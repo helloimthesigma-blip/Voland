@@ -66,6 +66,7 @@
 #include "common/vmm.h"
 #include "cpu/cpu.h"
 #include "hle/kernel/address_space.h"
+#include "hle/kernel/handle_table.h"
 #include "hle/kernel/page_allocator.h"
 #include "hle/kernel/tls.h"
 #include "hle/loader/exefs.h"
@@ -117,6 +118,13 @@ typedef struct Process {
   Process_Module modules[PROCESS_MAX_MODULES]; /* in load order */
   uint32_t module_count;
   uint64_t entry_point; /* rtld (or main) .text base */
+
+  /* PROPOSED (ipc/sm: review): the process's handle table (§12).
+   * process_bootstrap initializes it and adds the main thread FIRST, so
+   * main_thread_handle is a real entry equal to
+   * PROCESS_MAIN_THREAD_HANDLE; process_teardown closes every live
+   * session through the IPC pool before dropping the table. */
+  Handle_Table handles;
 
   /* Main thread. */
   uint32_t main_thread_handle;
