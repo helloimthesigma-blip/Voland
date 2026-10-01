@@ -41,6 +41,13 @@ typedef struct Emulator
   Page_Allocator pages;
   Process process;
   bool program_loaded;
+
+  /* PROPOSED (ipc/sm: review): IPC kernel state and the sm: registry,
+   * reachable from HLE through hle.sessions / hle.sm. Reset by
+   * emulator_unload_program (all sessions die with the process); the
+   * registry is filled once at emulator_create and survives reloads. */
+  IPC_Session_Pool sessions;
+  SM_Registry sm;
 } Emulator;
 
 /* Reserves the linear memory layout (§4), creates the softmmu (§5), and

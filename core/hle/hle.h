@@ -27,15 +27,25 @@
 
 #include "common/vmm.h"
 #include "cpu/cpu.h"
+#include "hle/kernel/ipc.h"
 #include "hle/kernel/page_allocator.h"
 #include "hle/kernel/process.h"
+#include "hle/services/sm/sm.h"
 
 /* Switch OS result codes (subset relevant to Phase 0). Horizon Result
  * encoding: (description << 9) | module. Module 1 is the kernel - these
  * constants are genuine kernel results, e.g. 0xE401 = (114 << 9) | 1.
  * Service-specific results use their own module (§12). */
 #define HLE_RESULT_SUCCESS 0x00000000u
-#define HLE_RESULT_NOT_IMPLEMENTED 0xF601u
+/* PROPOSED CORRECTION (ipc/sm: review): 0xF601 is (123 << 9) | 1 =
+ * KernelError_ConnectionClosed in libnx's result.h, not NotImplemented
+ * (33 -> 0x4201). Harmless while nothing decoded it; the moment
+ * SendSyncRequest exists, a title seeing "connection closed" for an
+ * unknown SVC takes the session-teardown path instead of reporting an
+ * unimplemented call. Same treatment HLE_RESULT_OUT_OF_MEMORY got in
+ * v3.27. tests/thread_test.c compares against the macro, not the
+ * literal, so it follows. */
+#define HLE_RESULT_NOT_IMPLEMENTED 0x4201u /* KernelError_NotImplemented=33 */
 #define HLE_RESULT_INVALID_HANDLE 0xE401u
 #define HLE_RESULT_INVALID_POINTER 0xCC01u /* KernelError_InvalidAddress=102 */
 /* Was 0x1A01 (module=13, not a real kernel description) until the memory
@@ -44,27 +54,43 @@
  * (KernelError_OutOfMemory=104) and corrected here rather than shipped
  * wrong the first time it became observable. */
 #define HLE_RESULT_OUT_OF_MEMORY 0xD001u /* KernelError_OutOfMemory=104 */
-#define HLE_RESULT_NOT_FOUND 0xE002u
-#define HLE_RESULT_ALREADY_EXISTS 0xFA02u
+/* PROPOSED CORRECTION: both were module 2 (fs), not kernel results.
+ * Neither has been returned to a guest yet; ConnectToNamedPort is the
+ * first user of NOT_FOUND. */
+#define HLE_RESULT_NOT_FOUND 0xF201u      /* KernelError_NotFound=121 */
+#define HLE_RESULT_ALREADY_EXISTS 0xF401u /* KernelError_AlreadyExists=122 */
 /* Added for the memory SVCs (svc_memory.h); same libnx result.h source. */
 #define HLE_RESULT_INVALID_SIZE 0xCA01u          /* KernelError_InvalidSize=101 */
 #define HLE_RESULT_INVALID_MEMORY_STATE 0xD401u  /* KernelError_InvalidMemoryState=106, aka InvalidCurrentMemory */
 #define HLE_RESULT_INVALID_MEMORY_RANGE 0xDC01u  /* KernelError_InvalidMemoryRange=110 */
+/* PROPOSED, for the IPC SVCs (svc_ipc.h); same libnx result.h source. */
+#define HLE_RESULT_OUT_OF_SESSIONS 0x0E01u     /* KernelError_OutOfSessions=7 */
+#define HLE_RESULT_OUT_OF_HANDLES 0xD201u      /* KernelError_OutOfHandles=105 */
+#define HLE_RESULT_OUT_OF_RANGE 0xEE01u        /* KernelError_OutOfRange=119 */
+#define HLE_RESULT_CONNECTION_CLOSED 0xF601u   /* KernelError_ConnectionClosed=123 */
+#define HLE_RESULT_INVALID_STATE 0xFA01u       /* KernelError_InvalidState=125 */
 
 #define HLE_MAKE_RESULT(module, description) \
   ((uint32_t)(((description) << 9) | ((module) & 0x1FF)))
 
-typedef struct HLE_Context
+struct HLE_Context
 {
   const CPU_Backend *cpu_backend;
   VMM_Context *vmm;      /* softmmu (§5); the only guest-memory gateway memory SVCs use */
   Process *process;      /* the loaded process (§12); valid once emulator_load_program() has run */
   Page_Allocator *pages; /* guest physical pages (§4), shared with the bootstrap */
+  /* PROPOSED (ipc/sm: review). Owned by Emulator, like the three above.
+   * The handle table itself lives in Process (process->handles). */
+  IPC_Session_Pool *sessions;
+  SM_Registry *sm;
   uint64_t svc_call_count;
-} HLE_Context;
+};
 
+/* PROPOSED: gains `sessions` and `sm` (mechanical call-site ripple into
+ * emulator.c and the tests that build an HLE_Context by hand). */
 void hle_context_init(HLE_Context *context, const CPU_Backend *backend,
-                      VMM_Context *vmm, Process *process, Page_Allocator *pages);
+                      VMM_Context *vmm, Process *process, Page_Allocator *pages,
+                      IPC_Session_Pool *sessions, SM_Registry *sm);
 
 /* CPU_SVC_Handler-compatible entry point. `swi` is the SVC instruction's
  * immediate - the actual Horizon syscall id. It is NOT in X8; that is the
