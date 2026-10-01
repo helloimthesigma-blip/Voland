@@ -67,7 +67,13 @@ const readGameFile: GameFileReadHook = (offset, destination, size) => {
 };
 
 async function loadCoreModule(memory: WebAssembly.Memory): Promise<SwitchCoreExports> {
-  const factory = (await import(/* @vite-ignore */ CORE_MODULE_URL)).default as CoreModuleFactory;
+  /* An absolute URL, not the bare "/core/..." path: Vite's dev server
+   * appends `?import` to root-relative dynamic imports and then refuses
+   * to serve files under public/ as modules ("can only be referenced via
+   * HTML tags"). A full URL bypasses that rewrite in dev and is
+   * equivalent in a production build. */
+  const coreUrl = new URL(CORE_MODULE_URL, self.location.origin).href;
+  const factory = (await import(/* @vite-ignore */ coreUrl)).default as CoreModuleFactory;
   return factory({ wasmMemory: memory, volandReadGameFile: readGameFile });
 }
 
