@@ -3,6 +3,7 @@
 #include "common/log.h"
 #include "hle/kernel/svc_ipc.h"
 #include "hle/kernel/svc_memory.h"
+#include "hle/kernel/svc_thread.h"
 
 #include <stddef.h>
 
@@ -18,6 +19,9 @@ void hle_context_init(HLE_Context *context, const CPU_Backend *backend,
   context->pages = pages;
   context->sessions = sessions;
   context->sm = sm;
+  context->scheduler = NULL;
+  context->debug_output = NULL;
+  context->debug_userdata = NULL;
   context->svc_call_count = 0;
 }
 
@@ -77,8 +81,14 @@ static const char *svc_name(uint32_t swi)
     return "SendSyncRequest";
   case 0x22:
     return "SendSyncRequestWithUserBuffer";
+  case 0x24:
+    return "GetProcessId";
+  case 0x25:
+    return "GetThreadId";
   case 0x26:
     return "Break";
+  case 0x27:
+    return "OutputDebugString";
   case 0x29:
     return "GetInfo";
   default:
@@ -127,6 +137,31 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
   case 0x06:
     hle_svc_query_memory(context, cpu_state);
     break;
+  case 0x03: hle_svc_set_memory_attribute(context, cpu_state); break;
+  case 0x07: hle_svc_exit_process(context, cpu_state); break;
+  case 0x08: hle_svc_create_thread(context, cpu_state); break;
+  case 0x09: hle_svc_start_thread(context, cpu_state); break;
+  case 0x0A: hle_svc_exit_thread(context, cpu_state); break;
+  case 0x0B: hle_svc_sleep_thread(context, cpu_state); break;
+  case 0x0C: hle_svc_get_thread_priority(context, cpu_state); break;
+  case 0x0D: hle_svc_set_thread_priority(context, cpu_state); break;
+  case 0x0E: hle_svc_get_thread_core_mask(context, cpu_state); break;
+  case 0x0F: hle_svc_set_thread_core_mask(context, cpu_state); break;
+  case 0x10: hle_svc_get_current_processor_number(context, cpu_state); break;
+  case 0x18: hle_svc_wait_synchronization(context, cpu_state); break;
+  case 0x19: hle_svc_cancel_synchronization(context, cpu_state); break;
+  case 0x1A: hle_svc_arbitrate_lock(context, cpu_state); break;
+  case 0x1B: hle_svc_arbitrate_unlock(context, cpu_state); break;
+  case 0x1C: hle_svc_wait_process_wide_key_atomic(context, cpu_state); break;
+  case 0x1D: hle_svc_signal_process_wide_key(context, cpu_state); break;
+  case 0x1E: hle_svc_get_system_tick(context, cpu_state); break;
+  case 0x24: hle_svc_get_process_id(context, cpu_state); break;
+  case 0x25: hle_svc_get_thread_id(context, cpu_state); break;
+  case 0x26: hle_svc_break(context, cpu_state); break;
+  case 0x27: hle_svc_output_debug_string(context, cpu_state); break;
+  case 0x29: hle_svc_get_info(context, cpu_state); break;
+  case 0x34: hle_svc_wait_for_address(context, cpu_state); break;
+  case 0x35: hle_svc_signal_to_address(context, cpu_state); break;
   case HLE_SVC_CLOSE_HANDLE:
     hle_svc_close_handle(context, cpu_state);
     break;

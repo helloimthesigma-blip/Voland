@@ -32,6 +32,11 @@
 #include "hle/kernel/process.h"
 #include "hle/services/sm/sm.h"
 
+typedef struct Scheduler Scheduler;
+
+/* Where svcOutputDebugString text goes (the platform's console/log). */
+typedef void (*HLE_Debug_Output_Fn)(void *userdata, const char *text, size_t length);
+
 /* Switch OS result codes (subset relevant to Phase 0). Horizon Result
  * encoding: (description << 9) | module. Module 1 is the kernel - these
  * constants are genuine kernel results, e.g. 0xE401 = (114 << 9) | 1.
@@ -74,6 +79,14 @@
  * HLE_RESULT_INVALID_POINTER above, which is really InvalidAddress=102. */
 #define HLE_RESULT_INVALID_USER_POINTER 0xE601u /* 115 */
 #define HLE_RESULT_MESSAGE_TOO_LARGE 0x20801u   /* KernelError_IpcCmdbufTooSmall=260 */
+/* Threading and sync (svc_thread.h); same libnx result.h source. */
+#define HLE_RESULT_RESOURCE_EXHAUSTED 0xCE01u  /* KernelError_ResourceExhausted=103 */
+#define HLE_RESULT_INVALID_PRIORITY 0xE001u    /* KernelError_InvalidPriority=112 */
+#define HLE_RESULT_INVALID_CORE_ID 0xE201u     /* KernelError_InvalidCoreId=113 */
+#define HLE_RESULT_INVALID_COMBINATION 0xE801u /* KernelError_InvalidCombination=116 */
+#define HLE_RESULT_TIMED_OUT 0xEA01u           /* KernelError_TimedOut=117 */
+#define HLE_RESULT_CANCELLED 0xEC01u           /* KernelError_Cancelled=118 */
+#define HLE_RESULT_INVALID_ENUM_VALUE 0xF001u  /* KernelError_InvalidEnumValue=120 */
 
 #define HLE_MAKE_RESULT(module, description) \
   ((uint32_t)(((description) << 9) | ((module) & 0x1FF)))
@@ -88,6 +101,9 @@ struct HLE_Context
    * lives in Process (process->handles). */
   IPC_Session_Pool *sessions;
   SM_Registry *sm;
+  Scheduler *scheduler;            /* guest threads (§7); set by the Emulator */
+  HLE_Debug_Output_Fn debug_output; /* optional */
+  void *debug_userdata;
   uint64_t svc_call_count;
 };
 

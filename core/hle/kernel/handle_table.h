@@ -90,6 +90,11 @@ void *handle_table_get(const Handle_Table *table, uint32_t handle, Kernel_Object
  * which must dispatch on type before it knows what it is closing. */
 Kernel_Object_Type handle_table_type_of(const Handle_Table *table, uint32_t handle);
 
+/* Points a live handle at a different object of the same type (the
+ * bootstrap's main-thread entry, re-pointed at its scheduler thread).
+ * RESULT_NOT_FOUND if `handle` is not live with `type`. */
+Error handle_table_replace(Handle_Table *table, uint32_t handle, Kernel_Object_Type type, void *object);
+
 /* Frees the slot. Optional outs report what was stored so the caller can
  * release the object. RESULT_NOT_FOUND if the handle is not live. */
 Error handle_table_remove(Handle_Table *table, uint32_t handle, Kernel_Object_Type *out_type,

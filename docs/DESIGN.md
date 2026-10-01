@@ -2268,8 +2268,8 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 - [x] Interpreter backend (partial ARM64), all memory access via vmm. *v3.32: complete ARMv8.0 A64 user ISA minus crypto - scalar FP and all Advanced SIMD (incl. structure loads/stores) on a bit-exact ARM-semantics soft-float (`softfloat.c`). 53 instruction classes match an Apple M1 under `tests/a64_diff_test.c`. v3.31, integer half: `core/cpu/backends/interpreter/` executes the whole ARMv8.0 integer ISA (DP immediate/register incl. CRC32, branches, exception generation, MRS/MSR, hints/barriers/CLREX/DC ZVA, every integer and SIMD&FP scalar load/store addressing form, exclusives, acquire/release) through vmm's inline fast path. Verified against the host CPU by `tests/a64_diff_test.c` (ARM64 hosts). SIMD&FP data processing and structure loads/stores remain.*
 - [ ] NRO loader — homebrew is this phase's proof of life
-- [ ] **Guest thread scheduler** (§7): bounded run, exit reasons, wait objects, virtual time
-- [ ] Threading + sync HLE (CreateThread, StartThread, SleepThread, WaitSynchronization) on the scheduler
+- [x] **Guest thread scheduler** (§7): bounded run, exit reasons, wait objects, virtual time. *v3.33: `hle/kernel/scheduler.{h,c}`; the main thread is adopted as handle 0x8000; `emulator_run_slice()` is the CPU worker's loop body.*
+- [x] Threading + sync HLE (CreateThread, StartThread, SleepThread, WaitSynchronization) on the scheduler. *v3.33: `hle/kernel/svc_thread.{h,c}` - also ExitThread/ExitProcess, priorities and core masks, CancelSynchronization, ArbitrateLock/Unlock, the process-wide-key condvar pair, WaitForAddress/SignalToAddress, GetSystemTick, GetProcessId/ThreadId, Break, OutputDebugString, GetInfo, SetMemoryAttribute.*
 - [ ] Basic IPC routing
 
 ### Phase 3 — First Pixels
@@ -2408,9 +2408,15 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.32.0*
+*Document version: 3.33.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.32 → v3.33 (summary)
+
+- **§25 Phase 2 scheduler and threading/sync HLE closed.** `core/hle/kernel/scheduler.{h,c}`: green threads (§7) - highest priority first, round-robin within a priority by last-run stamp; virtual time in 19.2 MHz ticks advanced by consumed cycles (fractional remainder carried) and published to each thread's CNTVCT_EL0 at run() entry; idle jumps to the earliest wake; DEADLOCK when every thread waits forever. `core/hle/kernel/svc_thread.{h,c}`: 25 SVCs (list in the header) with libnx's register ABI. Mutexes use Horizon's word format (owner handle | 0x40000000 waiters bit) through vmm; unlock hands ownership to the highest-priority, then longest-waiting waiter; a signalled condvar waiter re-acquires its mutex in the kernel, a timed-out one does not (libnx re-locks on TimedOut). `Emulator` owns the `Scheduler`; the bootstrap's main thread is adopted with its 0x8000 handle re-pointed (`handle_table_replace`); `emulator_run_slice()` returns RUNNING/IDLE/EXITED/CRASHED/DEADLOCK; `emulator_set_debug_output()` routes OutputDebugString; `emulator_create_with_backend()` lets tests run the interpreter under any preset. New kernel results: ResourceExhausted, InvalidPriority, InvalidCoreId, InvalidCombination, TimedOut, Cancelled, InvalidEnumValue.
+- **Deviations, stated (svc_thread.h):** events and their SVCs arrive with the services that create them (Phase 4), so WaitSynchronization waits on thread handles only; core affinity is recorded but not enforced (one worker); no priority inheritance through mutexes; GetInfo answers the region/memory/id queries from the address-space carve-up and a fixed ~3.2GB application pool, RandomEntropy is a per-title splitmix of the program id.
+- **Guest-program tests.** `tools/guest_asm.py` assembles position-independent ARM64 sources with clang and emits a C array (or an NRO), refusing anything with relocations; outputs are committed so no ARM toolchain is needed to build or test. `tests/guest_fixture.c` boots such code as a real process (NSO in a synthesized NCA through `emulator_load_program`). `tests/scheduler_test.c` runs `tests/guest/threads.s` (two workers × 1000 increments under a libnx-style mutex, WaitSynchronization on thread handles, a 1ms sleep checked against GetSystemTick) and `tests/guest/condvar.s` (500-item producer/consumer over two condvars, condvar and WaitForAddress timeouts, InvalidState on mismatch) at slice budgets from 7 to 100000 cycles, so preemption lands inside critical sections; at 7 cycles the mutex takes ~4000 kernel round trips. Mutation-checked: an unlock that never wakes its waiter is reported as DEADLOCK.
 
 ### Changelog v3.31 → v3.32 (summary)
 

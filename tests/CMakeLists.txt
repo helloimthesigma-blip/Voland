@@ -129,3 +129,16 @@ endif()
 add_executable(interpreter_test interpreter_test.c)
 target_link_libraries(interpreter_test PRIVATE switch_core)
 add_test(NAME interpreter_test COMMAND interpreter_test)
+
+#
+# Guest threads end to end (§7): real ARM64 programs (tests/guest/*.s,
+# assembled into *.inc by tools/guest_asm.py) run on the interpreter
+# under the scheduler, booted as real processes by guest_fixture.c.
+#
+add_library(guest_fixture STATIC guest_fixture.c)
+target_include_directories(guest_fixture PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(guest_fixture PRIVATE switch_core loader_fixtures)
+
+add_executable(scheduler_test scheduler_test.c)
+target_link_libraries(scheduler_test PRIVATE switch_core guest_fixture loader_fixtures)
+add_test(NAME scheduler_test COMMAND scheduler_test)

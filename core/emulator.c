@@ -6,11 +6,17 @@
 #include "hle/loader/exefs.h"
 #include "hle/loader/nca_parse.h"
 #include "hle/loader/npdm.h"
+#include "hle/kernel/handle_table.h"
+#include "hle/kernel/thread.h"
 
 #include <string.h>
 
 Error emulator_create(Emulator* out) {
-  if (!out) {
+  return emulator_create_with_backend(out, cpu_get_active_backend());
+}
+
+Error emulator_create_with_backend(Emulator* out, const CPU_Backend* backend) {
+  if (!out || !backend) {
     return ERR(RESULT_INVALID_ARGUMENT, "emulator_create: out is NULL");
   }
 
@@ -33,7 +39,7 @@ Error emulator_create(Emulator* out) {
 
   /* 3. CPU backend selected at configure time; it receives the MMU, never
    * raw guest RAM (§8). */
-  out->cpu_backend = cpu_get_active_backend();
+  out->cpu_backend = backend;
   SWITCH_ASSERT_ALWAYS(out->cpu_backend != NULL, "no CPU backend registered");
 
   out->cpu_state = out->cpu_backend->create(out->vmm, &out->hle);
@@ -59,6 +65,8 @@ Error emulator_create(Emulator* out) {
   sm_registry_init(&out->sm);
   hle_context_init(&out->hle, out->cpu_backend, out->vmm, &out->process, &out->pages,
                    &out->sessions, &out->sm);
+  scheduler_init(&out->scheduler, out->cpu_backend);
+  out->hle.scheduler = &out->scheduler;
   out->cpu_backend->set_svc_handler(out->cpu_state, hle_on_svc);
   out->cpu_backend->set_undefined_handler(out->cpu_state, hle_on_undefined);
 
@@ -159,6 +167,24 @@ Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
     page_allocator_reset(&emulator->pages);
     return err;
   }
+  /* The main thread joins the scheduler: it wraps the Emulator's own
+   * CPU_State, and its bootstrap handle (0x8000) now names it. */
+  scheduler_init(&emulator->scheduler, emulator->cpu_backend);
+  Sched_Thread *main_thread = scheduler_new_thread(&emulator->scheduler);
+  SWITCH_ASSERT_ALWAYS(main_thread != NULL, "empty scheduler has a slot");
+  main_thread->thread.cpu_state = emulator->cpu_state;
+  main_thread->thread.tls_gva = emulator->process.main_thread_tls_gva;
+  main_thread->thread.entry_point = emulator->process.entry_point;
+  main_thread->thread.stack_top = emulator->process.main_thread_stack.base + emulator->process.main_thread_stack.size;
+  main_thread->thread.priority = emulator->process.npdm.main_thread_priority;
+  main_thread->thread.preferred_core = emulator->process.npdm.main_thread_core_number;
+  main_thread->core_mask = 1ull << main_thread->thread.preferred_core;
+  main_thread->handle = emulator->process.main_thread_handle;
+  main_thread->owns_cpu_state = false;
+  main_thread->state = THREAD_STATE_RUNNABLE;
+  err = handle_table_replace(&emulator->process.handles, main_thread->handle, KERNEL_OBJECT_THREAD, main_thread);
+  SWITCH_ASSERT_ALWAYS(error_is_ok(err), "main thread handle is live");
+
   emulator->program_loaded = true;
   log_info("[emulator] program '%s' loaded; main thread armed at pc=0x%010llx",
            emulator->process.npdm.name, (unsigned long long)emulator->process.entry_point);
@@ -167,15 +193,45 @@ Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
 
 void emulator_unload_program(Emulator* emulator) {
   if (!emulator || !emulator->program_loaded) return;
+  const Thread_Env env = {emulator->cpu_backend, emulator->vmm, &emulator->process.tls, &emulator->hle};
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    Sched_Thread* t = &emulator->scheduler.threads[i];
+    if (t->state != THREAD_STATE_FREE && t->owns_cpu_state) thread_destroy(&env, &t->thread);
+  }
+  scheduler_init(&emulator->scheduler, emulator->cpu_backend);
   process_teardown(&emulator->process, emulator->vmm, &emulator->pages);
   page_allocator_reset(&emulator->pages);
   ipc_session_pool_init(&emulator->sessions); /* every session belonged to the process */
   emulator->program_loaded = false;
 }
 
+Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
+  SWITCH_ASSERT_ALWAYS(emulator != NULL, "emulator_run_slice: emulator is NULL");
+  if (!emulator->program_loaded) return EMULATOR_NOT_LOADED;
+  CPU_ExitReason reason = CPU_EXIT_CYCLES_ELAPSED;
+  switch (scheduler_tick(&emulator->scheduler, emulator->cpu_backend, cycle_budget, &reason)) {
+  case SCHEDULER_RAN: return EMULATOR_RUNNING;
+  case SCHEDULER_IDLE: return EMULATOR_IDLE;
+  case SCHEDULER_EXITED: return EMULATOR_EXITED;
+  case SCHEDULER_CRASHED: return EMULATOR_CRASHED;
+  default: return EMULATOR_DEADLOCK;
+  }
+}
+
 CPU_ExitReason emulator_run(Emulator* emulator, uint64_t cycle_budget) {
   SWITCH_ASSERT_ALWAYS(emulator != NULL, "emulator_run: emulator is NULL");
-  return emulator->cpu_backend->run(emulator->cpu_state, cycle_budget);
+  if (!emulator->program_loaded) return emulator->cpu_backend->run(emulator->cpu_state, cycle_budget);
+  CPU_ExitReason reason = CPU_EXIT_HALT;
+  if (scheduler_tick(&emulator->scheduler, emulator->cpu_backend, cycle_budget, &reason) != SCHEDULER_RAN) {
+    return CPU_EXIT_HALT;
+  }
+  return reason;
+}
+
+void emulator_set_debug_output(Emulator* emulator, HLE_Debug_Output_Fn fn, void* userdata) {
+  if (!emulator) return;
+  emulator->hle.debug_output = fn;
+  emulator->hle.debug_userdata = userdata;
 }
 
 CPU_ExitReason emulator_step(Emulator* emulator) {

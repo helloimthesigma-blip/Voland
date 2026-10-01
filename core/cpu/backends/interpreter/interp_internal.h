@@ -51,7 +51,9 @@ typedef struct Interp_State {
 
   uint64_t fault_address;
   uint64_t cycles_consumed;    /* by the last run()/step() */
-  uint64_t total_cycles;       /* lifetime; backs CNTVCT_EL0 until §7 virtual time */
+  uint64_t total_cycles;       /* lifetime */
+  uint64_t cntvct_base;        /* virtual time at the last set_sys_reg(CNTVCT) (§7) */
+  uint64_t cntvct_origin;      /* total_cycles at that moment */
   uint32_t svc_immediate;
 
   VMM_Context *vmm;

@@ -273,7 +273,10 @@ uint64_t interp_read_sys_reg(const Interp_State *s, uint32_t reg, bool *known) {
   case CPU_SYSREG_FPCR: return s->fpcr;
   case CPU_SYSREG_FPSR: return s->fpsr;
   case CPU_SYSREG_CNTFRQ_EL0: return INTERP_CNTFRQ_HZ;
-  case CPU_SYSREG_CNTVCT_EL0: return s->total_cycles * (INTERP_CNTFRQ_HZ / 100000ull) / (INTERP_CPU_HZ / 100000ull);
+  case CPU_SYSREG_CNTVCT_EL0:
+    /* The scheduler's virtual time at run() entry plus this run's cycles. */
+    return s->cntvct_base +
+           (s->total_cycles - s->cntvct_origin) * (INTERP_CNTFRQ_HZ / 100000ull) / (INTERP_CPU_HZ / 100000ull);
   case CPU_SYSREG_CTR_EL0: return INTERP_CTR_EL0;
   case CPU_SYSREG_DCZID_EL0: return INTERP_DCZID_EL0;
   default:
@@ -299,8 +302,14 @@ static uint64_t interp_get_sys_reg(CPU_State *state, uint32_t reg) {
 static void interp_set_sys_reg(CPU_State *state, uint32_t reg, uint64_t value) {
   Interp_State *s = as_interp(state);
   /* The kernel (HLE) may set TPIDRRO_EL0; guest MSR may not. */
-  if (reg == CPU_SYSREG_TPIDRRO_EL0) s->tpidrro_el0 = value;
-  else (void)interp_write_sys_reg(s, reg, value);
+  if (reg == CPU_SYSREG_TPIDRRO_EL0) {
+    s->tpidrro_el0 = value;
+  } else if (reg == CPU_SYSREG_CNTVCT_EL0) { /* the scheduler publishes virtual time (§7) */
+    s->cntvct_base = value;
+    s->cntvct_origin = s->total_cycles;
+  } else {
+    (void)interp_write_sys_reg(s, reg, value);
+  }
 }
 
 static CPU_Vector_Register interp_get_vector_reg(CPU_State *state, uint8_t index) {

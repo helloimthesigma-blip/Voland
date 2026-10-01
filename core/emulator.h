@@ -16,6 +16,7 @@
 #include "hle/hle.h"
 #include "hle/kernel/page_allocator.h"
 #include "hle/kernel/process.h"
+#include "hle/kernel/scheduler.h"
 #include "hle/loader/byte_source.h"
 
 /* Scratch for one bootstrap: the ExeFS directory plus the largest
@@ -48,7 +49,21 @@ typedef struct Emulator
    * registry is filled once at emulator_create and survives reloads. */
   IPC_Session_Pool sessions;
   SM_Registry sm;
+
+  /* Guest threads (§7). The main thread wraps `cpu_state`; CreateThread
+   * threads own their own states. Reset by emulator_unload_program. */
+  Scheduler scheduler;
 } Emulator;
+
+/* What one emulator_run_slice() did (§7 scheduler status). */
+typedef enum Emulator_Status {
+  EMULATOR_RUNNING,  /* a guest thread ran */
+  EMULATOR_IDLE,     /* every thread sleeps; virtual time jumped ahead */
+  EMULATOR_EXITED,   /* ExitProcess or every thread exited */
+  EMULATOR_CRASHED,  /* svcBreak or an unhandled fault/undefined instruction */
+  EMULATOR_DEADLOCK, /* every thread waits forever */
+  EMULATOR_NOT_LOADED,
+} Emulator_Status;
 
 /* Reserves the linear memory layout (§4), creates the softmmu (§5), and
  * wires the active CPU backend (§8) to the stub HLE dispatcher. There is
@@ -57,6 +72,10 @@ typedef struct Emulator
  * WebAssembly.Memory is created by the boot sequence (§16) before the
  * core module is even instantiated. */
 Error emulator_create(Emulator *out);
+
+/* As emulator_create, with an explicit CPU backend instead of the
+ * configure-time one (tests run the interpreter under every preset). */
+Error emulator_create_with_backend(Emulator *out, const CPU_Backend *backend);
 void emulator_destroy(Emulator *emulator);
 
 /* "Load a game" (§12): parses the decrypted PROGRAM NCA in `nca` (§1.6:
@@ -74,10 +93,17 @@ Error emulator_load_program(Emulator *emulator, const Byte_Source *nca, uint64_t
  * loaded. */
 void emulator_unload_program(Emulator *emulator);
 
-/* Runs the single CPU_State for at most `cycle_budget` cycles and reports
- * why it stopped. This is a direct pass-through to the active backend;
- * `run(entry_point)`-until-done does not exist in the interface (§7/§8). */
+/* One scheduler slice (§7): the highest-priority runnable guest thread
+ * runs for at most `cycle_budget` cycles. */
+Emulator_Status emulator_run_slice(Emulator *emulator, uint64_t cycle_budget);
+
+/* Compatibility wrapper: one slice, reported as the backend's exit reason
+ * (CPU_EXIT_HALT when no thread ran). With nothing loaded it runs the
+ * bare CPU_State, as before the scheduler existed. */
 CPU_ExitReason emulator_run(Emulator *emulator, uint64_t cycle_budget);
+
+/* Routes svcOutputDebugString text to the platform. */
+void emulator_set_debug_output(Emulator *emulator, HLE_Debug_Output_Fn fn, void *userdata);
 
 /* Single-step. */
 CPU_ExitReason emulator_step(Emulator *emulator);

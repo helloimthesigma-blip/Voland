@@ -59,6 +59,13 @@ Kernel_Object_Type handle_table_type_of(const Handle_Table *table, uint32_t hand
   return entry ? entry->type : KERNEL_OBJECT_NONE;
 }
 
+Error handle_table_replace(Handle_Table *table, uint32_t handle, Kernel_Object_Type type, void *object) {
+  const Handle_Entry *found = lookup(table, handle);
+  if (!found || found->type != type || !object) return ERR(RESULT_NOT_FOUND, "handle_table_replace: no such handle");
+  table->entries[handle & HANDLE_INDEX_MASK].object = object;
+  return OK;
+}
+
 Error handle_table_remove(Handle_Table *table, uint32_t handle, Kernel_Object_Type *out_type,
                           void **out_object) {
   const Handle_Entry *found = lookup(table, handle);
