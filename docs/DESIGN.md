@@ -2276,8 +2276,8 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 - [ ] Minimal nvdrv stub (nvmap + channel submit) + **syncpoint skeleton over the GPU completion ring**
 - [ ] NVDEC/VIC **syncpoint-signalling stub** (black frames that complete — cutscene titles deadlock without it, §13)
-- [ ] Framebuffer-blit path: double-buffered slots + publish counters (§6)
-- [ ] WebGPU renderer (texture upload + fullscreen quad), `Atomics.waitAsync` consumer
+- [x] Framebuffer-blit path: double-buffered slots + publish counters (§6). *v3.35: `core/gpu/framebuffer.{h,c}` (+ `bindings/framebuffer.ts`); the core publishes a test card at boot until a guest presents (vi:, Phase 4).*
+- [x] WebGPU renderer (texture upload + fullscreen quad), `Atomics.waitAsync` consumer. *v3.35: `workers/gpu.worker.ts`; pixel-verified by `e2e/display.spec.ts` under SwiftShader.*
 - [ ] **voland-cli headless runner** (Dawn offscreen, golden-image hashing) — the native test harness (§17)
 
 ### Phase 4 — First Boot
@@ -2408,9 +2408,15 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.34.0*
+*Document version: 3.35.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.34 → v3.35 (summary)
+
+- **§25 Phase 3: first pixels.** `core/gpu/framebuffer.{h,c}` implements §6's handoff over the layout's framebuffer region: publish/consume u32 counters, two 24-byte slot metadata blocks (width, height, stride, format, frame number), slot N % 2; `framebuffer_acquire()` reports `FRAMEBUFFER_BUSY` while both slots await the consumer, `framebuffer_publish()` writes metadata then release-increments the publish counter and `emscripten_futex_wake`s it (Atomics.notify). `framebuffer_publish_test_card()` draws colour bars, a grey ramp and a checker strip; `wasm_entry.c` publishes it at boot so the display shows something until a guest presents. GPU worker: parks in `Atomics.waitAsync` on the publish counter (setTimeout polling where waitAsync is missing), presents the newest slot (`writeTexture` from the shared buffer + a fullscreen-triangle WGSL blit), sets consume = publish and notifies. The shell gained a 16:9 screen box; the transferred canvas is pinned over it (ResizeObserver). Tests: `tests/framebuffer_test.c` (rotation, backpressure, metadata bytes, card pixels), `e2e/display.spec.ts` (screenshot decoded with a 60-line PNG reader over node:zlib; all eight bars and the ramp checked).
+- **Deviation, stated (framebuffer.h):** §6 has the CPU block (Atomics.wait, 100ms) when both slots are full; `framebuffer_acquire()` never blocks and the present path drops the frame instead - equivalent under the newest-wins rule, and the CPU worker's run loop stays responsive (§7).
+- **e2e environment:** Playwright now runs full Chromium in new-headless mode with SwiftShader as the WebGPU adapter (`--use-webgpu-adapter=swiftshader`): the headless shell has no adapter by default and does not composite WebGPU canvases into screenshots. Rendering is software and deterministic, so CI needs no GPU.
 
 ### Changelog v3.33 → v3.34 (summary)
 

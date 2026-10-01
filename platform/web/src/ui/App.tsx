@@ -49,6 +49,7 @@ function App(props: AppProps) {
         <div class="voland-hero">
           <h2>Runtime online.</h2>
           <p>Both workers initialised. Load a decrypted Program NCA or a homebrew NRO, or run the built-in demo.</p>
+          <div class="voland-screen" data-voland-screen data-testid="screen" />
           <LoadPanel loadGame={props.loadGame} />
           <dl class="voland-facts">
             <div><dt>CPU backend</dt><dd>{props.cpuBackend}</dd></div>

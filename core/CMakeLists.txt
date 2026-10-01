@@ -37,6 +37,7 @@ set(SWITCH_CORE_SOURCES
   hle/loader/npdm.c
   hle/loader/nso.c
   hle/loader/nro.c
+  gpu/framebuffer.c
   emulator.c
 )
 
@@ -89,6 +90,7 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   hle/loader/npdm.h
   hle/loader/nso.h
   hle/loader/nro.h
+  gpu/framebuffer.h
   emulator.h
 )
 

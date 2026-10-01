@@ -12,6 +12,7 @@
 #include "common/layout.h"
 #include "common/log.h"
 #include "emulator.h"
+#include "gpu/framebuffer.h"
 #include "hle/loader/byte_source.h"
 
 #include <stddef.h>
@@ -45,6 +46,10 @@ EXPORT uint64_t emulator_program_id_ffi(void);
 EXPORT int emulator_run_slice_ffi(uint64_t cycle_budget);
 EXPORT uint64_t emulator_virtual_ticks_ffi(void);
 EXPORT uint64_t emulator_crash_pc_ffi(void);
+
+/* The Switch's handheld resolution. */
+#define BOOT_FRAME_WIDTH 1280u
+#define BOOT_FRAME_HEIGHT 720u
 
 static Emulator g_emulator;
 static int g_initialised = 0;
@@ -119,6 +124,9 @@ EXPORT int emulator_create_ffi(void)
     return 0;
   }
   emulator_set_debug_output(&g_emulator, forward_guest_output, NULL);
+  /* The display shows Voland's test card until a guest presents (§6). */
+  framebuffer_reset();
+  (void)framebuffer_publish_test_card(BOOT_FRAME_WIDTH, BOOT_FRAME_HEIGHT);
   g_initialised = 1;
   return 1;
 }

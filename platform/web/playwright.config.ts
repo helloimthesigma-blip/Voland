@@ -12,6 +12,8 @@ import { defineConfig, devices } from "@playwright/test";
  * (it once refused to serve the staged core from public/), and only a
  * dev-server run catches that class of bug.
  */
+const WEBGPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"];
+
 export default defineConfig({
   testDir: "./e2e",
   timeout: 30_000,
@@ -36,8 +38,12 @@ export default defineConfig({
       timeout: 60_000,
     },
   ],
+  /* Full Chromium in new-headless mode (the headless shell does not
+   * composite WebGPU canvases into screenshots) with SwiftShader as the
+   * WebGPU adapter, so
+   * rendered pixels are checkable (and deterministic) with no GPU. */
   projects: [
-    { name: "chromium",     use: { ...devices["Desktop Chrome"], baseURL: "http://localhost:5174" } },
-    { name: "chromium-dev", use: { ...devices["Desktop Chrome"], baseURL: "http://localhost:5173" } },
+    { name: "chromium",     use: { ...devices["Desktop Chrome"], baseURL: "http://localhost:5174", launchOptions: { args: WEBGPU_ARGS }, channel: "chromium" } },
+    { name: "chromium-dev", use: { ...devices["Desktop Chrome"], baseURL: "http://localhost:5173", launchOptions: { args: WEBGPU_ARGS }, channel: "chromium" } },
   ],
 });

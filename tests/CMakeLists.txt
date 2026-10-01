@@ -151,3 +151,8 @@ add_test(NAME nro_test COMMAND nro_test ${PROJECT_SOURCE_DIR}/platform/web/publi
 add_executable(arena_test arena_test.c)
 target_link_libraries(arena_test PRIVATE switch_core)
 add_test(NAME arena_test COMMAND arena_test)
+
+# core/gpu/framebuffer (§6 frame handoff).
+add_executable(framebuffer_test framebuffer_test.c)
+target_link_libraries(framebuffer_test PRIVATE switch_core)
+add_test(NAME framebuffer_test COMMAND framebuffer_test)

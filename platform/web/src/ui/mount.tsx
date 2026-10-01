@@ -15,11 +15,36 @@ export interface MountOptions {
   readonly loadGame:     (file: File) => Promise<GameLoadOutcome>;
 }
 
+/** The display canvas (transferred to the GPU worker as an
+ * OffscreenCanvas) stays in <body>; this pins its on-screen box to the
+ * shell's 16:9 screen element so the guest's frames appear in the UI. */
+function attachCanvasToScreen(): void {
+  const canvas = document.getElementById("game");
+  const screen = document.querySelector<HTMLElement>("[data-voland-screen]");
+  if (!canvas || !screen) return;
+  const place = (): void => {
+    const box = screen.getBoundingClientRect();
+    canvas.style.position = "fixed";
+    canvas.style.left = `${box.left}px`;
+    canvas.style.top = `${box.top}px`;
+    canvas.style.width = `${box.width}px`;
+    canvas.style.height = `${box.height}px`;
+    canvas.style.zIndex = "5";
+    canvas.style.borderRadius = "10px";
+  };
+  new ResizeObserver(place).observe(screen);
+  window.addEventListener("resize", place);
+  window.addEventListener("scroll", place, true);
+  place();
+}
+
 export function mountShell(options: MountOptions): void {
   const root = document.getElementById("app-root");
   if (!root) throw new Error("mountShell: #app-root missing from index.html");
 
   render(() => <App adapterLabel={options.adapterLabel} cpuBackend={options.cpuBackend} guestRamMiB={options.guestRamMiB} loadGame={options.loadGame} />, root);
+
+  attachCanvasToScreen();
 
   const boot = document.getElementById("boot");
   if (boot) {
