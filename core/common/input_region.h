@@ -1,14 +1,13 @@
 /**
- * Input region: the host -> core controller transport (§18). PROPOSED
- * HEADER - awaiting maintainer review; no implementation exists yet.
- * Phase 1, §25 "Input region + seqlock writer/reader".
+ * Input region: the host -> core controller transport (§18). Phase 1,
+ * §25 "Input region + seqlock writer/reader".
  *
  * The region is already reserved by layout.c (LAYOUT_INPUT_REGION_*:
  * 8 slots x 32 bytes, base = layout_get()->input_region_base). This
  * header fixes the byte layout inside a slot and provides the READER;
  * the WRITER is platform code (web: main thread, once per rAF -
- * platform/web/src/input/, designed below; native: the platform's input
- * thread). It is host memory, not guest RAM: nothing here goes through
+ * platform/web/src/input/input-region.ts; native: the platform's input
+ * thread, through input_region_write_* below). It is host memory, not guest RAM: nothing here goes through
  * vmm, and the guest never sees this layout - the Phase 4 hid:
  * shared-memory writer (§12) transforms it into Horizon's npad rings.
  *

@@ -1835,6 +1835,8 @@ INPUT_REGION_BASE: per controller slot (×8):
 
 Hidden-tab behavior is covered by the auto-pause policy in §16.
 
+**Slot layout, made exact (v3.30, `core/common/input_region.h`):** `u32 sequence @0`, `u32 buttons @4`, `i16 axes[8] @8` (LX, LY, RX, RY, then 4 reserved for motion; ±32767, +Y up), `u32 flags @24` (bit 0 connected, bits 8–15 device kind, bits 16–31 profile id), `u32 reserved @28`. **Buttons use Horizon's HidNpadButton bit order** (libnx `hid.h`) so the hid: writer copies them unchanged; bits 16–23 (stick pseudo-buttons) are not transported - hid: derives them from the axes; Home/Capture ride in bits 28/29 and are masked out of npad state. The A↔B / X↔Y remap below happens once, in the platform writer. The reader makes at most 4 attempts and leaves the caller's previous state on failure. `tests/data/input_region_vectors.txt` pins the C and TypeScript writers to the same bytes; a two-thread stress test (200k writes) checks the reader never returns a torn state. Slot policy on web: slot N is `navigator.getGamepads()[N]`; the keyboard drives slot 0 while no pad holds it, from the first mapped key press. Default keyboard profile: Z/X/C/V = A/B/X/Y, E/U = L/R, Q/O = ZL/ZR, -/= = Minus/Plus, arrows = D-pad, WASD / IJKL = sticks, F/N = stick clicks.
+
 ### Sources
 
 ```mermaid
@@ -2251,7 +2253,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 **Compiler-portability rule (resolved MSVC build break):** `core/` is compiled by GCC, Clang (via emcc), and MSVC. Any GCC/Clang-only extension (`__attribute__`, `__builtin_*`, statement expressions, etc.) must be wrapped in a guarded macro that expands to nothing on compilers that lack it; an unguarded extension is a hard `cl.exe` syntax error, not an ignorable warning. The first instance was `log_message`'s `__attribute__((format(printf, 2, 3)))`, which broke 7 of 12 `native-noop` translation units under MSVC; it is now `SWITCH_PRINTF_FORMAT(2, 3)`, defined in `core/common/log.h` under `#if defined(__GNUC__) || defined(__clang__)`. The attribute is diagnostic-only (format-string checking), so MSVC builds lose that one warning class and nothing else - no ABI or behavior difference. `SWITCH_PRINTF_FORMAT` lives inline in `log.h` for now; if a second portable-attribute macro is needed, move both into a shared `core/common/compiler.h` rather than defining a second inline.
 
-### Phase 1 — Load & Memory
+### Phase 1 — Load & Memory (closed v3.30)
 
 - [x] **Softmmu** (`vmm.{h,c}`): page tables, map/unmap/reprotect/query, read/write, guest_to_host (§5)
 - [x] Decrypted-NCA parsing (RomFS, ExeFS, npdm — no encryption handling per §1.6) + **NSO loader** (LZ4 segments) and process bootstrap per §12
@@ -2259,7 +2261,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 - [x] Load executable sections into guest memory *through vmm mappings*
 - [x] **Memory HLE (SetHeapSize, MapMemory, QueryMemory) as thin vmm layers** — the checkbox's four SVCs (UnmapMemory is MapMemory's inverse, named alongside the other three in §12's priority list). *v3.27: `hle/kernel/svc_memory.{h,c}`; register ABI and MapMemory/UnmapMemory semantics verified against libnx's `svc.s`/`svc.h`/`thread.c` rather than assumed (SetHeapSize's size arrives in X1, not X0). Two scoped-down simplifications, documented in `svc_memory.h` and the "Deviation" note after §12's HLE result type: UnmapMemory requires an exact match against a recorded MapMemory call (no partial unmap); QueryMemory's `MemoryInfo.type`/`attr` model only the address-space regions reachable by a Phase 1 title, not Horizon's full ~30-value enum. `page_allocator.h` gained the release path (a small freelist) it had already anticipated needing for SetHeapSize's shrink and process teardown. Full account in the Changelog v3.26 → v3.27 entry.*
 - [x] Minimal IPC + sm: stub. *v3.29: `hle/kernel/handle_table`, `ipc`, `svc_ipc` and `hle/services/sm/sm`. HIPC (all descriptor kinds, PID, handles, receive lists), CMIF with domains from day one, and TIPC (sm: has spoken it since 12.0.0) - framing chosen per message from the HIPC type. ConnectToNamedPort("sm:"), SendSyncRequest (one `vmm_read_block` of the TLS command buffer in, one `vmm_write_block` out; no pointer into guest RAM), CloseHandle at its real number 0x16. sm: RegisterClient + GetServiceHandle over a fixed registry, empty in shipping builds (every lookup answers NotRegistered until fsp-srv & co. register). Deviations in the v3.29 changelog.*
-- [ ] Input region + seqlock writer/reader (§18)
+- [x] Input region + seqlock writer/reader (§18). *v3.30: `core/common/input_region.{h,c}` (bounded, never-blocking reader; C writer for native) and `platform/web/src/input/` (region writer, Gamepad API + keyboard mappings, rAF pump; connect/disconnect as §16 lifecycle messages). Slot layout and button bits fixed in the §18 note below.*
 - [x] User-facing error path for encrypted input → dumping guide. *v3.28: the web shell's file picker loads an NCA through `emulator_load_program_ffi` (`core/stubs/wasm_entry.c`), the core reading the `File` piecewise via a `FileReaderSync` hook (§15); `RESULT_ENCRYPTED_INPUT` renders as an error linking `docs/DUMP.md` (`platform/web/src/ui/LoadPanel.tsx`). Protocol deviation (`load-game` carries a `File`; new `load-failed`) stated in §16.*
 
 ### Phase 2 — First Instructions
@@ -2406,9 +2408,16 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.29.0*
+*Document version: 3.30.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.29 → v3.30 (summary)
+
+- **§25 Phase 1 "Input region + seqlock writer/reader" closed - and with it Phase 1.** `core/common/input_region.{h,c}`: the §18 slot layout made exact (see the §18 note), C11-atomic seqlock with a bounded reader (≤4 attempts, never waits, caller keeps its previous state on failure) and a writer half for native platforms. `platform/web/src/input/`: `input-region.ts` (Atomics.add around DataView payload writes over the shared memory), `gamepad-mapping.ts` (Standard Gamepad → Switch bits with the positional A↔B / X↔Y swap, Y axes inverted, symmetric rounding), `keyboard-mapping.ts` (default profile on `KeyboardEvent.code`), `input-loop.ts` (rAF pump; slot N = gamepad N, keyboard on slot 0 when free; connect/disconnect as the §16 `controller-connected`/`controller-disconnected` lifecycle messages, payload never over postMessage). `tsconfig.json` gains `allowImportingTsExtensions` so these modules run unchanged under Node's test runner.
+- **Placement:** `core/common/` beside `layout.h` - the region is a layout region (host memory, not guest), and §2 has no input directory. The hid: shared-memory writer (Phase 4) is its consumer.
+- Tests: `tests/input_region_test.c` (HidNpadButton bit positions, offsets, the shared vectors byte-for-byte, eight independent slots with canaries either side, odd-sequence rejection leaving `out` untouched, a 200k-write two-thread stress run; mutation-checked - removing the torn-read check fails the stress run), `platform/web/tests/unit/input-region.test.ts` (the same vectors, sequence parity, label swap, axis inversion/clamping, keyboard profile, slot policy). The web test caught a real rounding asymmetry (`Math.round(-x.5)` rounds up), fixed.
+- **Verified:** native 21/21 ctest, web build zero warnings, `npm test` 18/18, `npm run e2e` 6/6 (production build and dev server).
 
 ### Changelog v3.28 → v3.29 (summary)
 

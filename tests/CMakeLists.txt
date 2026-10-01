@@ -102,3 +102,13 @@ foreach(ipc_test ipc_parse_test svc_ipc_test)
   target_link_libraries(${ipc_test} PRIVATE switch_core ipc_fixtures loader_fixtures)
   add_test(NAME ${ipc_test} COMMAND ${ipc_test})
 endforeach()
+
+#
+# core/common/input_region (§18): seqlock reader/writer, byte layout
+# against the vectors the web writer's unit test also consumes.
+#
+find_package(Threads REQUIRED)
+add_executable(input_region_test input_region_test.c)
+target_link_libraries(input_region_test PRIVATE switch_core Threads::Threads)
+add_test(NAME input_region_test
+         COMMAND input_region_test ${CMAKE_CURRENT_SOURCE_DIR}/data/input_region_vectors.txt)

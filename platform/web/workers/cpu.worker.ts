@@ -172,6 +172,15 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     return;
   }
 
+  if (msg.type === "controller-connected") {
+    log("info", `controller connected in slot ${msg.index} (profile ${msg.profileId})`);
+    return;
+  }
+  if (msg.type === "controller-disconnected") {
+    log("info", `controller disconnected from slot ${msg.index}`);
+    return;
+  }
+
   if (msg.type === "pause" || msg.type === "resume") {
     // No scheduler yet (§7 is Phase 2); acknowledged so main.ts's
     // visibilitychange handler has somewhere real to send these.

@@ -4,7 +4,7 @@ A Nintendo Switch emulator targeting the web as a primary platform, with native 
 
 Play Switch games in your browser. No installation. No setup beyond providing your own keys and games.
 
-> **Status:** Early development — **Phase 1 (Load & Memory)** of the plan in [DESIGN.md §25](docs/DESIGN.md#25-development-phases). The softmmu, decrypted-NCA/NSO loaders, process bootstrap, TLS and memory SVCs have landed, and the web shell can now load a decrypted Program NCA into guest memory (encrypted files get an error pointing to the [dumping guide](docs/DUMP.md)). Next are the minimal IPC + sm: stub and the input region. Nothing executes guest code yet — the interpreter is a Phase 2 goal.
+> **Status:** Early development — **Phase 2 (First Instructions)** of the plan in [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Phase 1 is complete: the web app loads a decrypted Program NCA into guest memory (encrypted files point to the [dumping guide](docs/DUMP.md)), and the kernel has memory SVCs, a handle table, IPC with the `sm:` service manager, and a controller-input channel from the browser. Next is the ARM64 interpreter, the homebrew (NRO) loader and the guest thread scheduler. Nothing executes guest code yet.
 
 ---
 

@@ -23,6 +23,10 @@ export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
 export type MainToCPUMessage =
   | { readonly type: "init"; readonly memory: WebAssembly.Memory }
   | { readonly type: "load-game"; readonly file: File }
+  /* §18: slot connect/disconnect is a lifecycle event; the state itself
+   * travels through the input region, never postMessage. */
+  | { readonly type: "controller-connected"; readonly index: number; readonly profileId: number }
+  | { readonly type: "controller-disconnected"; readonly index: number }
   | { readonly type: "pause" }
   | { readonly type: "resume" }
   | { readonly type: "halt" };

@@ -12,10 +12,11 @@
  */
 
 import type { CPUToMainMessage, GPUToMainMessage, MainToCPUMessage, MainToGPUMessage } from "@bindings/protocol";
-import type { MemoryLayout } from "@bindings/layout";
+import { type MemoryLayout, toByteOffset } from "@bindings/layout";
 import type { GameLoadOutcome } from "@bindings/load";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
+import { startInputLoop } from "./input/input-loop";
 import { appendLogLine, setStatus } from "./log";
 
 /**
@@ -259,6 +260,23 @@ async function boot(): Promise<BootResult | null> {
   appendLogLine("info", "cpu worker posted init message; awaiting layout handshake");
 
   await Promise.race([Promise.all([cpuReady, gpuReady]), timeout]);
+
+  /* Input (§18): written into the shared region every frame once the
+   * layout is known; only connect/disconnect goes to the worker (§16). */
+  const inputLayout = layout as MemoryLayout | null;
+  if (inputLayout) {
+    startInputLoop({
+      buffer: memory.buffer,
+      regionBase: toByteOffset(inputLayout.inputRegionBase),
+      getGamepads: () => navigator.getGamepads(),
+      onConnectionChange: (change) => {
+        const msg: MainToCPUMessage = change.connected
+          ? { type: "controller-connected", index: change.slot, profileId: change.profileId }
+          : { type: "controller-disconnected", index: change.slot };
+        cpuWorker.postMessage(msg);
+      },
+    });
+  }
 
   /* rAF stops in hidden tabs, freezing input writes (§18); auto-pause
    * keeps the policy explicit instead of leaving it as a silent symptom. */
