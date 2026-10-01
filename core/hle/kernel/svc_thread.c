@@ -5,6 +5,7 @@
 #include "hle/kernel/svc_thread.h"
 
 #include "common/log.h"
+#include "hle/kernel/event.h"
 #include "hle/kernel/handle_table.h"
 #include "hle/kernel/scheduler.h"
 #include "hle/kernel/thread.h"
@@ -149,6 +150,94 @@ void hle_svc_get_current_processor_number(HLE_Context *c, CPU_State *s) {
 /* WaitSynchronization / CancelSynchronization.                        */
 /* ------------------------------------------------------------------ */
 
+/* Whether a waitable handle is signaled now; false + *valid = false for
+ * a handle that cannot be waited on. */
+static bool handle_signaled(HLE_Context *c, CPU_State *s, uint32_t handle, bool *valid) {
+  *valid = true;
+  Kernel_Event *event = (Kernel_Event *)handle_table_get(&c->process->handles, handle, KERNEL_OBJECT_EVENT_READABLE);
+  if (event) return event->signaled;
+  Sched_Thread *t = thread_from_handle(c, s, handle);
+  if (t) return t->state == THREAD_STATE_DEAD;
+  *valid = false;
+  return false;
+}
+
+void hle_signal_event(HLE_Context *c, Kernel_Event *event) {
+  if (!event) return;
+  event->signaled = true;
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    Sched_Thread *t = &c->scheduler->threads[i];
+    if (t->state != THREAD_STATE_WAITING || t->wait != WAIT_SYNCHRONIZATION) continue;
+    for (uint32_t h = 0; h < t->wait_handle_count; h++) {
+      if (handle_table_get(&c->process->handles, t->wait_handles[h], KERNEL_OBJECT_EVENT_READABLE) == event) {
+        scheduler_wake(c->scheduler, t, HLE_RESULT_SUCCESS);
+        c->cpu_backend->get_register_file(t->thread.cpu_state)->x[1] = h;
+        break;
+      }
+    }
+  }
+}
+
+uint32_t hle_create_event(HLE_Context *c, uint32_t *readable, uint32_t *writable, Kernel_Event **out) {
+  Kernel_Event *event = event_create(c->events);
+  if (!event) return HLE_RESULT_RESOURCE_EXHAUSTED;
+  if (!error_is_ok(handle_table_add(&c->process->handles, KERNEL_OBJECT_EVENT_READABLE, event, readable))) {
+    event_release(event);
+    return HLE_RESULT_OUT_OF_HANDLES;
+  }
+  if (writable) {
+    event_retain(event);
+    if (!error_is_ok(handle_table_add(&c->process->handles, KERNEL_OBJECT_EVENT_WRITABLE, event, writable))) {
+      (void)handle_table_remove(&c->process->handles, *readable, NULL, NULL);
+      event_release(event);
+      event_release(event);
+      return HLE_RESULT_OUT_OF_HANDLES;
+    }
+  }
+  if (out) *out = event;
+  return HLE_RESULT_SUCCESS;
+}
+
+void hle_svc_create_event(HLE_Context *c, CPU_State *s) {
+  CPU_Register_File *r = regs(c, s);
+  uint32_t readable = 0, writable = 0;
+  r->x[0] = hle_create_event(c, &readable, &writable, NULL);
+  if (r->x[0] == HLE_RESULT_SUCCESS) {
+    r->x[1] = writable;
+    r->x[2] = readable;
+  }
+}
+
+void hle_svc_signal_event(HLE_Context *c, CPU_State *s) {
+  CPU_Register_File *r = regs(c, s);
+  Kernel_Event *e = (Kernel_Event *)handle_table_get(&c->process->handles, (uint32_t)r->x[0], KERNEL_OBJECT_EVENT_WRITABLE);
+  if (!e) { r->x[0] = HLE_RESULT_INVALID_HANDLE; return; }
+  hle_signal_event(c, e);
+  r->x[0] = HLE_RESULT_SUCCESS;
+}
+
+static Kernel_Event *any_event(HLE_Context *c, uint32_t handle) {
+  Kernel_Event *e = (Kernel_Event *)handle_table_get(&c->process->handles, handle, KERNEL_OBJECT_EVENT_WRITABLE);
+  return e ? e : (Kernel_Event *)handle_table_get(&c->process->handles, handle, KERNEL_OBJECT_EVENT_READABLE);
+}
+
+void hle_svc_clear_event(HLE_Context *c, CPU_State *s) {
+  CPU_Register_File *r = regs(c, s);
+  Kernel_Event *e = any_event(c, (uint32_t)r->x[0]);
+  if (!e) { r->x[0] = HLE_RESULT_INVALID_HANDLE; return; }
+  e->signaled = false;
+  r->x[0] = HLE_RESULT_SUCCESS;
+}
+
+void hle_svc_reset_signal(HLE_Context *c, CPU_State *s) {
+  CPU_Register_File *r = regs(c, s);
+  Kernel_Event *e = (Kernel_Event *)handle_table_get(&c->process->handles, (uint32_t)r->x[0], KERNEL_OBJECT_EVENT_READABLE);
+  if (!e) { r->x[0] = HLE_RESULT_INVALID_HANDLE; return; }
+  if (!e->signaled) { r->x[0] = HLE_RESULT_INVALID_STATE; return; }
+  e->signaled = false;
+  r->x[0] = HLE_RESULT_SUCCESS;
+}
+
 void hle_svc_wait_synchronization(HLE_Context *c, CPU_State *s) {
   CPU_Register_File *r = regs(c, s);
   const uint64_t handles_gva = r->x[1];
@@ -162,9 +251,10 @@ void hle_svc_wait_synchronization(HLE_Context *c, CPU_State *s) {
     return;
   }
   for (uint32_t i = 0; i < count; i++) {
-    Sched_Thread *t = thread_from_handle(c, s, handles[i]);
-    if (!t) { r->x[0] = HLE_RESULT_INVALID_HANDLE; return; }
-    if (t->state == THREAD_STATE_DEAD) {
+    bool valid = false;
+    const bool signaled = handle_signaled(c, s, handles[i], &valid);
+    if (!valid) { r->x[0] = HLE_RESULT_INVALID_HANDLE; return; }
+    if (signaled) {
       r->x[0] = HLE_RESULT_SUCCESS;
       r->x[1] = i;
       return;

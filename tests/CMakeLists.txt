@@ -156,3 +156,13 @@ add_test(NAME arena_test COMMAND arena_test)
 add_executable(framebuffer_test framebuffer_test.c)
 target_link_libraries(framebuffer_test PRIVATE switch_core)
 add_test(NAME framebuffer_test COMMAND framebuffer_test)
+
+# core/gpu/syncpoint (§13 syncpoints + the GPU completion ring).
+add_executable(syncpoint_test syncpoint_test.c)
+target_link_libraries(syncpoint_test PRIVATE switch_core)
+add_test(NAME syncpoint_test COMMAND syncpoint_test)
+
+# nvdrv (§12, §13) over real IPC.
+add_executable(nvdrv_test nvdrv_test.c)
+target_link_libraries(nvdrv_test PRIVATE switch_core ipc_fixtures loader_fixtures)
+add_test(NAME nvdrv_test COMMAND nvdrv_test)

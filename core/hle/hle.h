@@ -33,6 +33,8 @@
 #include "hle/services/sm/sm.h"
 
 typedef struct Scheduler Scheduler;
+typedef struct Event_Pool Event_Pool;
+typedef struct Kernel_Event Kernel_Event;
 
 /* Where svcOutputDebugString text goes (the platform's console/log). */
 typedef void (*HLE_Debug_Output_Fn)(void *userdata, const char *text, size_t length);
@@ -102,10 +104,20 @@ struct HLE_Context
   IPC_Session_Pool *sessions;
   SM_Registry *sm;
   Scheduler *scheduler;            /* guest threads (§7); set by the Emulator */
+  Event_Pool *events;              /* kernel events (event.h); set by the Emulator */
   HLE_Debug_Output_Fn debug_output; /* optional */
   void *debug_userdata;
   uint64_t svc_call_count;
 };
+
+/* Signals `event` and wakes every thread whose WaitSynchronization names
+ * it (svc_thread.c). Services call this; so does SignalEvent. */
+void hle_signal_event(HLE_Context *context, Kernel_Event *event);
+
+/* Creates an event and adds its readable handle (and, if `writable` is
+ * not NULL, a writable one) to the process's handle table. Returns a
+ * kernel result; nothing leaks on failure. */
+uint32_t hle_create_event(HLE_Context *context, uint32_t *readable, uint32_t *writable, Kernel_Event **out);
 
 void hle_context_init(HLE_Context *context, const CPU_Backend *backend,
                       VMM_Context *vmm, Process *process, Page_Allocator *pages,

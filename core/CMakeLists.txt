@@ -28,8 +28,10 @@ set(SWITCH_CORE_SOURCES
   hle/kernel/ipc.c
   hle/kernel/svc_ipc.c
   hle/kernel/scheduler.c
+  hle/kernel/event.c
   hle/kernel/svc_thread.c
   hle/services/sm/sm.c
+  hle/services/nvdrv/nvdrv.c
   hle/loader/byte_source.c
   hle/loader/nca_parse.c
   hle/loader/exefs.c
@@ -38,6 +40,7 @@ set(SWITCH_CORE_SOURCES
   hle/loader/nso.c
   hle/loader/nro.c
   gpu/framebuffer.c
+  gpu/syncpoint.c
   emulator.c
 )
 
@@ -80,8 +83,10 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   hle/kernel/ipc.h
   hle/kernel/svc_ipc.h
   hle/kernel/scheduler.h
+  hle/kernel/event.h
   hle/kernel/svc_thread.h
   hle/services/sm/sm.h
+  hle/services/nvdrv/nvdrv.h
   common/input_region.h
   hle/loader/byte_source.h
   hle/loader/nca_parse.h
@@ -91,6 +96,7 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   hle/loader/nso.h
   hle/loader/nro.h
   gpu/framebuffer.h
+  gpu/syncpoint.h
   emulator.h
 )
 

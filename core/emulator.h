@@ -16,7 +16,9 @@
 #include "hle/hle.h"
 #include "hle/kernel/page_allocator.h"
 #include "hle/kernel/process.h"
+#include "hle/kernel/event.h"
 #include "hle/kernel/scheduler.h"
+#include "hle/services/nvdrv/nvdrv.h"
 #include "hle/loader/byte_source.h"
 
 /* Scratch for one bootstrap: the ExeFS directory plus the largest
@@ -53,6 +55,8 @@ typedef struct Emulator
   /* Guest threads (§7). The main thread wraps `cpu_state`; CreateThread
    * threads own their own states. Reset by emulator_unload_program. */
   Scheduler scheduler;
+  Event_Pool events; /* kernel events (event.h); reset with the process */
+  Nvdrv_State nvdrv; /* the nvdrv service (§13); reset with the process */
 } Emulator;
 
 /* What one emulator_run_slice() did (§7 scheduler status). */

@@ -72,6 +72,12 @@ Error emulator_create_with_backend(Emulator* out, const CPU_Backend* backend) {
                    &out->sessions, &out->sm);
   scheduler_init(&out->scheduler, out->cpu_backend);
   out->hle.scheduler = &out->scheduler;
+  event_pool_init(&out->events);
+  out->hle.events = &out->events;
+  /* Services (§12) register with sm: once; their state resets per process. */
+  nvdrv_init(&out->nvdrv);
+  const Error service_err = nvdrv_register(&out->nvdrv, &out->sm);
+  SWITCH_ASSERT_ALWAYS(error_is_ok(service_err), "nvdrv registers into an empty sm: registry");
   out->cpu_backend->set_svc_handler(out->cpu_state, hle_on_svc);
   out->cpu_backend->set_undefined_handler(out->cpu_state, hle_on_undefined);
 
@@ -262,6 +268,8 @@ void emulator_unload_program(Emulator* emulator) {
     if (t->state != THREAD_STATE_FREE && t->owns_cpu_state) thread_destroy(&env, &t->thread);
   }
   scheduler_init(&emulator->scheduler, emulator->cpu_backend);
+  event_pool_init(&emulator->events);
+  nvdrv_init(&emulator->nvdrv); /* fds, nvmap handles and syncpoints die with the process */
   process_teardown(&emulator->process, emulator->vmm, &emulator->pages);
   page_allocator_reset(&emulator->pages);
   ipc_session_pool_init(&emulator->sessions); /* every session belonged to the process */
@@ -272,6 +280,8 @@ Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
   SWITCH_ASSERT_ALWAYS(emulator != NULL, "emulator_run_slice: emulator is NULL");
   if (!emulator->program_loaded) return EMULATOR_NOT_LOADED;
   CPU_ExitReason reason = CPU_EXIT_CYCLES_ELAPSED;
+  /* GPU completions (§13) arrive at scheduler-tick cadence. */
+  nvdrv_poll_completions(&emulator->nvdrv, &emulator->hle);
   switch (scheduler_tick(&emulator->scheduler, emulator->cpu_backend, cycle_budget, &reason)) {
   case SCHEDULER_RAN: return EMULATOR_RUNNING;
   case SCHEDULER_IDLE: return EMULATOR_IDLE;

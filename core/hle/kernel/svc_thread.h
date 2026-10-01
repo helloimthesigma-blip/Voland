@@ -76,6 +76,12 @@ void hle_svc_break(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_output_debug_string(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_get_info(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_set_memory_attribute(HLE_Context *context, CPU_State *cpu_state);
+/* Events (event.h): 0x11 SignalEvent W0, 0x12 ClearEvent W0, 0x17
+ * ResetSignal W0, 0x45 CreateEvent -> W1 writable, W2 readable. */
+void hle_svc_signal_event(HLE_Context *context, CPU_State *cpu_state);
+void hle_svc_clear_event(HLE_Context *context, CPU_State *cpu_state);
+void hle_svc_reset_signal(HLE_Context *context, CPU_State *cpu_state);
+void hle_svc_create_event(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_wait_for_address(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_signal_to_address(HLE_Context *context, CPU_State *cpu_state);
 

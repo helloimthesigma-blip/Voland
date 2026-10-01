@@ -5,6 +5,7 @@
 #include "hle/kernel/svc_ipc.h"
 
 #include "common/log.h"
+#include "hle/kernel/event.h"
 #include "hle/kernel/handle_table.h"
 #include "hle/kernel/ipc.h"
 
@@ -120,6 +121,9 @@ void hle_svc_close_handle(HLE_Context *context, CPU_State *cpu_state) {
     return;
   }
   if (type == KERNEL_OBJECT_SESSION) ipc_session_pool_close(context->sessions, (IPC_Session *)object);
+  if (type == KERNEL_OBJECT_EVENT_READABLE || type == KERNEL_OBJECT_EVENT_WRITABLE) {
+    event_release((Kernel_Event *)object);
+  }
   /* A thread handle only drops the table entry; the thread outlives it. */
   regs->x[0] = HLE_RESULT_SUCCESS;
 }

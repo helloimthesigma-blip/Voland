@@ -54,6 +54,8 @@ typedef enum Kernel_Object_Type {
   KERNEL_OBJECT_NONE = 0, /* free slot */
   KERNEL_OBJECT_THREAD,   /* Guest_Thread (thread.h) or, until Phase 2, the main thread marker */
   KERNEL_OBJECT_SESSION,  /* IPC_Session (ipc.h) - client end */
+  KERNEL_OBJECT_EVENT_READABLE, /* Kernel_Event (event.h): wait / reset */
+  KERNEL_OBJECT_EVENT_WRITABLE, /* Kernel_Event: signal / clear */
   /* Events, shared memory, transfer memory, ports: added with their SVCs. */
 } Kernel_Object_Type;
 

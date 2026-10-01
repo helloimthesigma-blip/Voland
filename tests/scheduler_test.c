@@ -13,6 +13,7 @@
 
 #include "guest_fixture.h"
 #include "guest/condvar.inc"
+#include "guest/events.inc"
 #include "guest/threads.inc"
 
 #include <stdio.h>
@@ -31,6 +32,7 @@ int main(void) {
   static const Program programs[] = {
       {"threads", k_guest_threads, sizeof(k_guest_threads), "counter 2000, sleep ok"},
       {"condvar", k_guest_condvar, sizeof(k_guest_condvar), "sum 125250, timeouts ok"},
+      {"events", k_guest_events, sizeof(k_guest_events), "signal, reset, timeout, close ok"},
   };
   static const uint64_t budgets[] = {7, 31, 100, 997, 100000};
   for (size_t p = 0; p < sizeof(programs) / sizeof(programs[0]); p++)

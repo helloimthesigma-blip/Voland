@@ -2274,8 +2274,8 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ### Phase 3 — First Pixels
 
-- [ ] Minimal nvdrv stub (nvmap + channel submit) + **syncpoint skeleton over the GPU completion ring**
-- [ ] NVDEC/VIC **syncpoint-signalling stub** (black frames that complete — cutscene titles deadlock without it, §13)
+- [x] Minimal nvdrv stub (nvmap + channel submit) + **syncpoint skeleton over the GPU completion ring**. *v3.36: `hle/services/nvdrv/nvdrv.{h,c}` (8 devices, libnx ioctl layouts), `gpu/syncpoint.{h,c}` (syncpoints + the SPSC completion ring, drained every scheduler slice), kernel events (`hle/kernel/event.{h,c}`).*
+- [x] NVDEC/VIC **syncpoint-signalling stub** (black frames that complete — cutscene titles deadlock without it, §13). *v3.36: nvhost-nvdec/vic/nvjpg channel SUBMIT completes every syncpoint increment at once.*
 - [x] Framebuffer-blit path: double-buffered slots + publish counters (§6). *v3.35: `core/gpu/framebuffer.{h,c}` (+ `bindings/framebuffer.ts`); the core publishes a test card at boot until a guest presents (vi:, Phase 4).*
 - [x] WebGPU renderer (texture upload + fullscreen quad), `Atomics.waitAsync` consumer. *v3.35: `workers/gpu.worker.ts`; pixel-verified by `e2e/display.spec.ts` under SwiftShader.*
 - [ ] **voland-cli headless runner** (Dawn offscreen, golden-image hashing) — the native test harness (§17)
@@ -2408,9 +2408,15 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.35.0*
+*Document version: 3.36.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.35 → v3.36 (summary)
+
+- **Kernel events** (`hle/kernel/event.{h,c}`): a pooled object behind a readable and a writable handle (reference-counted by handles); signaled until cleared (no auto-reset on wait, as Horizon). SVCs SignalEvent 0x11, ClearEvent 0x12, ResetSignal 0x17 (InvalidState when not signaled), CreateEvent 0x45 (W1 writable, W2 readable); WaitSynchronization now waits on readable events as well as threads; CloseHandle releases event references. `hle_signal_event()` / `hle_create_event()` are the service-facing API. Test: `tests/guest/events.s` in `scheduler_test` (a worker signals while main blocks; ResetSignal twice; zero-timeout wait; stale close).
+- **Syncpoints + GPU completion ring** (`gpu/syncpoint.{h,c}`): 192 syncpoints with max (promised) / min (reached) and wrap-safe comparisons; the §13 completion ring in its layout region - 64-byte header (write/read u32 indices), 8-byte (id, value) records, SPSC with acquire/release - with C push (native producer, tests) and drain. `emulator_run_slice()` drains it every slice through `nvdrv_poll_completions()`, which also signals EVENT_WAIT_ASYNC waiters. Test: `tests/syncpoint_test.c`.
+- **nvdrv** (`hle/services/nvdrv/nvdrv.{h,c}`), registered with sm: as nvdrv, nvdrv:a, nvdrv:s, nvdrv:t: commands Open/Ioctl/Close/Initialize/QueryEvent/SetAruid/Ioctl2/Ioctl3 (+ a named stub for 13); devices nvmap, nvhost-ctrl, nvhost-ctrl-gpu (GM20B characteristics byte-for-byte from libnx's struct comments), nvhost-as-gpu, nvhost-gpu, nvhost-nvdec, nvhost-vic, nvhost-nvjpg; ioctl numbers and struct layouts from libnx's `nvidia/ioctl/*.c`. Ioctl buffers are read/written through vmm from A/X and B/C descriptors (pointer buffer size 0, so libnx uses A/B). **Scope, stated:** GPU work is not executed (Phase 4's command ring and engines) - GPFIFO/KICKOFF and host1x SUBMIT complete their syncpoint increments immediately, so syncpoint waits never block; unknown ioctls answer NvError NotImplemented and are logged. Test: `tests/nvdrv_test.c` over real IPC (sm: lookup, every device opened, nvmap create/alloc/param/id/from-id/two-step free, VA map/unmap/regions, GPFIFO fence, ctrl read/wait/timeout, VIC fence, characteristics, QueryEvent + EVENT_WAIT_ASYNC signalled by a completion-ring record).
 
 ### Changelog v3.34 → v3.35 (summary)
 

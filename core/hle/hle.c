@@ -20,6 +20,7 @@ void hle_context_init(HLE_Context *context, const CPU_Backend *backend,
   context->sessions = sessions;
   context->sm = sm;
   context->scheduler = NULL;
+  context->events = NULL;
   context->debug_output = NULL;
   context->debug_userdata = NULL;
   context->svc_call_count = 0;
@@ -161,6 +162,10 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
   case 0x27: hle_svc_output_debug_string(context, cpu_state); break;
   case 0x29: hle_svc_get_info(context, cpu_state); break;
   case 0x34: hle_svc_wait_for_address(context, cpu_state); break;
+  case 0x11: hle_svc_signal_event(context, cpu_state); break;
+  case 0x12: hle_svc_clear_event(context, cpu_state); break;
+  case 0x17: hle_svc_reset_signal(context, cpu_state); break;
+  case 0x45: hle_svc_create_event(context, cpu_state); break;
   case 0x35: hle_svc_signal_to_address(context, cpu_state); break;
   case HLE_SVC_CLOSE_HANDLE:
     hle_svc_close_handle(context, cpu_state);
