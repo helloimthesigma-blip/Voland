@@ -2266,7 +2266,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ### Phase 2 — First Instructions
 
-- [ ] Interpreter backend (partial ARM64), all memory access via vmm. *v3.31, integer half: `core/cpu/backends/interpreter/` executes the whole ARMv8.0 integer ISA (DP immediate/register incl. CRC32, branches, exception generation, MRS/MSR, hints/barriers/CLREX/DC ZVA, every integer and SIMD&FP scalar load/store addressing form, exclusives, acquire/release) through vmm's inline fast path. Verified against the host CPU by `tests/a64_diff_test.c` (ARM64 hosts). SIMD&FP data processing and structure loads/stores remain.*
+- [x] Interpreter backend (partial ARM64), all memory access via vmm. *v3.32: complete ARMv8.0 A64 user ISA minus crypto - scalar FP and all Advanced SIMD (incl. structure loads/stores) on a bit-exact ARM-semantics soft-float (`softfloat.c`). 53 instruction classes match an Apple M1 under `tests/a64_diff_test.c`. v3.31, integer half: `core/cpu/backends/interpreter/` executes the whole ARMv8.0 integer ISA (DP immediate/register incl. CRC32, branches, exception generation, MRS/MSR, hints/barriers/CLREX/DC ZVA, every integer and SIMD&FP scalar load/store addressing form, exclusives, acquire/release) through vmm's inline fast path. Verified against the host CPU by `tests/a64_diff_test.c` (ARM64 hosts). SIMD&FP data processing and structure loads/stores remain.*
 - [ ] NRO loader — homebrew is this phase's proof of life
 - [ ] **Guest thread scheduler** (§7): bounded run, exit reasons, wait objects, virtual time
 - [ ] Threading + sync HLE (CreateThread, StartThread, SleepThread, WaitSynchronization) on the scheduler
@@ -2408,9 +2408,14 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.31.0*
+*Document version: 3.32.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.31 → v3.32 (summary)
+
+- **§25 Phase 2 "Interpreter backend" closed: SIMD&FP.** `core/cpu/backends/interpreter/softfloat.{h,c}` - IEEE arithmetic with ARM semantics in integer arithmetic only (unpack with FPCR.FZ input flushing → exact 128-bit intermediate + sticky → one FPRound): add/sub/mul/mulx/div/sqrt/fused multiply-add, min/max(num), round-to-integral in every mode, compares, half/single/double conversions incl. round-to-odd (FCVTXN), FP↔integer/fixed-point, the architected FRECPE/FRSQRTE estimate algorithms and FRECPS/FRSQRTS steps, FRECPX. Host floats were rejected on §3's grounds - x86/ARM/wasm differ in NaN propagation, default NaN, flush-to-zero and underflow detection (ARM: before rounding), and wasm cannot set rounding modes or read flags. `interp_simd_fp.c` (scalar FP), `interp_simd.c` (Advanced SIMD vector and scalar: three-same, two-reg misc, across lanes, three-different, shift by immediate, modified immediate, copy, permute, EXT, TBL/TBX, by-element; QC saturation), `interp_simd_ldst.c` (LD1-4/ST1-4, single-lane, LDnR, post-index). ARMv8.0 only: FP16 arithmetic, FHM, RDM, dot product, FCMLA, FJCVTZS, FRINT32/64 and crypto (AES/SHA/PMULL.1Q) decode as undefined.
+- **Oracle coverage now 53 classes** (24 integer + 8 scalar FP + 21 SIMD). FP templates feed signed zeros, infinities, quiet/signaling NaNs with payloads, denormals, rounding-boundary and integer-limit values, with FPCR randomized over FZ/DN/all four rounding modes and a pre-set FPSR so flag accumulation is compared too. Generators keep to ARMv8.0 where the host (ARMv8.5+) defines more - each excluded extension is named in the generator. Found and fixed by the oracle: conversions mis-decoded `sf` as the M bit; `sig >> 64` (undefined behavior in C) in FP→int when the exponent was 0; EXT rejecting odd `imm4`; scalar FSQRT accepted though only the vector form exists; asymmetric stick rounding in the web input mapping was caught earlier by its own unit test. Five seeds × 10,000 instances per class pass.
 
 ### Changelog v3.30 → v3.31 (summary)
 

@@ -14,6 +14,9 @@ set(SWITCH_CORE_SOURCES
   cpu/backends/interpreter/interp_load_store.c
   cpu/backends/interpreter/interp_dp_register.c
   cpu/backends/interpreter/interp_simd_fp.c
+  cpu/backends/interpreter/interp_simd.c
+  cpu/backends/interpreter/interp_simd_ldst.c
+  cpu/backends/interpreter/softfloat.c
   hle/hle.c
   hle/kernel/page_allocator.c
   hle/kernel/address_space.c

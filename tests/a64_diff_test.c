@@ -259,6 +259,8 @@ typedef struct Case {
    * faults, and so does the interpreter. Misalignments generated for
    * these cross a 16-byte boundary, where both architectures fault. */
   uint32_t checked_access_bytes;
+  bool fp; /* V registers get FP edge values; FPCR/FPSR randomized */
+  bool table_indices; /* TBL/TBX: index bytes mostly in range */
 } Case;
 
 typedef void (*Make_Fn)(Case *c);
@@ -424,6 +426,227 @@ static void make_dc_zva(Case *c) {
   c->misalign = true;
 }
 
+/* --- Scalar floating point ------------------------------------------- */
+
+/* ftype 11 (half) is FEAT_FP16 arithmetic: the host has it, the Switch's
+ * ARMv8.0 core does not. Generated only where ARMv8.0 defines it (FCVT). */
+static uint32_t ftype_any(void) {
+  static const uint32_t ftypes[] = {0, 1, 0, 1, 0, 1, 0, 2};
+  return ftypes[rnd_below(8)];
+}
+static uint32_t ftype_with_half(void) {
+  static const uint32_t ftypes[] = {0, 1, 3, 0, 1, 3, 2};
+  return ftypes[rnd_below(7)];
+}
+
+static void make_fp_one_source(Case *c) {
+  static const uint32_t opcodes[] = {0, 1, 2, 3, 4, 5, 7, 8, 9, 10, 11, 12, 13, 14, 15, 3, 3, 8, 12, 14};
+  const uint32_t opcode = opcodes[rnd_below(20)];
+  const bool fcvt = (opcode & 0x3Cu) == 0x04u;
+  c->insn = 0x1E204000u | ((fcvt ? ftype_with_half() : ftype_any()) << 22) | (opcode << 15) | (rbits(5) << 5) | rbits(5);
+  c->fp = true;
+}
+static void make_fp_two_source(Case *c) {
+  c->insn = 0x1E200800u | (ftype_any() << 22) | (rbits(5) << 16) | (rnd_below(10) << 12) | (rbits(5) << 5) | rbits(5);
+  c->fp = true;
+}
+static void make_fp_three_source(Case *c) {
+  c->insn = 0x1F000000u | (ftype_any() << 22) | (rbits(1) << 21) | (rbits(5) << 16) | (rbits(1) << 15) |
+            (rbits(5) << 10) | (rbits(5) << 5) | rbits(5);
+  c->fp = true;
+}
+static void make_fp_compare(Case *c) {
+  static const uint32_t opcode2[] = {0x00, 0x08, 0x10, 0x18};
+  c->insn = 0x1E202000u | (ftype_any() << 22) | (rbits(5) << 16) | (rbits(5) << 5) | opcode2[rnd_below(4)];
+  c->fp = true;
+}
+static void make_fp_conditional(Case *c) {
+  if (rbits(1)) { /* FCCMP / FCCMPE */
+    c->insn = 0x1E200400u | (ftype_any() << 22) | (rbits(5) << 16) | (rbits(4) << 12) | (rbits(5) << 5) |
+              (rbits(1) << 4) | rbits(4);
+  } else {        /* FCSEL */
+    c->insn = 0x1E200C00u | (ftype_any() << 22) | (rbits(5) << 16) | (rbits(4) << 12) | (rbits(5) << 5) | rbits(5);
+  }
+  c->fp = true;
+}
+static void make_fp_move_immediate(Case *c) {
+  c->insn = 0x1E201000u | (ftype_any() << 22) | (rbits(8) << 13) | ((rnd_below(16) == 0 ? rbits(5) : 0u) << 5) | rbits(5);
+  c->fp = true;
+}
+static void make_fp_int_conversion(Case *c) {
+  static const uint32_t opcodes[] = {0, 1, 2, 3, 4, 5, 6, 7, 0, 1, 2, 3};
+  const uint32_t opcode = opcodes[rnd_below(12)];
+  uint32_t rmode = (opcode <= 1) ? rbits(2) : (rnd_below(8) == 0 ? rbits(2) : 0u);
+  uint32_t ftype = ftype_any();
+  uint32_t sf = rbits(1);
+  if (opcode >= 6) rmode = 0; /* rmode 11 + opcode 110 is FJCVTZS (ARMv8.3): the host has it, the Switch does not */
+  if (opcode >= 6 && rnd_below(4) == 0) { ftype = 2; sf = 1; rmode = 1; } /* FMOV to/from D[1] */
+  c->insn = (sf << 31) | 0x1E200000u | (ftype << 22) | (rmode << 19) | (opcode << 16) | (reg_or_zr() << 5) | reg_or_zr();
+  c->fp = true;
+}
+static void make_fp_fixed_conversion(Case *c) {
+  static const uint32_t forms[][2] = {{3, 0}, {3, 1}, {0, 2}, {0, 3}};
+  const uint32_t form = rnd_below(4);
+  const uint32_t sf = rbits(1);
+  const uint32_t scale = sf ? rbits(6) : (rnd_below(10) == 0 ? rbits(6) : 32u + rbits(5));
+  c->insn = (sf << 31) | 0x1E000000u | (ftype_any() << 22) | (forms[form][0] << 19) | (forms[form][1] << 16) |
+            (scale << 10) | (reg_or_zr() << 5) | reg_or_zr();
+  c->fp = true;
+}
+
+/* --- Advanced SIMD ---------------------------------------------------- */
+
+static uint32_t vreg(void) { return rbits(5); }
+static uint32_t q_u(void) { return (rbits(1) << 30) | (rbits(1) << 29); }
+
+static void make_simd_three_same_int(Case *c) {
+  c->insn = 0x0E200400u | q_u() | (rbits(2) << 22) | (vreg() << 16) | (rnd_below(24) << 11) | (vreg() << 5) | vreg();
+}
+static void make_simd_three_same_fp(Case *c) {
+  /* Not U=0 11101 / U=1 11001: FMLAL/FMLSL (FEAT_FHM, ARMv8.2) - host only. */
+  uint32_t u, opcode;
+  do {
+    u = rbits(1);
+    opcode = 24u + rnd_below(8);
+  } while ((!u && opcode == 0x1D) || (u && opcode == 0x19));
+  c->insn = 0x0E200400u | (rbits(1) << 30) | (u << 29) | (rbits(2) << 22) | (vreg() << 16) | (opcode << 11) |
+            (vreg() << 5) | vreg();
+  c->fp = true;
+}
+static void make_simd_two_misc(Case *c) {
+  uint32_t opcode, size;
+  do { /* FRINT32/64 (ARMv8.5): opcode 1111x with size<1> = 0 */
+    opcode = rbits(5);
+    size = rbits(2);
+  } while (opcode >= 0x1E && !(size & 2u));
+  c->insn = 0x0E200800u | q_u() | (size << 22) | (opcode << 12) | (vreg() << 5) | vreg();
+  c->fp = opcode >= 12;
+}
+static void make_simd_across(Case *c) {
+  static const uint32_t opcodes[] = {3, 10, 26, 27, 12, 15};
+  const uint32_t opcode = opcodes[rnd_below(6)];
+  /* FP across lanes with U = 0 is FP16 (host only). */
+  const uint32_t u = opcode >= 12 ? 1u : rbits(1);
+  c->insn = 0x0E300800u | (rbits(1) << 30) | (u << 29) | (rbits(2) << 22) | (opcode << 12) | (vreg() << 5) | vreg();
+  c->fp = opcode >= 12;
+}
+static void make_simd_three_different(Case *c) {
+  /* size 11 is PMULL.1Q (crypto) or unallocated: the host has crypto. */
+  c->insn = 0x0E200000u | q_u() | (rnd_below(3) << 22) | (vreg() << 16) | (rbits(4) << 12) | (vreg() << 5) | vreg();
+}
+static void make_simd_shift_immediate(Case *c) {
+  uint32_t immhb = 8u + rnd_below(120); /* immh != 0 */
+  const uint32_t opcode = rbits(5);
+  if (opcode >= 0x1C && immhb < 32u) immhb += 32u; /* FP16 fixed-point conversions: host only */
+  c->insn = 0x0F000400u | q_u() | (immhb << 16) | (opcode << 11) | (vreg() << 5) | vreg();
+  c->fp = opcode >= 0x1C;
+}
+static void make_simd_modified_immediate(Case *c) {
+  c->insn = 0x0F000400u | q_u() | (rbits(3) << 16) | (rbits(4) << 12) | (0u << 11) /* o2: FP16 FMOV */ |
+            (rbits(5) << 5) | vreg();
+}
+static void make_simd_copy(Case *c) {
+  static const uint32_t imm4s[] = {0, 1, 3, 5, 7, 0, 1, 3, 5, 7, 2, 4};
+  const uint32_t op = rnd_below(5) == 0;
+  c->insn = 0x0E000400u | (rbits(1) << 30) | (op << 29) | (rbits(5) << 16) |
+            ((op ? rbits(4) : imm4s[rnd_below(12)]) << 11) | (reg_or_zr() << 5) | reg_or_zr();
+}
+static void make_simd_permute(Case *c) {
+  c->insn = 0x0E000800u | (rbits(1) << 30) | (rbits(2) << 22) | (vreg() << 16) | (rbits(3) << 12) | (vreg() << 5) | vreg();
+}
+static void make_simd_extract(Case *c) {
+  c->insn = 0x2E000000u | (rbits(1) << 30) | (vreg() << 16) | (rbits(4) << 11) | (vreg() << 5) | vreg();
+}
+static void make_simd_table(Case *c) {
+  c->insn = 0x0E000000u | (rbits(1) << 30) | (vreg() << 16) | (rbits(2) << 13) | (rbits(1) << 12) | (vreg() << 5) | vreg();
+  c->table_indices = true;
+}
+/* ARMv8.0 by-element (U, opcode) pairs: the host also implements FMLAL
+ * (FHM), SQRDMLAH (RDM), FCMLA, SDOT and FP16 forms, which the Switch
+ * does not, so only these are generated. FP ones get size 1x. */
+static const uint32_t k_by_element_v80[][2] = {
+    {1, 0x0}, {1, 0x4}, {0, 0x2}, {1, 0x2}, {0, 0x3}, {0, 0x6}, {1, 0x6}, {0, 0x7}, {0, 0x8},
+    {0, 0xA}, {1, 0xA}, {0, 0xB}, {0, 0xC}, {0, 0xD}, {0, 0x1}, {0, 0x5}, {0, 0x9}, {1, 0x9},
+};
+static uint32_t by_element_insn(uint32_t base, bool scalar, bool *fp) {
+  const uint32_t *pick = k_by_element_v80[rnd_below(18)];
+  const uint32_t u = pick[0], opcode = pick[1];
+  *fp = opcode == 1 || opcode == 5 || opcode == 9;
+  const uint32_t size = *fp ? (2u | rbits(1)) : rbits(2);
+  return base | (scalar ? 0u : rbits(1) << 30) | (u << 29) | (size << 22) | (rbits(1) << 21) | (rbits(1) << 20) |
+         (rbits(4) << 16) | (opcode << 12) | (rbits(1) << 11) | (vreg() << 5) | vreg();
+}
+static void make_simd_by_element(Case *c) {
+  bool fp = false;
+  c->insn = by_element_insn(0x0F000000u, false, &fp);
+  c->fp = fp;
+}
+static void make_simd_scalar_three_same(Case *c) {
+  const uint32_t opcode = rbits(5);
+  c->insn = 0x5E200400u | (rbits(1) << 29) | (rbits(2) << 22) | (vreg() << 16) | (opcode << 11) | (vreg() << 5) | vreg();
+  c->fp = opcode >= 24;
+}
+static void make_simd_scalar_two_misc(Case *c) {
+  const uint32_t opcode = rbits(5);
+  c->insn = 0x5E200800u | (rbits(1) << 29) | (rbits(2) << 22) | (opcode << 12) | (vreg() << 5) | vreg();
+  c->fp = opcode >= 12;
+}
+static void make_simd_scalar_pairwise(Case *c) {
+  static const uint32_t opcodes[] = {27, 12, 13, 15};
+  const uint32_t opcode = opcodes[rnd_below(4)];
+  /* FP pairwise with U = 0 is FP16 (host only). */
+  c->insn = 0x5E300800u | ((opcode == 27 ? rbits(1) : 1u) << 29) | (rbits(2) << 22) | (opcode << 12) | (vreg() << 5) | vreg();
+  c->fp = true;
+}
+static void make_simd_scalar_shift_immediate(Case *c) {
+  const uint32_t opcode = rbits(5);
+  uint32_t immhb = 8u + rnd_below(120);
+  if (opcode >= 0x1C && immhb < 32u) immhb += 32u;
+  c->insn = 0x5F000400u | (rbits(1) << 29) | (immhb << 16) | (opcode << 11) | (vreg() << 5) | vreg();
+  c->fp = opcode >= 0x1C;
+}
+static void make_simd_scalar_three_different(Case *c) {
+  static const uint32_t opcodes[] = {9, 11, 13, 9, 11, 13, 0, 5};
+  c->insn = 0x5E200000u | (rbits(1) << 29) | (rbits(2) << 22) | (vreg() << 16) | (opcodes[rnd_below(8)] << 12) |
+            (vreg() << 5) | vreg();
+}
+static void make_simd_scalar_by_element(Case *c) {
+  bool fp = false;
+  c->insn = by_element_insn(0x5F000000u, true, &fp);
+  c->fp = fp;
+}
+static void make_simd_scalar_copy(Case *c) {
+  c->insn = 0x5E000400u | ((rnd_below(10) == 0) << 29) | (rbits(5) << 16) | ((rnd_below(10) == 0 ? rbits(4) : 0u) << 11) |
+            (vreg() << 5) | vreg();
+}
+static void make_simd_structure_multiple(Case *c) {
+  static const uint32_t opcodes[] = {0, 2, 4, 6, 7, 8, 10, 7, 7, 3};
+  const uint32_t n = reg();
+  const bool post = rbits(1);
+  uint32_t m = 31;
+  if (post && rbits(1)) {
+    do m = reg(); while (m == n);
+    c->index_regs = REG_BIT(m);
+  }
+  c->insn = 0x0C000000u | (rbits(1) << 30) | ((uint32_t)post << 23) | (rbits(1) << 22) | ((post ? m : 0u) << 16) |
+            (opcodes[rnd_below(10)] << 12) | (rbits(2) << 10) | (n << 5) | vreg();
+  c->base_regs = REG_BIT(n);
+  c->misalign = true;
+}
+static void make_simd_structure_single(Case *c) {
+  const uint32_t n = reg();
+  const bool post = rbits(1);
+  uint32_t m = 31;
+  if (post && rbits(1)) {
+    do m = reg(); while (m == n);
+    c->index_regs = REG_BIT(m);
+  }
+  c->insn = 0x0D000000u | (rbits(1) << 30) | ((uint32_t)post << 23) | (rbits(1) << 22) | (rbits(1) << 21) |
+            ((post ? m : 0u) << 16) | (rbits(3) << 13) | (rbits(1) << 12) | (rbits(2) << 10) | (n << 5) | vreg();
+  c->base_regs = REG_BIT(n);
+  c->misalign = true;
+}
+
 typedef struct Template {
   const char *name;
   Make_Fn make;
@@ -454,11 +677,83 @@ static const Template k_templates[] = {
     {"ldar/stlr", make_acquire_release},
     {"load exclusive", make_load_exclusive},
     {"dc zva", make_dc_zva},
+    {"fp (1 source)", make_fp_one_source},
+    {"fp (2 source)", make_fp_two_source},
+    {"fp (3 source, fused)", make_fp_three_source},
+    {"fp compare", make_fp_compare},
+    {"fp conditional compare/select", make_fp_conditional},
+    {"fp move immediate", make_fp_move_immediate},
+    {"fp <-> integer", make_fp_int_conversion},
+    {"fp <-> fixed point", make_fp_fixed_conversion},
+    {"simd three same (int)", make_simd_three_same_int},
+    {"simd three same (fp)", make_simd_three_same_fp},
+    {"simd two-reg misc", make_simd_two_misc},
+    {"simd across lanes", make_simd_across},
+    {"simd three different", make_simd_three_different},
+    {"simd shift by immediate", make_simd_shift_immediate},
+    {"simd modified immediate", make_simd_modified_immediate},
+    {"simd copy", make_simd_copy},
+    {"simd permute", make_simd_permute},
+    {"simd extract", make_simd_extract},
+    {"simd table lookup", make_simd_table},
+    {"simd by element", make_simd_by_element},
+    {"simd scalar three same", make_simd_scalar_three_same},
+    {"simd scalar two-reg misc", make_simd_scalar_two_misc},
+    {"simd scalar pairwise", make_simd_scalar_pairwise},
+    {"simd scalar shift by imm", make_simd_scalar_shift_immediate},
+    {"simd scalar three different", make_simd_scalar_three_different},
+    {"simd scalar by element", make_simd_scalar_by_element},
+    {"simd scalar copy", make_simd_scalar_copy},
+    {"simd ld/st multiple", make_simd_structure_multiple},
+    {"simd ld/st single", make_simd_structure_single},
 };
 
 /* ------------------------------------------------------------------ */
 /* Comparison.                                                         */
 /* ------------------------------------------------------------------ */
+
+static uint64_t fp32_value(void) {
+  static const uint32_t specials[] = {
+      0x00000000, 0x80000000, 0x7F800000, 0xFF800000, 0x7FC00000, 0xFFC00001, 0x7FA00000, 0xFF800001,
+      0x00000001, 0x807FFFFF, 0x00400000, 0x00800000, 0x80800000, 0x7F7FFFFF, 0xFF7FFFFF, 0x3F800000,
+      0xBF800000, 0x3FC00000, 0x40000000, 0x3F000000, 0x40200000, 0x40600000, 0xBF000000, 0x4F000000,
+      0xCF000000, 0x4F800000, 0x5F000000, 0xDF000000, 0x5F800000, 0x3EFFFFFF, 0x4B000000, 0x4AFFFFFF,
+      0x00800001, 0x7E800000, 0x01000000, 0x34000000, 0x0C000000, 0x72000000,
+  };
+  switch (rnd_below(4)) {
+  case 0: return specials[rnd_below(sizeof(specials) / sizeof(specials[0]))];
+  case 1: return (uint32_t)rnd();
+  case 2: /* moderate exponent, random mantissa */
+    return ((uint32_t)rbits(1) << 31) | ((100u + rnd_below(56)) << 23) | rbits(23);
+  default: /* near rounding boundaries: small integers plus fractions */
+    return ((uint32_t)rbits(1) << 31) | ((120u + rnd_below(40)) << 23) | (rbits(3) << 20);
+  }
+}
+
+static uint64_t fp64_value(void) {
+  static const uint64_t specials[] = {
+      0, 0x8000000000000000ull, 0x7FF0000000000000ull, 0xFFF0000000000000ull, 0x7FF8000000000000ull,
+      0xFFF8000000000001ull, 0x7FF4000000000000ull, 0x7FF0000000000001ull, 1, 0x800FFFFFFFFFFFFFull,
+      0x0010000000000000ull, 0x7FEFFFFFFFFFFFFFull, 0x3FF0000000000000ull, 0xBFF0000000000000ull,
+      0x3FF8000000000000ull, 0x4000000000000000ull, 0x3FE0000000000000ull, 0x4004000000000000ull,
+      0x41E0000000000000ull, 0xC1E0000000000000ull, 0x41F0000000000000ull, 0x43E0000000000000ull,
+      0xC3E0000000000000ull, 0x43F0000000000000ull, 0x4330000000000000ull, 0x432FFFFFFFFFFFFFull,
+      0x0010000000000001ull, 0x47EFFFFFE0000000ull, 0x36A0000000000000ull, 0x3810000000000000ull,
+      0x380FFFFFFFFFFFFFull, 0x47F0000000000000ull,
+  };
+  switch (rnd_below(4)) {
+  case 0: return specials[rnd_below(sizeof(specials) / sizeof(specials[0]))];
+  case 1: return rnd();
+  case 2: return ((uint64_t)rbits(1) << 63) | ((uint64_t)(900u + rnd_below(250)) << 52) | (rnd() & 0xFFFFFFFFFFFFFull);
+  default: return ((uint64_t)rbits(1) << 63) | ((uint64_t)(1015u + rnd_below(60)) << 52) | ((uint64_t)rbits(3) << 49);
+  }
+}
+
+static uint64_t random_fpcr(void) {
+  static const uint64_t fz = 1u << 24, dn = 1u << 25;
+  if (rnd_below(2)) return 0;
+  return (rbits(1) ? fz : 0) | (rbits(1) ? dn : 0) | ((uint64_t)rbits(2) << 22);
+}
 
 static void random_state(const Case *c, Oracle_State *state) {
   memset(state, 0, sizeof(*state));
@@ -483,6 +778,21 @@ static void random_state(const Case *c, Oracle_State *state) {
   for (uint32_t i = 0; i < 32; i++) {
     state->v[i][0] = interesting_value();
     state->v[i][1] = interesting_value();
+    if (c->fp) {
+      state->v[i][0] = rbits(1) ? fp64_value() : ((rnd() << 32) | fp32_value());
+      if (rnd_below(8) == 0) state->v[i][0] = (state->v[i][0] & ~0xFFFFull) | (rnd() & 0xFFFFu); /* halves */
+    }
+  }
+  if (c->table_indices) {
+    for (uint32_t i = 0; i < 32; i++) {
+      state->v[i][0] &= 0x3F3F3F3F3F3F3F3Full;
+      state->v[i][1] &= rbits(1) ? 0x3F3F3F3F3F3F3F3Full : ~0ull;
+    }
+  }
+  if (!c->fp) state->fpsr = rnd_below(4) == 0 ? (1u << 27) : 0; /* QC */
+  if (c->fp) {
+    state->fpcr = random_fpcr();
+    state->fpsr = rnd_below(4) == 0 ? (rnd() & 0x9Fu) : 0;
   }
 }
 
