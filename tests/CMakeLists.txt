@@ -81,3 +81,24 @@ add_test(NAME thread_test COMMAND thread_test)
 add_executable(svc_memory_test svc_memory_test.c)
 target_link_libraries(svc_memory_test PRIVATE switch_core loader_fixtures)
 add_test(NAME svc_memory_test COMMAND svc_memory_test)
+
+#
+# core/hle/kernel IPC (§12 "The call surface"): the handle table as a
+# unit; HIPC/CMIF/TIPC parse + encode byte-exact against an independent
+# encoder (ipc_fixtures.c restates libnx's layout); and the SVC path -
+# ConnectToNamedPort / SendSyncRequest / CloseHandle and sm: - driven
+# through hle_on_svc with the command buffer in a real TLS block.
+#
+add_library(ipc_fixtures STATIC ipc_fixtures.c)
+target_include_directories(ipc_fixtures PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(ipc_fixtures PRIVATE switch_core loader_fixtures)
+
+add_executable(handle_table_test handle_table_test.c)
+target_link_libraries(handle_table_test PRIVATE switch_core)
+add_test(NAME handle_table_test COMMAND handle_table_test)
+
+foreach(ipc_test ipc_parse_test svc_ipc_test)
+  add_executable(${ipc_test} ${ipc_test}.c)
+  target_link_libraries(${ipc_test} PRIVATE switch_core ipc_fixtures loader_fixtures)
+  add_test(NAME ${ipc_test} COMMAND ${ipc_test})
+endforeach()

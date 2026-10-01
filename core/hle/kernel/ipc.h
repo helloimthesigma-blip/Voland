@@ -1,8 +1,7 @@
 /**
  * IPC: HIPC transport, CMIF/TIPC framing, sessions, domains and the C
  * service-object pattern (§12 "The call surface: SVC -> HIPC -> CMIF").
- * PROPOSED HEADER - awaiting maintainer review; no implementation exists
- * yet. Phase 1, §25 "Minimal IPC + sm: stub".
+ * Phase 1, §25 "Minimal IPC + sm: stub".
  *
  * Wire formats verified against libnx's sf/hipc.h, sf/cmif.h and
  * sf/tipc.h (the SDK every homebrew links - published protocol, not
@@ -133,6 +132,7 @@ typedef enum IPC_Control_Command {
 #define IPC_RESULT_SF_INVALID_HEADER_SIZE ((uint32_t)((202u << 9) | IPC_SF_MODULE))
 #define IPC_RESULT_SF_INVALID_IN_HEADER ((uint32_t)((211u << 9) | IPC_SF_MODULE))
 #define IPC_RESULT_SF_UNKNOWN_COMMAND ((uint32_t)((221u << 9) | IPC_SF_MODULE)) /* 0x1BA0A */
+#define IPC_RESULT_SF_INVALID_OUT_RAW_SIZE ((uint32_t)((232u << 9) | IPC_SF_MODULE))
 #define IPC_RESULT_SF_INVALID_IN_OBJECT ((uint32_t)((239u << 9) | IPC_SF_MODULE))
 #define IPC_RESULT_SF_TARGET_NOT_FOUND ((uint32_t)((261u << 9) | IPC_SF_MODULE))
 #define IPC_RESULT_SF_OUT_OF_DOMAIN_ENTRIES ((uint32_t)((301u << 9) | IPC_SF_MODULE))
@@ -195,19 +195,32 @@ typedef struct IPC_Request {
   uint32_t payload_offset;
   uint32_t payload_size;
 
+  /* Non-zero when the HIPC layer parsed but the CMIF layer did not
+   * (missing SFCI magic, bad domain header). The kernel delivered the
+   * message, so the SERVICE answers: ipc_dispatch replies with this sf
+   * result instead of running a command. */
+  uint32_t framing_error;
+
   uint8_t buffer[IPC_COMMAND_BUFFER_BYTES]; /* the host copy of the TLS buffer */
 } IPC_Request;
 
 /* Decodes `request->buffer` (filled by the caller) in place. Bounds are
  * enforced against IPC_COMMAND_BUFFER_BYTES everywhere - a request is
- * untrusted input.
- *   RESULT_INVALID_ARGUMENT legacy/invalid HIPC type; counts, data size
- *                           or in-object count overrunning the buffer;
- *                           CMIF magic missing; unknown domain request
+ * untrusted input. Two failure layers:
+ *   returns RESULT_INVALID_ARGUMENT  HIPC-level: legacy/invalid type,
+ *                                    descriptor counts, data or receive
+ *                                    list overrunning the buffer. The
+ *                                    kernel would refuse to deliver it;
+ *                                    svc_ipc.c answers
+ *                                    HLE_RESULT_MESSAGE_TOO_LARGE in W0
+ *                                    and leaves TLS untouched.
+ *   returns OK, sets framing_error   CMIF-level: SFCI magic missing,
+ *                                    domain header malformed or
+ *                                    overrunning. Delivered, so the
+ *                                    service replies with the sf result.
  * `session_is_domain` selects whether a CMIF request is preceded by a
  * domain header - the wire format cannot say, only the session knows.
- * svc_ipc.c turns a parse failure into a kernel-level failure in W0
- * (HLE_RESULT_INVALID_STATE) without writing a reply. */
+ * Control messages never carry one. */
 Error ipc_parse_request(IPC_Request *request, bool session_is_domain);
 
 /* Bounds-checked payload readers: RESULT_INVALID_ARGUMENT past the end. */
@@ -219,7 +232,13 @@ Error ipc_request_read_bytes(const IPC_Request *request, uint32_t offset, void *
 /* Response.                                                           */
 /* ------------------------------------------------------------------ */
 
-typedef struct Service_Object Service_Object;
+typedef struct Service_Interface Service_Interface;
+
+/* An object a handler returns (an "out object" in CMIF terms). */
+typedef struct IPC_Out_Object {
+  const Service_Interface *interface;
+  uint64_t state;
+} IPC_Out_Object;
 
 typedef struct IPC_Response {
   uint32_t result; /* the service Result in SFCO / TIPC word 0 */
@@ -233,24 +252,39 @@ typedef struct IPC_Response {
   uint32_t move_handle_count;
 
   /* Objects a handler returns; ipc_dispatch turns each into a domain id
-   * or a new session's move handle depending on the session. */
-  Service_Object *out_objects[IPC_MAX_OUT_OBJECTS];
+   * or a new session's move handle depending on the session. On a
+   * non-domain session they become the FIRST move handles, ahead of any
+   * pushed with ipc_response_push_move_handle (libnx sf/service.h:
+   * "Output objects are marshalled as move handles at the beginning of
+   * the list"). */
+  IPC_Out_Object out_objects[IPC_MAX_OUT_OBJECTS];
   uint32_t out_object_count;
+
+  /* Filled by ipc_dispatch on a domain session: the ids the out objects
+   * received, written after the out data. */
+  uint32_t out_object_ids[IPC_MAX_OUT_OBJECTS];
+
+  /* Set by any push that did not fit; ipc_dispatch then replies
+   * IPC_RESULT_SF_INVALID_OUT_RAW_SIZE with no data instead of a
+   * truncated reply. */
+  bool overflowed;
 } IPC_Response;
 
-/* Append raw out data / handles. RESULT_INVALID_ARGUMENT on overflow;
- * a handler that overflows is a bug, and ipc_dispatch turns it into
- * IPC_RESULT_SF_INVALID_HEADER_SIZE rather than a truncated reply. */
+/* Append raw out data / handles. RESULT_INVALID_ARGUMENT on overflow
+ * (and response->overflowed is set); a handler that overflows is a bug,
+ * and ipc_dispatch turns it into IPC_RESULT_SF_INVALID_OUT_RAW_SIZE
+ * rather than a truncated reply. */
 Error ipc_response_push_u32(IPC_Response *response, uint32_t value);
 Error ipc_response_push_u64(IPC_Response *response, uint64_t value);
 Error ipc_response_push_bytes(IPC_Response *response, const void *bytes, uint32_t size);
 Error ipc_response_push_copy_handle(IPC_Response *response, uint32_t handle);
 Error ipc_response_push_move_handle(IPC_Response *response, uint32_t handle);
 
-/* Return a new service object (e.g. sm: GetServiceHandle's session). The
- * response does not own `object`; it must come from
- * ipc_session_pool_new_object() for the duration of the dispatch. */
-Error ipc_response_push_object(IPC_Response *response, Service_Object *object);
+/* Return a new service object of `interface` (e.g. fsp-srv
+ * OpenFileSystem's IFileSystem). Note sm: GetServiceHandle does NOT use
+ * this: it returns a plain move handle (ipc_open_session_handle). */
+Error ipc_response_push_object(IPC_Response *response, const Service_Interface *interface,
+                               uint64_t state);
 
 /* Encodes the reply for `request`'s framing into `out` (one TLS command
  * buffer). Pure: no vmm, no handle table. Writes HIPC header + special
@@ -265,6 +299,7 @@ Error ipc_write_response(const IPC_Request *request, const IPC_Response *respons
 /* ------------------------------------------------------------------ */
 
 typedef uint32_t HLE_ServiceResult; /* a Horizon Result: (description << 9) | module */
+typedef struct Service_Object Service_Object;
 
 typedef HLE_ServiceResult (*Service_Command_Fn)(HLE_Context *context, Service_Object *self,
                                                 const IPC_Request *request,
@@ -276,13 +311,13 @@ typedef struct Service_Command {
   const char *name; /* for trace/coverage output; "_stub" suffix marks an allowlisted stub (§12) */
 } Service_Command;
 
-typedef struct Service_Interface {
+struct Service_Interface {
   const char *name;                /* "sm:", "IFileSystemProxy", ... */
   const Service_Command *commands; /* sorted by command_id ascending; bsearch */
   size_t command_count;
   uint16_t pointer_buffer_size;    /* QueryPointerBufferSize answer */
   void *service_state;             /* service-global, not per object; may be NULL */
-} Service_Interface;
+};
 
 /* One live object: an interface plus one word of per-object state. */
 struct Service_Object {
@@ -317,13 +352,13 @@ IPC_Session *ipc_session_pool_open(IPC_Session_Pool *pool, const Service_Interfa
 /* Frees the session and every object in it. */
 void ipc_session_pool_close(IPC_Session_Pool *pool, IPC_Session *session);
 
-/* Scratch object for ipc_response_push_object: a handler fills one in
- * and returns it; ipc_dispatch then copies it into its final home (a
- * domain slot or a new session). Lives in the pool so no handler needs
- * storage of its own. NULL if more than IPC_MAX_OUT_OBJECTS are requested
- * in one dispatch. */
-Service_Object *ipc_session_pool_new_object(IPC_Session_Pool *pool,
-                                            const Service_Interface *interface, uint64_t state);
+/* Opens a session on `interface` and adds it to the current process's
+ * handle table. Returns a KERNEL result: HLE_RESULT_SUCCESS,
+ * HLE_RESULT_OUT_OF_SESSIONS or HLE_RESULT_OUT_OF_HANDLES (nothing
+ * leaked on failure). Used by ConnectToNamedPort, by sm:
+ * GetServiceHandle, and by ipc_dispatch for non-domain out objects. */
+uint32_t ipc_open_session_handle(HLE_Context *context, const Service_Interface *interface,
+                                 uint64_t state, uint32_t *out_handle);
 
 /* ------------------------------------------------------------------ */
 /* Dispatch.                                                           */

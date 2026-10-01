@@ -1,7 +1,6 @@
 /**
- * sm: - the service manager (§12 priority list item 1). PROPOSED HEADER -
- * awaiting maintainer review; no implementation exists yet. Phase 1,
- * §25 "Minimal IPC + sm: stub".
+ * sm: - the service manager (§12 priority list item 1). Phase 1, §25
+ * "Minimal IPC + sm: stub".
  *
  * Every other service is reached through sm: GetServiceHandle, so this is
  * the first Service_Interface (ipc.h) and the template the
@@ -16,15 +15,16 @@
  *   1 GetServiceHandle   in: u64 name (8 ASCII bytes, NUL-padded)
  *                        out: move handle to a new session on the
  *                        registered HLE interface
- *   2 RegisterService    homebrew sysmodules only -> not implemented
- *   3 UnregisterService  homebrew sysmodules only -> not implemented
+ *   2 RegisterService    sysmodules only - absent from the table, so the
+ *   3 UnregisterService  unknown-command policy logs them
  * (4 DetachClient, 11.0.0+, is not in the table: unknown-command policy.)
  *
  * Results, module 21 (Atmosphère's sm_results.hpp; the numbering
  * Nintendo's sm uses): see SM_RESULT_* below. Behavior:
  *   - GetServiceHandle before RegisterClient -> SM_RESULT_INVALID_CLIENT.
- *   - A name that is empty, has a non-NUL after a NUL, or a byte outside
- *     printable ASCII -> SM_RESULT_INVALID_SERVICE_NAME.
+ *   - A name that is empty or has a non-NUL after a NUL ->
+ *     SM_RESULT_INVALID_SERVICE_NAME (Atmosphère's sm validation; no
+ *     character-class check).
  *   - A well-formed name with no registered HLE interface ->
  *     SM_RESULT_NOT_REGISTERED, logged with the name. DEVIATION, stated:
  *     real sm defers the reply until the service registers (the caller
@@ -89,7 +89,7 @@ typedef struct SM_Registry {
 /* Empties the registry and initializes `registry->interface`. */
 void sm_registry_init(SM_Registry *registry);
 
-/* Register an HLE service under `name` (1-8 printable ASCII chars).
+/* Register an HLE service under `name` (1-8 chars).
  *   RESULT_INVALID_ARGUMENT bad name / NULL
  *   RESULT_OUT_OF_MEMORY    registry full
  *   (re-registering a name replaces nothing: RESULT_INVALID_ARGUMENT) */

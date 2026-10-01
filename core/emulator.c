@@ -53,7 +53,12 @@ Error emulator_create(Emulator* out) {
    * before emulator_load_program() populates it - same pattern as
    * `out->cpu_state` above being handed `&out->hle` before
    * hle_context_init() has even run (see hle.h's doc comment). */
-  hle_context_init(&out->hle, out->cpu_backend, out->vmm, &out->process, &out->pages);
+  /* IPC kernel state and the sm: registry (§12). The registry is filled
+   * once here as services land; sessions die with each process. */
+  ipc_session_pool_init(&out->sessions);
+  sm_registry_init(&out->sm);
+  hle_context_init(&out->hle, out->cpu_backend, out->vmm, &out->process, &out->pages,
+                   &out->sessions, &out->sm);
   out->cpu_backend->set_svc_handler(out->cpu_state, hle_on_svc);
   out->cpu_backend->set_undefined_handler(out->cpu_state, hle_on_undefined);
 
@@ -164,6 +169,7 @@ void emulator_unload_program(Emulator* emulator) {
   if (!emulator || !emulator->program_loaded) return;
   process_teardown(&emulator->process, emulator->vmm, &emulator->pages);
   page_allocator_reset(&emulator->pages);
+  ipc_session_pool_init(&emulator->sessions); /* every session belonged to the process */
   emulator->program_loaded = false;
 }
 

@@ -51,7 +51,7 @@ int main(void) {
   /* No Process/pages here - this test only exercises SVC dispatch
    * generically (below), never a memory SVC, so NULL is fine (hle_on_svc
    * guards its borrow-scope calls on `vmm` being non-NULL too). */
-  hle_context_init(&hle, cpu, vmm, NULL, NULL);
+  hle_context_init(&hle, cpu, vmm, NULL, NULL, NULL, NULL);
   TLS_Allocator tls;
   const Address_Region region = {TLS_REGION_BASE, 2 * PAGE};
   CHECK_OK(tls_allocator_init(&tls, vmm, &pages, region));

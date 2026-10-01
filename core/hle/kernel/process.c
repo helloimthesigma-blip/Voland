@@ -4,6 +4,7 @@
  */
 #include "hle/kernel/process.h"
 
+#include "common/assert.h"
 #include "common/layout.h"
 #include "common/log.h"
 
@@ -250,7 +251,16 @@ Error process_bootstrap(const Process_Bootstrap_Params *params, Process *out) {
   err = tls_allocate(&out->tls, &out->main_thread_tls_gva);
   if (!error_is_ok(err)) goto fail;
 
-  out->main_thread_handle = PROCESS_MAIN_THREAD_HANDLE;
+  /* The handle table's first entry is the main thread, so the X1 the
+   * entry ABI hands the guest is a live handle (handle_table.h). The
+   * object pointer is the process itself until Phase 2 gives the main
+   * thread a Guest_Thread of its own. */
+  err = handle_table_init(&out->handles);
+  if (!error_is_ok(err)) goto fail;
+  err = handle_table_add(&out->handles, KERNEL_OBJECT_THREAD, out, &out->main_thread_handle);
+  if (!error_is_ok(err)) goto fail;
+  SWITCH_ASSERT_ALWAYS(out->main_thread_handle == PROCESS_MAIN_THREAD_HANDLE,
+                       "first handle must be the main thread's 0x8000");
   out->npdm = *npdm;
   log_info("process: '%s' bootstrapped, %u modules, entry 0x%010llx, stack 0x%010llx+0x%x, tls 0x%010llx",
            npdm->name, (unsigned)out->module_count, (unsigned long long)out->entry_point,

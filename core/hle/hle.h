@@ -37,7 +37,7 @@
  * constants are genuine kernel results, e.g. 0xE401 = (114 << 9) | 1.
  * Service-specific results use their own module (§12). */
 #define HLE_RESULT_SUCCESS 0x00000000u
-/* PROPOSED CORRECTION (ipc/sm: review): 0xF601 is (123 << 9) | 1 =
+/* Corrected with the IPC SVCs: 0xF601 is (123 << 9) | 1 =
  * KernelError_ConnectionClosed in libnx's result.h, not NotImplemented
  * (33 -> 0x4201). Harmless while nothing decoded it; the moment
  * SendSyncRequest exists, a title seeing "connection closed" for an
@@ -54,7 +54,7 @@
  * (KernelError_OutOfMemory=104) and corrected here rather than shipped
  * wrong the first time it became observable. */
 #define HLE_RESULT_OUT_OF_MEMORY 0xD001u /* KernelError_OutOfMemory=104 */
-/* PROPOSED CORRECTION: both were module 2 (fs), not kernel results.
+/* Corrected with the IPC SVCs: both were module 2 (fs), not kernel results.
  * Neither has been returned to a guest yet; ConnectToNamedPort is the
  * first user of NOT_FOUND. */
 #define HLE_RESULT_NOT_FOUND 0xF201u      /* KernelError_NotFound=121 */
@@ -63,12 +63,17 @@
 #define HLE_RESULT_INVALID_SIZE 0xCA01u          /* KernelError_InvalidSize=101 */
 #define HLE_RESULT_INVALID_MEMORY_STATE 0xD401u  /* KernelError_InvalidMemoryState=106, aka InvalidCurrentMemory */
 #define HLE_RESULT_INVALID_MEMORY_RANGE 0xDC01u  /* KernelError_InvalidMemoryRange=110 */
-/* PROPOSED, for the IPC SVCs (svc_ipc.h); same libnx result.h source. */
+/* For the IPC SVCs (svc_ipc.h); same libnx result.h source. */
 #define HLE_RESULT_OUT_OF_SESSIONS 0x0E01u     /* KernelError_OutOfSessions=7 */
 #define HLE_RESULT_OUT_OF_HANDLES 0xD201u      /* KernelError_OutOfHandles=105 */
 #define HLE_RESULT_OUT_OF_RANGE 0xEE01u        /* KernelError_OutOfRange=119 */
 #define HLE_RESULT_CONNECTION_CLOSED 0xF601u   /* KernelError_ConnectionClosed=123 */
 #define HLE_RESULT_INVALID_STATE 0xFA01u       /* KernelError_InvalidState=125 */
+/* A user pointer the kernel could not read (svc::ResultInvalidPointer;
+ * libnx calls it KernelError_InvalidUserBuffer). Distinct from
+ * HLE_RESULT_INVALID_POINTER above, which is really InvalidAddress=102. */
+#define HLE_RESULT_INVALID_USER_POINTER 0xE601u /* 115 */
+#define HLE_RESULT_MESSAGE_TOO_LARGE 0x20801u   /* KernelError_IpcCmdbufTooSmall=260 */
 
 #define HLE_MAKE_RESULT(module, description) \
   ((uint32_t)(((description) << 9) | ((module) & 0x1FF)))
@@ -79,15 +84,13 @@ struct HLE_Context
   VMM_Context *vmm;      /* softmmu (§5); the only guest-memory gateway memory SVCs use */
   Process *process;      /* the loaded process (§12); valid once emulator_load_program() has run */
   Page_Allocator *pages; /* guest physical pages (§4), shared with the bootstrap */
-  /* PROPOSED (ipc/sm: review). Owned by Emulator, like the three above.
-   * The handle table itself lives in Process (process->handles). */
+  /* Owned by Emulator, like the three above. The handle table itself
+   * lives in Process (process->handles). */
   IPC_Session_Pool *sessions;
   SM_Registry *sm;
   uint64_t svc_call_count;
 };
 
-/* PROPOSED: gains `sessions` and `sm` (mechanical call-site ripple into
- * emulator.c and the tests that build an HLE_Context by hand). */
 void hle_context_init(HLE_Context *context, const CPU_Backend *backend,
                       VMM_Context *vmm, Process *process, Page_Allocator *pages,
                       IPC_Session_Pool *sessions, SM_Registry *sm);

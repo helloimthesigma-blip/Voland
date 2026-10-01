@@ -1,7 +1,6 @@
 /**
  * IPC and handle SVCs: ConnectToNamedPort (0x1F), SendSyncRequest (0x21),
- * CloseHandle (0x16). PROPOSED HEADER - awaiting maintainer review; no
- * implementation exists yet. Phase 1, §25 "Minimal IPC + sm: stub";
+ * CloseHandle (0x16). Phase 1, §25 "Minimal IPC + sm: stub";
  * §12 priority list item 3.
  *
  * Register ABI, verified against libnx's svc.s:
@@ -22,16 +21,14 @@
  *                       in:  W0 = handle
  *                       out: W0 = Result
  *
- * DOC BUG FOUND WHILE VERIFYING, flagged for review: §12's dispatch table
- * lists CloseHandle as 0x26. libnx's svc.s has svcCloseHandle = 0x16 and
- * svcBreak = 0x26. This header uses 0x16; the §12 table is corrected in
- * the same change that implements it.
+ * §12's dispatch table listed CloseHandle as 0x26 until v3.29; libnx's
+ * svc.s has svcCloseHandle = 0x16 and svcBreak = 0x26.
  *
  * Behavior:
  *   ConnectToNamedPort - reads the name with vmm_read_block one byte at a
  *     time up to the limit (a name may end right before an unmapped page);
  *     no NUL within the limit -> HLE_RESULT_OUT_OF_RANGE; unmapped ->
- *     HLE_RESULT_INVALID_POINTER; unknown port -> HLE_RESULT_NOT_FOUND
+ *     HLE_RESULT_INVALID_USER_POINTER; unknown port -> HLE_RESULT_NOT_FOUND
  *     (libnx retries sm: on NotFound with a sleep, so answering it for
  *     sm: would spin forever - sm: is always present); otherwise opens a
  *     session on the port's interface and adds it to the handle table
@@ -42,11 +39,12 @@
  *     HLE_RESULT_INVALID_HANDLE. TLS block address = the calling
  *     CPU_State's tpidrro_el0 (set once at thread creation, thread.h).
  *     One vmm_read_block of IPC_COMMAND_BUFFER_BYTES, ipc_parse_request,
- *     ipc_dispatch, ipc_write_response, one vmm_write_block back. Parse
- *     failure -> HLE_RESULT_INVALID_STATE, TLS untouched. A Close message
+ *     ipc_dispatch, ipc_write_response, one vmm_write_block back. A Close message
  *     closes the session and its handle and returns success (libnx
  *     ignores the result and closes the handle itself; the second close
- *     then fails INVALID_HANDLE harmlessly, as on hardware).
+ *     then fails INVALID_HANDLE harmlessly). HIPC-level garbage ->
+ *     HLE_RESULT_MESSAGE_TOO_LARGE; CMIF-level garbage is answered by the
+ *     "service" with an sf result in a normal reply (ipc.h).
  *     Does not block: every Phase 1 service answers synchronously. A
  *     service that must wait (a deferred sm: GetServiceHandle, any event
  *     wait) needs the Phase 2 scheduler (§7) and is out of scope.

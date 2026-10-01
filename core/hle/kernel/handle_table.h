@@ -1,6 +1,5 @@
 /**
- * Per-process kernel handle table (§12 "Handle table"). PROPOSED HEADER -
- * awaiting maintainer review; no implementation exists yet.
+ * Per-process kernel handle table (§12 "Handle table").
  *
  * Every kernel object a guest names by integer - threads, IPC sessions,
  * and later events, shared memory and transfer memory - lives behind

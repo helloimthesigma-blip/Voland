@@ -119,11 +119,11 @@ typedef struct Process {
   uint32_t module_count;
   uint64_t entry_point; /* rtld (or main) .text base */
 
-  /* PROPOSED (ipc/sm: review): the process's handle table (§12).
-   * process_bootstrap initializes it and adds the main thread FIRST, so
-   * main_thread_handle is a real entry equal to
-   * PROCESS_MAIN_THREAD_HANDLE; process_teardown closes every live
-   * session through the IPC pool before dropping the table. */
+  /* The process's handle table (§12). process_bootstrap initializes it
+   * and adds the main thread FIRST, so main_thread_handle is a real entry
+   * equal to PROCESS_MAIN_THREAD_HANDLE. The objects behind session
+   * handles live in Emulator.sessions, which emulator_unload_program
+   * resets alongside process_teardown. */
   Handle_Table handles;
 
   /* Main thread. */

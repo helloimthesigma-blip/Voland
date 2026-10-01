@@ -1,12 +1,14 @@
 #include "hle/hle.h"
 #include "common/assert.h"
 #include "common/log.h"
+#include "hle/kernel/svc_ipc.h"
 #include "hle/kernel/svc_memory.h"
 
 #include <stddef.h>
 
 void hle_context_init(HLE_Context *context, const CPU_Backend *backend,
-                      VMM_Context *vmm, Process *process, Page_Allocator *pages)
+                      VMM_Context *vmm, Process *process, Page_Allocator *pages,
+                      IPC_Session_Pool *sessions, SM_Registry *sm)
 {
   SWITCH_ASSERT_ALWAYS(context != NULL, "hle_context_init: context is NULL");
   SWITCH_ASSERT_ALWAYS(backend != NULL, "hle_context_init: backend is NULL");
@@ -14,6 +16,8 @@ void hle_context_init(HLE_Context *context, const CPU_Backend *backend,
   context->vmm = vmm;
   context->process = process;
   context->pages = pages;
+  context->sessions = sessions;
+  context->sm = sm;
   context->svc_call_count = 0;
 }
 
@@ -53,6 +57,8 @@ static const char *svc_name(uint32_t swi)
     return "UnmapSharedMemory";
   case 0x15:
     return "CreateTransferMemory";
+  case 0x16:
+    return "CloseHandle";
   case 0x18:
     return "WaitSynchronization";
   case 0x19:
@@ -72,7 +78,7 @@ static const char *svc_name(uint32_t swi)
   case 0x22:
     return "SendSyncRequestWithUserBuffer";
   case 0x26:
-    return "CloseHandle";
+    return "Break";
   case 0x29:
     return "GetInfo";
   default:
@@ -102,9 +108,9 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
    * each call keeps at most one borrow live at a time regardless of how
    * many pages a handler walks. */
 
-  /* §12's dispatch table, Phase 1 slice: the four memory SVCs this
-   * checkbox implements (thin layers over vmm/process/pages - see
-   * hle/kernel/svc_memory.h) plus the §12 unimplemented-surface policy
+  /* §12's dispatch table, Phase 1 slice: the four memory SVCs (thin
+   * layers over vmm/process/pages - hle/kernel/svc_memory.h), the IPC
+   * and handle SVCs (hle/kernel/svc_ipc.h), plus the §12 unimplemented-surface policy
    * default arm for everything else: log, then HLE_RESULT_NOT_IMPLEMENTED
    * in W0. */
   switch (swi)
@@ -120,6 +126,15 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
     break;
   case 0x06:
     hle_svc_query_memory(context, cpu_state);
+    break;
+  case HLE_SVC_CLOSE_HANDLE:
+    hle_svc_close_handle(context, cpu_state);
+    break;
+  case HLE_SVC_CONNECT_TO_NAMED_PORT:
+    hle_svc_connect_to_named_port(context, cpu_state);
+    break;
+  case HLE_SVC_SEND_SYNC_REQUEST:
+    hle_svc_send_sync_request(context, cpu_state);
     break;
   default:
     log_warn("[hle] SVC 0x%02x (%s) at PC 0x%016llx - unimplemented",
