@@ -56,7 +56,8 @@ typedef enum Kernel_Object_Type {
   KERNEL_OBJECT_SESSION,  /* IPC_Session (ipc.h) - client end */
   KERNEL_OBJECT_EVENT_READABLE, /* Kernel_Event (event.h): wait / reset */
   KERNEL_OBJECT_EVENT_WRITABLE, /* Kernel_Event: signal / clear */
-  /* Events, shared memory, transfer memory, ports: added with their SVCs. */
+  KERNEL_OBJECT_SHARED_MEMORY,  /* Kernel_Shared_Memory (shared_memory.h) */
+  /* Transfer memory, ports: added with their SVCs. */
 } Kernel_Object_Type;
 
 typedef struct Handle_Entry {

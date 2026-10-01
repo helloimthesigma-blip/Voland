@@ -8,6 +8,8 @@
 #include "common/assert.h"
 #include "common/layout.h"
 #include "common/log.h"
+#include "hle/kernel/handle_table.h"
+#include "hle/kernel/shared_memory.h"
 
 #include <stddef.h>
 
@@ -51,6 +53,10 @@ static bool borrow_overlaps_src(const Process *process, uint64_t base, uint64_t 
  * than perms as a proxy for it). */
 static uint32_t classify_type(const Process *process, uint64_t gva, bool is_mapped) {
   if (!is_mapped) return HLE_MEMTYPE_UNMAPPED;
+  for (uint32_t i = 0; i < process->shared_mapping_count; i++) {
+    const Address_Region view = {process->shared_mappings[i].base, process->shared_mappings[i].size};
+    if (address_region_contains(&view, gva, 1)) return HLE_MEMTYPE_SHARED;
+  }
   const Address_Space *as = &process->address_space;
   if (address_region_contains(&as->code, gva, 1)) return HLE_MEMTYPE_CODE_STATIC;
   if (address_region_contains(&as->heap, gva, 1)) {
@@ -313,4 +319,100 @@ void hle_svc_query_memory(HLE_Context *context, CPU_State *cpu_state) {
 
   regs->x[0] = HLE_RESULT_SUCCESS;
   regs->x[1] = 0; /* pageinfo: reserved, always 0 on real hardware too */
+}
+
+/* ------------------------------------------------------------------ */
+/* Shared memory (shared_memory.h).                                    */
+/* ------------------------------------------------------------------ */
+
+static int find_shared_mapping(const Process *process, uint64_t base, uint64_t size, const void *object) {
+  for (uint32_t i = 0; i < process->shared_mapping_count; i++) {
+    const Shared_Mapping *m = &process->shared_mappings[i];
+    if (m->base == base && m->size == size && m->object == object) return (int)i;
+  }
+  return -1;
+}
+
+static bool overlaps_region(const Address_Region *region, uint64_t base, uint64_t size) {
+  return region->size && ranges_overlap(region->base, region->size, base, size);
+}
+
+/* The common checks of Map/UnmapSharedMemory: a shared-memory handle, a
+ * page-aligned range of exactly the object's size. Writes the failing
+ * result into W0 and returns NULL. */
+static Kernel_Shared_Memory *shared_memory_args(HLE_Context *context, CPU_Register_File *regs) {
+  const uint32_t handle = (uint32_t)regs->x[0];
+  const uint64_t addr = regs->x[1];
+  const uint64_t size = regs->x[2];
+  Kernel_Shared_Memory *object =
+      (Kernel_Shared_Memory *)handle_table_get(&context->process->handles, handle, KERNEL_OBJECT_SHARED_MEMORY);
+  if (!object) {
+    regs->x[0] = HLE_RESULT_INVALID_HANDLE;
+    return NULL;
+  }
+  if (addr & VMM_PAGE_OFFSET_MASK) {
+    regs->x[0] = HLE_RESULT_INVALID_POINTER;
+    return NULL;
+  }
+  if (size == 0 || (size & VMM_PAGE_OFFSET_MASK) || size != object->size) {
+    regs->x[0] = HLE_RESULT_INVALID_SIZE;
+    return NULL;
+  }
+  return object;
+}
+
+void hle_svc_map_shared_memory(HLE_Context *context, CPU_State *cpu_state) {
+  CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
+  Process *process = context->process;
+  const uint64_t addr = regs->x[1];
+  const uint64_t size = regs->x[2];
+  const uint32_t perm = (uint32_t)regs->x[3];
+  Kernel_Shared_Memory *object = shared_memory_args(context, regs);
+  if (!object) return;
+
+  if (perm != SHARED_MEMORY_PERM_R && perm != SHARED_MEMORY_PERM_RW) {
+    regs->x[0] = HLE_RESULT_INVALID_NEW_MEMORY_PERMISSION;
+    return;
+  }
+  if (object->remote_perm != SHARED_MEMORY_PERM_DONT_CARE && perm != object->remote_perm) {
+    regs->x[0] = HLE_RESULT_INVALID_NEW_MEMORY_PERMISSION;
+    return;
+  }
+  const Address_Space *as = &process->address_space;
+  if (!address_region_contains(&as->aslr, addr, size) || overlaps_region(&as->heap, addr, size) ||
+      overlaps_region(&as->alias, addr, size) || overlaps_region(&as->stack, addr, size)) {
+    regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
+    return;
+  }
+  if (object->mapped_gva || process->shared_mapping_count >= PROCESS_MAX_SHARED_MAPPINGS) {
+    regs->x[0] = HLE_RESULT_INVALID_STATE;
+    return;
+  }
+  const uint32_t vmm_perms = perm == SHARED_MEMORY_PERM_RW ? (uint32_t)VMM_PERM_RW : (uint32_t)VMM_PERM_R;
+  if (!error_is_ok(vmm_map(context->vmm, addr, object->guest_pa, size, vmm_perms))) {
+    regs->x[0] = HLE_RESULT_INVALID_MEMORY_STATE; /* something is mapped there */
+    return;
+  }
+  object->mapped_gva = addr;
+  process->shared_mappings[process->shared_mapping_count++] = (Shared_Mapping){addr, size, object};
+  regs->x[0] = HLE_RESULT_SUCCESS;
+}
+
+void hle_svc_unmap_shared_memory(HLE_Context *context, CPU_State *cpu_state) {
+  CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
+  Process *process = context->process;
+  const uint64_t addr = regs->x[1];
+  const uint64_t size = regs->x[2];
+  Kernel_Shared_Memory *object = shared_memory_args(context, regs);
+  if (!object) return;
+  const int index = find_shared_mapping(process, addr, size, object);
+  if (index < 0) {
+    regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
+    return;
+  }
+  const Error err = vmm_unmap(context->vmm, addr, size);
+  SWITCH_ASSERT_ALWAYS(error_is_ok(err), "hle_svc_unmap_shared_memory: tracked view was not mapped");
+  object->mapped_gva = 0;
+  process->shared_mappings[(uint32_t)index] = process->shared_mappings[--process->shared_mapping_count];
+  regs->x[0] = HLE_RESULT_SUCCESS;
 }

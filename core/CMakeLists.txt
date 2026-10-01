@@ -29,6 +29,8 @@ set(SWITCH_CORE_SOURCES
   hle/kernel/svc_ipc.c
   hle/kernel/scheduler.c
   hle/kernel/event.c
+  hle/kernel/shared_memory.c
+  hle/services/hid/hid.c
   hle/kernel/svc_thread.c
   hle/services/sm/sm.c
   hle/services/nvdrv/nvdrv.c

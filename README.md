@@ -4,7 +4,7 @@ A Nintendo Switch emulator targeting the web as a primary platform, with native 
 
 Play Switch games in your browser. No installation. No setup beyond providing your own keys and games.
 
-> **Status:** Early development — **Phase 4 (First Boot)** of the plan in [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Phases 0–3 are complete: a hardware-verified ARM64 interpreter runs guest threads under a green-thread scheduler with IPC, `sm:`, events, threading/sync syscalls and a minimal `nvdrv`; the browser presents frames through WebGPU (try **Run the demo**), and `voland-cli` runs programs headless with golden-image checks. Next is the GPU command ring, shaders, `vi:`/buffer-queue presentation and the core services (filesystem, input, applet, time, audio) that commercial games need before they show anything.
+> **Status:** Early development — **Phase 4 (First Boot)** of the plan in [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Phases 0–3 are complete: a hardware-verified ARM64 interpreter runs guest threads under a green-thread scheduler with IPC, `sm:`, events, threading/sync syscalls and a minimal `nvdrv`, and controllers now reach games through the `hid` shared-memory block; the browser presents frames through WebGPU (try **Run the demo**), and `voland-cli` runs programs headless with golden-image checks. Next is the GPU command ring, shaders, `vi:`/buffer-queue presentation and the remaining core services (filesystem, applet, time, audio) that commercial games need before they show anything.
 
 ---
 

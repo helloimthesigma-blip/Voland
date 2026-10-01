@@ -18,6 +18,8 @@
 #include "hle/kernel/process.h"
 #include "hle/kernel/event.h"
 #include "hle/kernel/scheduler.h"
+#include "hle/kernel/shared_memory.h"
+#include "hle/services/hid/hid.h"
 #include "hle/services/nvdrv/nvdrv.h"
 #include "hle/loader/byte_source.h"
 
@@ -57,6 +59,8 @@ typedef struct Emulator
   Scheduler scheduler;
   Event_Pool events; /* kernel events (event.h); reset with the process */
   Nvdrv_State nvdrv; /* the nvdrv service (§13); reset with the process */
+  Shared_Memory_Pool shared_memory; /* shared_memory.h; reset with the process */
+  Hid_State hid;     /* the hid service (§18); reset with the process */
 } Emulator;
 
 /* What one emulator_run_slice() did (§7 scheduler status). */

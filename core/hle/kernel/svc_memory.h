@@ -104,6 +104,7 @@
 typedef enum HLE_Memory_Type {
   HLE_MEMTYPE_UNMAPPED = 0x00,       /* address_space.h: outside every region, or unmapped within one */
   HLE_MEMTYPE_CODE_STATIC = 0x03,    /* address_space.code */
+  HLE_MEMTYPE_SHARED = 0x06,         /* an svcMapSharedMemory view */
   HLE_MEMTYPE_HEAP = 0x05,           /* address_space.heap, not currently borrowed out */
   HLE_MEMTYPE_WEIRD_MAPPED_MEM = 0x07, /* address_space.heap, borrowed out via MapMemory (Perm_None) */
   HLE_MEMTYPE_MAPPED_MEMORY = 0x0B, /* address_space.stack, a live MapMemory alias */
@@ -140,5 +141,14 @@ void hle_svc_set_heap_size(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_map_memory(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_unmap_memory(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_query_memory(HLE_Context *context, CPU_State *cpu_state);
+
+/* Shared memory (shared_memory.h), libnx svc.s ABI:
+ *   0x13 MapSharedMemory   W0 handle, X1 addr, X2 size, W3 perm (R or RW)
+ *   0x14 UnmapSharedMemory W0 handle, X1 addr, X2 size
+ * The view must lie in the ASLR region outside heap, alias and stack (where
+ * libnx's virtmemFindAslr places it), be exactly the object's size, and
+ * match its remote permission. One view per object. */
+void hle_svc_map_shared_memory(HLE_Context *context, CPU_State *cpu_state);
+void hle_svc_unmap_shared_memory(HLE_Context *context, CPU_State *cpu_state);
 
 #endif /* SWITCH_HLE_KERNEL_SVC_MEMORY_H */

@@ -229,6 +229,14 @@ Error vmm_write64(VMM_Context *ctx, uint64_t gva, uint64_t value);
 Error vmm_read_block(VMM_Context *ctx, uint64_t gva, void *out, uint64_t size);
 Error vmm_write_block(VMM_Context *ctx, uint64_t gva, const void *src, uint64_t size);
 
+/* Guest-PHYSICAL copies for kernel objects that own pages directly
+ * (shared memory: the hid service writes its block whether or not, and
+ * wherever, the guest has mapped it). RESULT_INVALID_ARGUMENT outside
+ * guest RAM. No permission checks - physical memory is the kernel's. */
+Error vmm_read_physical(VMM_Context *ctx, uint64_t guest_pa, void *out, uint64_t size);
+Error vmm_write_physical(VMM_Context *ctx, uint64_t guest_pa, const void *src, uint64_t size);
+Error vmm_fill_physical(VMM_Context *ctx, uint64_t guest_pa, uint8_t value, uint64_t size);
+
 /* Translation for HLE code that needs a host pointer to a guest buffer.
  * Succeeds only if every page of [gva, gva + size) is mapped with
  * `required_perms` (non-zero) AND the backing pages are host-contiguous,

@@ -407,6 +407,9 @@ void process_teardown(Process *process, VMM_Context *vmm, Page_Allocator *pages)
     mapped.ranges[mapped.count++] = process->main_thread_stack;
   }
   unmap_all(vmm, &mapped);
+  for (uint32_t i = 0; i < process->shared_mapping_count; i++) {
+    (void)vmm_unmap(vmm, process->shared_mappings[i].base, process->shared_mappings[i].size);
+  }
   unwind_heap_borrows(vmm, process);
   if (process->heap_size > 0) {
     free_teardown_heap(vmm, pages, process);

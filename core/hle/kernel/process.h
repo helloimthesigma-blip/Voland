@@ -94,6 +94,14 @@
  * thread's own stack-guard-page trick - revisit the cap once multiple
  * threads actually exercise it. */
 #define PROCESS_MAX_HEAP_BORROWS 8u
+#define PROCESS_MAX_SHARED_MAPPINGS 32u
+
+/* An svcMapSharedMemory mapping (shared_memory.h). */
+typedef struct Shared_Mapping {
+  uint64_t base;
+  uint64_t size;
+  void *object; /* Kernel_Shared_Memory; identity only */
+} Shared_Mapping;
 
 typedef struct Memory_Borrow {
   uint64_t dst_base; /* in address_space.stack; the new alias */
@@ -143,6 +151,8 @@ typedef struct Process {
                                * always a PROCESS_HEAP_SIZE_GRANULE multiple */
   Memory_Borrow heap_borrows[PROCESS_MAX_HEAP_BORROWS]; /* active svcMapMemory aliases */
   uint32_t heap_borrow_count;
+  Shared_Mapping shared_mappings[PROCESS_MAX_SHARED_MAPPINGS]; /* active svcMapSharedMemory views */
+  uint32_t shared_mapping_count;
 } Process;
 
 typedef struct Process_Bootstrap_Params {

@@ -76,8 +76,12 @@ Error emulator_create_with_backend(Emulator* out, const CPU_Backend* backend) {
   out->hle.events = &out->events;
   /* Services (§12) register with sm: once; their state resets per process. */
   nvdrv_init(&out->nvdrv);
-  const Error service_err = nvdrv_register(&out->nvdrv, &out->sm);
-  SWITCH_ASSERT_ALWAYS(error_is_ok(service_err), "nvdrv registers into an empty sm: registry");
+  shared_memory_pool_init(&out->shared_memory, &out->pages);
+  out->hle.shared_memory = &out->shared_memory;
+  hid_init(&out->hid, &out->shared_memory);
+  Error service_err = nvdrv_register(&out->nvdrv, &out->sm);
+  if (error_is_ok(service_err)) service_err = hid_register(&out->hid, &out->sm);
+  SWITCH_ASSERT_ALWAYS(error_is_ok(service_err), "services register into an empty sm: registry");
   out->cpu_backend->set_svc_handler(out->cpu_state, hle_on_svc);
   out->cpu_backend->set_undefined_handler(out->cpu_state, hle_on_undefined);
 
@@ -272,6 +276,8 @@ void emulator_unload_program(Emulator* emulator) {
   nvdrv_init(&emulator->nvdrv); /* fds, nvmap handles and syncpoints die with the process */
   process_teardown(&emulator->process, emulator->vmm, &emulator->pages);
   page_allocator_reset(&emulator->pages);
+  shared_memory_pool_init(&emulator->shared_memory, &emulator->pages); /* pages went with the reset */
+  hid_init(&emulator->hid, &emulator->shared_memory);
   ipc_session_pool_init(&emulator->sessions); /* every session belonged to the process */
   emulator->program_loaded = false;
 }
@@ -282,6 +288,10 @@ Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
   CPU_ExitReason reason = CPU_EXIT_CYCLES_ELAPSED;
   /* GPU completions (§13) arrive at scheduler-tick cadence. */
   nvdrv_poll_completions(&emulator->nvdrv, &emulator->hle);
+  /* Controllers (§18): the input region into hid's shared memory. */
+  const Memory_Layout* layout = layout_get();
+  hid_update(&emulator->hid, &emulator->hle, layout ? (const void*)(uintptr_t)layout->input_region_base : NULL,
+             emulator->scheduler.ticks);
   switch (scheduler_tick(&emulator->scheduler, emulator->cpu_backend, cycle_budget, &reason)) {
   case SCHEDULER_RAN: return EMULATOR_RUNNING;
   case SCHEDULER_IDLE: return EMULATOR_IDLE;

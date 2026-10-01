@@ -588,6 +588,43 @@ Error vmm_write_block(VMM_Context *ctx, uint64_t gva, const void *src, uint64_t 
   return OK;
 }
 
+/* Guest-physical access: kernel objects backed by pages rather than a
+ * mapping (shared memory written by services, §12). Bounds-checked
+ * against guest RAM; no permissions apply - the kernel owns physical. */
+static bool physical_range_valid(const VMM_Context *ctx, uint64_t guest_pa, uint64_t size) {
+  return guest_pa < ctx->guest_ram_size && size <= ctx->guest_ram_size - guest_pa;
+}
+
+Error vmm_read_physical(VMM_Context *ctx, uint64_t guest_pa, void *out, uint64_t size) {
+  if (!ctx) return ERR(RESULT_INVALID_ARGUMENT, "vmm_read_physical: ctx is NULL");
+  if (size == 0) return OK;
+  if (!out || !physical_range_valid(ctx, guest_pa, size)) {
+    return ERR(RESULT_INVALID_ARGUMENT, "vmm_read_physical: range outside guest RAM");
+  }
+  memcpy(out, (const void *)(uintptr_t)(ctx->guest_ram_base + guest_pa), (size_t)size);
+  return OK;
+}
+
+Error vmm_write_physical(VMM_Context *ctx, uint64_t guest_pa, const void *src, uint64_t size) {
+  if (!ctx) return ERR(RESULT_INVALID_ARGUMENT, "vmm_write_physical: ctx is NULL");
+  if (size == 0) return OK;
+  if (!src || !physical_range_valid(ctx, guest_pa, size)) {
+    return ERR(RESULT_INVALID_ARGUMENT, "vmm_write_physical: range outside guest RAM");
+  }
+  memcpy((void *)(uintptr_t)(ctx->guest_ram_base + guest_pa), src, (size_t)size);
+  return OK;
+}
+
+Error vmm_fill_physical(VMM_Context *ctx, uint64_t guest_pa, uint8_t value, uint64_t size) {
+  if (!ctx) return ERR(RESULT_INVALID_ARGUMENT, "vmm_fill_physical: ctx is NULL");
+  if (size == 0) return OK;
+  if (!physical_range_valid(ctx, guest_pa, size)) {
+    return ERR(RESULT_INVALID_ARGUMENT, "vmm_fill_physical: range outside guest RAM");
+  }
+  memset((void *)(uintptr_t)(ctx->guest_ram_base + guest_pa), value, (size_t)size);
+  return OK;
+}
+
 Error vmm_guest_to_host(VMM_Context *ctx, uint64_t gva, uint64_t size, uint32_t required_perms,
                         void **host_ptr) {
   if (!ctx) return ERR(RESULT_INVALID_ARGUMENT, "vmm_guest_to_host: ctx is NULL");

@@ -2285,7 +2285,8 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 - [ ] **GPU command ring** (§13): versioned records, CPU-side decode, GPU-side drain
 - [ ] Minimal shader path (stall-on-compile, no cache yet)
 - [ ] **vi: + buffer queue (nvnflinger)** — the present contract; without it Phase 4 has no screen
-- [ ] fsp-srv (RomFS on decrypted input), hid: **shared-memory writer (N independent npads + style bits — enables same-console multiplayer, §20)**, applet, time (virtual-time-backed)
+- [x] hid: **shared-memory writer (N independent npads + style bits — enables same-console multiplayer, §20)**. *v3.38: `hle/services/hid/hid.{h,c}` over the new shared-memory kernel object; input region sampled at 200Hz virtual time.*
+- [ ] fsp-srv (RomFS on decrypted input), applet, time (virtual-time-backed)
 - [ ] Audio ring + AudioWorkletProcessor output (§14)
 
 ### Phase 5 — Playable Core (+ Compatibility Database)
@@ -2408,9 +2409,15 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.37.0*
+*Document version: 3.38.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.37 → v3.38 (summary)
+
+- **Shared memory** (`hle/kernel/shared_memory.{h,c}`): a pooled kernel object owning a run of guest physical pages, reference counted by handles plus its creating service; the last release frees the pages. SVCs MapSharedMemory 0x13 (W0 handle, X1 addr, X2 size, W3 perm) and UnmapSharedMemory 0x14: the view must be page-aligned, exactly the object's size, inside the ASLR region and outside heap/alias/stack (where libnx's `virtmemFindAslr` puts it), and match the object's remote permission; one view per object, tracked in `Process.shared_mappings` (QueryMemory reports MemType_SharedMem 0x06; teardown unmaps). CloseHandle releases shared-memory references. Services write the block through new `vmm_{read,write,fill}_physical()` - kernel-owned physical access, so updates land whether or not (and wherever) the guest has mapped it; §5's "HLE uses vmm only" rule holds.
+- **hid** (`hle/services/hid/hid.{h,c}`), registered as `hid`: CreateAppletResource -> IAppletResource GetSharedMemoryHandle (the 0x40000-byte HidSharedMemory), SetSupportedNpadStyleSet/Get, SetSupportedNpadIdType (X buffer), ActivateNpad(+WithRevision), AcquireNpadStyleSetUpdateEventHandle (signalled on acquire and on every style change), GetPlayerLedPattern, joy hold / handheld activation / communication mode get+set, GetVibrationDeviceInfo, CreateActiveVibrationDeviceList, and named `_stub`s for touch/mouse/keyboard/gesture/six-axis/vibration commands (§12 allowlist). **The shared-memory writer** samples the §18 input region at 200Hz of virtual time: input slot i drives npad No(i+1) in the title's preferred supported style (FullKey first; a handheld-only title gets slot 0 as the Handheld npad), each of the npad's seven common LIFOs advances in step (17 entries, consecutive sampling numbers, `tail` = newest - libnx `_hidGetStates` semantics), and style set, device type, colors, system properties and battery are rewritten on change. Stick-direction button bits are derived at half deflection. Offsets come from libnx's public `hid.h` structs (compiled offsetof shim). Test: `tests/hid_test.c` over real IPC and SVCs (handle refcounts, every Map/Unmap error path, QueryMemory type, read-only view, style negotiation, LIFO wraparound read exactly as libnx reads it, 200Hz gating, disconnect, handheld-only titles, unsupported ids, unmap/close/re-map, unload).
+- **Scope, stated:** touch screen, mouse, keyboard, gesture and six-axis LIFOs stay empty; vibration is dropped; Home/Capture are not npad buttons (they belong to the applet layer). §25's Phase 4 hid item is checked: N independent npads with style bits are what same-console multiplayer (§20) needs.
 
 ### Changelog v3.36 → v3.37 (summary)
 

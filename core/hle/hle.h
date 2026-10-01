@@ -34,6 +34,7 @@
 
 typedef struct Scheduler Scheduler;
 typedef struct Event_Pool Event_Pool;
+typedef struct Shared_Memory_Pool Shared_Memory_Pool;
 typedef struct Kernel_Event Kernel_Event;
 
 /* Where svcOutputDebugString text goes (the platform's console/log). */
@@ -70,6 +71,7 @@ typedef void (*HLE_Debug_Output_Fn)(void *userdata, const char *text, size_t len
 #define HLE_RESULT_INVALID_SIZE 0xCA01u          /* KernelError_InvalidSize=101 */
 #define HLE_RESULT_INVALID_MEMORY_STATE 0xD401u  /* KernelError_InvalidMemoryState=106, aka InvalidCurrentMemory */
 #define HLE_RESULT_INVALID_MEMORY_RANGE 0xDC01u  /* KernelError_InvalidMemoryRange=110 */
+#define HLE_RESULT_INVALID_NEW_MEMORY_PERMISSION 0xD801u /* KernelError_InvalidNewMemoryPermission=108 */
 /* For the IPC SVCs (svc_ipc.h); same libnx result.h source. */
 #define HLE_RESULT_OUT_OF_SESSIONS 0x0E01u     /* KernelError_OutOfSessions=7 */
 #define HLE_RESULT_OUT_OF_HANDLES 0xD201u      /* KernelError_OutOfHandles=105 */
@@ -105,6 +107,7 @@ struct HLE_Context
   SM_Registry *sm;
   Scheduler *scheduler;            /* guest threads (§7); set by the Emulator */
   Event_Pool *events;              /* kernel events (event.h); set by the Emulator */
+  Shared_Memory_Pool *shared_memory; /* shared_memory.h; set by the Emulator */
   HLE_Debug_Output_Fn debug_output; /* optional */
   void *debug_userdata;
   uint64_t svc_call_count;
