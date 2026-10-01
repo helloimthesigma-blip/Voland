@@ -2287,7 +2287,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 - [x] **vi: + buffer queue (nvnflinger)** — the present contract; without it Phase 4 has no screen. *v3.39: `hle/services/vi/` - IGraphicBufferProducer over parcels, vsync compositor with block-linear deswizzle into the §6 slots.*
 - [x] hid: **shared-memory writer (N independent npads + style bits — enables same-console multiplayer, §20)**. *v3.38: `hle/services/hid/hid.{h,c}` over the new shared-memory kernel object; input region sampled at 200Hz virtual time.*
 - [x] fsp-srv (RomFS on decrypted input), applet, time (virtual-time-backed). *v3.39: plus set, apm, offline bsd/nifm, pl (platform font), psm, ts; libnx homebrew boots through all of them.*
-- [ ] Audio ring + AudioWorkletProcessor output (§14)
+- [x] Audio ring + AudioWorkletProcessor output (§14). *v3.43: ring writer, `audout:u`, the rate-controlled worklet drainer; `audren:u` follows.*
 
 ### Phase 5 — Playable Core (+ Compatibility Database)
 
@@ -2409,9 +2409,15 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.42.0*
+*Document version: 3.43.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.42 → v3.43 (summary)
+
+- **Audio, end to end (§14).** Core: `audio/audio_ring.{h,c}` writes the §14 ring (layout.h offsets; write/read frame indices with release/acquire; a full ring drops and counts, never overwrites) and drains it for hosts without a device. `audout:u` (`hle/services/audio/audout.{h,c}`): ListAudioOuts/OpenAudioOut(+Auto), IAudioOut Start/Stop/Append(+Auto)/RegisterBufferEvent/GetReleased(+Auto)/Contains/BufferCount/PlayedSampleCount/Flush/Volume; 16-bit mono or stereo at 48kHz, paced by virtual time at exactly 400 ticks per frame, released buffers returned by tag with the buffer event signalled. Web: `src/audio/ring-processor.ts`, an AudioWorkletProcessor reading the ring straight out of the shared WebAssembly memory (never waits; silence + an underrun count on shortfall; linear-interpolating resampler steered by `ring-control.ts`, the §14 PI controller: setpoint half capacity, ±1% bound); `audio-output.ts` opens the 48kHz AudioContext on the first load (a user gesture) and resumes it on the next one if the browser started it suspended. CLI: `--dump-audio FILE` writes what the guest played as a WAV.
+- **Tests:** `services_test` (audout: open, append, half-buffer then full-buffer pacing with tick remainders, exact ring samples, release-by-tag once, played count); `tests/unit/audio-rate.test.ts` (bounds, direction, a 0.5%-fast producer settles at the setpoint); `e2e/audio.spec.ts` (the worklet runs against the shared ring in production and dev builds).
+- **Not yet, stated:** `audren:u` (the audio renderer most games and SDL-based homebrew use) - mixing voices, ADPCM, effects - is the next audio piece.
 
 ### Changelog v3.41 → v3.42 (summary)
 

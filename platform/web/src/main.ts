@@ -12,11 +12,12 @@
  */
 
 import type { CPUToMainMessage, GPUToMainMessage, MainToCPUMessage, MainToGPUMessage } from "@bindings/protocol";
-import { type MemoryLayout, toByteOffset } from "@bindings/layout";
+import { AUDIO_RING_CAPACITY_FRAMES, type MemoryLayout, toByteOffset } from "@bindings/layout";
 import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
 import { appendGuestOutput, resetGuestConsole, setGuestRunState } from "./guest-console";
+import { startAudioOutput } from "./audio/audio-output";
 import { startInputLoop } from "./input/input-loop";
 import { appendLogLine, setStatus } from "./log";
 
@@ -315,6 +316,11 @@ async function boot(): Promise<BootResult | null> {
         success: false,
         failure: { reason: "internal", message: "the CPU worker is not running, so nothing can be loaded" },
       });
+    }
+    /* A load is a user gesture: the moment browsers allow audio to start. */
+    if (finalLayout && memory) {
+      void startAudioOutput(memory, toByteOffset(finalLayout.audioRingBase), AUDIO_RING_CAPACITY_FRAMES,
+                            (message) => appendLogLine("info", message));
     }
     return new Promise<GameLoadOutcome>((resolve) => {
       pendingLoad = resolve;

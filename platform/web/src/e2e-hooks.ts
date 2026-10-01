@@ -12,9 +12,18 @@ export interface VolandE2EBootMilestone {
   readonly allocatedMemoryBytes: number;
 }
 
+/** The audio worklet's latest report (src/audio/audio-output.ts). */
+export interface VolandAudioReport {
+  readonly blocks: number;
+  readonly underruns: number;
+  readonly fill: number;
+  readonly ratio: number;
+}
+
 declare global {
   interface Window {
     __VOLAND_E2E__?: VolandE2EBootMilestone;
+    __VOLAND_AUDIO__?: VolandAudioReport;
   }
 }
 

@@ -7,6 +7,7 @@
 #define CHECK_NAME "services_test"
 #include "check.h"
 
+#include "audio/audio_ring.h"
 #include "gpu/block_linear.h"
 #include "gpu/framebuffer.h"
 #include "hle/kernel/handle_table.h"
@@ -460,6 +461,65 @@ static void test_set_apm_am(void) {
   CHECK(regs->x[0] == 0 && live == 0);
 }
 
+static void test_audout(void) {
+  const uint32_t manager = service("audout:u");
+  const uint32_t open_in[4] = {48000, 0x00020000, 0, 0};
+  Test_Ipc_Message m;
+  memset(&m, 0, sizeof(m));
+  m.sends[0] = (Test_Ipc_Buffer){SCRATCH(0xB000), 0x100, 0};
+  m.send_count = 1;
+  m.receives[0] = (Test_Ipc_Buffer){SCRATCH(0xB100), 0x100, 0};
+  m.receive_count = 1;
+  Test_Ipc_Reply r = call(manager, 1, open_in, sizeof(open_in), &m);
+  CHECK(r.move_count == 1 && test_le32(r.data) == 48000 && test_le32(r.data + 4) == 2 && test_le32(r.data + 8) == 2);
+  const uint32_t out = r.move_handles[0];
+  r = call(out, 4, NULL, 0, NULL);
+  Kernel_Event *event = handle_table_get(&g_emu.process.handles, r.copy_handles[0], KERNEL_OBJECT_EVENT_READABLE);
+  CHECK(event && !event->signaled);
+
+  /* 480 stereo frames (10ms): left = i, right = -i. */
+  enum { FRAMES = 480 };
+  int16_t pcm[FRAMES * 2];
+  for (int i = 0; i < FRAMES; i++) {
+    pcm[i * 2] = (int16_t)(i * 50);
+    pcm[i * 2 + 1] = (int16_t)(-i * 50);
+  }
+  CHECK_OK(vmm_write_block(g_emu.vmm, SCRATCH(0xC000), pcm, sizeof(pcm)));
+  const uint64_t desc[5] = {0, SCRATCH(0xC000), sizeof(pcm), sizeof(pcm), 0};
+  CHECK_OK(vmm_write_block(g_emu.vmm, SCRATCH(0xB200), desc, sizeof(desc)));
+  Test_Ipc_Message a;
+  memset(&a, 0, sizeof(a));
+  a.sends[0] = (Test_Ipc_Buffer){SCRATCH(0xB200), sizeof(desc), 0};
+  a.send_count = 1;
+  const uint64_t tag = 0xA0D10;
+  (void)call(out, 3, &tag, sizeof(tag), &a);
+  r = call(out, 6, &tag, sizeof(tag), NULL);
+  CHECK(r.data[0] == 1);
+
+  audio_ring_reset();
+  (void)call(out, 1, NULL, 0, NULL); /* Start */
+  const uint64_t t0 = g_emu.scheduler.ticks;
+  audout_update(&g_emu.audout, &g_emu.hle, t0 + 240u * AUDOUT_TICKS_PER_FRAME);  /* half */
+  CHECK(!event->signaled && g_emu.audout.played_frames == 240);
+  audout_update(&g_emu.audout, &g_emu.hle, t0 + 480u * AUDOUT_TICKS_PER_FRAME + 399u); /* the rest, +399 ticks */
+  CHECK(event->signaled && g_emu.audout.played_frames == 480 && g_emu.audout.tick_remainder == 399);
+  static float ring[FRAMES * 2];
+  CHECK(audio_ring_drain(ring, FRAMES) == FRAMES);
+  CHECK(ring[0] == 0.0f && ring[2 * 100] == 5000.0f / 32768.0f && ring[2 * 100 + 1] == -5000.0f / 32768.0f);
+
+  /* Released: the tag comes back once. */
+  Test_Ipc_Message b;
+  memset(&b, 0, sizeof(b));
+  b.receives[0] = (Test_Ipc_Buffer){SCRATCH(0xB300), 8, 0};
+  b.receive_count = 1;
+  r = call(out, 5, NULL, 0, &b);
+  CHECK(test_le32(r.data) == 1 && rd64(SCRATCH(0xB300)) == tag);
+  r = call(out, 5, NULL, 0, &b);
+  CHECK(test_le32(r.data) == 0);
+  r = call(out, 10, NULL, 0, NULL);
+  CHECK(test_le64(r.data) == 480);
+}
+
 int main(void) {
   ipc_fixture_boot(&g_emu);
   g_scratch = g_emu.process.main_thread_stack.base + 0x10000;
@@ -467,6 +527,7 @@ int main(void) {
   test_fs();
   test_time();
   test_set_apm_am();
+  test_audout();
   emulator_destroy(&g_emu);
   printf("[services_test] passed\n");
   return 0;

@@ -14,6 +14,7 @@
  *       --dump-frame FILE            write the newest frame as a binary PPM (P6)
  *       --font FILE                  the TTF/OTF pl:u serves as the system font
  *       --svc-stats                  print per-SVC call counts at the end
+ *       --dump-audio FILE            write what the guest played as a 48kHz stereo WAV
  *       --input SLICE:BUTTONS:SLICES player 1 holds BUTTONS (hex, HidNpadButton
  *                                    bits) from SLICE for SLICES slices (repeatable)
  *     Prints guest output (svcOutputDebugString) as it happens, then a
@@ -33,6 +34,7 @@
  * hashes. `ptc-precompile`, `cache` and `save-export/import` arrive with
  * the features they operate on (Phases 5-6).
  */
+#include "audio/audio_ring.h"
 #include "common/input_region.h"
 #include "common/layout.h"
 #include "emulator.h"
@@ -65,6 +67,49 @@
 #define FINGERPRINT_CHUNK 65536u
 #define SDMC_PATH_BYTES 0x301u
 #define MAX_INPUT_EVENTS 32u
+#define WAV_HEADER_BYTES 44u
+#define WAV_DRAIN_FRAMES 4096u
+
+/* Drains the audio ring into an open WAV file (16-bit stereo). */
+static uint64_t drain_audio(FILE *wav) {
+  static float frames[WAV_DRAIN_FRAMES * AUDIO_RING_CHANNELS];
+  static int16_t pcm[WAV_DRAIN_FRAMES * AUDIO_RING_CHANNELS];
+  uint64_t total = 0;
+  uint32_t n;
+  while ((n = audio_ring_drain(frames, WAV_DRAIN_FRAMES)) > 0) {
+    for (uint32_t i = 0; i < n * AUDIO_RING_CHANNELS; i++) {
+      const float v = frames[i] > 1.0f ? 1.0f : frames[i] < -1.0f ? -1.0f : frames[i];
+      pcm[i] = (int16_t)(v * 32767.0f);
+    }
+    if (wav) fwrite(pcm, sizeof(int16_t) * AUDIO_RING_CHANNELS, n, wav);
+    total += n;
+  }
+  return total;
+}
+
+static void write_wav_header(FILE *wav, uint64_t frames) {
+  const uint32_t data_bytes = (uint32_t)(frames * AUDIO_RING_CHANNELS * sizeof(int16_t));
+  const uint32_t rate = AUDIO_RING_SAMPLE_RATE, byte_rate = rate * AUDIO_RING_CHANNELS * 2u;
+  uint8_t h[WAV_HEADER_BYTES];
+  memcpy(h, "RIFF", 4);
+  const uint32_t riff = 36u + data_bytes;
+  memcpy(h + 4, &riff, 4);
+  memcpy(h + 8, "WAVEfmt ", 8);
+  const uint32_t fmt_size = 16;
+  const uint16_t pcm_format = 1, channels = (uint16_t)AUDIO_RING_CHANNELS, align = (uint16_t)(AUDIO_RING_CHANNELS * 2u),
+                 bits = 16;
+  memcpy(h + 16, &fmt_size, 4);
+  memcpy(h + 20, &pcm_format, 2);
+  memcpy(h + 22, &channels, 2);
+  memcpy(h + 24, &rate, 4);
+  memcpy(h + 28, &byte_rate, 4);
+  memcpy(h + 32, &align, 2);
+  memcpy(h + 34, &bits, 2);
+  memcpy(h + 36, "data", 4);
+  memcpy(h + 40, &data_bytes, 4);
+  fseek(wav, 0, SEEK_SET);
+  fwrite(h, 1, sizeof(h), wav);
+}
 
 typedef struct Input_Event {
   uint64_t start;
@@ -220,7 +265,7 @@ static int run(int argc, char **argv) {
   bool test_card = false, svc_stats = false;
   Input_Event inputs[MAX_INPUT_EVENTS];
   uint32_t input_count = 0;
-  const char *expect_output = NULL, *expect_hash = NULL, *sdmc = NULL, *frame_path = NULL, *font_path = NULL;
+  const char *expect_output = NULL, *expect_hash = NULL, *sdmc = NULL, *frame_path = NULL, *font_path = NULL, *audio_path = NULL;
   for (int i = 1; i < argc; i++) {
     const bool has_value = i + 1 < argc;
     if (!strcmp(argv[i], "--backend") && has_value) {
@@ -248,6 +293,8 @@ static int run(int argc, char **argv) {
       inputs[input_count++] = (Input_Event){start, buttons, length};
     } else if (!strcmp(argv[i], "--svc-stats")) {
       svc_stats = true;
+    } else if (!strcmp(argv[i], "--dump-audio") && has_value) {
+      audio_path = argv[++i];
     } else if (!strcmp(argv[i], "--font") && has_value) {
       font_path = argv[++i];
     } else if (!strcmp(argv[i], "--dump-frame") && has_value) {
@@ -308,11 +355,18 @@ static int run(int argc, char **argv) {
   }
 
   Emulator_Status status = EMULATOR_RUNNING;
-  uint64_t slices = 0;
+  uint64_t slices = 0, audio_frames = 0;
+  FILE *wav = NULL;
+  if (audio_path) {
+    wav = fopen(audio_path, "wb");
+    if (!wav) fprintf(stderr, "voland-cli: cannot write %s\n", audio_path);
+    else write_wav_header(wav, 0);
+  }
   while (slices < max_slices && (status == EMULATOR_RUNNING || status == EMULATOR_IDLE)) {
     if (input_count) apply_input(inputs, input_count, slices);
     status = emulator_run_slice(&emu, budget);
     framebuffer_consume_all(); /* the CLI "displays" every frame at once */
+    audio_frames += drain_audio(wav); /* and plays (or discards) every sample */
     slices++;
   }
 
@@ -323,6 +377,12 @@ static int run(int argc, char **argv) {
           k_status[status], (unsigned long long)slices, (unsigned long long)emu.scheduler.ticks,
           (unsigned long long)emu.hle.svc_call_count);
   if (width) fprintf(stderr, "voland-cli: frame %ux%u fnv1a64=%016llx\n", width, height, (unsigned long long)frame_hash);
+  if (wav) {
+    write_wav_header(wav, audio_frames);
+    fclose(wav);
+    fprintf(stderr, "voland-cli: audio %llu frames (%.2fs) -> %s\n", (unsigned long long)audio_frames,
+            (double)audio_frames / AUDIO_RING_SAMPLE_RATE, audio_path);
+  }
   if (svc_stats) {
     for (uint32_t i = 0; i < HLE_SVC_COUNT; i++) {
       if (emu.hle.svc_counts[i]) fprintf(stderr, "voland-cli: svc 0x%02x x %llu\n", i, (unsigned long long)emu.hle.svc_counts[i]);

@@ -41,6 +41,8 @@ set(SWITCH_CORE_SOURCES
   hle/services/network/network.c
   hle/services/pl/pl.c
   hle/services/misc/misc.c
+  hle/services/audio/audout.c
+  audio/audio_ring.c
   gpu/block_linear.c
   gpu/gpu_channel.c
   hle/fs/ramfs.c

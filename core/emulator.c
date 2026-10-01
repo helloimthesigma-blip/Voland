@@ -2,6 +2,7 @@
 
 #include "common/arena.h"
 #include "common/assert.h"
+#include "audio/audio_ring.h"
 #include "common/log.h"
 #include "hle/loader/exefs.h"
 #include "hle/loader/nca_parse.h"
@@ -252,6 +253,7 @@ static void reset_process_services(Emulator* emulator) {
   vi_init(&emulator->vi, &emulator->nvdrv, emulator->vi_scratch);
   network_init(&emulator->network);
   misc_init(&emulator->misc);
+  audout_init(&emulator->audout);
   pl_init(&emulator->pl, &emulator->shared_memory, emulator->shared_font, emulator->shared_font_size);
 }
 
@@ -267,6 +269,7 @@ static Error register_services(Emulator* emulator) {
   if (error_is_ok(err)) err = network_register(&emulator->network, &emulator->sm);
   if (error_is_ok(err)) err = pl_register(&emulator->pl, &emulator->sm);
   if (error_is_ok(err)) err = misc_register(&emulator->misc, &emulator->sm);
+  if (error_is_ok(err)) err = audout_register(&emulator->audout, &emulator->sm);
   return err;
 }
 
@@ -328,6 +331,7 @@ Error emulator_create_with_backend(Emulator* out, const CPU_Backend* backend) {
   out->hle.scheduler = &out->scheduler;
   out->hle.events = &out->events;
   out->rtc = TIME_DEFAULT_RTC;
+  audio_ring_reset();
   out->content_node = RAMFS_NO_NODE;
   snprintf(out->program_path, sizeof(out->program_path), "%s", EMULATOR_DEFAULT_NRO_PATH);
   if (arena_create(&out->service_arena, EMULATOR_SERVICE_ARENA_BYTES)) {
@@ -582,6 +586,8 @@ Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
   /* Display (§13): vsync composites queued buffers into the §6 slots. */
   vi_update(&emulator->vi, &emulator->hle, emulator->scheduler.ticks);
   emulator->scheduler.device_wake_at = vi_next_wake(&emulator->vi);
+  /* Audio (§14): queued PCM into the ring at 48kHz of virtual time. */
+  audout_update(&emulator->audout, &emulator->hle, emulator->scheduler.ticks);
   switch (scheduler_tick(&emulator->scheduler, emulator->cpu_backend, cycle_budget, &reason)) {
   case SCHEDULER_RAN: return EMULATOR_RUNNING;
   case SCHEDULER_IDLE: return EMULATOR_IDLE;

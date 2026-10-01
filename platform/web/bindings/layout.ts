@@ -60,3 +60,6 @@ export function toByteOffset(address: bigint): number {
 export function guestRamView(memory: WebAssembly.Memory, layout: MemoryLayout): Uint8Array {
   return new Uint8Array(memory.buffer, toByteOffset(layout.guestRamBase), toByteOffset(layout.guestRamSize));
 }
+
+/** Mirrors core/common/layout.h LAYOUT_AUDIO_RING_CAPACITY_FRAMES (§14). */
+export const AUDIO_RING_CAPACITY_FRAMES = 4096;
