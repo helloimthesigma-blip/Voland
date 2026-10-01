@@ -14,6 +14,7 @@
 typedef struct NoopState
 {
   CPU_Register_File regs;
+  CPU_Vector_Register vregs[CPU_VECTOR_REGISTER_COUNT];
 
   uint64_t fault_address;
   uint64_t cycles_consumed;
@@ -110,6 +111,17 @@ static void noop_set_sys_reg(CPU_State *state, uint32_t reg, uint64_t value)
     ((NoopState *)state)->tpidrro_el0 = value;
 }
 
+static CPU_Vector_Register noop_get_vector_reg(CPU_State *state, uint8_t index)
+{
+  SWITCH_ASSERT(index < CPU_VECTOR_REGISTER_COUNT, "noop_get_vector_reg: index out of range");
+  return ((NoopState *)state)->vregs[index];
+}
+static void noop_set_vector_reg(CPU_State *state, uint8_t index, CPU_Vector_Register value)
+{
+  SWITCH_ASSERT(index < CPU_VECTOR_REGISTER_COUNT, "noop_set_vector_reg: index out of range");
+  ((NoopState *)state)->vregs[index] = value;
+}
+
 static void noop_invalidate_cache(CPU_State *state, uint64_t addr, uint64_t size)
 {
   (void)state;
@@ -149,6 +161,8 @@ const CPU_Backend CPU_BACKEND_NOOP = {
     .get_register_file = noop_get_register_file,
     .get_sys_reg = noop_get_sys_reg,
     .set_sys_reg = noop_set_sys_reg,
+    .get_vector_reg = noop_get_vector_reg,
+    .set_vector_reg = noop_set_vector_reg,
     .invalidate_cache = noop_invalidate_cache,
     .clear_cache = noop_clear_cache,
     .set_svc_handler = noop_set_svc_handler,

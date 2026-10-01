@@ -2266,7 +2266,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ### Phase 2 — First Instructions
 
-- [ ] Interpreter backend (partial ARM64), all memory access via vmm
+- [ ] Interpreter backend (partial ARM64), all memory access via vmm. *v3.31, integer half: `core/cpu/backends/interpreter/` executes the whole ARMv8.0 integer ISA (DP immediate/register incl. CRC32, branches, exception generation, MRS/MSR, hints/barriers/CLREX/DC ZVA, every integer and SIMD&FP scalar load/store addressing form, exclusives, acquire/release) through vmm's inline fast path. Verified against the host CPU by `tests/a64_diff_test.c` (ARM64 hosts). SIMD&FP data processing and structure loads/stores remain.*
 - [ ] NRO loader — homebrew is this phase's proof of life
 - [ ] **Guest thread scheduler** (§7): bounded run, exit reasons, wait objects, virtual time
 - [ ] Threading + sync HLE (CreateThread, StartThread, SleepThread, WaitSynchronization) on the scheduler
@@ -2408,9 +2408,17 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.30.0*
+*Document version: 3.31.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.30 → v3.31 (summary)
+
+- **§25 Phase 2 opened: interpreter backend, integer half.** `core/cpu/backends/interpreter/` (`interpreter.c` state/run loop/vtable, `interp_dp_immediate.c`, `interp_dp_register.c`, `interp_branch_system.c`, `interp_load_store.c`, `interp_simd_fp.c` stub). Fetch-decode-execute through `vmm_translate_inline`/`vmm_*_cross_page` (§5; fetch requires X, loads R, stores W). Semantics from the Arm ARM pseudocode, no emulator code reused. ARMv8.0 exactly - the Switch's Cortex-A57 - so LSE atomics, RCpc, PAC, MTE, BTI-era and later encodings are undefined, as on the console; CRC32 (present on A57) is implemented. Faulting instructions leave architectural state untouched (writeback after the access). The interpreter is always compiled; `-DCPU_BACKEND=interpreter` makes it the active backend.
+- **§8 interface additions:** `get_vector_reg`/`set_vector_reg` (V0-V31 as `CPU_Vector_Register` lo/hi) - the interface had no SIMD&FP state at all; `CPU_PSTATE_N/Z/C/V` (NZCV in bits 31:28, the NZCV register's own layout, now stated); `CPU_SYSREG_TPIDR_EL0/NZCV/FPCR/FPSR/CNTFRQ_EL0/CNTVCT_EL0/CTR_EL0/DCZID_EL0`. The noop backend implements the new accessors.
+- **§7 behaviors realized:** SVC advances PC past itself, runs the HLE handler, exits `CPU_EXIT_SVC`; BRK exits `CPU_EXIT_BREAKPOINT`; undefined → undefined handler + `CPU_EXIT_FAULT` with PC on the instruction. The exclusive monitor is per thread, cleared at `run()` entry, and `run()` never yields while it is held (≤64-instruction grace), so a LDAXR/STLXR pair is never split by preemption. CNTVCT_EL0 is scaled from the interpreter's own cycle count (19.2 MHz over a nominal 1.02 GHz) until the scheduler's virtual time owns it. Cache maintenance is a no-op: there is no translation cache yet, so self-modifying code is always seen.
+- **Hardware oracle.** `tests/a64_diff_test.c` + `tests/a64_oracle_stub.S` (built on ARM64 hosts): random instances of 24 instruction classes run natively in a JIT page and in the interpreter, with guest memory mapped at the same virtual addresses as the host buffers so pointers and PC-relative results compare directly; all X registers (bar Darwin's X18), NZCV, V0-V31, FPSR and 64KB of memory must match, and undefined (SIGILL) / faulting (SIGBUS) outcomes must agree. 1.2M instructions across five seeds match an Apple M1. One deliberate divergence, handled in the generator: the M1 has FEAT_LSE2 and completes misaligned exclusive/acquire accesses that stay within 16 bytes; ARMv8.0 faults on them and so does the interpreter, so generated misalignments always cross 16 bytes, where both must fault. Mutation-checked (a broken 32-bit carry fails five classes at once).
+- `tests/interpreter_test.c` (portable): data-driven branch vectors (B/BL/B.cond incl. NV/CBZ/CBNZ/TBZ/TBNZ/BR/BLR x30/RET), SVC return address and handler, BRK, UDF, a faulting post-index load and a page-straddling STP leaving registers and memory untouched, misaligned-PC and non-executable fetch faults, LSE/PAC/RCpc encodings undefined, TPIDRRO_EL0 read-only to MSR, an LDAXR/STLXR increment loop, failing store-exclusive, CLREX, the §7 exclusive grace, bounded run() budget accounting. Encodings cross-checked with clang's assembler.
 
 ### Changelog v3.29 → v3.30 (summary)
 

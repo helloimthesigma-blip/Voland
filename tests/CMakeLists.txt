@@ -112,3 +112,20 @@ add_executable(input_region_test input_region_test.c)
 target_link_libraries(input_region_test PRIVATE switch_core Threads::Threads)
 add_test(NAME input_region_test
          COMMAND input_region_test ${CMAKE_CURRENT_SOURCE_DIR}/data/input_region_vectors.txt)
+
+#
+# core/cpu/backends/interpreter: differential test against the host CPU
+# (ARM64 hosts only - the hardware is the oracle; a64_diff_test.c).
+#
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(arm64|aarch64|ARM64)$")
+  enable_language(ASM)
+  add_executable(a64_diff_test a64_diff_test.c a64_oracle_stub.S)
+  target_link_libraries(a64_diff_test PRIVATE switch_core)
+  add_test(NAME a64_diff_test COMMAND a64_diff_test 3000)
+endif()
+
+# Interpreter behavior the oracle cannot reach (control flow, exceptions,
+# exclusives, run loop) - portable, every host.
+add_executable(interpreter_test interpreter_test.c)
+target_link_libraries(interpreter_test PRIVATE switch_core)
+add_test(NAME interpreter_test COMMAND interpreter_test)

@@ -26,8 +26,23 @@ typedef struct CPU_Register_File {
   uint64_t x[31];  /* X0-X30; index 31 does not exist (see get_reg note) */
   uint64_t sp;
   uint64_t pc;
-  uint32_t pstate; /* NZCV */
+  uint32_t pstate; /* NZCV in bits 31..28, the NZCV system register's layout */
 } CPU_Register_File;
+
+#define CPU_PSTATE_N (1u << 31)
+#define CPU_PSTATE_Z (1u << 30)
+#define CPU_PSTATE_C (1u << 29)
+#define CPU_PSTATE_V (1u << 28)
+#define CPU_PSTATE_NZCV_MASK 0xF0000000u
+
+/* One 128-bit SIMD&FP register (V0-V31) as two little-endian halves:
+ * lo = bits 63..0, hi = bits 127..64. */
+typedef struct CPU_Vector_Register {
+  uint64_t lo;
+  uint64_t hi;
+} CPU_Vector_Register;
+
+#define CPU_VECTOR_REGISTER_COUNT 32u
 
 typedef enum CPU_ExitReason {
   CPU_EXIT_CYCLES_ELAPSED, /* budget consumed; thread is preempted */
@@ -90,6 +105,12 @@ struct CPU_Backend
   uint64_t (*get_sys_reg)(CPU_State *state, uint32_t encoded_reg);
   void (*set_sys_reg)(CPU_State *state, uint32_t encoded_reg, uint64_t value);
 
+  /* SIMD&FP registers V0-V31 (v3.31). FPCR/FPSR go through the sys-reg
+   * accessors above (CPU_SYSREG_FPCR/FPSR). Backends must debug-assert
+   * index < CPU_VECTOR_REGISTER_COUNT. */
+  CPU_Vector_Register (*get_vector_reg)(CPU_State *state, uint8_t index);
+  void (*set_vector_reg)(CPU_State *state, uint8_t index, CPU_Vector_Register value);
+
   /* Code cache management. Called by the SMC path (§5) and module loaders.
    * Shared across all CPU_States of the same process. */
   void (*invalidate_cache)(CPU_State *state, uint64_t guest_va, uint64_t size_bytes);
@@ -125,6 +146,15 @@ struct CPU_Backend
 #define CPU_SYSREG_ENCODE(op0, op1, crn, crm, op2) \
   ((uint32_t)(((op0) << 19) | ((op1) << 16) | ((crn) << 12) | ((crm) << 8) | ((op2) << 5)))
 #define CPU_SYSREG_TPIDRRO_EL0 CPU_SYSREG_ENCODE(3u, 3u, 13u, 0u, 3u) /* S3_3_C13_C0_3 */
+#define CPU_SYSREG_TPIDR_EL0 CPU_SYSREG_ENCODE(3u, 3u, 13u, 0u, 2u)   /* S3_3_C13_C0_2 */
+#define CPU_SYSREG_NZCV CPU_SYSREG_ENCODE(3u, 3u, 4u, 2u, 0u)         /* S3_3_C4_C2_0 */
+#define CPU_SYSREG_FPCR CPU_SYSREG_ENCODE(3u, 3u, 4u, 4u, 0u)         /* S3_3_C4_C4_0 */
+#define CPU_SYSREG_FPSR CPU_SYSREG_ENCODE(3u, 3u, 4u, 4u, 1u)         /* S3_3_C4_C4_1 */
+#define CPU_SYSREG_CNTFRQ_EL0 CPU_SYSREG_ENCODE(3u, 3u, 14u, 0u, 0u)  /* S3_3_C14_C0_0 */
+#define CPU_SYSREG_CNTVCT_EL0 CPU_SYSREG_ENCODE(3u, 3u, 14u, 0u, 2u)  /* S3_3_C14_C0_2 */
+#define CPU_SYSREG_CTR_EL0 CPU_SYSREG_ENCODE(3u, 3u, 0u, 0u, 1u)      /* S3_3_C0_C0_1 */
+#define CPU_SYSREG_DCZID_EL0 CPU_SYSREG_ENCODE(3u, 3u, 0u, 0u, 7u)    /* S3_3_C0_C0_7 */
+
 
 /* ------------------------------------------------------------------ */
 /* Backend registry.                                                   */
