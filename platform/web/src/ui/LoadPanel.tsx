@@ -6,12 +6,13 @@
  * hand-written homebrew (public/demo/hello.nro, from tests/guest/hello.s).
  */
 import { For, Match, Show, Switch, createSignal, onCleanup, onMount } from "solid-js";
-import type { GameLoadOutcome, LoadFailure } from "@bindings/load";
+import type { GameLoadOutcome, LoadFailure, SdImportOutcome } from "@bindings/load";
 import { type GuestConsoleState, getGuestConsole, subscribeGuestConsole } from "../guest-console";
 import { describeLoadFailure } from "./load-failure-copy";
 
 interface LoadPanelProps {
   readonly loadGame: (file: File) => Promise<GameLoadOutcome>;
+  readonly addToSdCard: (files: readonly File[]) => Promise<SdImportOutcome>;
 }
 
 type LoadState =
@@ -35,6 +36,14 @@ function LoadPanel(props: LoadPanelProps) {
   const [state, setState] = createSignal<LoadState>({ kind: "idle" });
   const [guest, setGuest] = createSignal<GuestConsoleState>(getGuestConsole());
   let input: HTMLInputElement | undefined;
+  let sdInput: HTMLInputElement | undefined;
+  const [sd, setSd] = createSignal<SdImportOutcome | null>(null);
+
+  async function onSdFilesChosen(event: Event & { currentTarget: HTMLInputElement }): Promise<void> {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+    if (files.length > 0) setSd(await props.addToSdCard(files));
+  }
 
   onMount(() => {
     const off = subscribeGuestConsole(setGuest);
@@ -70,6 +79,14 @@ function LoadPanel(props: LoadPanelProps) {
         data-testid="load-input"
         onChange={(event) => { void onFileChosen(event); }}
       />
+      <input
+        ref={sdInput}
+        type="file"
+        multiple
+        class="voland-load-input"
+        data-testid="sd-input"
+        onChange={(event) => { void onSdFilesChosen(event); }}
+      />
       <div class="voland-load-actions">
         <button
           type="button"
@@ -88,7 +105,24 @@ function LoadPanel(props: LoadPanelProps) {
         >
           Run the demo
         </button>
+        <button
+          type="button"
+          class="voland-load-button voland-load-secondary"
+          data-testid="sd-add"
+          onClick={() => sdInput?.click()}
+        >
+          Add homebrew to SD card…
+        </button>
       </div>
+      <Show when={sd()}>
+        {(result) => (
+          <p class="voland-load-note" data-testid="sd-result">
+            SD card: added {result().added.length} file(s)
+            {result().added.length > 0 ? ` (${result().added.join(", ")})` : ""}
+            {result().failed.length > 0 ? `; could not add ${result().failed.join(", ")}` : ""}.
+          </p>
+        )}
+      </Show>
 
       <Switch>
         <Match when={(() => { const s = state(); return s.kind === "loading" ? s : null; })()}>

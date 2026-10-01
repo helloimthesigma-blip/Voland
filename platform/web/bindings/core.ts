@@ -37,6 +37,17 @@ export interface SwitchCoreExports {
   readonly _emulator_run_slice_ffi:     (cycleBudget: bigint) => number;
   readonly _emulator_virtual_ticks_ffi: () => bigint;
   readonly _emulator_crash_pc_ffi:      () => bigint;
+
+  /* Homebrew and system setup (v3.41). Strings and bytes live in memory
+   * from `_malloc`; the shared font's allocation is never freed. */
+  readonly _emulator_set_program_path_ffi: (path: bigint) => void;
+  readonly _emulator_set_rtc_ffi:          (unixSeconds: bigint) => void;
+  readonly _emulator_set_shared_font_ffi:  (bytes: bigint, size: number) => void;
+  readonly _emulator_sd_write_file_ffi:    (path: bigint, bytes: bigint, size: bigint) => number; /* Result */
+  /* Emscripten's own wrappers: under MEMORY64 they exchange pointers
+   * as JS numbers (unlike the uint64_t parameters above). */
+  readonly _malloc: (size: number) => number;
+  readonly _free:   (pointer: number) => void;
 }
 
 /* Guest svcOutputDebugString hook: text at `address` in linear memory. */

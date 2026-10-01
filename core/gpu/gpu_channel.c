@@ -63,6 +63,19 @@
 #define DMA_SRC_HEIGHT (0x730u / 4u)
 #define DMA_SRC_ORIGIN (0x73Cu / 4u)
 
+/* B197 (word addresses). */
+#define M3D_SYNCPT_ACTION 0xB2u
+#define M3D_REPORT_SEMAPHORE_A 0x6C0u
+#define M3D_REPORT_SEMAPHORE_B 0x6C1u
+#define M3D_REPORT_SEMAPHORE_C 0x6C2u
+#define M3D_REPORT_SEMAPHORE_D 0x6C3u
+#define M3D_SYNCPT_ID(d) ((d) & 0xFFFFu)
+#define M3D_SYNCPT_INCREMENT (1u << 16)
+#define M3D_REPORT_OPERATION_MASK 3u
+#define M3D_REPORT_RELEASE 0u
+#define M3D_REPORT_COUNTER 2u
+#define M3D_REPORT_ONE_WORD (1u << 28)
+
 /* LAUNCH_DMA fields. */
 #define LAUNCH_TRANSFER_MASK 3u
 #define LAUNCH_SEMAPHORE_SHIFT 3u
@@ -251,6 +264,30 @@ static void host_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t subchan
   }
 }
 
+/* REPORT_SEMAPHORE: releases (and counter reports, whose counters all
+ * read 0 here) write the payload, as one word or {payload, 0, u64
+ * timestamp 0}; acquires are satisfied. */
+static void report_semaphore(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t operation) {
+  const uint32_t op = operation & M3D_REPORT_OPERATION_MASK;
+  if (op != M3D_REPORT_RELEASE && op != M3D_REPORT_COUNTER) return;
+  const uint64_t va = addr40(ch->engine3d[M3D_REPORT_SEMAPHORE_A], ch->engine3d[M3D_REPORT_SEMAPHORE_B]);
+  uint8_t release[SEMAPHORE_FOUR_WORD_BYTES];
+  memset(release, 0, sizeof(release));
+  if (op == M3D_REPORT_RELEASE) memcpy(release, &ch->engine3d[M3D_REPORT_SEMAPHORE_C], 4);
+  if (!mem->write(mem->user, va, release, (operation & M3D_REPORT_ONE_WORD) ? 4u : sizeof(release))) ch->faults++;
+}
+
+static void engine3d_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t method, uint32_t data) {
+  ch->engine3d[method] = data;
+  if (method == M3D_SYNCPT_ACTION) {
+    if ((data & M3D_SYNCPT_INCREMENT) && mem->syncpoint_increment) mem->syncpoint_increment(mem->user, M3D_SYNCPT_ID(data));
+  } else if (method == M3D_REPORT_SEMAPHORE_D) {
+    report_semaphore(ch, mem, data);
+  } else {
+    ch->ignored_methods++; /* rendering state: the GPU worker's, later */
+  }
+}
+
 void gpu_channel_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t subchannel, uint32_t method, uint32_t data) {
   ch->methods++;
   subchannel &= GPU_SUBCHANNELS - 1u;
@@ -261,6 +298,10 @@ void gpu_channel_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t subchan
   if (ch->subchannel_class[subchannel] == GPU_CLASS_DMA && method < GPU_DMA_REGISTER_WORDS) {
     ch->dma[method] = data;
     if (method == DMA_LAUNCH) dma_launch(ch, mem, data);
+    return;
+  }
+  if (ch->subchannel_class[subchannel] == GPU_CLASS_3D && method < GPU_3D_REGISTER_WORDS) {
+    engine3d_method(ch, mem, method, data);
     return;
   }
   ch->ignored_methods++;

@@ -13,7 +13,7 @@
 
 import type { CPUToMainMessage, GPUToMainMessage, MainToCPUMessage, MainToGPUMessage } from "@bindings/protocol";
 import { type MemoryLayout, toByteOffset } from "@bindings/layout";
-import type { GameLoadOutcome } from "@bindings/load";
+import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
 import { appendGuestOutput, resetGuestConsole, setGuestRunState } from "./guest-console";
@@ -127,6 +127,7 @@ interface BootResult {
   readonly cpuBackend:   string;
   readonly guestRamMiB:  number;
   readonly loadGame:     (file: File) => Promise<GameLoadOutcome>;
+  readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
 }
 
 async function boot(): Promise<BootResult | null> {
@@ -192,6 +193,8 @@ async function boot(): Promise<BootResult | null> {
   /* At most one load in flight: the worker answers each load-game with
    * exactly one game-loaded or load-failed, in order. */
   let pendingLoad: ((outcome: GameLoadOutcome) => void) | null = null;
+  /* SD imports queue in order; the worker answers each with one sd-files-added. */
+  const pendingSd: ((outcome: SdImportOutcome) => void)[] = [];
 
   let cpuBackend:   string | null = null;
   let adapterLabel: string | null = null;
@@ -233,6 +236,10 @@ async function boot(): Promise<BootResult | null> {
       } else if (msg.type === "run-state") {
         appendLogLine(msg.state === "crashed" ? "error" : "info", `guest ${msg.state}${msg.detail ? `: ${msg.detail}` : ""}`);
         setGuestRunState(msg.state, msg.detail);
+      } else if (msg.type === "sd-files-added") {
+        appendLogLine(msg.failed.length ? "warn" : "info",
+          `SD card: added ${msg.added.length} file(s)${msg.failed.length ? `, failed: ${msg.failed.join(", ")}` : ""}`);
+        pendingSd.shift()?.({ added: msg.added, failed: msg.failed });
       } else if (msg.type === "load-failed") {
         appendLogLine("warn", `load failed (${msg.failure.reason}): ${msg.failure.message}`);
         pendingLoad?.({ success: false, failure: msg.failure });
@@ -316,11 +323,20 @@ async function boot(): Promise<BootResult | null> {
     });
   }
 
+  function addToSdCard(files: readonly File[]): Promise<SdImportOutcome> {
+    if (cpuSlot !== "ready") return Promise.resolve<SdImportOutcome>({ added: [], failed: files.map((f) => f.name) });
+    return new Promise<SdImportOutcome>((resolve) => {
+      pendingSd.push(resolve);
+      cpuWorker.postMessage({ type: "sd-add-files", files } satisfies MainToCPUMessage);
+    });
+  }
+
   return {
     adapterLabel: adapterLabel ?? "unavailable",
     cpuBackend:   cpuBackend   ?? "unavailable",
     guestRamMiB:  finalLayout ? Number(finalLayout.guestRamSize / (1024n * 1024n)) : 0,
     loadGame,
+    addToSdCard,
   };
 }
 

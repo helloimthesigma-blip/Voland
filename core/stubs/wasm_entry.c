@@ -46,6 +46,10 @@ EXPORT uint64_t emulator_program_id_ffi(void);
 EXPORT int emulator_run_slice_ffi(uint64_t cycle_budget);
 EXPORT uint64_t emulator_virtual_ticks_ffi(void);
 EXPORT uint64_t emulator_crash_pc_ffi(void);
+EXPORT void emulator_set_program_path_ffi(uint64_t path);
+EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
+EXPORT void emulator_set_shared_font_ffi(uint64_t bytes, uint32_t size);
+EXPORT int emulator_sd_write_file_ffi(uint64_t path, uint64_t bytes, uint64_t size);
 
 /* The Switch's handheld resolution. */
 #define BOOT_FRAME_WIDTH 1280u
@@ -256,6 +260,36 @@ EXPORT uint64_t emulator_crash_pc_ffi(void)
 }
 
 /* Linear-memory address of a NUL-terminated static string, or 0. */
+/* Homebrew's SD-card path (its argv[0]): a NUL-terminated string in
+ * linear memory, e.g. "/hbmenu.nro". */
+EXPORT void emulator_set_program_path_ffi(uint64_t path)
+{
+  if (g_initialised && path) emulator_set_program_path(&g_emulator, (const char *)(uintptr_t)path);
+}
+
+/* Wall-clock time for the next program (time service, §12). */
+EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds)
+{
+  if (g_initialised) emulator_set_rtc(&g_emulator, unix_seconds);
+}
+
+/* pl:u's font (§1.6: a font the platform may ship, never Nintendo's).
+ * The bytes stay owned by JS-side malloc and must never be freed. */
+EXPORT void emulator_set_shared_font_ffi(uint64_t bytes, uint32_t size)
+{
+  if (g_initialised) emulator_set_shared_font(&g_emulator, (const uint8_t *)(uintptr_t)bytes, size);
+}
+
+/* Adds a file to the emulated SD card (§15); returns a Result code. */
+EXPORT int emulator_sd_write_file_ffi(uint64_t path, uint64_t bytes, uint64_t size)
+{
+  if (!g_initialised || !path) return (int)RESULT_INVALID_ARGUMENT;
+  const Error err = emulator_sd_card_write_file(&g_emulator, (const char *)(uintptr_t)path,
+                                                (const void *)(uintptr_t)bytes, size);
+  g_last_error_message = err.message;
+  return (int)err.code;
+}
+
 EXPORT uint64_t emulator_last_error_message_ffi(void)
 {
   return (uint64_t)(uintptr_t)g_last_error_message;

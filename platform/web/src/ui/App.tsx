@@ -7,7 +7,7 @@
  * decrypted NCA. The game library + settings screens are Phase 6 (§25).
  */
 import { For, createSignal, onCleanup, onMount } from "solid-js";
-import type { GameLoadOutcome } from "@bindings/load";
+import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
 import type { LogEntry } from "../log";
 import { getLogHistory, getStatus, subscribeLogs, subscribeStatus } from "../log";
 import LoadPanel from "./LoadPanel";
@@ -17,6 +17,7 @@ interface AppProps {
   readonly cpuBackend:   string;
   readonly guestRamMiB:  number;
   readonly loadGame:     (file: File) => Promise<GameLoadOutcome>;
+  readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
 }
 
 function App(props: AppProps) {
@@ -40,7 +41,7 @@ function App(props: AppProps) {
       <header class="voland-header">
         <div class="voland-brand">
           <span class="voland-title">Voland</span>
-          <span class="voland-subtitle">Phase 2 · first instructions</span>
+          <span class="voland-subtitle">Phase 4 · first boot</span>
         </div>
         <div class="voland-status">{status()}</div>
       </header>
@@ -48,9 +49,9 @@ function App(props: AppProps) {
       <section class="voland-main">
         <div class="voland-hero">
           <h2>Runtime online.</h2>
-          <p>Both workers initialised. Load a decrypted Program NCA or a homebrew NRO, or run the built-in demo.</p>
+          <p>Both workers initialised. Load a decrypted Program NCA or a homebrew NRO, or run the built-in demo. Homebrew you add to the SD card appears in a homebrew menu such as hbmenu.</p>
           <div class="voland-screen" data-voland-screen data-testid="screen" />
-          <LoadPanel loadGame={props.loadGame} />
+          <LoadPanel loadGame={props.loadGame} addToSdCard={props.addToSdCard} />
           <dl class="voland-facts">
             <div><dt>CPU backend</dt><dd>{props.cpuBackend}</dd></div>
             <div><dt>GPU adapter</dt><dd>{props.adapterLabel}</dd></div>

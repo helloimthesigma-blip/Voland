@@ -11,9 +11,12 @@
  *     between pitch-linear and block-linear surfaces, with component
  *     remapping and semaphore release - what deko3d/NVN use for buffer <->
  *     image copies (homebrew menus present this way).
- * Methods for other classes (3D B197, compute B1C0, 2D 902D, inline-to-
- * memory A140) are counted and ignored until their engines land; the
- * rendering engines belong to the GPU worker (§13 command ring).
+ *   - Maxwell 3D (class B197), synchronization only: the register file is
+ *     kept, and SYNCPT_ACTION increments and REPORT_SEMAPHORE releases
+ *     execute - deko3d/NVN signal their fences this way.
+ * Rendering methods (3D draws, compute, 2D, inline-to-memory) are kept or
+ * counted and otherwise ignored until their engines land in the GPU
+ * worker (§13 command ring).
  *
  * Wire formats (NVIDIA's published host/class headers, e.g. open-gpu-doc
  * clb06f.h / clb0b5.h):
@@ -35,6 +38,7 @@
 
 #define GPU_SUBCHANNELS 8u
 #define GPU_DMA_REGISTER_WORDS 0x200u /* B0B5 method space through 0x7FC */
+#define GPU_3D_REGISTER_WORDS 0xE00u  /* B197 method space */
 #define GPU_LINE_BYTES 0x10000u       /* longest DMA line handled */
 #define GPU_FETCH_WORDS 0x1000u       /* pushbuffer words fetched at a time */
 
@@ -58,6 +62,7 @@ typedef struct Gpu_Channel {
   uint32_t subchannel_class[GPU_SUBCHANNELS];
   uint32_t host[0x40];                       /* host method registers */
   uint32_t dma[GPU_DMA_REGISTER_WORDS];      /* B0B5 registers, by word address */
+  uint32_t engine3d[GPU_3D_REGISTER_WORDS];  /* B197 registers, by word address */
   uint64_t methods;                          /* diagnostics */
   uint64_t ignored_methods;
   uint64_t dma_copies;

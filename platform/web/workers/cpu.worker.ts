@@ -40,15 +40,19 @@ type CoreModuleFactory = (options: CoreModuleOptions) => Promise<SwitchCoreExpor
 
 const CORE_MODULE_URL = "/core/switch_core.js";
 
+/* pl:u's system font (§1.6: an openly licensed font - Noto Sans, SIL OFL
+ * 1.1, see public/fonts/OFL.txt - never Nintendo's). */
+const SHARED_FONT_URL = "/fonts/NotoSans-Regular.ttf";
+
 /** Upper bound on a core Error message (static strings, all short). */
 const CORE_ERROR_MESSAGE_MAX_BYTES = 1024;
 
 let core: SwitchCoreExports | null = null;
 let coreMemory: WebAssembly.Memory | null = null;
 
-/* The file the core is currently reading; set only for the duration of
- * a load-game request. The loader is synchronous (byte_source.h), so a
- * single slot suffices. */
+/* The loaded program's file. The core reads it while the program runs
+ * (fsp-srv serves the RomFS from it, emulator.h), so it stays attached
+ * until the next load replaces it. */
 let activeGameFile: File | null = null;
 const fileReader = new FileReaderSync();
 
@@ -133,6 +137,81 @@ function randomAslrSeed(): bigint {
   return seed === 0n ? 1n : seed; // 0 disables ASLR (address_space.h)
 }
 
+/** Copies `bytes` into a fresh `_malloc` block; the caller owns it. */
+function copyIntoCore(bytes: Uint8Array): number {
+  if (!core || !coreMemory) return 0;
+  const pointer = core._malloc(bytes.byteLength + 1);
+  if (pointer === 0) return 0;
+  const view = new Uint8Array(coreMemory.buffer, pointer, bytes.byteLength + 1);
+  view.set(bytes);
+  view[bytes.byteLength] = 0;
+  return pointer;
+}
+
+/** Runs `fn` with `text` as a NUL-terminated C string in core memory. */
+function withCString(text: string, fn: (pointer: bigint) => void): void {
+  if (!core) return;
+  const pointer = copyIntoCore(new TextEncoder().encode(text));
+  if (pointer === 0) return;
+  try {
+    fn(BigInt(pointer));
+  } finally {
+    core._free(pointer);
+  }
+}
+
+/** SD-card file name for a host file: path separators and control
+ * characters are not allowed in a single component. */
+function sdName(name: string): string {
+  const cleaned = name.replace(/[\/\\:*?"<>|\u0000-\u001f]/g, "_");
+  return cleaned.length > 0 ? cleaned : "program.nro";
+}
+
+async function loadSharedFont(): Promise<void> {
+  if (!core) return;
+  try {
+    const response = await fetch(SHARED_FONT_URL);
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    const pointer = copyIntoCore(bytes); // never freed: the core keeps using it
+    if (pointer !== 0) core._emulator_set_shared_font_ffi(BigInt(pointer), bytes.byteLength);
+  } catch (e) {
+    log("warn", `no shared font (${SHARED_FONT_URL}): ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+/* Largest file copied onto the SD card (it lives in core memory). */
+const SD_MAX_FILE_BYTES = 64 * 1024 * 1024;
+
+function addToSdCard(files: readonly File[]): CPUToMainMessage {
+  const added: string[] = [];
+  const failed: string[] = [];
+  for (const file of files) {
+    const name = sdName(file.name);
+    const path = name.toLowerCase().endsWith(".nro") ? `/switch/${name}` : `/${name}`;
+    if (!core || file.size > SD_MAX_FILE_BYTES) {
+      failed.push(file.name);
+      continue;
+    }
+    const sdCore = core;
+    let ok = false;
+    try {
+      const bytes = new Uint8Array(fileReader.readAsArrayBuffer(file));
+      const data = copyIntoCore(bytes);
+      if (data !== 0) {
+        withCString(path, (pathPointer) => {
+          ok = sdCore._emulator_sd_write_file_ffi(pathPointer, BigInt(data), BigInt(bytes.byteLength)) === CoreResult.Ok;
+        });
+        sdCore._free(data);
+      }
+    } catch (e) {
+      log("warn", `SD card: ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+    (ok ? added : failed).push(ok ? path : file.name);
+  }
+  return { type: "sd-files-added", added, failed };
+}
+
 function loadGame(file: File): CPUToMainMessage {
   if (!core || !coreMemory) {
     return { type: "load-failed", failure: { reason: "internal", message: "the emulator core is not loaded" } };
@@ -144,14 +223,13 @@ function loadGame(file: File): CPUToMainMessage {
   core._emulator_unload_program_ffi();
 
   activeGameFile = file;
-  let code: number;
-  try {
-    code = core._emulator_load_program_ffi(BigInt(file.size), randomAslrSeed());
-  } finally {
-    activeGameFile = null;
-  }
+  const loadingCore = core;
+  loadingCore._emulator_set_rtc_ffi(BigInt(Math.floor(Date.now() / 1000)));
+  withCString(`/${sdName(file.name)}`, (path) => loadingCore._emulator_set_program_path_ffi(path));
+  const code = core._emulator_load_program_ffi(BigInt(file.size), randomAslrSeed());
 
   if (code !== CoreResult.Ok) {
+    activeGameFile = null;
     const message = readCString(coreMemory.buffer, Number(core._emulator_last_error_message_ffi()),
                                 CORE_ERROR_MESSAGE_MAX_BYTES);
     return { type: "load-failed", failure: loadFailureFromResult(code, message) };
@@ -186,6 +264,8 @@ async function init(memory: WebAssembly.Memory): Promise<void> {
     self.postMessage(err);
     return;
   }
+
+  await loadSharedFont();
 
   const layoutPtr = core._layout_get_ffi();
   const layout = readMemoryLayout(memory, layoutPtr);
@@ -222,6 +302,11 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     const outcome = loadGame(msg.file);
     self.postMessage(outcome);
     if (outcome.type === "game-loaded") startRunning();
+    return;
+  }
+
+  if (msg.type === "sd-add-files") {
+    self.postMessage(addToSdCard(msg.files));
     return;
   }
 

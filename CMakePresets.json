@@ -39,6 +39,17 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CPU_BACKEND": "interpreter"
       }
+    },
+    {
+      "name": "native-release",
+      "displayName": "Native, interpreter backend, optimized (voland-cli for real use)",
+      "description": "Release build of the interpreter backend: what you run real homebrew with natively.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/native-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CPU_BACKEND": "interpreter"
+      }
     }
   ],
   "buildPresets": [
@@ -53,6 +64,10 @@
     {
       "name": "web",
       "configurePreset": "web"
+    },
+    {
+      "name": "native-release",
+      "configurePreset": "native-release"
     }
   ],
   "testPresets": [
@@ -70,6 +85,17 @@
     {
       "name": "native-interpreter",
       "configurePreset": "native-interpreter",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": true
+      }
+    },
+    {
+      "name": "native-release",
+      "configurePreset": "native-release",
       "output": {
         "outputOnFailure": true
       },

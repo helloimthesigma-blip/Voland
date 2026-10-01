@@ -105,3 +105,10 @@ export function readCString(buffer: ArrayBufferLike, address: number, maxBytes: 
   const bytes = window.slice(0, end === -1 ? window.length : end);
   return new TextDecoder().decode(bytes);
 }
+
+/** What an SD-card import did: the SD paths written and the files that
+ * could not be (too large, out of space, unreadable). */
+export interface SdImportOutcome {
+  readonly added: readonly string[];
+  readonly failed: readonly string[];
+}

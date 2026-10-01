@@ -2409,9 +2409,18 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.40.0*
+*Document version: 3.41.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.40 → v3.41 (summary)
+
+- **Homebrew in the browser, end to end.** hbmenu v3.6.1 boots in the web shell (~5s on SwiftShader Chromium), lists NROs the user adds to the emulated SD card, and launches them through the hbloader chain-loader; the launched program runs and the menu returns when it exits.
+- **3D engine synchronization (§13):** `gpu_channel` keeps the B197 register file and executes SYNCPT_ACTION increments and REPORT_SEMAPHORE releases/counter reports (one- and four-word) - deko3d and NVN signal fences this way, and without it `dkFenceWait` spun forever. Rendering methods are stored and otherwise ignored (GPU worker, next).
+- **Web shell:** "Add homebrew to SD card…" (`sd-add-files` / `sd-files-added`, §16 lifecycle messages: .nro → `/switch/`, other files → root, 64MB cap); loading sets the program's SD path from its file name and the RTC from the host clock; the CPU worker loads the system font from `public/fonts/` (Noto Sans, SIL OFL 1.1 - `OFL.txt` beside it) into pl:u; the loaded file stays attached while the program runs (the RomFS is read from it). New FFI exports: `emulator_set_program_path_ffi`, `emulator_set_rtc_ffi`, `emulator_set_shared_font_ffi`, `emulator_sd_write_file_ffi`, plus `_malloc`/`_free` (§24 export list updated; under MEMORY64 Emscripten's own wrappers take JS-number pointers, the `uint64_t` exports take BigInt).
+- **voland-cli:** `--input SLICE:BUTTONS:SLICES` scripted player-1 input. New `native-release` preset (optimized interpreter: ~31 MIPS on an M1 vs ~5 in Debug) for running real homebrew natively.
+- **Fix:** hid's npad trailer write overran a stack buffer by 8 bytes (battery levels end at +0x20, the buffer was 0x18) - invisible in Debug, a fortified-memcpy trap in optimized native builds and silent corruption in wasm (it broke input in the browser).
+- **Tests:** `gpu_channel_test` gains the 3D sync path; `e2e/homebrew.spec.ts` (opt-in via `VOLAND_HOMEBREW_NRO` / `VOLAND_HOMEBREW_MENU=1`, so no third-party binary is needed in the repo) boots a real NRO in the browser and drives a homebrew menu to launch Voland's demo from the SD card.
 
 ### Changelog v3.39 → v3.40 (summary)
 

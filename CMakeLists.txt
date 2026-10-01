@@ -100,7 +100,10 @@ if(EMSCRIPTEN)
                             '_cpu_get_reg_ffi','_cpu_set_reg_ffi','_cpu_get_pc_ffi',
                             '_emulator_load_program_ffi','_emulator_unload_program_ffi',
                             '_emulator_last_error_message_ffi','_emulator_program_id_ffi',
-                            '_emulator_run_slice_ffi','_emulator_virtual_ticks_ffi','_emulator_crash_pc_ffi']"
+                            '_emulator_run_slice_ffi','_emulator_virtual_ticks_ffi','_emulator_crash_pc_ffi',
+                            '_emulator_set_program_path_ffi','_emulator_set_rtc_ffi',
+                            '_emulator_set_shared_font_ffi','_emulator_sd_write_file_ffi',
+                            '_malloc','_free']"
     "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap']"
   )
 endif()

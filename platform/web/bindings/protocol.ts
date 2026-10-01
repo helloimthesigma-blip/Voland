@@ -23,6 +23,10 @@ export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
 export type MainToCPUMessage =
   | { readonly type: "init"; readonly memory: WebAssembly.Memory }
   | { readonly type: "load-game"; readonly file: File }
+  /* Copy files onto the emulated SD card (§15): .nro files go to /switch/
+   * (where homebrew menus look), anything else to the root. Answered by
+   * exactly one sd-files-added. */
+  | { readonly type: "sd-add-files"; readonly files: readonly File[] }
   /* §18: slot connect/disconnect is a lifecycle event; the state itself
    * travels through the input region, never postMessage. */
   | { readonly type: "controller-connected"; readonly index: number; readonly profileId: number }
@@ -39,6 +43,7 @@ export type CPUToMainMessage =
   | { readonly type: "error"; readonly message: string }
   | { readonly type: "game-loaded"; readonly titleId: string; readonly entryPoint: bigint }
   | { readonly type: "load-failed"; readonly failure: LoadFailure }
+  | { readonly type: "sd-files-added"; readonly added: readonly string[]; readonly failed: readonly string[] }
   /* Guest debug text (svcOutputDebugString) and run-state changes: both
    * happen at guest pace, never per frame (§6). */
   | { readonly type: "guest-output"; readonly text: string }

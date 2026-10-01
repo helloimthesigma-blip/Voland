@@ -14,6 +14,8 @@
  *       --dump-frame FILE            write the newest frame as a binary PPM (P6)
  *       --font FILE                  the TTF/OTF pl:u serves as the system font
  *       --svc-stats                  print per-SVC call counts at the end
+ *       --input SLICE:BUTTONS:SLICES player 1 holds BUTTONS (hex, HidNpadButton
+ *                                    bits) from SLICE for SLICES slices (repeatable)
  *     Prints guest output (svcOutputDebugString) as it happens, then a
  *     summary with the newest frame's FNV-1a-64 hash (golden-image check).
  *     Exit: 0 exited, 1 crashed, 2 deadlock, 3 slice limit, 4/5 failed
@@ -31,6 +33,7 @@
  * hashes. `ptc-precompile`, `cache` and `save-export/import` arrive with
  * the features they operate on (Phases 5-6).
  */
+#include "common/input_region.h"
 #include "common/layout.h"
 #include "emulator.h"
 #include "gpu/framebuffer.h"
@@ -61,6 +64,28 @@
 #define FNV_PRIME 0x100000001B3ull
 #define FINGERPRINT_CHUNK 65536u
 #define SDMC_PATH_BYTES 0x301u
+#define MAX_INPUT_EVENTS 32u
+
+typedef struct Input_Event {
+  uint64_t start;
+  uint32_t buttons;
+  uint64_t length;
+} Input_Event;
+
+/* Player 1 as a connected standard gamepad holding whatever the active
+ * events say at `slice`. */
+static void apply_input(const Input_Event *events, uint32_t count, uint64_t slice) {
+  Input_Controller_State state;
+  memset(&state, 0, sizeof(state));
+  state.flags = INPUT_FLAG_CONNECTED | ((uint32_t)INPUT_DEVICE_STANDARD_GAMEPAD << INPUT_FLAG_DEVICE_KIND_SHIFT);
+  for (uint32_t i = 0; i < count; i++) {
+    if (slice >= events[i].start && slice < events[i].start + events[i].length) state.buttons |= events[i].buttons;
+  }
+  void *region = (void *)(uintptr_t)layout_get()->input_region_base;
+  input_region_write_begin(region, 0);
+  input_region_write_payload(region, 0, &state);
+  input_region_write_end(region, 0);
+}
 #define SDMC_MAX_FILE_BYTES ((uint64_t)64 * 1024 * 1024)
 
 /* ------------------------------------------------------------------ */
@@ -193,6 +218,8 @@ static int run(int argc, char **argv) {
   const CPU_Backend *backend = &CPU_BACKEND_INTERPRETER;
   uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES;
   bool test_card = false, svc_stats = false;
+  Input_Event inputs[MAX_INPUT_EVENTS];
+  uint32_t input_count = 0;
   const char *expect_output = NULL, *expect_hash = NULL, *sdmc = NULL, *frame_path = NULL, *font_path = NULL;
   for (int i = 1; i < argc; i++) {
     const bool has_value = i + 1 < argc;
@@ -211,6 +238,14 @@ static int run(int argc, char **argv) {
       expect_output = argv[++i];
     } else if (!strcmp(argv[i], "--expect-frame-hash") && has_value) {
       expect_hash = argv[++i];
+    } else if (!strcmp(argv[i], "--input") && has_value) {
+      unsigned long long start = 0, length = 0;
+      unsigned buttons = 0;
+      if (input_count == MAX_INPUT_EVENTS || sscanf(argv[++i], "%llu:%x:%llu", &start, &buttons, &length) != 3) {
+        fprintf(stderr, "voland-cli: bad --input %s (want SLICE:HEXBUTTONS:SLICES)\n", argv[i]);
+        return EXIT_USAGE;
+      }
+      inputs[input_count++] = (Input_Event){start, buttons, length};
     } else if (!strcmp(argv[i], "--svc-stats")) {
       svc_stats = true;
     } else if (!strcmp(argv[i], "--font") && has_value) {
@@ -275,6 +310,7 @@ static int run(int argc, char **argv) {
   Emulator_Status status = EMULATOR_RUNNING;
   uint64_t slices = 0;
   while (slices < max_slices && (status == EMULATOR_RUNNING || status == EMULATOR_IDLE)) {
+    if (input_count) apply_input(inputs, input_count, slices);
     status = emulator_run_slice(&emu, budget);
     framebuffer_consume_all(); /* the CLI "displays" every frame at once */
     slices++;

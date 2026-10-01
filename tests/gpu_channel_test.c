@@ -92,7 +92,7 @@ static void test_headers_and_host(void) {
   CHECK(g_channel.subchannel_class[1] == GPU_CLASS_DMA && g_channel.subchannel_class[2] == GPU_CLASS_3D);
   CHECK(g_channel.methods >= 3);
   CHECK(g_channel.dma[R(0x410)] == 9 && g_channel.dma[R(0x418)] == 11 && g_channel.dma[R(0x41C)] == 13);
-  CHECK(g_channel.ignored_methods == 1);
+  CHECK(g_channel.ignored_methods == 1 && g_channel.engine3d[0x100] == 0x1234);
   uint32_t v;
   memcpy(&v, g_mem + 0x100, 4);
   CHECK(v == 0xCAFE && g_syncpoint_increments[5] == 1);
@@ -175,10 +175,31 @@ static void test_linear_and_remap(void) {
   CHECK(g_channel.faults == 1);
 }
 
+static void test_3d_sync(void) {
+  /* deko3d's fence signal: SYNCPT_ACTION increment, then a one-word
+   * REPORT_SEMAPHORE release; plus a four-word counter report. */
+  one(2, 0xB2, 3u | (1u << 16));
+  const uint32_t report[4] = {0, (uint32_t)(MEM_BASE + 0x300), 0x77, 0u | (1u << 28)};
+  inc(2, 0x6C0, report, 4);
+  memset(g_mem + 0x310, 0xAA, 16);
+  const uint32_t counter[4] = {0, (uint32_t)(MEM_BASE + 0x310), 0x99, 2u};
+  inc(2, 0x6C0, counter, 4);
+  const uint64_t ignored = g_channel.ignored_methods;
+  one(2, 0x35E, 1); /* a draw-state register: kept, otherwise ignored */
+  submit();
+  uint32_t v[4];
+  memcpy(v, g_mem + 0x300, 4);
+  CHECK(v[0] == 0x77 && g_syncpoint_increments[3] == 1);
+  memcpy(v, g_mem + 0x310, sizeof(v));
+  CHECK(v[0] == 0 && v[1] == 0 && v[2] == 0 && v[3] == 0);
+  CHECK(g_channel.engine3d[0x35E] == 1 && g_channel.ignored_methods > ignored);
+}
+
 int main(void) {
   test_headers_and_host();
   test_pitch_to_block_linear();
   test_linear_and_remap();
+  test_3d_sync();
   printf("[gpu_channel_test] passed\n");
   return 0;
 }

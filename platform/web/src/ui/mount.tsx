@@ -4,7 +4,7 @@
  * part that runs inside a black screen - small and fast.
  */
 import { render } from "solid-js/web";
-import type { GameLoadOutcome } from "@bindings/load";
+import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
 import App from "./App";
 import "./shell.css";
 
@@ -13,6 +13,7 @@ export interface MountOptions {
   readonly cpuBackend:   string;
   readonly guestRamMiB:  number;
   readonly loadGame:     (file: File) => Promise<GameLoadOutcome>;
+  readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
 }
 
 /** The display canvas (transferred to the GPU worker as an
@@ -42,7 +43,7 @@ export function mountShell(options: MountOptions): void {
   const root = document.getElementById("app-root");
   if (!root) throw new Error("mountShell: #app-root missing from index.html");
 
-  render(() => <App adapterLabel={options.adapterLabel} cpuBackend={options.cpuBackend} guestRamMiB={options.guestRamMiB} loadGame={options.loadGame} />, root);
+  render(() => <App adapterLabel={options.adapterLabel} cpuBackend={options.cpuBackend} guestRamMiB={options.guestRamMiB} loadGame={options.loadGame} addToSdCard={options.addToSdCard} />, root);
 
   attachCanvasToScreen();
 

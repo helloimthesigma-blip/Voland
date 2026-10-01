@@ -108,7 +108,8 @@ static void write_npad_header(HLE_Context *c, const Hid_State *s, uint32_t index
   const uint64_t base = npad_pa(s, index);
   (void)vmm_write_physical(c->vmm, base, head, sizeof(head));
 
-  uint8_t tail[0x18]; /* device_type @0x4188 .. battery_level[3] ending @0x41A8 */
+  /* device_type @0x4188 .. battery_level[3] ending @0x41A8 */
+  uint8_t tail[HID_NPAD_BATTERY_LEVEL + 4u * HID_BATTERY_SLOTS - HID_NPAD_DEVICE_TYPE];
   memset(tail, 0, sizeof(tail));
   wr32(tail, device_type_for(style));
   uint64_t props = 0;
