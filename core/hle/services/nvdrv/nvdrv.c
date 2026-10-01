@@ -366,12 +366,84 @@ static uint32_t complete_submission(Nvdrv_State *s, Nv_Fd *f, uint32_t increment
   return value;
 }
 
+/* ---- GPU memory for the command processor ------------------------- */
+
+bool nvdrv_gpu_translate(const Nvdrv_State *s, uint64_t gpu_va, uint64_t *guest_va, uint64_t *contiguous) {
+  for (uint32_t i = 0; i < NVDRV_MAX_GPU_MAPPINGS; i++) {
+    const Gpu_Mapping *m = &s->mappings[i];
+    if (!m->in_use || gpu_va < m->gpu_va || gpu_va - m->gpu_va >= m->size) continue;
+    uint64_t base = 0, size = 0;
+    if (!nvdrv_nvmap_lookup(s, m->nvmap_handle, &base, &size)) return false;
+    *guest_va = base + m->buffer_offset + (gpu_va - m->gpu_va);
+    *contiguous = m->size - (gpu_va - m->gpu_va);
+    return true;
+  }
+  return false;
+}
+
+static bool gpu_access(void *user, uint64_t gpu_va, void *buffer, uint64_t size, bool write) {
+  const Nvdrv_State *s = (const Nvdrv_State *)user;
+  for (uint64_t done = 0; done < size;) {
+    uint64_t guest = 0, run = 0;
+    if (!nvdrv_gpu_translate(s, gpu_va + done, &guest, &run)) return false;
+    const uint64_t n = size - done < run ? size - done : run;
+    const Error err = write ? vmm_write_block(s->hle->vmm, guest, (const uint8_t *)buffer + done, n)
+                            : vmm_read_block(s->hle->vmm, guest, (uint8_t *)buffer + done, n);
+    if (!error_is_ok(err)) return false;
+    done += n;
+  }
+  return true;
+}
+
+static bool gpu_read(void *user, uint64_t gpu_va, void *out, uint64_t size) { return gpu_access(user, gpu_va, out, size, false); }
+static bool gpu_write(void *user, uint64_t gpu_va, const void *src, uint64_t size) {
+  return gpu_access(user, gpu_va, (void *)(uintptr_t)src, size, true);
+}
+
+static void gpu_syncpoint_increment(void *user, uint32_t id) {
+  Nvdrv_State *s = (Nvdrv_State *)user;
+  if (id == 0 || id >= SYNCPOINT_COUNT) return;
+  syncpoint_complete(&s->syncpoints, id, syncpoint_increment_max(&s->syncpoints, id));
+}
+
+static Gpu_Channel *channel_of(Nvdrv_State *s, Nv_Fd *f) {
+  if (!s->channels) return NULL;
+  if (f->channel == NVDRV_NO_CHANNEL) {
+    for (uint32_t i = 0; i < NVDRV_MAX_CHANNELS; i++) {
+      if (s->channel_used[i]) continue;
+      s->channel_used[i] = true;
+      gpu_channel_init(&s->channels[i]);
+      f->channel = i;
+      break;
+    }
+    if (f->channel == NVDRV_NO_CHANNEL) return NULL;
+  }
+  return &s->channels[f->channel];
+}
+
+/* SUBMIT_GPFIFO / KICKOFF_PB: the entries follow the 24-byte header
+ * (inline, or Ioctl2's extra buffer appended - run_ioctl). */
+#define GPFIFO_HEADER_BYTES 24u
+#define GPFIFO_MAX_ENTRIES ((NVDRV_IOCTL_MAX_BYTES - GPFIFO_HEADER_BYTES) / 8u)
+
+static void run_gpfifo(Nvdrv_State *s, Nv_Fd *f, const uint8_t *d) {
+  Gpu_Channel *channel = channel_of(s, f);
+  if (!channel || !s->hle) return;
+  uint32_t count = rd32(d + 8);
+  if (count > GPFIFO_MAX_ENTRIES) count = GPFIFO_MAX_ENTRIES;
+  uint64_t entries[GPFIFO_MAX_ENTRIES];
+  memcpy(entries, d + GPFIFO_HEADER_BYTES, (size_t)count * 8u);
+  const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment};
+  gpu_channel_submit(channel, &memory, entries, count);
+}
+
 static uint32_t gpu_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint8_t *d) {
   switch (nr) {
   case 0x01: f->nvmap_fd = rd32(d); return NV_SUCCESS;           /* SET_NVMAP_FD */
   case 0x03: case 0x0B: case 0x0C: case 0x0D: return NV_SUCCESS; /* SET_TIMEOUT, ZCULL_BIND, SET_ERROR_NOTIFIER, SET_PRIORITY */
   case 0x08: case 0x1B: { /* SUBMIT_GPFIFO / KICKOFF_PB {u64 gpfifo, u32 num, u32 flags, fence io} */
     const uint32_t flags = rd32(d + 12);
+    run_gpfifo(s, f, d);
     const uint32_t value = complete_submission(s, f, 1);
     if (flags & SUBMIT_FLAG_FENCE_GET) {
       wr32(d + 16, f->syncpoint);
@@ -496,6 +568,7 @@ static uint32_t run_ioctl(HLE_Context *c, Nvdrv_State *s, const IPC_Request *req
     total += extra;
   }
   (void)total;
+  s->hle = c;
   const uint32_t error = dispatch_ioctl(s, f, request, s->ioctl_buffer);
   log_debug("[nvdrv] ioctl dev %d req %08x -> %u", (int)f->device, request, error);
   if (dir & NV_IOC_READ) {
@@ -535,6 +608,7 @@ static HLE_ServiceResult cmd_open(HLE_Context *c, Service_Object *self, const IP
       if (s->fds[i].device != NV_DEVICE_NONE) continue;
       memset(&s->fds[i], 0, sizeof(s->fds[i]));
       s->fds[i].device = k_devices[d].device;
+      s->fds[i].channel = NVDRV_NO_CHANNEL;
       fd = i;
       error = NV_SUCCESS;
       break;
@@ -569,7 +643,9 @@ static HLE_ServiceResult cmd_close(HLE_Context *c, Service_Object *self, const I
   Nv_Fd *f = fd_of(s, fd);
   if (f) {
     if (f->syncpoint) syncpoint_free(&s->syncpoints, f->syncpoint);
+    if (f->channel < NVDRV_MAX_CHANNELS) s->channel_used[f->channel] = false;
     memset(f, 0, sizeof(*f));
+    f->channel = NVDRV_NO_CHANNEL;
   }
   (void)ipc_response_push_u32(res, f ? NV_SUCCESS : NV_BAD_VALUE);
   return HLE_RESULT_SUCCESS;
@@ -642,8 +718,9 @@ static const Service_Command k_nvdrv_commands[] = {
     {13, cmd_set_fw_margin_stub, "SetGraphicsFirmwareMemoryMarginEnabled_stub"},
 };
 
-void nvdrv_init(Nvdrv_State *state) {
+void nvdrv_init(Nvdrv_State *state, Gpu_Channel *channels) {
   memset(state, 0, sizeof(*state));
+  state->channels = channels;
   syncpoints_init(&state->syncpoints);
   state->next_gpu_va = GPU_VA_BASE;
   state->interface.name = "nvdrv";

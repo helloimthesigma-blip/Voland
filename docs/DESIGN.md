@@ -2282,7 +2282,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ### Phase 4 — First Boot
 
-- [ ] **GPU command ring** (§13): versioned records, CPU-side decode, GPU-side drain
+- [ ] **GPU command ring** (§13): versioned records, CPU-side decode, GPU-side drain. *v3.40: CPU-side GPFIFO decode, host methods and the DMA copy engine are done (`gpu/gpu_channel.{h,c}`); the ring to the GPU worker and the 3D/compute engines remain.*
 - [ ] Minimal shader path (stall-on-compile, no cache yet)
 - [x] **vi: + buffer queue (nvnflinger)** — the present contract; without it Phase 4 has no screen. *v3.39: `hle/services/vi/` - IGraphicBufferProducer over parcels, vsync compositor with block-linear deswizzle into the §6 slots.*
 - [x] hid: **shared-memory writer (N independent npads + style bits — enables same-console multiplayer, §20)**. *v3.38: `hle/services/hid/hid.{h,c}` over the new shared-memory kernel object; input region sampled at 200Hz virtual time.*
@@ -2409,9 +2409,16 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.39.0*
+*Document version: 3.40.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.39 → v3.40 (summary)
+
+- **GPU command processing begins (§13).** `gpu/gpu_channel.{h,c}`: a GPFIFO submission is fetched and decoded as PFIFO does - GP entries (VA, length; control entries skipped), method headers (incrementing, non-incrementing, immediate, increment-once), subchannel class binding - and host methods execute (semaphore release 4/16-byte, acquire treated as satisfied, in-stream syncpoint increments). The **Maxwell DMA copy engine (B0B5)** runs CPU-side: 1D copies of any length, multi-line pitch ↔ block-linear copies with origins and block heights, component remap (sizes 1-4, constants, no-write), and its semaphore releases. nvdrv runs every SUBMIT_GPFIFO/KICKOFF_PB through it (`nvdrv_gpu_translate`: GPU VA → guest VA through the address-space mappings; channel state from the Emulator's service arena). Other classes' methods (3D, compute, 2D, inline-to-memory) are counted and ignored until their engines land in the GPU worker.
+- **Result:** hbmenu v3.6.1 - libnx + deko3d, which composes its UI on the CPU and copies it to the swapchain image with the DMA engine - now renders its full menu (theme, shared font text, status bar) through Voland's present path.
+- **Deviation, stated:** §13 routes GPU work through the command ring to the GPU worker. Copy-engine work is memory movement with no rendering, so it executes in the core where guest memory lives; rendering engines keep §13's plan.
+- **Tests:** `gpu_channel_test` (every header form, bind/semaphore/syncpoint host methods, pitch → block-linear and back with origins, 100KB 1D copy, remap with constants, semaphore release, unmapped-VA fault accounting).
 
 ### Changelog v3.38 → v3.39 (summary)
 

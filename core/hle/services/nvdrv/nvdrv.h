@@ -25,11 +25,13 @@
  *                       channel SUBMIT, GET_SYNCPOINT, GET_WAITBASE,
  *                       MAP/UNMAP_BUFFER, clock/timeout setters
  *
- * Phase 3 scope, stated: GPU work is not executed yet (the command ring
- * and Maxwell engines are Phase 4). Every submission - GPFIFO and
- * NVDEC/VIC alike - is accepted and its syncpoint increments complete at
- * once, so fences a title waits on are already reached ("black frames
- * that complete", §25). Syncpoint waits therefore never block. The GPU
+ * Scope, stated: GPFIFO submissions on /dev/nvhost-gpu are run by the
+ * CPU-side command processor (gpu/gpu_channel.h, v3.40): host methods
+ * and the DMA copy engine execute; 3D/compute/2D methods are counted and
+ * ignored until the GPU worker's engines land. Every submission - GPFIFO
+ * and NVDEC/VIC alike - completes at once, so fences a title waits on
+ * are already reached ("black frames that complete", §25) and syncpoint
+ * waits never block. The GPU
  * completion ring (gpu/syncpoint.h) is drained every scheduler slice, so
  * once the GPU worker posts real completions they flow through the same
  * path, and EVENT_WAIT_ASYNC waiters are signalled from it.
@@ -40,6 +42,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "gpu/gpu_channel.h"
 #include "gpu/syncpoint.h"
 #include "hle/kernel/event.h"
 #include "hle/kernel/ipc.h"
@@ -49,6 +52,8 @@
 #define NVMAP_MAX_HANDLES 1024u
 #define NVDRV_MAX_GPU_MAPPINGS 512u
 #define NVDRV_MAX_EVENTS 64u
+#define NVDRV_MAX_CHANNELS 8u     /* GPU channels with command processing */
+#define NVDRV_NO_CHANNEL UINT32_MAX
 #define NVDRV_IOCTL_MAX_BYTES 0x4000u /* the 14-bit size field */
 
 /* NvError codes (libnx result.h LibnxNvidiaError mapping). */
@@ -80,6 +85,7 @@ typedef struct Nv_Fd {
   uint32_t syncpoint;   /* channels: their syncpoint, allocated on open/gpfifo */
   uint32_t nvmap_fd;
   uint32_t submissions; /* diagnostics */
+  uint32_t channel;     /* nvhost-gpu: index into Nvdrv_State.channels, or NVDRV_NO_CHANNEL */
 } Nv_Fd;
 
 typedef struct Nvmap_Handle {
@@ -120,10 +126,22 @@ typedef struct Nvdrv_State {
   uint8_t ioctl_buffer[NVDRV_IOCTL_MAX_BYTES];
   uint8_t extra_buffer[NVDRV_IOCTL_MAX_BYTES];
   uint64_t ioctl_count;
+  /* GPU command processing (gpu/gpu_channel.h): channel state lives in
+   * caller-owned memory (NVDRV_MAX_CHANNELS of them); `hle` is the
+   * context of the ioctl being run, for guest memory access. */
+  Gpu_Channel *channels;
+  bool channel_used[NVDRV_MAX_CHANNELS];
+  HLE_Context *hle;
 } Nvdrv_State;
 
-/* Resets the state and initializes `state->interface`. */
-void nvdrv_init(Nvdrv_State *state);
+/* Resets the state and initializes `state->interface`. `channels`:
+ * NVDRV_MAX_CHANNELS Gpu_Channels the caller owns (NULL: submissions
+ * complete without running their commands, the Phase 3 behavior). */
+void nvdrv_init(Nvdrv_State *state, Gpu_Channel *channels);
+
+/* GPU VA -> guest VA through the address space's mappings: the guest
+ * address and how many bytes from there stay inside the mapping. */
+bool nvdrv_gpu_translate(const Nvdrv_State *state, uint64_t gpu_va, uint64_t *guest_va, uint64_t *contiguous);
 
 /* Registers the four service names with sm:. */
 Error nvdrv_register(Nvdrv_State *state, SM_Registry *registry);

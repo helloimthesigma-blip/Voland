@@ -240,7 +240,7 @@ static bool chain_load(Emulator* emulator) {
 
 static void reset_process_services(Emulator* emulator) {
   event_pool_init(&emulator->events);
-  nvdrv_init(&emulator->nvdrv); /* fds, nvmap handles and syncpoints die with the process */
+  nvdrv_init(&emulator->nvdrv, emulator->gpu_channels); /* fds, nvmap handles, syncpoints die with the process */
   shared_memory_pool_init(&emulator->shared_memory, &emulator->pages);
   memset(&emulator->transfer_memory, 0, sizeof(emulator->transfer_memory));
   hid_init(&emulator->hid, &emulator->shared_memory);
@@ -333,6 +333,7 @@ Error emulator_create_with_backend(Emulator* out, const CPU_Backend* backend) {
   if (arena_create(&out->service_arena, EMULATOR_SERVICE_ARENA_BYTES)) {
     out->am_storage_pool = ARENA_ALLOC_ARRAY(&out->service_arena, uint8_t, (size_t)AM_STORAGE_POOL_BYTES);
     out->vi_scratch = ARENA_ALLOC_ARRAY(&out->service_arena, uint8_t, (size_t)VI_SCRATCH_BYTES);
+    out->gpu_channels = ARENA_ALLOC_ARRAY(&out->service_arena, Gpu_Channel, NVDRV_MAX_CHANNELS);
   }
   out->ramfs_ready = ramfs_pool_init(&out->ramfs, EMULATOR_RAMFS_BYTES);
   if (!out->ramfs_ready) log_warn("[emulator] no RAM for the SD card / saves; fsp-srv filesystems will be full");

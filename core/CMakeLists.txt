@@ -41,6 +41,7 @@ set(SWITCH_CORE_SOURCES
   hle/services/pl/pl.c
   hle/services/misc/misc.c
   gpu/block_linear.c
+  gpu/gpu_channel.c
   hle/fs/ramfs.c
   hle/kernel/svc_thread.c
   hle/services/sm/sm.c

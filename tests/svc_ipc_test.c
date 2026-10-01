@@ -219,7 +219,7 @@ static void test_sm(uint32_t sm, uint32_t *out_test_handle) {
   reg.send_pid = true;
   CHECK(send_cmif(sm, &reg, 0).result == 0);
 
-  CHECK(get_service(sm, "fsp-srv", &handle) == SM_RESULT_NOT_REGISTERED);
+  CHECK(get_service(sm, "lbl", &handle) == SM_RESULT_NOT_REGISTERED); /* a real name nothing registers */
   CHECK(get_service(sm, "", &handle) == SM_RESULT_INVALID_SERVICE_NAME);
   const uint64_t gap = 0x4100000000000041ull; /* "A\0\0...\0A" */
   const Test_Ipc_Message bad = cmif(1, &gap, sizeof(gap));

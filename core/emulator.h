@@ -40,7 +40,7 @@
  * emulator_load_program() only, then freed. */
 #define EMULATOR_LOADER_ARENA_BYTES ((size_t)96 * 1024 * 1024)
 #define EMULATOR_RAMFS_BYTES ((uint64_t)128 * 1024 * 1024) /* SD card + saves */
-#define EMULATOR_SERVICE_ARENA_BYTES ((size_t)12 * 1024 * 1024)
+#define EMULATOR_SERVICE_ARENA_BYTES ((size_t)14 * 1024 * 1024)
 #define EMULATOR_ARGV_BYTES 0x800u
 #define EMULATOR_DEFAULT_NRO_PATH "/switch/homebrew.nro"
 
@@ -92,6 +92,7 @@ typedef struct Emulator
   Arena service_arena; /* large service buffers (applet storages, compositor scratch) */
   uint8_t *am_storage_pool;
   uint8_t *vi_scratch;
+  Gpu_Channel *gpu_channels; /* NVDRV_MAX_CHANNELS */
   bool ramfs_ready;
 
   /* The loaded program's file (§12): kept readable until unload so the
