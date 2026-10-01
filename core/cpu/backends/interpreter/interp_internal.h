@@ -36,6 +36,10 @@ typedef enum Interp_Status {
  * architectural maximum; Cortex-A57's ERG is 64 bytes). */
 #define INTERP_EXCLUSIVE_GRANULE 64u
 
+/* Instructions the run loop keeps executing past the budget while an
+ * exclusive monitor is held, so LDXR/STXR loops complete (§7). */
+#define INTERP_EXCLUSIVE_GRACE_INSTRUCTIONS 64u
+
 typedef struct Interp_State {
   CPU_Register_File regs;
   CPU_Vector_Register v[CPU_VECTOR_REGISTER_COUNT];
@@ -66,6 +70,23 @@ typedef struct Interp_State {
 
 /* Executes the instruction `insn` at regs.pc. */
 Interp_Status interp_execute(Interp_State *s, uint32_t insn);
+
+/* Retires one instruction (cycle accounting, SVC/breakpoint/fault
+ * handlers) and maps its status; true to keep running. */
+bool interp_retire(Interp_State *s, Interp_Status status, uint64_t pc, uint32_t insn, CPU_ExitReason *exit_reason);
+/* Fetch + decode + execute one instruction (the reference path). */
+bool interp_run_one(Interp_State *s, CPU_ExitReason *exit_reason);
+
+/* Predecoded execution (interp_predecode.c, §25 Phase 5): the run loop
+ * over decoded blocks, chaining block to block until the budget is spent
+ * (with the exclusive-monitor grace rule) or an instruction exits.
+ * Results are identical to the reference loop (interp_run_one). */
+CPU_ExitReason interp_predecode_execute(Interp_State *s, uint64_t cycle_budget);
+/* Off when VOLAND_NO_PREDECODE is set in the environment (native only):
+ * a switch for bisecting a suspected predecoder bug. */
+bool interp_predecode_enabled(void);
+/* Drops every decoded block (IC maintenance, invalidate_cache). */
+void interp_predecode_flush(void);
 
 /* Instruction groups (A64 top-level encoding, DDI 0487 C4.1). */
 Interp_Status interp_dp_immediate(Interp_State *s, uint32_t insn);
@@ -123,7 +144,23 @@ static inline void set_nzcv(Interp_State *s, uint32_t nzcv4) {
 static inline uint32_t get_nzcv(const Interp_State *s) { return (s->regs.pstate >> 28) & 0xFu; }
 
 /* ConditionHolds(cond) for the 4-bit cond field. */
-bool interp_condition_holds(const Interp_State *s, uint32_t cond);
+static inline bool interp_condition_holds(const Interp_State *s, uint32_t cond) {
+  const uint32_t nzcv = get_nzcv(s);
+  const bool n = (nzcv & 8u) != 0, z = (nzcv & 4u) != 0, c = (nzcv & 2u) != 0, v = (nzcv & 1u) != 0;
+  bool result;
+  switch (cond >> 1) {
+  case 0: result = z; break;
+  case 1: result = c; break;
+  case 2: result = n; break;
+  case 3: result = v; break;
+  case 4: result = c && !z; break;
+  case 5: result = n == v; break;
+  case 6: result = (n == v) && !z; break;
+  default: result = true; break;
+  }
+  if ((cond & 1u) && cond != 0xFu) result = !result;
+  return result;
+}
 
 /* AddWithCarry for 32/64-bit: returns the result, *nzcv = flags. */
 uint64_t interp_add_with_carry(uint64_t x, uint64_t y, uint32_t carry_in, bool sf, uint32_t *nzcv);

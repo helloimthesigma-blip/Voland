@@ -130,6 +130,11 @@ add_executable(interpreter_test interpreter_test.c)
 target_link_libraries(interpreter_test PRIVATE switch_core)
 add_test(NAME interpreter_test COMMAND interpreter_test)
 
+# Predecoded interpreter vs the reference decoder on random streams.
+add_executable(predecode_test predecode_test.c)
+target_link_libraries(predecode_test PRIVATE switch_core)
+add_test(NAME predecode_test COMMAND predecode_test)
+
 #
 # Guest threads end to end (§7): real ARM64 programs (tests/guest/*.s,
 # assembled into *.inc by tools/guest_asm.py) run on the interpreter

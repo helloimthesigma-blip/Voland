@@ -314,6 +314,21 @@ static inline uint8_t *vmm_translate_inline(const uint64_t *l1, uint64_t gva,
   return (uint8_t *)(uintptr_t)((pte & VMM_PTE_HOST_MASK) | (gva & VMM_PAGE_OFFSET_MASK));
 }
 
+/* The page-table generation: changes whenever any mapping or permission
+ * changes (and when a context is created). Decoded-code caches compare it
+ * to know their blocks still describe mapped, executable memory. */
+extern uint64_t g_vmm_generation; /* vmm.c; read through vmm_generation() */
+static inline uint64_t vmm_generation(void) { return g_vmm_generation; }
+
+/* The raw PTE for `gva` (0 if unmapped): permissions in the low bits. */
+static inline uint64_t vmm_pte_inline(const uint64_t *l1, uint64_t gva) {
+  if (gva >= VMM_ADDRESS_SPACE_SIZE) return 0;
+  const uint64_t vpn = gva >> VMM_PAGE_BITS;
+  const uint64_t l2_offset = l1[vpn >> VMM_L2_INDEX_BITS];
+  if (l2_offset == 0) return 0;
+  return ((const uint64_t *)(uintptr_t)l2_offset)[vpn & VMM_L2_INDEX_MASK];
+}
+
 /* Out-of-line slow path for accesses that straddle a page boundary
  * (both pages validated before any byte moves). Implemented in vmm.c;
  * declared here because the inline helpers call it. Never call directly. */

@@ -15,7 +15,6 @@
 /* §7 starvation guard, layer 2: when the budget runs out while this
  * thread holds the exclusive monitor, keep going for at most this many
  * instructions so a LDAXR/STLXR pair is never split by preemption. */
-#define INTERP_EXCLUSIVE_GRACE_INSTRUCTIONS 64u
 
 /* Switch timer frequency (CNTFRQ_EL0) and the nominal CPU clock the
  * cycle counter is scaled from, until §7's virtual time owns CNTVCT. */
@@ -31,23 +30,6 @@
 /* Shared helpers.                                                     */
 /* ------------------------------------------------------------------ */
 
-bool interp_condition_holds(const Interp_State *s, uint32_t cond) {
-  const uint32_t nzcv = get_nzcv(s);
-  const bool n = (nzcv & 8u) != 0, z = (nzcv & 4u) != 0, c = (nzcv & 2u) != 0, v = (nzcv & 1u) != 0;
-  bool result;
-  switch (cond >> 1) {
-  case 0: result = z; break;
-  case 1: result = c; break;
-  case 2: result = n; break;
-  case 3: result = v; break;
-  case 4: result = c && !z; break;
-  case 5: result = n == v; break;
-  case 6: result = (n == v) && !z; break;
-  default: result = true; break;
-  }
-  if ((cond & 1u) && cond != 0xFu) result = !result;
-  return result;
-}
 
 uint64_t interp_add_with_carry(uint64_t x, uint64_t y, uint32_t carry_in, bool sf, uint32_t *nzcv) {
   if (sf) {
@@ -172,20 +154,9 @@ static CPU_State *interp_create(VMM_Context *vmm, void *userdata) {
 
 static void interp_destroy(CPU_State *state) { free(state); }
 
-/* One instruction, with exit-reason mapping. Returns true to keep going. */
-static bool run_one(Interp_State *s, CPU_ExitReason *exit_reason) {
-  const uint64_t pc = s->regs.pc;
-  uint32_t insn = 0;
-  VMM_Fault fault;
-  const uint8_t *host = (pc & 3u) ? NULL : vmm_translate_inline(s->l1, pc, VMM_PERM_X, &fault);
-  if (!host) {
-    s->fault_address = pc;
-    *exit_reason = CPU_EXIT_FAULT;
-    return false;
-  }
-  memcpy(&insn, host, sizeof(insn));
-
-  const Interp_Status status = interp_execute(s, insn);
+/* Accounts one executed instruction and maps its status to an exit
+ * reason. Returns true to keep going. Shared with the predecoded path. */
+bool interp_retire(Interp_State *s, Interp_Status status, uint64_t pc, uint32_t insn, CPU_ExitReason *exit_reason) {
   s->cycles_consumed++;
   s->total_cycles++;
   switch (status) {
@@ -215,13 +186,24 @@ static bool run_one(Interp_State *s, CPU_ExitReason *exit_reason) {
   return false;
 }
 
-static CPU_ExitReason interp_run(CPU_State *state, uint64_t cycle_budget) {
-  Interp_State *s = as_interp(state);
-  SWITCH_ASSERT_ALWAYS(s->l1 != NULL, "interpreter run() without a vmm");
-  s->cycles_consumed = 0;
-  /* Entering run() is a potential context switch: the monitor of
-   * whatever ran before is gone (§7). */
-  s->exclusive_valid = false;
+/* One instruction through the full decoder (the reference path: step()
+ * and anything the predecoded path does not cache). */
+bool interp_run_one(Interp_State *s, CPU_ExitReason *exit_reason) {
+  const uint64_t pc = s->regs.pc;
+  uint32_t insn = 0;
+  VMM_Fault fault;
+  const uint8_t *host = (pc & 3u) ? NULL : vmm_translate_inline(s->l1, pc, VMM_PERM_X, &fault);
+  if (!host) {
+    s->fault_address = pc;
+    *exit_reason = CPU_EXIT_FAULT;
+    return false;
+  }
+  memcpy(&insn, host, sizeof(insn));
+  return interp_retire(s, interp_execute(s, insn), pc, insn, exit_reason);
+}
+
+/* The reference loop: one instruction at a time through the decoder. */
+static CPU_ExitReason run_reference(Interp_State *s, uint64_t cycle_budget) {
   uint32_t grace = 0;
   CPU_ExitReason exit_reason = CPU_EXIT_CYCLES_ELAPSED;
   for (;;) {
@@ -231,15 +213,27 @@ static CPU_ExitReason interp_run(CPU_State *state, uint64_t cycle_budget) {
       }
       grace++;
     }
-    if (!run_one(s, &exit_reason)) return exit_reason;
+    if (!interp_run_one(s, &exit_reason)) return exit_reason;
   }
+}
+
+/* Decoded blocks (interp_predecode.c) unless the predecoder is disabled,
+ * in which case the reference loop runs - both give identical results. */
+static CPU_ExitReason interp_run(CPU_State *state, uint64_t cycle_budget) {
+  Interp_State *s = as_interp(state);
+  SWITCH_ASSERT_ALWAYS(s->l1 != NULL, "interpreter run() without a vmm");
+  s->cycles_consumed = 0;
+  /* Entering run() is a potential context switch: the monitor of
+   * whatever ran before is gone (§7). */
+  s->exclusive_valid = false;
+  return interp_predecode_enabled() ? interp_predecode_execute(s, cycle_budget) : run_reference(s, cycle_budget);
 }
 
 static CPU_ExitReason interp_step(CPU_State *state) {
   Interp_State *s = as_interp(state);
   s->cycles_consumed = 0;
   CPU_ExitReason exit_reason = CPU_EXIT_CYCLES_ELAPSED;
-  (void)run_one(s, &exit_reason);
+  (void)interp_run_one(s, &exit_reason);
   return exit_reason;
 }
 
@@ -326,11 +320,15 @@ static void interp_set_vector_reg(CPU_State *state, uint8_t index, CPU_Vector_Re
  * every time, so self-modifying code is always seen. The predecoded
  * interpreter (§25 Phase 5) gives these meaning. */
 static void interp_invalidate_cache(CPU_State *state, uint64_t address, uint64_t size) {
+  interp_predecode_flush();
   (void)state;
   (void)address;
   (void)size;
 }
-static void interp_clear_cache(CPU_State *state) { (void)state; }
+static void interp_clear_cache(CPU_State *state) {
+  (void)state;
+  interp_predecode_flush();
+}
 
 static void interp_set_svc_handler(CPU_State *state, CPU_SVC_Handler h) { as_interp(state)->svc_handler = h; }
 static void interp_set_undefined_handler(CPU_State *state, CPU_Undefined_Handler h) {

@@ -2292,7 +2292,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 ### Phase 5 — Playable Core (+ Compatibility Database)
 
 - [ ] Ballistic-x86 integration on desktop: region compilation, dispatcher, exit-code ABI (§10–11). This validates all dispatcher/block-cache/PTC infrastructure backend-agnostically; the WASM emitter slots in whenever upstream resumes it
-- [ ] **Predecoded interpreter** for web: decode blocks once into a dense internal form (op index + extracted operands), execute the predecoded form. 2–4x over fetch-decode-execute, backend-independent, and its block discovery/invalidation is the same machinery the JIT dispatcher uses. This is the web execution path until Ballistic-WASM exists — treat it as a deliverable, not a stopgap
+- [ ] **Predecoded interpreter** for web: decode blocks once into a dense internal form (op index + extracted operands), execute the predecoded form. *v3.42: block cache + specialized integer/branch/load-store handlers landed (~1.9×), proven equivalent to the reference decoder by `predecode_test`; SIMD/FP handlers and block chaining by successor pointer remain.* 2–4x over fetch-decode-execute, backend-independent, and its block discovery/invalidation is the same machinery the JIT dispatcher uses. This is the web execution path until Ballistic-WASM exists — treat it as a deliverable, not a stopgap
 - [ ] PTC first cut (desktop, against ballistic-x86): content-hash keys, OPFS bytes, session compile
 - [ ] Pipeline cache (OPFS, microcode-hash keys)
 - [ ] Software TLB if profiling justifies it (§5)
@@ -2409,9 +2409,16 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.41.0*
+*Document version: 3.42.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.41 → v3.42 (summary)
+
+- **§25 Phase 5, first deliverable started early: the predecoded interpreter.** `cpu/backends/interpreter/interp_predecode.c` decodes straight-line code once into blocks (≤32 ops; end at any branch/exception/system instruction or page end) held in a direct-mapped cache keyed by PC and validated by `vmm_generation()` (bumped on every map/unmap/reprotect and at create) plus a flush epoch (IC/DC maintenance, `invalidate_cache`/`clear_cache`). Only pages mapped executable and not writable are cached. Specialized handlers with precomputed fields cover add/sub (immediate, shifted register, with and without flags), logical (immediate, shifted register), move wide, ADR/ADRP (PC folded in), bitfield moves, conditional select, MADD/MSUB, every branch form, and general-register loads/stores (unsigned offset, LDUR/STUR, pre/post-index, register offset, LDP/STP); everything else - and any specialized access that crosses a page, faults, or has CONSTRAINED UNPREDICTABLE register overlap - runs the reference decoder for that execution. The run loop chains blocks itself, retires the common case inline, and applies the reference loop's budget/exclusive-grace rule before every instruction. `step()` stays on the reference decoder (it is what the hardware oracle tests). `VOLAND_NO_PREDECODE=1` (native) selects the reference loop for bisecting.
+- **Result:** ~1.9× on hbmenu (optimized native build, identical virtual time, frame hash and output).
+- **Equivalence, tested:** `tests/predecode_test.c` runs random streams of every specialized form plus raw random words through `run()` (random budgets, so blocks are entered and left mid-way) and through `step()` from identical images, comparing registers, SP, flags, PC, exit reason, fault address, cycle count and all data memory. Mutation-checked (a dropped 32-bit mask and a swapped load/writeback order are each caught within a few hundred streams); 600k streams across 6 seeds pass.
+- `interp_condition_holds` and the vmm generation read are inline; the exclusive-grace constant moved to `interp_internal.h`.
 
 ### Changelog v3.40 → v3.41 (summary)
 
