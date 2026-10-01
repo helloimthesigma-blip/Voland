@@ -1,5 +1,5 @@
 /**
- * Phase 0 boot sequence (docs/DESIGN.md section 16). The page loads as a
+ * Boot sequence (docs/DESIGN.md section 16). The page loads as a
  * black screen with a boot log on the right; once the CPU and GPU workers
  * each report "ready" we dynamically import the Solid shell and fade the
  * boot overlay out. Keeping the Solid runtime out of the boot-critical
@@ -128,7 +128,7 @@ interface BootResult {
 }
 
 async function boot(): Promise<BootResult | null> {
-  appendLogLine("info", "Voland web - Phase 0 skeleton booting");
+  appendLogLine("info", "Voland web booting");
 
   if ("serviceWorker" in navigator) {
     // Vite serves sw.ts directly (on-the-fly transform) in dev; the
