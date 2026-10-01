@@ -97,4 +97,17 @@ if(EMSCRIPTEN)
     OUTPUT_NAME "switch_core"
     SUFFIX ".js"
   )
+  # The CPU worker imports the module from /core/switch_core.js
+  # (platform/web/workers/cpu.worker.ts); Vite serves platform/web/public/
+  # verbatim, so stage both artifacts there after every link. The staged
+  # copies are build output and gitignored.
+  set(VOLAND_WEB_CORE_DIR ${PROJECT_SOURCE_DIR}/platform/web/public/core)
+  add_custom_command(TARGET switch_core_wasm POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${VOLAND_WEB_CORE_DIR}
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            $<TARGET_FILE_DIR:switch_core_wasm>/switch_core.js
+            $<TARGET_FILE_DIR:switch_core_wasm>/switch_core.wasm
+            ${VOLAND_WEB_CORE_DIR}
+    COMMENT "Staging switch_core.{js,wasm} into platform/web/public/core"
+  )
 endif()

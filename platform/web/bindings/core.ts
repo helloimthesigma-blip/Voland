@@ -23,7 +23,23 @@ export interface SwitchCoreExports {
   readonly _cpu_get_reg_ffi: (index: number) => bigint;
   readonly _cpu_set_reg_ffi: (index: number, value: bigint) => void;
   readonly _cpu_get_pc_ffi:  () => bigint;
+
+  /* Game load (core/stubs/wasm_entry.c). The file is never copied in
+   * whole: the core pulls bytes through the `volandReadGameFile` hook the
+   * worker passes to the module factory (§15). Returns a Result code
+   * (bindings/load.ts CoreResult). */
+  readonly _emulator_load_program_ffi:        (fileSize: bigint, aslrSeed: bigint) => number;
+  readonly _emulator_unload_program_ffi:      () => void;
+  readonly _emulator_last_error_message_ffi:  () => bigint; /* const char* or 0 */
+  readonly _emulator_program_id_ffi:          () => bigint;
 }
+
+/**
+ * Synchronous read hook the core calls while loading (byte_source.h
+ * contract): copy exactly `size` bytes of the game file at `offset` into
+ * linear memory at `destination`, returning false on any failure.
+ */
+export type GameFileReadHook = (offset: number, destination: number, size: number) => boolean;
 
 /* Mirrors the #if ladder in core/stubs/wasm_entry.c's cpu_backend_id_ffi -
  * CPU_BACKEND is a CMake configure-time choice, never a runtime one, so

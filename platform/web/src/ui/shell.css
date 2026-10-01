@@ -139,3 +139,50 @@
 .voland-log-scroll .log-error { color: #ff8b8b; }
 .voland-log-scroll .log-debug { color: #8d8d99; }
 .voland-log-scroll .log-trace { color: #5a5a66; }
+
+.voland-load {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 14px;
+  max-width: 640px;
+}
+
+.voland-load-input { display: none; }
+
+.voland-load-button {
+  font: inherit;
+  font-size: 14px;
+  padding: 10px 18px;
+  border-radius: 8px;
+  border: 1px solid #2c2c3c;
+  background: #181824;
+  color: #e6e6ea;
+  cursor: pointer;
+}
+.voland-load-button:hover:not(:disabled) { background: #20202f; }
+.voland-load-button:disabled { opacity: 0.5; cursor: progress; }
+
+.voland-load-note { color: #8d8d99; }
+
+.voland-load-result {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #1f1f2b;
+  border-radius: 10px;
+  padding: 16px 18px;
+  background: rgba(255, 255, 255, 0.015);
+}
+.voland-load-result h3 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+.voland-load-result p + p { margin-top: 8px; }
+.voland-load-result code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #e6e6ea; }
+.voland-load-result a { color: #9db4ff; }
+
+.voland-load-error { border-color: #4a2a2a; background: rgba(255, 90, 90, 0.05); }
+.voland-load-error h3 { color: #ff9f9f; }
+
+.voland-load-detail {
+  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #6b6b78;
+  word-break: break-word;
+}

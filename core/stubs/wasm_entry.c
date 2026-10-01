@@ -12,6 +12,7 @@
 #include "common/layout.h"
 #include "common/log.h"
 #include "emulator.h"
+#include "hle/loader/byte_source.h"
 
 #include <stddef.h>
 #include <stdint.h>
@@ -37,9 +38,50 @@ EXPORT void cpu_set_reg_ffi(uint32_t index, uint64_t value);
 EXPORT uint64_t cpu_get_pc_ffi(void);
 EXPORT int cpu_backend_id_ffi(void);
 EXPORT uint64_t layout_get_ffi(void);
+EXPORT int emulator_load_program_ffi(uint64_t file_size, uint64_t aslr_seed);
+EXPORT void emulator_unload_program_ffi(void);
+EXPORT uint64_t emulator_last_error_message_ffi(void);
+EXPORT uint64_t emulator_program_id_ffi(void);
 
 static Emulator g_emulator;
 static int g_initialised = 0;
+
+/* Message of the most recent failed emulator_load_program_ffi call. Always
+ * a static string (Error.message is never heap allocated, §3), so handing
+ * its address to JS is safe for the life of the module. */
+static const char *g_last_error_message = NULL;
+
+/* Host read hook for the game file (byte_source.h contract: synchronous,
+ * exactly `size` bytes or failure). The CPU worker supplies
+ * `volandReadGameFile` through the module factory options; it reads the
+ * user's File with FileReaderSync over `blob.slice()` (§15) straight into
+ * linear memory at `out`. Returns 1 on a full read, 0 otherwise. Pointers
+ * and u64 values may arrive as BigInt under wasm64, so the JS side
+ * normalizes both with Number() - offsets into a File and into linear
+ * memory are both below 2^53. */
+#ifdef __EMSCRIPTEN__
+EM_JS(int, voland_host_read_game_file, (uint64_t offset, void *out, uint64_t size), {
+  const read = Module["volandReadGameFile"];
+  if (typeof read !== "function") return 0;
+  return read(Number(offset), Number(out), Number(size)) ? 1 : 0;
+})
+#else
+static int voland_host_read_game_file(uint64_t offset, void *out, uint64_t size)
+{
+  (void)offset;
+  (void)out;
+  (void)size;
+  return 0; /* the native smoke binary never loads through the FFI */
+}
+#endif
+
+static Error host_game_file_read(void *user, uint64_t offset, void *out, uint64_t size)
+{
+  (void)user;
+  if (!voland_host_read_game_file(offset, out, size))
+    return ERR(RESULT_IO_ERROR, "host read of the game file failed");
+  return OK;
+}
 
 EXPORT int emulator_create_ffi(void)
 {
@@ -122,6 +164,55 @@ EXPORT uint64_t layout_get_ffi(void)
 {
   const Memory_Layout *layout = layout_get();
   return (uint64_t)(uintptr_t)layout;
+}
+
+/* "Load a game" over the FFI (§12 process bootstrap). The game file
+ * itself never crosses into linear memory as a whole: the core reads it
+ * piecewise through voland_host_read_game_file (§15). Returns the
+ * core's Result code (common/result.h; 0 = RESULT_OK). On failure the
+ * message is available from emulator_last_error_message_ffi - in
+ * particular RESULT_ENCRYPTED_INPUT, which the web UI turns into the
+ * dumping-guide error (§1.6). */
+EXPORT int emulator_load_program_ffi(uint64_t file_size, uint64_t aslr_seed)
+{
+  if (!g_initialised)
+  {
+    g_last_error_message = "emulator is not initialised";
+    return (int)RESULT_INVALID_ARGUMENT;
+  }
+  const Byte_Source source = {
+      .user = NULL,
+      .size = file_size,
+      .read = host_game_file_read,
+  };
+  const Error err = emulator_load_program(&g_emulator, &source, aslr_seed);
+  g_last_error_message = err.message;
+  if (err.code != RESULT_OK)
+    log_warn("[wasm_entry] emulator_load_program failed (%d): %s", (int)err.code,
+             err.message ? err.message : "(no message)");
+  return (int)err.code;
+}
+
+EXPORT void emulator_unload_program_ffi(void)
+{
+  if (!g_initialised)
+    return;
+  emulator_unload_program(&g_emulator);
+}
+
+/* Linear-memory address of a NUL-terminated static string, or 0. */
+EXPORT uint64_t emulator_last_error_message_ffi(void)
+{
+  return (uint64_t)(uintptr_t)g_last_error_message;
+}
+
+/* The loaded program's id from main.npdm's ACI0, or 0 if nothing is
+ * loaded. Shown to the user as the 16-hex-digit title id. */
+EXPORT uint64_t emulator_program_id_ffi(void)
+{
+  if (!g_initialised || !g_emulator.program_loaded)
+    return 0;
+  return g_emulator.process.npdm.program_id;
 }
 
 #ifndef __EMSCRIPTEN__

@@ -5,18 +5,18 @@
  *
  * Instantiation contract: `emcmake cmake --build` (CPU_BACKEND=noop by
  * default, §24) emits `switch_core.js` + `switch_core.wasm` as an
- * EXPORT_ES6 module. The build pipeline is expected to place (copy or
- * symlink) that output at `platform/web/public/core/switch_core.js` so
- * Vite serves it as a static asset; that copy step is CI plumbing, not
- * part of this design and not wired up in this repository yet. Until it
- * is, the dynamic import below fails and this worker reports a clear
- * "error" message instead of a fake "ready" - Phase 0's boot path is
- * meant to be exercised honestly, not stubbed into looking alive.
+ * EXPORT_ES6 module, and a POST_BUILD step in core/CMakeLists.txt stages
+ * both into `platform/web/public/core/` so Vite serves them as static
+ * assets. Without a web build the dynamic import below fails and this
+ * worker reports a clear "error" message instead of a fake "ready" - the
+ * boot path is meant to be exercised honestly, not stubbed into looking
+ * alive.
  */
 
-import type { CpuBackendId, SwitchCoreExports } from "@bindings/core";
+import type { CpuBackendId, GameFileReadHook, SwitchCoreExports } from "@bindings/core";
 import { CPU_BACKEND_DISPLAY_NAMES } from "@bindings/core";
 import { readMemoryLayout } from "@bindings/layout";
+import { CoreResult, formatTitleId, loadFailureFromResult, readCString } from "@bindings/load";
 import type { CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
 
 const self: DedicatedWorkerGlobalScope =
@@ -28,30 +28,97 @@ function log(level: "debug" | "info" | "warn" | "error", message: string): void 
 }
 
 /** Emscripten EXPORT_ES6+MODULARIZE factory shape: a default export that
- * takes an options object (here, the imported WebAssembly.Memory for
- * -sIMPORTED_MEMORY) and resolves to the instantiated module's exports. */
-type CoreModuleFactory = (options: { wasmMemory: WebAssembly.Memory }) => Promise<SwitchCoreExports>;
+ * takes an options object (the imported WebAssembly.Memory for
+ * -sIMPORTED_MEMORY, plus the game-file read hook wasm_entry.c's EM_JS
+ * looks up on `Module`) and resolves to the instantiated module's exports. */
+interface CoreModuleOptions {
+  readonly wasmMemory:         WebAssembly.Memory;
+  readonly volandReadGameFile: GameFileReadHook;
+}
+type CoreModuleFactory = (options: CoreModuleOptions) => Promise<SwitchCoreExports>;
 
 const CORE_MODULE_URL = "/core/switch_core.js";
 
-async function loadCoreModule(memory: WebAssembly.Memory): Promise<SwitchCoreExports> {
-  const factory = (await import(/* @vite-ignore */ CORE_MODULE_URL)).default as CoreModuleFactory;
-  return factory({ wasmMemory: memory });
-}
+/** Upper bound on a core Error message (static strings, all short). */
+const CORE_ERROR_MESSAGE_MAX_BYTES = 1024;
 
 let core: SwitchCoreExports | null = null;
+let coreMemory: WebAssembly.Memory | null = null;
+
+/* The file the core is currently reading; set only for the duration of
+ * a load-game request. The loader is synchronous (byte_source.h), so a
+ * single slot suffices. */
+let activeGameFile: File | null = null;
+const fileReader = new FileReaderSync();
+
+/** byte_source.h `read` realized over FileReaderSync + `blob.slice()`
+ * (§15): synchronous, exact-length, straight into linear memory. */
+const readGameFile: GameFileReadHook = (offset, destination, size) => {
+  if (!activeGameFile || !coreMemory) return false;
+  try {
+    const bytes = fileReader.readAsArrayBuffer(activeGameFile.slice(offset, offset + size));
+    if (bytes.byteLength !== size) return false;
+    new Uint8Array(coreMemory.buffer, destination, size).set(new Uint8Array(bytes));
+    return true;
+  } catch (e) {
+    log("warn", `game file read failed at offset ${offset}: ${e instanceof Error ? e.message : String(e)}`);
+    return false;
+  }
+};
+
+async function loadCoreModule(memory: WebAssembly.Memory): Promise<SwitchCoreExports> {
+  const factory = (await import(/* @vite-ignore */ CORE_MODULE_URL)).default as CoreModuleFactory;
+  return factory({ wasmMemory: memory, volandReadGameFile: readGameFile });
+}
+
+function randomAslrSeed(): bigint {
+  const words = crypto.getRandomValues(new BigUint64Array(1));
+  const seed = words[0] ?? 1n;
+  return seed === 0n ? 1n : seed; // 0 disables ASLR (address_space.h)
+}
+
+function loadGame(file: File): CPUToMainMessage {
+  if (!core || !coreMemory) {
+    return { type: "load-failed", failure: { reason: "internal", message: "the emulator core is not loaded" } };
+  }
+  log("info", `loading ${file.name} (${file.size} bytes)`);
+
+  /* One program per Emulator (emulator.h): replace whatever was loaded. */
+  core._emulator_unload_program_ffi();
+
+  activeGameFile = file;
+  let code: number;
+  try {
+    code = core._emulator_load_program_ffi(BigInt(file.size), randomAslrSeed());
+  } finally {
+    activeGameFile = null;
+  }
+
+  if (code !== CoreResult.Ok) {
+    const message = readCString(coreMemory.buffer, Number(core._emulator_last_error_message_ffi()),
+                                CORE_ERROR_MESSAGE_MAX_BYTES);
+    return { type: "load-failed", failure: loadFailureFromResult(code, message) };
+  }
+
+  return {
+    type: "game-loaded",
+    titleId: formatTitleId(core._emulator_program_id_ffi()),
+    entryPoint: core._cpu_get_pc_ffi(),
+  };
+}
 
 async function init(memory: WebAssembly.Memory): Promise<void> {
   log("info", "cpu.worker initialising");
 
+  coreMemory = memory;
   try {
     core = await loadCoreModule(memory);
   } catch (e) {
     const err: CPUToMainMessage = {
       type: "error",
       message: `failed to load core module from ${CORE_MODULE_URL}: ${e instanceof Error ? e.message : String(e)}. ` +
-        `Build it with emcmake cmake -B build-web && cmake --build build-web (docs/DESIGN.md §24), ` +
-        `then copy build-web/core/switch_core.{js,wasm} to platform/web/public/core/.`,
+        `Build it with cmake --preset web && cmake --build --preset web (docs/DESIGN.md §24); ` +
+        `the build stages switch_core.{js,wasm} into platform/web/public/core/.`,
     };
     self.postMessage(err);
     return;
@@ -91,6 +158,11 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
       };
       self.postMessage(err);
     });
+    return;
+  }
+
+  if (msg.type === "load-game") {
+    self.postMessage(loadGame(msg.file));
     return;
   }
 

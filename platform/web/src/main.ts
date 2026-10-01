@@ -13,6 +13,7 @@
 
 import type { CPUToMainMessage, GPUToMainMessage, MainToCPUMessage, MainToGPUMessage } from "@bindings/protocol";
 import type { MemoryLayout } from "@bindings/layout";
+import type { GameLoadOutcome } from "@bindings/load";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
 import { appendLogLine, setStatus } from "./log";
@@ -123,6 +124,7 @@ interface BootResult {
   readonly adapterLabel: string;
   readonly cpuBackend:   string;
   readonly guestRamMiB:  number;
+  readonly loadGame:     (file: File) => Promise<GameLoadOutcome>;
 }
 
 async function boot(): Promise<BootResult | null> {
@@ -185,6 +187,10 @@ async function boot(): Promise<BootResult | null> {
   let cpuSlot: Slot = "pending";
   let gpuSlot: Slot = "pending";
 
+  /* At most one load in flight: the worker answers each load-game with
+   * exactly one game-loaded or load-failed, in order. */
+  let pendingLoad: ((outcome: GameLoadOutcome) => void) | null = null;
+
   let cpuBackend:   string | null = null;
   let adapterLabel: string | null = null;
   let layout:       MemoryLayout | null = null;
@@ -216,6 +222,14 @@ async function boot(): Promise<BootResult | null> {
         resolve();
       } else if (msg.type === "halted") {
         appendLogLine("warn", "cpu halted");
+      } else if (msg.type === "game-loaded") {
+        appendLogLine("info", `loaded title ${msg.titleId}, entry 0x${msg.entryPoint.toString(16)}`);
+        pendingLoad?.({ success: true, titleId: msg.titleId, entryPoint: msg.entryPoint });
+        pendingLoad = null;
+      } else if (msg.type === "load-failed") {
+        appendLogLine("warn", `load failed (${msg.failure.reason}): ${msg.failure.message}`);
+        pendingLoad?.({ success: false, failure: msg.failure });
+        pendingLoad = null;
       }
     }, () => { cpuSlot = "failed"; updateStatus(); resolve(); });
   });
@@ -257,10 +271,31 @@ async function boot(): Promise<BootResult | null> {
   // closures (the "layout" case above), so it treats `layout` as still
   // `null` here; the cast reasserts the declared type.
   const finalLayout = layout as MemoryLayout | null;
+
+  function loadGame(file: File): Promise<GameLoadOutcome> {
+    if (pendingLoad) {
+      return Promise.resolve<GameLoadOutcome>({
+        success: false,
+        failure: { reason: "internal", message: "another game is still loading" },
+      });
+    }
+    if (cpuSlot !== "ready") {
+      return Promise.resolve<GameLoadOutcome>({
+        success: false,
+        failure: { reason: "internal", message: "the CPU worker is not running, so nothing can be loaded" },
+      });
+    }
+    return new Promise<GameLoadOutcome>((resolve) => {
+      pendingLoad = resolve;
+      cpuWorker.postMessage({ type: "load-game", file } satisfies MainToCPUMessage);
+    });
+  }
+
   return {
     adapterLabel: adapterLabel ?? "unavailable",
     cpuBackend:   cpuBackend   ?? "unavailable",
     guestRamMiB:  finalLayout ? Number(finalLayout.guestRamSize / (1024n * 1024n)) : 0,
+    loadGame,
   };
 }
 

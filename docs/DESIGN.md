@@ -1712,7 +1712,7 @@ Per §6, per-frame data (input, frames, audio, GPU commands) never travels over 
 // Main → CPU Worker
 type MainToCPUMessage =
   | { type: "init";       memory: WebAssembly.Memory }
-  | { type: "load-game";  titleId: string; fileHandle: FileSystemFileHandle }
+  | { type: "load-game";  file: File }   // see deviation note below
   | { type: "pause" } | { type: "resume" }
   | { type: "save-state"; slot: number } | { type: "load-state"; slot: number }
   | { type: "controller-connected";    index: number; profileId: string }
@@ -1722,7 +1722,9 @@ type MainToCPUMessage =
 type CPUToMainMessage =
   | { type: "layout";      layout: MemoryLayout }
   | { type: "fps";         value: number }
-  | { type: "game-loaded"; titleId: string; title: string }
+  | { type: "game-loaded"; titleId: string; entryPoint: bigint }
+  | { type: "load-failed"; failure: { reason: "encrypted-input" | "unsupported-content"
+                                            | "read-failed" | "internal"; message: string } }
   | { type: "error";       message: string }
   | { type: "halted" };
 
@@ -1742,6 +1744,8 @@ type CompilerToCPUMessage =
   | { readonly requestId: number; readonly module: WebAssembly.Module }
   | { readonly requestId: number; readonly error: string };
 ```
+
+**Deviation (v3.28), game loading:** `load-game` carries a `File`, not `titleId + FileSystemFileHandle`. A `File` is what both the FSA path (`handle.getFile()` on the main thread) and the non-Chromium `<input type="file">` fallback (§15) produce, so the worker has one read path (`FileReaderSync` over `File.slice()`, backing the core's `Byte_Source`); and the title id is an output of parsing main.npdm, not something the main thread knows beforehand. Failures come back as `load-failed` with a user-actionable `reason` - not as `error`, which signals a dead worker - and `reason: "encrypted-input"` is §1.6's dumping-guide path. `game-loaded` reports `entryPoint` instead of a display `title`: the name lives in the Control NCA's NACP, which the loader does not read yet.
 
 ### Service Worker
 
@@ -2194,6 +2198,8 @@ if(EMSCRIPTEN)
 endif()
 ```
 
+The `EXPORTED_FUNCTIONS` list above is illustrative of shape, not current contents: the shipping exports are `_ffi`-suffixed wrappers over a module-global `Emulator` (`core/stubs/wasm_entry.c`), and `_scheduler_tick` does not exist until Phase 2. `CMakeLists.txt` is authoritative; `platform/web/bindings/core.ts` mirrors it 1:1. *(v3.28: the load path added `_emulator_load_program_ffi`, `_emulator_unload_program_ffi`, `_emulator_last_error_message_ffi`, `_emulator_program_id_ffi`.)*
+
 Flag spellings are pinned to what Emscripten 6.0.9 accepts without `-Wdeprecated`. The following are **deliberately absent** and must not be reintroduced:
 
 | Absent flag | Why |
@@ -2249,7 +2255,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 - [x] **Memory HLE (SetHeapSize, MapMemory, QueryMemory) as thin vmm layers** — the checkbox's four SVCs (UnmapMemory is MapMemory's inverse, named alongside the other three in §12's priority list). *v3.27: `hle/kernel/svc_memory.{h,c}`; register ABI and MapMemory/UnmapMemory semantics verified against libnx's `svc.s`/`svc.h`/`thread.c` rather than assumed (SetHeapSize's size arrives in X1, not X0). Two scoped-down simplifications, documented in `svc_memory.h` and the "Deviation" note after §12's HLE result type: UnmapMemory requires an exact match against a recorded MapMemory call (no partial unmap); QueryMemory's `MemoryInfo.type`/`attr` model only the address-space regions reachable by a Phase 1 title, not Horizon's full ~30-value enum. `page_allocator.h` gained the release path (a small freelist) it had already anticipated needing for SetHeapSize's shrink and process teardown. Full account in the Changelog v3.26 → v3.27 entry.*
 - [ ] Minimal IPC + sm: stub
 - [ ] Input region + seqlock writer/reader (§18)
-- [ ] User-facing error path for encrypted input → dumping guide
+- [x] User-facing error path for encrypted input → dumping guide. *v3.28: the web shell's file picker loads an NCA through `emulator_load_program_ffi` (`core/stubs/wasm_entry.c`), the core reading the `File` piecewise via a `FileReaderSync` hook (§15); `RESULT_ENCRYPTED_INPUT` renders as an error linking `docs/DUMP.md` (`platform/web/src/ui/LoadPanel.tsx`). Protocol deviation (`load-game` carries a `File`; new `load-failed`) stated in §16.*
 
 ### Phase 2 — First Instructions
 
@@ -2395,9 +2401,17 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.27.0*
-*Last updated: September 2026*
+*Document version: 3.28.0*
+*Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.27 → v3.28 (summary)
+
+- **§25 Phase 1 "User-facing error path for encrypted input → dumping guide" closed.** The core half already existed (structural `RESULT_ENCRYPTED_INPUT` detection, §12 loader note); what was missing was any way for a browser user to reach it. **Core (no header changes):** `core/stubs/wasm_entry.c` gains `emulator_load_program_ffi(file_size, aslr_seed)`, `emulator_unload_program_ffi`, `emulator_last_error_message_ffi` (address of the static `Error.message`) and `emulator_program_id_ffi`. The NCA's `Byte_Source` is backed by an `EM_JS` hook that calls `Module.volandReadGameFile`, which the CPU worker supplies through the module factory options and realizes with `FileReaderSync` over `File.slice()` written straight into linear memory (§15: the file is never copied in whole). `core/CMakeLists.txt` stages `switch_core.{js,wasm}` into `platform/web/public/core/` after every web link (the copy step `cpu.worker.ts` said was "not wired up yet"; the directory is gitignored). **Web:** `bindings/load.ts` maps core Result codes to four user-actionable reasons (`encrypted-input`, `unsupported-content`, `read-failed`, `internal`); `src/ui/LoadPanel.tsx` adds a file picker to the shell and renders either the loaded title id + entry point, or the error with a link to `docs/DUMP.md` and the core's message verbatim. Encrypted detection stays in the core - the UI never inspects bytes or file extensions.
+- **§16 deviation, stated:** `load-game` carries a `File`, not `titleId + FileSystemFileHandle`. `File` is what both the FSA path (`handle.getFile()`) and the non-Chromium `<input type="file">` fallback (§15) yield, and the title id is an *output* of parsing main.npdm, not an input the main thread can know. The outcome comes back as `game-loaded { titleId, entryPoint }` or a new `load-failed { failure }` (rather than the generic `error`, which `main.ts` treats as a fatal worker failure). `game-loaded` carries no `title` string yet: the display name lives in the Control NCA's NACP, which the loader does not read.
+- **§24:** `EXPORTED_FUNCTIONS` gains the four load exports. The §24 listing was already illustrative (it names `_scheduler_tick`, which does not exist until Phase 2); `CMakeLists.txt` is authoritative and §24 now says so.
+- Tests: `tests/program_nca_fixture.c` (ctest) writes a fully synthetic PROGRAM NCA to `build/native-noop/fixtures/synthetic_program.nca` and proves it loads *from disk* through a file-backed `Byte_Source`; `platform/web/tests/unit/load.test.ts` covers the Result mapping, the wording/guide-link choice, title-id formatting and the bounded C-string read; `platform/web/e2e/load.spec.ts` drives headless Chromium through the real wasm64 core for both outcomes - a noise file named `game.nsp` yields `data-reason="encrypted-input"` with the guide link, and the synthetic NCA loads with title id `0100000000042000`. The load e2e skips with an explicit reason when the core is not staged, so `boot.spec.ts` keeps working without Emscripten.
+- **Verified:** Emscripten 6.0.10 `web` preset, zero warnings; native `native-noop` (AppleClang) 17/17 ctest, zero warnings; `npm run typecheck`, `npm test` 12/12, `npm run e2e` 3/3.
 
 ### Changelog v3.26 → v3.27 (summary)
 

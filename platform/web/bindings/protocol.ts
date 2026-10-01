@@ -4,15 +4,25 @@
  * Per-frame data (input, frames, audio, GPU commands) never travels over
  * postMessage - it lives in the single shared WebAssembly.Memory (§4) and
  * is addressed through MemoryLayout offsets. Phase 0 ships the minimum
- * lifecycle surface: init + log plumbing + halt. Loading games, gamepad
- * input, and save-state messages arrive in later phases.
+ * lifecycle surface: init + log plumbing + halt. Phase 1 adds the game
+ * load request/outcome pair; gamepad connection and save-state messages
+ * arrive in later phases.
+ *
+ * `load-game` carries a `File`, not §16's `titleId + FileSystemFileHandle`:
+ * `File` is what both the FSA path (`handle.getFile()`) and the
+ * non-Chromium `<input type="file">` fallback (§15) produce, and the
+ * title id is an output of parsing (main.npdm), not an input the main
+ * thread could know. The worker reads it piecewise; it is never copied
+ * into linear memory whole.
  */
+import type { LoadFailure } from "./load";
 import type { MemoryLayout } from "./layout";
 
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
 
 export type MainToCPUMessage =
   | { readonly type: "init"; readonly memory: WebAssembly.Memory }
+  | { readonly type: "load-game"; readonly file: File }
   | { readonly type: "pause" }
   | { readonly type: "resume" }
   | { readonly type: "halt" };
@@ -22,7 +32,9 @@ export type CPUToMainMessage =
   | { readonly type: "ready"; readonly backendName: string; readonly backendVersion: string }
   | { readonly type: "log"; readonly level: LogLevel; readonly message: string }
   | { readonly type: "halted" }
-  | { readonly type: "error"; readonly message: string };
+  | { readonly type: "error"; readonly message: string }
+  | { readonly type: "game-loaded"; readonly titleId: string; readonly entryPoint: bigint }
+  | { readonly type: "load-failed"; readonly failure: LoadFailure };
 
 export type MainToGPUMessage =
   | {

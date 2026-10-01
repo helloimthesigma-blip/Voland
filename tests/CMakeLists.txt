@@ -33,6 +33,15 @@ foreach(loader_test byte_source_test exefs_test romfs_test npdm_test nca_parse_t
   add_test(NAME ${loader_test} COMMAND ${loader_test})
 endforeach()
 
+# Writes the synthetic PROGRAM NCA the browser e2e loads (platform/web/
+# e2e/load.spec.ts) and proves it loads from disk. The path is fixed so
+# the e2e can find it: build/native-noop/fixtures/synthetic_program.nca.
+add_executable(program_nca_fixture program_nca_fixture.c)
+target_link_libraries(program_nca_fixture PRIVATE switch_core loader_fixtures)
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/fixtures)
+add_test(NAME program_nca_fixture
+         COMMAND program_nca_fixture ${CMAKE_BINARY_DIR}/fixtures/synthetic_program.nca)
+
 #
 # core/hle/kernel (§12 process bootstrap): the page allocator and address
 # space are pure units; process_test drives the bootstrap over a
