@@ -1,6 +1,10 @@
 {
   "version": 6,
-  "cmakeMinimumRequired": { "major": 3, "minor": 24, "patch": 0 },
+  "cmakeMinimumRequired": {
+    "major": 3,
+    "minor": 24,
+    "patch": 0
+  },
   "configurePresets": [
     {
       "name": "native-noop",
@@ -14,28 +18,65 @@
       }
     },
     {
+      "name": "native-interpreter",
+      "displayName": "Native (interpreter backend)",
+      "description": "Runs guest ARM64 code on the interpreter (\u00a78, \u00a725 Phase 2) - what the web build ships.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/native-interpreter",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CPU_BACKEND": "interpreter"
+      }
+    },
+    {
       "name": "web",
       "displayName": "Web (Emscripten)",
-      "description": "WASM build per docs/DESIGN.md §24. Requires $EMSDK to be set - run emsdk_env.{sh,ps1,bat} first.",
+      "description": "WASM build per docs/DESIGN.md \u00a724. Requires $EMSDK to be set - run emsdk_env.{sh,ps1,bat} first.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/web",
       "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CPU_BACKEND": "noop"
+        "CPU_BACKEND": "interpreter"
       }
     }
   ],
   "buildPresets": [
-    { "name": "native-noop", "configurePreset": "native-noop" },
-    { "name": "web", "configurePreset": "web" }
+    {
+      "name": "native-noop",
+      "configurePreset": "native-noop"
+    },
+    {
+      "name": "native-interpreter",
+      "configurePreset": "native-interpreter"
+    },
+    {
+      "name": "web",
+      "configurePreset": "web"
+    }
   ],
   "testPresets": [
     {
       "name": "native-noop",
       "configurePreset": "native-noop",
-      "output": { "outputOnFailure": true },
-      "execution": { "noTestsAction": "error", "stopOnFailure": true }
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": true
+      }
+    },
+    {
+      "name": "native-interpreter",
+      "configurePreset": "native-interpreter",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": true
+      }
     }
   ]
 }

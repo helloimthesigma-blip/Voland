@@ -2205,7 +2205,7 @@ if(EMSCRIPTEN)
 endif()
 ```
 
-The `EXPORTED_FUNCTIONS` list above is illustrative of shape, not current contents: the shipping exports are `_ffi`-suffixed wrappers over a module-global `Emulator` (`core/stubs/wasm_entry.c`), and `_scheduler_tick` does not exist until Phase 2. `CMakeLists.txt` is authoritative; `platform/web/bindings/core.ts` mirrors it 1:1. *(v3.28: the load path added `_emulator_load_program_ffi`, `_emulator_unload_program_ffi`, `_emulator_last_error_message_ffi`, `_emulator_program_id_ffi`.)*
+The web preset builds with `CPU_BACKEND=interpreter` since v3.34 (the interpreter is the web execution path, §1); `native-noop` stays the default native preset and `native-interpreter` exists alongside it. The `EXPORTED_FUNCTIONS` list above is illustrative of shape, not current contents: the shipping exports are `_ffi`-suffixed wrappers over a module-global `Emulator` (`core/stubs/wasm_entry.c`), and `_scheduler_tick` does not exist until Phase 2. `CMakeLists.txt` is authoritative; `platform/web/bindings/core.ts` mirrors it 1:1. *(v3.28: the load path added `_emulator_load_program_ffi`, `_emulator_unload_program_ffi`, `_emulator_last_error_message_ffi`, `_emulator_program_id_ffi`.)*
 
 Flag spellings are pinned to what Emscripten 6.0.9 accepts without `-Wdeprecated`. The following are **deliberately absent** and must not be reintroduced:
 
@@ -2264,13 +2264,13 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 - [x] Input region + seqlock writer/reader (§18). *v3.30: `core/common/input_region.{h,c}` (bounded, never-blocking reader; C writer for native) and `platform/web/src/input/` (region writer, Gamepad API + keyboard mappings, rAF pump; connect/disconnect as §16 lifecycle messages). Slot layout and button bits fixed in the §18 note below.*
 - [x] User-facing error path for encrypted input → dumping guide. *v3.28: the web shell's file picker loads an NCA through `emulator_load_program_ffi` (`core/stubs/wasm_entry.c`), the core reading the `File` piecewise via a `FileReaderSync` hook (§15); `RESULT_ENCRYPTED_INPUT` renders as an error linking `docs/DUMP.md` (`platform/web/src/ui/LoadPanel.tsx`). Protocol deviation (`load-game` carries a `File`; new `load-failed`) stated in §16.*
 
-### Phase 2 — First Instructions
+### Phase 2 — First Instructions (closed v3.34)
 
 - [x] Interpreter backend (partial ARM64), all memory access via vmm. *v3.32: complete ARMv8.0 A64 user ISA minus crypto - scalar FP and all Advanced SIMD (incl. structure loads/stores) on a bit-exact ARM-semantics soft-float (`softfloat.c`). 53 instruction classes match an Apple M1 under `tests/a64_diff_test.c`. v3.31, integer half: `core/cpu/backends/interpreter/` executes the whole ARMv8.0 integer ISA (DP immediate/register incl. CRC32, branches, exception generation, MRS/MSR, hints/barriers/CLREX/DC ZVA, every integer and SIMD&FP scalar load/store addressing form, exclusives, acquire/release) through vmm's inline fast path. Verified against the host CPU by `tests/a64_diff_test.c` (ARM64 hosts). SIMD&FP data processing and structure loads/stores remain.*
-- [ ] NRO loader — homebrew is this phase's proof of life
+- [x] NRO loader — homebrew is this phase's proof of life. *v3.34: `hle/loader/nro.{h,c}` describes an NRO as a raw single-module image the existing bootstrap maps; `emulator_load_nro()` with a synthesized npdm; `emulator_load()` picks NRO vs NCA structurally. The web app's **Run the demo** executes `platform/web/public/demo/hello.nro` (hand-written ARM64 in `tests/guest/hello.s`: integer, FP, NEON, a second thread) on the interpreter in the browser.*
 - [x] **Guest thread scheduler** (§7): bounded run, exit reasons, wait objects, virtual time. *v3.33: `hle/kernel/scheduler.{h,c}`; the main thread is adopted as handle 0x8000; `emulator_run_slice()` is the CPU worker's loop body.*
 - [x] Threading + sync HLE (CreateThread, StartThread, SleepThread, WaitSynchronization) on the scheduler. *v3.33: `hle/kernel/svc_thread.{h,c}` - also ExitThread/ExitProcess, priorities and core masks, CancelSynchronization, ArbitrateLock/Unlock, the process-wide-key condvar pair, WaitForAddress/SignalToAddress, GetSystemTick, GetProcessId/ThreadId, Break, OutputDebugString, GetInfo, SetMemoryAttribute.*
-- [ ] Basic IPC routing
+- [x] Basic IPC routing. *v3.34: sm: GetServiceHandle routes registered interfaces to sessions (CMIF and TIPC), domains route by object id (v3.29 implementation, exercised with a test service). The shipping registry is empty until Phase 4's services register.*
 
 ### Phase 3 — First Pixels
 
@@ -2408,9 +2408,17 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.33.0*
+*Document version: 3.34.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.33 → v3.34 (summary)
+
+- **§25 Phase 2 closed: guest code runs in the browser.** NRO loader (`hle/loader/nro.{h,c}`; an NRO becomes a raw single-module image, so `process_bootstrap` gained `single_module` instead of a second mapping path), `emulator_load_nro()`/`emulator_load()`. Homebrew is entered with the Horizon ABI (X0 = 0, X1 = main thread handle); hbloader's homebrew-ABI config block (heap override, applet type, ...) is not provided yet - libnx programs also need Phase 4 services, so it lands with them. Web: the `web` preset now builds the interpreter; `wasm_entry.c` exports `emulator_run_slice_ffi` / `emulator_virtual_ticks_ffi` / `emulator_crash_pc_ffi` and forwards svcOutputDebugString through `Module.volandGuestOutput`; the CPU worker runs scheduler slices in ~12ms bursts between event-loop turns (pause/resume/new loads stay responsive) and posts `guest-output` / `run-state` lifecycle messages (§16 protocol additions; guest-paced, never per frame - §6); the shell shows the guest console and run state, with **Run the demo** loading `public/demo/hello.nro`. `tools/guest_asm.py nro` builds that demo from `tests/guest/hello.s`. Tests: `tests/nro_test.c` (the committed demo NRO end to end + `nro_open` rejections), `e2e/load.spec.ts` "the demo homebrew runs" (dev server and production build).
+- **Bug fixed - web guest RAM was not page-aligned (latent since Phase 1).** `arena_allocate()` aligned the *offset* within the arena, not the address; on web, guest RAM is carved from a `malloc`'d arena whose base is only 8/16-aligned, so `guest_ram_base` was e.g. `0x6fec8`. vmm PTEs keep permission bits in the low 12 bits of the host offset (§5), so every guest page resolved up to 0xFFF bytes *below* its real backing: guest page 0 overlapped the WebAssembly stack. Phase 1 loads happened to corrupt unused bytes; the larger Phase 2 `Emulator` moved the stack under it and loads failed with impossible errors. Fix: `arena_allocate` aligns absolute addresses (padding counts against capacity), guest RAM is requested at `LAYOUT_GUEST_RAM_ALIGNMENT` (64KB) with that much slack in the arena. `tests/arena_test.c` fails on the old code. Native was unaffected (guest RAM is `mmap`ed there).
+- **Oracle-found bug fixed:** SUQADD on 64-bit lanes did not saturate when the accumulator was negative and the unsigned addend large enough to overflow past INT64_MAX (seen at seeds 0x65 and 0xfeedface, 10,000 instances per class).
+- Tests that assert the noop backend's contract (bounded run over filler bytes) now name `CPU_BACKEND_NOOP` instead of the active backend, so every suite passes under both native presets.
+- **Verified:** native-noop 25/25 and native-interpreter 25/25 ctest; web build zero warnings; `npm test` 18/18; `npm run e2e` 8/8 (production + dev server).
 
 ### Changelog v3.32 → v3.33 (summary)
 

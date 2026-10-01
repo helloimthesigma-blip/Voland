@@ -150,8 +150,8 @@ static void describe_module(const NSO *nso, const char *name, uint64_t base_gva,
 }
 
 Error process_bootstrap(const Process_Bootstrap_Params *params, Process *out) {
-  if (!params || !out || !params->exefs || !params->npdm || !params->vmm || !params->pages ||
-      !params->scratch) {
+  if (!params || !out || (!params->exefs == !params->single_module) || !params->npdm || !params->vmm ||
+      !params->pages || !params->scratch) {
     return ERR(RESULT_INVALID_ARGUMENT, "process_bootstrap: NULL argument");
   }
   const NPDM *npdm = params->npdm;
@@ -171,7 +171,14 @@ Error process_bootstrap(const Process_Bootstrap_Params *params, Process *out) {
   uint32_t module_count = 0;
   uint64_t code_size = 0;
   bool has_main = false;
-  for (uint32_t i = 0; i < PROCESS_MAX_MODULES; i++) {
+  if (params->single_module) {
+    nsos[0] = *params->single_module;
+    copy_name(names[0], EXEFS_FILE_MAIN);
+    code_size = nsos[0].image_size;
+    module_count = 1;
+    has_main = true;
+  }
+  for (uint32_t i = 0; i < PROCESS_MAX_MODULES && params->exefs; i++) {
     char name[PROCESS_MODULE_NAME_BYTES];
     module_name_at(i, name);
     const ExeFS_Entry *entry = exefs_find(params->exefs, name);

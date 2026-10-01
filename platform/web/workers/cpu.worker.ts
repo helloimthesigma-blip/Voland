@@ -13,10 +13,10 @@
  * alive.
  */
 
-import type { CpuBackendId, GameFileReadHook, SwitchCoreExports } from "@bindings/core";
+import type { CpuBackendId, GameFileReadHook, GuestOutputHook, SwitchCoreExports } from "@bindings/core";
 import { CPU_BACKEND_DISPLAY_NAMES } from "@bindings/core";
 import { readMemoryLayout } from "@bindings/layout";
-import { CoreResult, formatTitleId, loadFailureFromResult, readCString } from "@bindings/load";
+import { CoreResult, formatTitleId, loadFailureFromResult, readCString, runStateAfterSlice } from "@bindings/load";
 import type { CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
 
 const self: DedicatedWorkerGlobalScope =
@@ -34,6 +34,7 @@ function log(level: "debug" | "info" | "warn" | "error", message: string): void 
 interface CoreModuleOptions {
   readonly wasmMemory:         WebAssembly.Memory;
   readonly volandReadGameFile: GameFileReadHook;
+  readonly volandGuestOutput:  GuestOutputHook;
 }
 type CoreModuleFactory = (options: CoreModuleOptions) => Promise<SwitchCoreExports>;
 
@@ -66,6 +67,55 @@ const readGameFile: GameFileReadHook = (offset, destination, size) => {
   }
 };
 
+const guestOutput: GuestOutputHook = (address, length) => {
+  if (!coreMemory) return;
+  // slice() copies out of the shared buffer; TextDecoder rejects SAB views.
+  const bytes = new Uint8Array(coreMemory.buffer, address, length).slice();
+  const msg: CPUToMainMessage = { type: "guest-output", text: new TextDecoder().decode(bytes) };
+  self.postMessage(msg);
+};
+
+/* ------------------------------------------------------------------ */
+/* Run loop (§7): scheduler slices in ~12ms bursts, then yield so      */
+/* lifecycle messages (pause, a new load) are handled promptly.        */
+/* ------------------------------------------------------------------ */
+
+const SLICE_CYCLES = 200_000n;
+const BURST_MS = 12;
+let running = false;
+let paused = false;
+
+function postRunState(state: "running" | "exited" | "crashed" | "deadlock" | "paused", detail: string): void {
+  const msg: CPUToMainMessage = { type: "run-state", state, detail };
+  self.postMessage(msg);
+}
+
+function runBurst(): void {
+  if (!core || !running || paused) return;
+  const deadline = performance.now() + BURST_MS;
+  while (performance.now() < deadline) {
+    const status = core._emulator_run_slice_ffi(SLICE_CYCLES);
+    const finished = runStateAfterSlice(status);
+    if (finished) {
+      running = false;
+      const ticks = core._emulator_virtual_ticks_ffi();
+      const detail = finished === "crashed"
+        ? `stopped at pc=0x${core._emulator_crash_pc_ffi().toString(16)}`
+        : `virtual time ${ticks} ticks`;
+      postRunState(finished, detail);
+      return;
+    }
+  }
+  setTimeout(runBurst, 0);
+}
+
+function startRunning(): void {
+  running = true;
+  paused = false;
+  postRunState("running", "");
+  setTimeout(runBurst, 0);
+}
+
 async function loadCoreModule(memory: WebAssembly.Memory): Promise<SwitchCoreExports> {
   /* An absolute URL, not the bare "/core/..." path: Vite's dev server
    * appends `?import` to root-relative dynamic imports and then refuses
@@ -74,7 +124,7 @@ async function loadCoreModule(memory: WebAssembly.Memory): Promise<SwitchCoreExp
    * equivalent in a production build. */
   const coreUrl = new URL(CORE_MODULE_URL, self.location.origin).href;
   const factory = (await import(/* @vite-ignore */ coreUrl)).default as CoreModuleFactory;
-  return factory({ wasmMemory: memory, volandReadGameFile: readGameFile });
+  return factory({ wasmMemory: memory, volandReadGameFile: readGameFile, volandGuestOutput: guestOutput });
 }
 
 function randomAslrSeed(): bigint {
@@ -90,6 +140,7 @@ function loadGame(file: File): CPUToMainMessage {
   log("info", `loading ${file.name} (${file.size} bytes)`);
 
   /* One program per Emulator (emulator.h): replace whatever was loaded. */
+  running = false;
   core._emulator_unload_program_ffi();
 
   activeGameFile = file;
@@ -168,7 +219,9 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   }
 
   if (msg.type === "load-game") {
-    self.postMessage(loadGame(msg.file));
+    const outcome = loadGame(msg.file);
+    self.postMessage(outcome);
+    if (outcome.type === "game-loaded") startRunning();
     return;
   }
 
@@ -181,10 +234,16 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     return;
   }
 
-  if (msg.type === "pause" || msg.type === "resume") {
-    // No scheduler yet (§7 is Phase 2); acknowledged so main.ts's
-    // visibilitychange handler has somewhere real to send these.
-    log("debug", `${msg.type} (no-op until the Phase 2 scheduler exists)`);
+  if (msg.type === "pause") {
+    paused = true;
+    return;
+  }
+  if (msg.type === "resume") {
+    if (paused && running) {
+      paused = false;
+      setTimeout(runBurst, 0);
+    }
+    paused = false;
     return;
   }
 

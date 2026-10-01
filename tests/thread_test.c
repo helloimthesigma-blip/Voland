@@ -45,7 +45,7 @@ int main(void) {
   CHECK(vmm != NULL);
   Page_Allocator pages;
   CHECK_OK(page_allocator_init(&pages, 0, 16 * PAGE));
-  const CPU_Backend *cpu = cpu_get_active_backend();
+  const CPU_Backend *cpu = &CPU_BACKEND_NOOP; /* asserts the noop contract on non-code bytes */
   CHECK(cpu != NULL);
   HLE_Context hle;
   /* No Process/pages here - this test only exercises SVC dispatch

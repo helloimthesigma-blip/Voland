@@ -32,8 +32,15 @@ static size_t align_up(size_t value, size_t alignment) {
 
 void* arena_allocate(Arena* arena, size_t size, size_t alignment) {
   SWITCH_ASSERT_ALWAYS(arena != NULL, "arena_allocate: arena is NULL");
-  size_t aligned = align_up(arena->used_bytes, alignment);
-  if (aligned + size > arena->capacity_bytes) return NULL;
+  /* Align the ADDRESS, not the offset: the base is whatever malloc (or
+   * the caller) returned, so an aligned offset is only an aligned
+   * pointer by luck. (Until v3.34 this aligned the offset, which left
+   * the web build's guest RAM unaligned - see DESIGN.md changelog.) */
+  const uintptr_t base = (uintptr_t)arena->base;
+  const size_t aligned = (size_t)(align_up(base + arena->used_bytes, alignment) - base);
+  if (aligned < arena->used_bytes || aligned > arena->capacity_bytes || size > arena->capacity_bytes - aligned) {
+    return NULL;
+  }
   void* ptr = arena->base + aligned;
   arena->used_bytes = aligned + size;
   return ptr;

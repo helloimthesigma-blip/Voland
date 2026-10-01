@@ -36,6 +36,7 @@ set(SWITCH_CORE_SOURCES
   hle/loader/romfs.c
   hle/loader/npdm.c
   hle/loader/nso.c
+  hle/loader/nro.c
   emulator.c
 )
 
@@ -87,6 +88,7 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   hle/loader/romfs.h
   hle/loader/npdm.h
   hle/loader/nso.h
+  hle/loader/nro.h
   emulator.h
 )
 

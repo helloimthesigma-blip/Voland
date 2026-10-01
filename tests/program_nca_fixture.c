@@ -120,6 +120,10 @@ int main(int argc, char **argv) {
   CHECK(emu.program_loaded);
   CHECK(emu.process.npdm.program_id == FIXTURE_PROGRAM_ID);
   CHECK(emu.cpu_backend->get_pc(emu.cpu_state) == emu.process.entry_point);
+  /* The auto-detecting entry point routes an NCA to the NCA loader. */
+  emulator_unload_program(&emu);
+  CHECK_OK(emulator_load(&emu, &source, 0x5EED));
+  CHECK(emu.process.npdm.program_id == FIXTURE_PROGRAM_ID);
   emulator_destroy(&emu);
   CHECK(fclose(in) == 0);
 

@@ -142,3 +142,12 @@ target_link_libraries(guest_fixture PRIVATE switch_core loader_fixtures)
 add_executable(scheduler_test scheduler_test.c)
 target_link_libraries(scheduler_test PRIVATE switch_core guest_fixture loader_fixtures)
 add_test(NAME scheduler_test COMMAND scheduler_test)
+
+# Homebrew NRO (§12): the committed demo NRO loads and runs end to end.
+add_executable(nro_test nro_test.c)
+target_link_libraries(nro_test PRIVATE switch_core)
+add_test(NAME nro_test COMMAND nro_test ${PROJECT_SOURCE_DIR}/platform/web/public/demo/hello.nro)
+
+add_executable(arena_test arena_test.c)
+target_link_libraries(arena_test PRIVATE switch_core)
+add_test(NAME arena_test COMMAND arena_test)

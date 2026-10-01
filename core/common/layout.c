@@ -67,7 +67,8 @@ Error layout_create(void) {
   memset(&storage, 0, sizeof(storage));
 
 #if defined(__EMSCRIPTEN__)
-  const size_t arena_capacity = (size_t)(LAYOUT_GUEST_RAM_SIZE + LAYOUT_SMALL_REGIONS_SIZE);
+  /* + alignment slack: the arena's base is malloc-aligned only. */
+  const size_t arena_capacity = (size_t)(LAYOUT_GUEST_RAM_SIZE + LAYOUT_SMALL_REGIONS_SIZE + LAYOUT_GUEST_RAM_ALIGNMENT);
 #else
   const size_t arena_capacity = (size_t)LAYOUT_SMALL_REGIONS_SIZE;
 #endif
@@ -77,7 +78,7 @@ Error layout_create(void) {
   }
 
 #if defined(__EMSCRIPTEN__)
-  storage.guest_ram = arena_allocate(&storage.arena, LAYOUT_GUEST_RAM_SIZE, 8);
+  storage.guest_ram = arena_allocate(&storage.arena, LAYOUT_GUEST_RAM_SIZE, LAYOUT_GUEST_RAM_ALIGNMENT);
 #else
   storage.guest_ram = guest_ram_reserve(LAYOUT_GUEST_RAM_SIZE);
 #endif

@@ -42,6 +42,9 @@ EXPORT int emulator_load_program_ffi(uint64_t file_size, uint64_t aslr_seed);
 EXPORT void emulator_unload_program_ffi(void);
 EXPORT uint64_t emulator_last_error_message_ffi(void);
 EXPORT uint64_t emulator_program_id_ffi(void);
+EXPORT int emulator_run_slice_ffi(uint64_t cycle_budget);
+EXPORT uint64_t emulator_virtual_ticks_ffi(void);
+EXPORT uint64_t emulator_crash_pc_ffi(void);
 
 static Emulator g_emulator;
 static int g_initialised = 0;
@@ -59,6 +62,28 @@ static const char *g_last_error_message = NULL;
  * and u64 values may arrive as BigInt under wasm64, so the JS side
  * normalizes both with Number() - offsets into a File and into linear
  * memory are both below 2^53. */
+/* Guest svcOutputDebugString text -> the CPU worker (Module.volandGuestOutput),
+ * which relays it to the page. Diagnostic text at guest pace, not per-frame
+ * data (§6). */
+#ifdef __EMSCRIPTEN__
+EM_JS(void, voland_host_guest_output, (const char *text, uint64_t length), {
+  const sink = Module["volandGuestOutput"];
+  if (typeof sink === "function") sink(Number(text), Number(length));
+})
+#else
+static void voland_host_guest_output(const char *text, uint64_t length)
+{
+  (void)text;
+  (void)length;
+}
+#endif
+
+static void forward_guest_output(void *userdata, const char *text, size_t length)
+{
+  (void)userdata;
+  voland_host_guest_output(text, (uint64_t)length);
+}
+
 #ifdef __EMSCRIPTEN__
 EM_JS(int, voland_host_read_game_file, (uint64_t offset, void *out, uint64_t size), {
   const read = Module["volandReadGameFile"];
@@ -93,6 +118,7 @@ EXPORT int emulator_create_ffi(void)
     log_error("[wasm_entry] emulator_create failed: %s", err.message);
     return 0;
   }
+  emulator_set_debug_output(&g_emulator, forward_guest_output, NULL);
   g_initialised = 1;
   return 1;
 }
@@ -151,6 +177,8 @@ EXPORT int cpu_backend_id_ffi(void)
 {
 #if defined(SWITCH_CPU_BACKEND_NOOP)
   return 0; /* CpuBackendId.Noop, bindings/core.ts */
+#elif defined(SWITCH_CPU_BACKEND_INTERPRETER)
+  return 1; /* CpuBackendId.Interpreter */
 #else
   return -1;
 #endif
@@ -185,7 +213,7 @@ EXPORT int emulator_load_program_ffi(uint64_t file_size, uint64_t aslr_seed)
       .size = file_size,
       .read = host_game_file_read,
   };
-  const Error err = emulator_load_program(&g_emulator, &source, aslr_seed);
+  const Error err = emulator_load(&g_emulator, &source, aslr_seed);
   g_last_error_message = err.message;
   if (err.code != RESULT_OK)
     log_warn("[wasm_entry] emulator_load_program failed (%d): %s", (int)err.code,
@@ -198,6 +226,25 @@ EXPORT void emulator_unload_program_ffi(void)
   if (!g_initialised)
     return;
   emulator_unload_program(&g_emulator);
+}
+
+/* One scheduler slice (§7); returns Emulator_Status. The CPU worker's
+ * loop body. */
+EXPORT int emulator_run_slice_ffi(uint64_t cycle_budget)
+{
+  if (!g_initialised)
+    return (int)EMULATOR_NOT_LOADED;
+  return (int)emulator_run_slice(&g_emulator, cycle_budget);
+}
+
+EXPORT uint64_t emulator_virtual_ticks_ffi(void)
+{
+  return g_initialised ? g_emulator.scheduler.ticks : 0;
+}
+
+EXPORT uint64_t emulator_crash_pc_ffi(void)
+{
+  return g_initialised ? g_emulator.scheduler.crash_pc : 0;
 }
 
 /* Linear-memory address of a NUL-terminated static string, or 0. */

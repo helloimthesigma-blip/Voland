@@ -186,3 +186,34 @@
   color: #6b6b78;
   word-break: break-word;
 }
+
+.voland-load-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.voland-load-secondary { background: #1f2a1f; border-color: #2f4a2f; }
+.voland-load-secondary:hover:not(:disabled) { background: #263626; }
+
+.voland-run-state {
+  margin-left: 10px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: #23232f;
+  color: #b9b9c6;
+  vertical-align: middle;
+}
+.voland-run-state[data-state="running"] { background: #1d3320; color: #9be3a6; }
+.voland-run-state[data-state="exited"] { background: #1f2638; color: #a9bdf5; }
+.voland-run-state[data-state="crashed"], .voland-run-state[data-state="deadlock"] { background: #3a1f1f; color: #ff9f9f; }
+
+.voland-guest-console {
+  margin: 12px 0 0;
+  max-height: 320px;
+  overflow: auto;
+  padding: 12px 14px;
+  border-radius: 8px;
+  background: #07070a;
+  border: 1px solid #1c1c28;
+  font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+  color: #d6f5da;
+  white-space: pre-wrap;
+}

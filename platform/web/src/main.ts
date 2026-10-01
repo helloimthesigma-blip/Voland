@@ -16,6 +16,7 @@ import { type MemoryLayout, toByteOffset } from "@bindings/layout";
 import type { GameLoadOutcome } from "@bindings/load";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
+import { appendGuestOutput, resetGuestConsole, setGuestRunState } from "./guest-console";
 import { startInputLoop } from "./input/input-loop";
 import { appendLogLine, setStatus } from "./log";
 
@@ -227,6 +228,11 @@ async function boot(): Promise<BootResult | null> {
         appendLogLine("info", `loaded title ${msg.titleId}, entry 0x${msg.entryPoint.toString(16)}`);
         pendingLoad?.({ success: true, titleId: msg.titleId, entryPoint: msg.entryPoint });
         pendingLoad = null;
+      } else if (msg.type === "guest-output") {
+        appendGuestOutput(msg.text);
+      } else if (msg.type === "run-state") {
+        appendLogLine(msg.state === "crashed" ? "error" : "info", `guest ${msg.state}${msg.detail ? `: ${msg.detail}` : ""}`);
+        setGuestRunState(msg.state, msg.detail);
       } else if (msg.type === "load-failed") {
         appendLogLine("warn", `load failed (${msg.failure.reason}): ${msg.failure.message}`);
         pendingLoad?.({ success: false, failure: msg.failure });
@@ -305,6 +311,7 @@ async function boot(): Promise<BootResult | null> {
     }
     return new Promise<GameLoadOutcome>((resolve) => {
       pendingLoad = resolve;
+      resetGuestConsole();
       cpuWorker.postMessage({ type: "load-game", file } satisfies MainToCPUMessage);
     });
   }

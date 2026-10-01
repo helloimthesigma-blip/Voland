@@ -6,10 +6,15 @@
 #include "hle/loader/exefs.h"
 #include "hle/loader/nca_parse.h"
 #include "hle/loader/npdm.h"
+#include "hle/loader/nro.h"
 #include "hle/kernel/handle_table.h"
 #include "hle/kernel/thread.h"
 
 #include <string.h>
+
+#define EMULATOR_HOMEBREW_PRIORITY 44u
+#define EMULATOR_HOMEBREW_STACK_BYTES 0x100000u
+#define EMULATOR_HOMEBREW_ARENA_BYTES ((size_t)1024 * 1024)
 
 Error emulator_create(Emulator* out) {
   return emulator_create_with_backend(out, cpu_get_active_backend());
@@ -88,6 +93,39 @@ void emulator_destroy(Emulator* emulator) {
   memset(emulator, 0, sizeof(*emulator));
 }
 
+/* Shared tail of every load: arm the main thread (Horizon entry ABI) and
+ * adopt it into the scheduler. On failure the process is torn down. */
+static Error finish_load(Emulator* emulator) {
+  Error err = OK;
+  err = process_enter_main_thread(&emulator->process, emulator->cpu_backend, emulator->cpu_state);
+  if (!error_is_ok(err)) {
+    process_teardown(&emulator->process, emulator->vmm, &emulator->pages);
+    page_allocator_reset(&emulator->pages);
+    return err;
+  }
+  /* The main thread joins the scheduler: it wraps the Emulator's own
+   * CPU_State, and its bootstrap handle (0x8000) now names it. */
+  scheduler_init(&emulator->scheduler, emulator->cpu_backend);
+  Sched_Thread *main_thread = scheduler_new_thread(&emulator->scheduler);
+  SWITCH_ASSERT_ALWAYS(main_thread != NULL, "empty scheduler has a slot");
+  main_thread->thread.cpu_state = emulator->cpu_state;
+  main_thread->thread.tls_gva = emulator->process.main_thread_tls_gva;
+  main_thread->thread.entry_point = emulator->process.entry_point;
+  main_thread->thread.stack_top = emulator->process.main_thread_stack.base + emulator->process.main_thread_stack.size;
+  main_thread->thread.priority = emulator->process.npdm.main_thread_priority;
+  main_thread->thread.preferred_core = emulator->process.npdm.main_thread_core_number;
+  main_thread->core_mask = 1ull << main_thread->thread.preferred_core;
+  main_thread->handle = emulator->process.main_thread_handle;
+  main_thread->owns_cpu_state = false;
+  main_thread->state = THREAD_STATE_RUNNABLE;
+  err = handle_table_replace(&emulator->process.handles, main_thread->handle, KERNEL_OBJECT_THREAD, main_thread);
+  SWITCH_ASSERT_ALWAYS(error_is_ok(err), "main thread handle is live");
+
+  emulator->program_loaded = true;
+  log_info("[emulator] program '%s' loaded; main thread armed at pc=0x%010llx",
+           emulator->process.npdm.name, (unsigned long long)emulator->process.entry_point);
+  return OK;
+}
 /* §12 "what load a game actually does", step 1 through 4, with the §1.6
  * encrypted-input diagnosis surfaced before any structural parse. */
 Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
@@ -161,34 +199,59 @@ Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
   arena_destroy(&scratch);
   if (!error_is_ok(err)) return err;
 
-  err = process_enter_main_thread(&emulator->process, emulator->cpu_backend, emulator->cpu_state);
+  return finish_load(emulator);
+}
+
+Error emulator_load_nro(Emulator* emulator, const Byte_Source* nro_source, uint64_t aslr_seed) {
+  if (!emulator || !nro_source) return ERR(RESULT_INVALID_ARGUMENT, "emulator_load_nro: NULL argument");
+  if (emulator->program_loaded) {
+    return ERR(RESULT_INVALID_ARGUMENT, "emulator_load_nro: a program is already loaded; unload it first");
+  }
+  NSO image;
+  Error err = nro_open(nro_source, &image);
+  if (!error_is_ok(err)) return err;
+
+  /* Homebrew has no main.npdm: the defaults hbloader's own npdm uses. */
+  NPDM npdm;
+  memset(&npdm, 0, sizeof(npdm));
+  npdm.is_64bit_instruction = true;
+  npdm.address_space = NPDM_ADDRESS_SPACE_64_BIT_39;
+  npdm.main_thread_priority = EMULATOR_HOMEBREW_PRIORITY;
+  npdm.main_thread_core_number = 0;
+  npdm.main_thread_stack_size = EMULATOR_HOMEBREW_STACK_BYTES;
+  memcpy(npdm.name, "homebrew", sizeof("homebrew"));
+  npdm.program_id = EMULATOR_HOMEBREW_PROGRAM_ID;
+
+  Arena scratch;
+  if (!arena_create(&scratch, EMULATOR_HOMEBREW_ARENA_BYTES)) {
+    return ERR(RESULT_OUT_OF_MEMORY, "emulator_load_nro: loader arena");
+  }
+  const Process_Bootstrap_Params params = {
+      .exefs = NULL,
+      .single_module = &image,
+      .npdm = &npdm,
+      .vmm = emulator->vmm,
+      .pages = &emulator->pages,
+      .scratch = &scratch,
+      .aslr_seed = aslr_seed,
+  };
+  err = process_bootstrap(&params, &emulator->process);
+  arena_destroy(&scratch);
   if (!error_is_ok(err)) {
-    process_teardown(&emulator->process, emulator->vmm, &emulator->pages);
     page_allocator_reset(&emulator->pages);
     return err;
   }
-  /* The main thread joins the scheduler: it wraps the Emulator's own
-   * CPU_State, and its bootstrap handle (0x8000) now names it. */
-  scheduler_init(&emulator->scheduler, emulator->cpu_backend);
-  Sched_Thread *main_thread = scheduler_new_thread(&emulator->scheduler);
-  SWITCH_ASSERT_ALWAYS(main_thread != NULL, "empty scheduler has a slot");
-  main_thread->thread.cpu_state = emulator->cpu_state;
-  main_thread->thread.tls_gva = emulator->process.main_thread_tls_gva;
-  main_thread->thread.entry_point = emulator->process.entry_point;
-  main_thread->thread.stack_top = emulator->process.main_thread_stack.base + emulator->process.main_thread_stack.size;
-  main_thread->thread.priority = emulator->process.npdm.main_thread_priority;
-  main_thread->thread.preferred_core = emulator->process.npdm.main_thread_core_number;
-  main_thread->core_mask = 1ull << main_thread->thread.preferred_core;
-  main_thread->handle = emulator->process.main_thread_handle;
-  main_thread->owns_cpu_state = false;
-  main_thread->state = THREAD_STATE_RUNNABLE;
-  err = handle_table_replace(&emulator->process.handles, main_thread->handle, KERNEL_OBJECT_THREAD, main_thread);
-  SWITCH_ASSERT_ALWAYS(error_is_ok(err), "main thread handle is live");
+  return finish_load(emulator);
+}
 
-  emulator->program_loaded = true;
-  log_info("[emulator] program '%s' loaded; main thread armed at pc=0x%010llx",
-           emulator->process.npdm.name, (unsigned long long)emulator->process.entry_point);
-  return OK;
+Error emulator_load(Emulator* emulator, const Byte_Source* source, uint64_t aslr_seed) {
+  if (!emulator || !source) return ERR(RESULT_INVALID_ARGUMENT, "emulator_load: NULL argument");
+  uint8_t magic[4] = {0};
+  if (source->size >= NRO_HEADER_END && error_is_ok(byte_source_read(source, NRO_HEADER_OFFSET, magic, sizeof(magic))) &&
+      memcmp(magic, "NRO0", sizeof(magic)) == 0) {
+    return emulator_load_nro(emulator, source, aslr_seed);
+  }
+  return emulator_load_program(emulator, source, aslr_seed);
 }
 
 void emulator_unload_program(Emulator* emulator) {

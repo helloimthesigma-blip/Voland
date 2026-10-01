@@ -401,11 +401,12 @@ static bool int_misc_lane(Interp_State *s, bool u, unsigned opcode, unsigned esi
   switch (((unsigned)u << 5) | opcode) {
   case 0x03: /* SUQADD: signed accumulator plus unsigned addend */
     if (wide) {
-      const uint64_t r = d + a;
-      const bool d_neg = (d >> 63) != 0;
-      if (!d_neg && r < d) { set_qc(s); *out = 0x7FFFFFFFFFFFFFFFull; }
-      else if (!d_neg && (r >> 63)) { set_qc(s); *out = 0x7FFFFFFFFFFFFFFFull; }
-      else *out = r;
+      /* The sum only grows (a is unsigned): it overflows iff a exceeds
+       * INT64_MAX - d, computed without overflow for either sign of d. */
+      const uint64_t max = 0x7FFFFFFFFFFFFFFFull;
+      const uint64_t headroom = (d >> 63) ? max + (0u - d) : max - d;
+      if (a > headroom) { set_qc(s); *out = max; }
+      else *out = d + a;
     } else {
       *out = sat_s(s, sign_extend(d, esize) + (int64_t)a, esize);
     }

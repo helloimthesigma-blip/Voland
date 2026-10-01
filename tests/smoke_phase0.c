@@ -29,7 +29,7 @@
 int main(void)
 {
   Emulator emu;
-  Error err = emulator_create(&emu);
+  Error err = emulator_create_with_backend(&emu, &CPU_BACKEND_NOOP); /* the noop contract (§9) */
   CHECK(err.code == RESULT_OK);
   CHECK(emu.cpu_backend != NULL);
   CHECK(emu.cpu_state != NULL);

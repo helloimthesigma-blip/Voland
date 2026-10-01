@@ -89,6 +89,19 @@ void emulator_destroy(Emulator *emulator);
  * emulator_unload_program(). */
 Error emulator_load_program(Emulator *emulator, const Byte_Source *nca, uint64_t aslr_seed);
 
+/* "Load homebrew" (§12): an NRO file (nro.h) becomes the process's single
+ * `main` module, with a synthesized npdm (39-bit address space, priority
+ * 44, core 0, 1MB stack, program id EMULATOR_HOMEBREW_PROGRAM_ID). Entered
+ * with the Horizon ABI (X0 = 0, X1 = main thread handle). */
+#define EMULATOR_HOMEBREW_PROGRAM_ID 0x0500000000000001ull
+Error emulator_load_nro(Emulator *emulator, const Byte_Source *nro, uint64_t aslr_seed);
+
+/* Loads whichever executable `source` is, decided structurally: an "NRO0"
+ * magic at 0x10 is homebrew (emulator_load_nro); anything else is treated
+ * as a PROGRAM NCA (emulator_load_program), whose own checks report
+ * encrypted or foreign input (§1.6). */
+Error emulator_load(Emulator *emulator, const Byte_Source *source, uint64_t aslr_seed);
+
 /* Unmaps the process and resets the page allocator. No-op if nothing is
  * loaded. */
 void emulator_unload_program(Emulator *emulator);

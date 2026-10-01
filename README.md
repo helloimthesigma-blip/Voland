@@ -4,7 +4,7 @@ A Nintendo Switch emulator targeting the web as a primary platform, with native 
 
 Play Switch games in your browser. No installation. No setup beyond providing your own keys and games.
 
-> **Status:** Early development — **Phase 2 (First Instructions)** of the plan in [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Phase 1 is complete: the web app loads a decrypted Program NCA into guest memory (encrypted files point to the [dumping guide](docs/DUMP.md)), and the kernel has memory SVCs, a handle table, IPC with the `sm:` service manager, and a controller-input channel from the browser. Next is the ARM64 interpreter, the homebrew (NRO) loader and the guest thread scheduler. Nothing executes guest code yet.
+> **Status:** Early development — **Phase 3 (First Pixels)** of the plan in [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Phases 0–2 are complete: an ARM64 interpreter (the full ARMv8.0 user instruction set except crypto, verified instruction-by-instruction against real hardware) runs guest threads under a green-thread scheduler with IPC, `sm:` and the threading/sync syscalls, and the web app runs homebrew in the browser (try **Run the demo**) or loads a decrypted Program NCA. Next is graphics output (nvdrv, framebuffer, WebGPU presentation); commercial games still need the Phase 4 services and GPU before they show anything.
 
 ---
 
@@ -67,7 +67,7 @@ The CPU backend vtable means Voland is not blocked on Ballistic. Current backend
 | Backend | Status | Notes |
 |---|---|---|
 | noop | Complete | Default - everything except game execution is testable |
-| interpreter | Planned | Slow but correct, unblocks homebrew |
+| interpreter | Working | ARMv8.0 user ISA (no crypto), hardware-verified; the web execution path |
 | dynarmic | Planned | Interim desktop backend - archived upstream, requires patching for GCC 14 |
 | ballistic | Planned | Primary target, wired in when instruction coverage is sufficient |
 

@@ -164,7 +164,7 @@ int main(void) {
 
   /* --- Steps 1-4 through the emulator: "load a game". --- */
   Emulator emu;
-  CHECK_OK(emulator_create(&emu));
+  CHECK_OK(emulator_create_with_backend(&emu, &CPU_BACKEND_NOOP)); /* fixture code is filler, not instructions */
   CHECK(!emu.program_loaded);
   CHECK_OK(emulator_load_program(&emu, &file, 0));
   CHECK(emu.program_loaded);

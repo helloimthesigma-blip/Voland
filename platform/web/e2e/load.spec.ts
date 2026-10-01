@@ -64,3 +64,15 @@ test("a decrypted program NCA loads and reports its title id", async ({ page }) 
   await expect(success).toBeVisible();
   await expect(success).toContainText(EXPECTED_TITLE_ID);
 });
+
+test("the demo homebrew runs on the interpreter and prints its results", async ({ page }) => {
+  await page.getByTestId("run-demo").click();
+  const runState = page.getByTestId("run-state");
+  await expect(runState).toHaveAttribute("data-state", "exited", { timeout: 20_000 });
+  const console = page.getByTestId("guest-console");
+  await expect(console).toContainText("Hello from Voland!");
+  await expect(console).toContainText("fib(90) = 2880067194370816120");
+  await expect(console).toContainText("sqrt(2) x 10^9 = 1414213562");
+  await expect(console).toContainText("dot([1,2,3,4], [5,6,7,8]) = 70");
+  await expect(console).toContainText("hello from a second guest thread");
+});

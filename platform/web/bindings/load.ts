@@ -38,6 +38,33 @@ export interface LoadFailure {
   readonly message: string;
 }
 
+/** Mirrors Emulator_Status in core/emulator.h. */
+export const EmulatorStatus = {
+  Running:   0,
+  Idle:      1,
+  Exited:    2,
+  Crashed:   3,
+  Deadlock:  4,
+  NotLoaded: 5,
+} as const;
+
+export type RunState = "running" | "exited" | "crashed" | "deadlock" | "paused";
+
+/** Which run state a slice status ends in, or null while it keeps running. */
+export function runStateAfterSlice(status: number): RunState | null {
+  switch (status) {
+    case EmulatorStatus.Running:
+    case EmulatorStatus.Idle:
+      return null;
+    case EmulatorStatus.Exited:
+      return "exited";
+    case EmulatorStatus.Deadlock:
+      return "deadlock";
+    default:
+      return "crashed";
+  }
+}
+
 /** What the main thread hands the UI for one load request. */
 export type GameLoadOutcome =
   | { readonly success: true;  readonly titleId: string; readonly entryPoint: bigint }

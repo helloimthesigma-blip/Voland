@@ -35,6 +35,10 @@
  * automatically by the OS-level reservation in layout.c (mmap/VirtualAlloc
  * always return page-aligned addresses), not an explicit parameter. */
 #define LAYOUT_GUEST_RAM_SIZE ((uint64_t)4 * 1024 * 1024 * 1024)
+/* Guest RAM must start on a page boundary: vmm PTEs keep permission bits
+ * in the low 12 bits of the host offset (vmm.h). 64KB (a wasm page) is a
+ * superset of that requirement. */
+#define LAYOUT_GUEST_RAM_ALIGNMENT ((uint64_t)0x10000)
 
 /* Softmmu L1 page table: 8192 entries * 8 bytes (§5). L2 tables are
  * allocated on demand from an arena in Phase 1 and are not part of the

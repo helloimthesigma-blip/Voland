@@ -26,8 +26,9 @@ int arena_create(Arena *out, size_t capacity_bytes);
 /* Create an arena over caller-provided memory (e.g. SharedArrayBuffer). */
 void arena_create_in_place(Arena *out, void *memory, size_t capacity_bytes);
 
-/* Allocate `size` bytes aligned to `alignment` (power of two). Returns NULL
- * when the arena is full. Never mallocs. */
+/* Allocate `size` bytes whose ADDRESS is aligned to `alignment` (power of
+ * two) - whatever the alignment of the arena's own base. Returns NULL when
+ * the arena is full (alignment padding counts). Never mallocs. */
 void *arena_allocate(Arena *arena, size_t size, size_t alignment);
 
 /* Rewind to empty. Existing pointers become invalid. */

@@ -40,7 +40,7 @@ function App(props: AppProps) {
       <header class="voland-header">
         <div class="voland-brand">
           <span class="voland-title">Voland</span>
-          <span class="voland-subtitle">Phase 1 · load &amp; memory</span>
+          <span class="voland-subtitle">Phase 2 · first instructions</span>
         </div>
         <div class="voland-status">{status()}</div>
       </header>
@@ -48,7 +48,7 @@ function App(props: AppProps) {
       <section class="voland-main">
         <div class="voland-hero">
           <h2>Runtime online.</h2>
-          <p>Both workers initialised. The core is idle, waiting for a title.</p>
+          <p>Both workers initialised. Load a decrypted Program NCA or a homebrew NRO, or run the built-in demo.</p>
           <LoadPanel loadGame={props.loadGame} />
           <dl class="voland-facts">
             <div><dt>CPU backend</dt><dd>{props.cpuBackend}</dd></div>

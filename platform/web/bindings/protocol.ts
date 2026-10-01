@@ -15,7 +15,7 @@
  * thread could know. The worker reads it piecewise; it is never copied
  * into linear memory whole.
  */
-import type { LoadFailure } from "./load";
+import type { LoadFailure, RunState } from "./load";
 import type { MemoryLayout } from "./layout";
 
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
@@ -38,7 +38,11 @@ export type CPUToMainMessage =
   | { readonly type: "halted" }
   | { readonly type: "error"; readonly message: string }
   | { readonly type: "game-loaded"; readonly titleId: string; readonly entryPoint: bigint }
-  | { readonly type: "load-failed"; readonly failure: LoadFailure };
+  | { readonly type: "load-failed"; readonly failure: LoadFailure }
+  /* Guest debug text (svcOutputDebugString) and run-state changes: both
+   * happen at guest pace, never per frame (§6). */
+  | { readonly type: "guest-output"; readonly text: string }
+  | { readonly type: "run-state"; readonly state: RunState; readonly detail: string };
 
 export type MainToGPUMessage =
   | {

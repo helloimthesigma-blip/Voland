@@ -146,7 +146,10 @@ typedef struct Process {
 } Process;
 
 typedef struct Process_Bootstrap_Params {
-  const ExeFS *exefs;    /* opened; its source must outlive the call */
+  const ExeFS *exefs;    /* opened; its source must outlive the call. NULL with single_module */
+  /* Alternative to `exefs` (v3.34): one already-described module that
+   * becomes `main` - an NRO through nro_open() (homebrew, §12). */
+  const NSO *single_module;
   const NPDM *npdm;      /* parsed main.npdm */
   VMM_Context *vmm;
   Page_Allocator *pages;

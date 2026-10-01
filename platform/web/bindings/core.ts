@@ -32,7 +32,15 @@ export interface SwitchCoreExports {
   readonly _emulator_unload_program_ffi:      () => void;
   readonly _emulator_last_error_message_ffi:  () => bigint; /* const char* or 0 */
   readonly _emulator_program_id_ffi:          () => bigint;
+
+  /* Execution (§7): one scheduler slice; returns EmulatorStatus. */
+  readonly _emulator_run_slice_ffi:     (cycleBudget: bigint) => number;
+  readonly _emulator_virtual_ticks_ffi: () => bigint;
+  readonly _emulator_crash_pc_ffi:      () => bigint;
 }
+
+/* Guest svcOutputDebugString hook: text at `address` in linear memory. */
+export type GuestOutputHook = (address: number, length: number) => void;
 
 /**
  * Synchronous read hook the core calls while loading (byte_source.h
