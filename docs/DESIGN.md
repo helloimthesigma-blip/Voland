@@ -2272,13 +2272,13 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 - [x] Threading + sync HLE (CreateThread, StartThread, SleepThread, WaitSynchronization) on the scheduler. *v3.33: `hle/kernel/svc_thread.{h,c}` - also ExitThread/ExitProcess, priorities and core masks, CancelSynchronization, ArbitrateLock/Unlock, the process-wide-key condvar pair, WaitForAddress/SignalToAddress, GetSystemTick, GetProcessId/ThreadId, Break, OutputDebugString, GetInfo, SetMemoryAttribute.*
 - [x] Basic IPC routing. *v3.34: sm: GetServiceHandle routes registered interfaces to sessions (CMIF and TIPC), domains route by object id (v3.29 implementation, exercised with a test service). The shipping registry is empty until Phase 4's services register.*
 
-### Phase 3 — First Pixels
+### Phase 3 — First Pixels (closed v3.37)
 
 - [x] Minimal nvdrv stub (nvmap + channel submit) + **syncpoint skeleton over the GPU completion ring**. *v3.36: `hle/services/nvdrv/nvdrv.{h,c}` (8 devices, libnx ioctl layouts), `gpu/syncpoint.{h,c}` (syncpoints + the SPSC completion ring, drained every scheduler slice), kernel events (`hle/kernel/event.{h,c}`).*
 - [x] NVDEC/VIC **syncpoint-signalling stub** (black frames that complete — cutscene titles deadlock without it, §13). *v3.36: nvhost-nvdec/vic/nvjpg channel SUBMIT completes every syncpoint increment at once.*
 - [x] Framebuffer-blit path: double-buffered slots + publish counters (§6). *v3.35: `core/gpu/framebuffer.{h,c}` (+ `bindings/framebuffer.ts`); the core publishes a test card at boot until a guest presents (vi:, Phase 4).*
 - [x] WebGPU renderer (texture upload + fullscreen quad), `Atomics.waitAsync` consumer. *v3.35: `workers/gpu.worker.ts`; pixel-verified by `e2e/display.spec.ts` under SwiftShader.*
-- [ ] **voland-cli headless runner** (Dawn offscreen, golden-image hashing) — the native test harness (§17)
+- [x] **voland-cli headless runner** (Dawn offscreen, golden-image hashing) — the native test harness (§17). *v3.37: `platform/cli/voland_cli.c` - `run` (exit codes, expected output, framebuffer FNV-1a-64 golden hash) and `verify-dump`; ctest golden checks. Dawn offscreen rendering arrives with GPU work (Phase 4).*
 
 ### Phase 4 — First Boot
 
@@ -2408,9 +2408,14 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.36.0*
+*Document version: 3.37.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.36 → v3.37 (summary)
+
+- **§25 Phase 3 closed: voland-cli** (`platform/cli/voland_cli.c`, built on every native preset). `run <nca|nro>`: interpreter or noop backend, slice budget/limit, `--test-card`, `--expect-output`, `--expect-frame-hash`; streams guest output; exit codes 0 exited / 1 crashed / 2 deadlock / 3 slice limit / 4-5 failed expectations / 64 usage / 66 load failure; prints the newest framebuffer frame's FNV-1a-64 over its visible pixels - the golden-image hash. `verify-dump <file>`: NRO or decrypted NCA (type, program id, per-section plaintext probe; encrypted input reports §1.6's docs/DUMP.md message) plus a file fingerprint for bug reports - a fingerprint, not authenticity (§12). ctest: `cli_run_demo`, `cli_golden_test_card` (hash 777dcb7dfea1bd25 on every host), `cli_verify_dump_nca`, `cli_verify_dump_rejects`.
+- **Deviations, stated:** §17's Dawn offscreen render-to-texture lands when there is GPU work to render (Phase 4) - until then every frame is CPU-side pixels in the §6 slots, which is exactly what the golden hash covers; `ptc-precompile`, `cache` and save import/export arrive with their features. §2 placed voland-cli under `platform/{windows,linux}/`; it lives in `platform/cli/` because it is portable C with no platform layer of its own (it also runs on macOS).
 
 ### Changelog v3.35 → v3.36 (summary)
 

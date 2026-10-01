@@ -166,3 +166,20 @@ add_test(NAME syncpoint_test COMMAND syncpoint_test)
 add_executable(nvdrv_test nvdrv_test.c)
 target_link_libraries(nvdrv_test PRIVATE switch_core ipc_fixtures loader_fixtures)
 add_test(NAME nvdrv_test COMMAND nvdrv_test)
+
+#
+# voland-cli (§17) as the golden-image / end-to-end harness.
+#
+set(VOLAND_DEMO_NRO ${PROJECT_SOURCE_DIR}/platform/web/public/demo/hello.nro)
+add_test(NAME cli_run_demo
+         COMMAND voland-cli run ${VOLAND_DEMO_NRO}
+                 --expect-output "fib(90) = 2880067194370816120")
+# Golden image: the core's test card must hash identically on every host.
+add_test(NAME cli_golden_test_card
+         COMMAND voland-cli run ${VOLAND_DEMO_NRO} --test-card --expect-frame-hash 777dcb7dfea1bd25)
+add_test(NAME cli_verify_dump_nca
+         COMMAND voland-cli verify-dump ${CMAKE_BINARY_DIR}/fixtures/synthetic_program.nca)
+set_tests_properties(cli_verify_dump_nca PROPERTIES DEPENDS program_nca_fixture)
+# Not a dump at all: verify-dump must fail (exit 66).
+add_test(NAME cli_verify_dump_rejects COMMAND voland-cli verify-dump ${PROJECT_SOURCE_DIR}/CMakeLists.txt)
+set_tests_properties(cli_verify_dump_rejects PROPERTIES WILL_FAIL TRUE)

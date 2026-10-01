@@ -107,6 +107,11 @@ endif()
 
 add_subdirectory(core)
 
+# voland-cli (§17) builds on every native platform.
+if(NOT EMSCRIPTEN)
+  add_subdirectory(platform/cli)
+endif()
+
 #
 # Optional: tests (Phase 0 ships with a smoke test only)
 #
