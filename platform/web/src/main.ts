@@ -129,6 +129,7 @@ interface BootResult {
   readonly guestRamMiB:  number;
   readonly loadGame:     (file: File) => Promise<GameLoadOutcome>;
   readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
+  readonly clearSdCard:  () => Promise<SdImportOutcome>;
 }
 
 async function boot(): Promise<BootResult | null> {
@@ -337,12 +338,21 @@ async function boot(): Promise<BootResult | null> {
     });
   }
 
+  function clearSdCard(): Promise<SdImportOutcome> {
+    if (cpuSlot !== "ready") return Promise.resolve<SdImportOutcome>({ added: [], failed: [] });
+    return new Promise<SdImportOutcome>((resolve) => {
+      pendingSd.push(resolve);
+      cpuWorker.postMessage({ type: "sd-clear" } satisfies MainToCPUMessage);
+    });
+  }
+
   return {
     adapterLabel: adapterLabel ?? "unavailable",
     cpuBackend:   cpuBackend   ?? "unavailable",
     guestRamMiB:  finalLayout ? Number(finalLayout.guestRamSize / (1024n * 1024n)) : 0,
     loadGame,
     addToSdCard,
+    clearSdCard,
   };
 }
 

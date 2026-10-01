@@ -13,6 +13,7 @@ import { describeLoadFailure } from "./load-failure-copy";
 interface LoadPanelProps {
   readonly loadGame: (file: File) => Promise<GameLoadOutcome>;
   readonly addToSdCard: (files: readonly File[]) => Promise<SdImportOutcome>;
+  readonly clearSdCard: () => Promise<SdImportOutcome>;
 }
 
 type LoadState =
@@ -113,13 +114,23 @@ function LoadPanel(props: LoadPanelProps) {
         >
           Add homebrew to SD card…
         </button>
+        <button
+          type="button"
+          class="voland-load-button voland-load-secondary"
+          data-testid="sd-clear"
+          onClick={() => { void props.clearSdCard().then(() => setSd({ added: [], failed: [] })); }}
+        >
+          Empty SD card
+        </button>
       </div>
       <Show when={sd()}>
         {(result) => (
           <p class="voland-load-note" data-testid="sd-result">
-            SD card: added {result().added.length} file(s)
-            {result().added.length > 0 ? ` (${result().added.join(", ")})` : ""}
-            {result().failed.length > 0 ? `; could not add ${result().failed.join(", ")}` : ""}.
+            {result().added.length === 0 && result().failed.length === 0
+              ? "SD card emptied."
+              : `SD card: added ${result().added.length} file(s)` +
+                (result().added.length > 0 ? ` (${result().added.join(", ")})` : "") +
+                (result().failed.length > 0 ? `; could not add ${result().failed.join(", ")}` : "") + "."}
           </p>
         )}
       </Show>

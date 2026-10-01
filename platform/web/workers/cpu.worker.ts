@@ -18,6 +18,7 @@ import { CPU_BACKEND_DISPLAY_NAMES } from "@bindings/core";
 import { readMemoryLayout } from "@bindings/layout";
 import { CoreResult, formatTitleId, loadFailureFromResult, readCString, runStateAfterSlice } from "@bindings/load";
 import type { CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
+import { clearSdFiles, persistSdFile, restoreSdFiles } from "./sd-persistence";
 
 const self: DedicatedWorkerGlobalScope =
   globalThis as unknown as DedicatedWorkerGlobalScope;
@@ -183,33 +184,43 @@ async function loadSharedFont(): Promise<void> {
 /* Largest file copied onto the SD card (it lives in core memory). */
 const SD_MAX_FILE_BYTES = 64 * 1024 * 1024;
 
-function addToSdCard(files: readonly File[]): CPUToMainMessage {
+/** Writes `bytes` to the core's SD card at `path`. */
+function writeSdFile(path: string, bytes: Uint8Array): boolean {
+  if (!core || bytes.byteLength > SD_MAX_FILE_BYTES) return false;
+  const sdCore = core;
+  const data = copyIntoCore(bytes);
+  if (data === 0) return false;
+  let ok = false;
+  withCString(path, (pathPointer) => {
+    ok = sdCore._emulator_sd_write_file_ffi(pathPointer, BigInt(data), BigInt(bytes.byteLength)) === CoreResult.Ok;
+  });
+  sdCore._free(data);
+  return ok;
+}
+
+async function addToSdCard(files: readonly File[]): Promise<CPUToMainMessage> {
   const added: string[] = [];
   const failed: string[] = [];
   for (const file of files) {
     const name = sdName(file.name);
     const path = name.toLowerCase().endsWith(".nro") ? `/switch/${name}` : `/${name}`;
-    if (!core || file.size > SD_MAX_FILE_BYTES) {
-      failed.push(file.name);
-      continue;
-    }
-    const sdCore = core;
     let ok = false;
     try {
       const bytes = new Uint8Array(fileReader.readAsArrayBuffer(file));
-      const data = copyIntoCore(bytes);
-      if (data !== 0) {
-        withCString(path, (pathPointer) => {
-          ok = sdCore._emulator_sd_write_file_ffi(pathPointer, BigInt(data), BigInt(bytes.byteLength)) === CoreResult.Ok;
-        });
-        sdCore._free(data);
-      }
+      ok = writeSdFile(path, bytes);
+      if (ok && !(await persistSdFile(path, bytes))) log("warn", `SD card: ${path} will not survive a reload (no OPFS)`);
     } catch (e) {
       log("warn", `SD card: ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
     }
     (ok ? added : failed).push(ok ? path : file.name);
   }
   return { type: "sd-files-added", added, failed };
+}
+
+async function clearSdCard(): Promise<CPUToMainMessage> {
+  if (core && core._emulator_sd_clear_ffi() !== CoreResult.Ok) log("warn", "SD card: a file is in use; reload to clear it");
+  await clearSdFiles();
+  return { type: "sd-files-added", added: [], failed: [] };
 }
 
 function loadGame(file: File): CPUToMainMessage {
@@ -266,6 +277,12 @@ async function init(memory: WebAssembly.Memory): Promise<void> {
   }
 
   await loadSharedFont();
+  try {
+    const restored = await restoreSdFiles(writeSdFile);
+    if (restored > 0) log("info", `SD card: restored ${restored} file(s) from browser storage`);
+  } catch (e) {
+    log("warn", `SD card: could not restore stored files: ${e instanceof Error ? e.message : String(e)}`);
+  }
 
   const layoutPtr = core._layout_get_ffi();
   const layout = readMemoryLayout(memory, layoutPtr);
@@ -306,7 +323,11 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   }
 
   if (msg.type === "sd-add-files") {
-    self.postMessage(addToSdCard(msg.files));
+    void addToSdCard(msg.files).then((reply) => self.postMessage(reply));
+    return;
+  }
+  if (msg.type === "sd-clear") {
+    void clearSdCard().then((reply) => self.postMessage(reply));
     return;
   }
 

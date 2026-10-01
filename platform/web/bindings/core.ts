@@ -44,6 +44,7 @@ export interface SwitchCoreExports {
   readonly _emulator_set_rtc_ffi:          (unixSeconds: bigint) => void;
   readonly _emulator_set_shared_font_ffi:  (bytes: bigint, size: number) => void;
   readonly _emulator_sd_write_file_ffi:    (path: bigint, bytes: bigint, size: bigint) => number; /* Result */
+  readonly _emulator_sd_clear_ffi:         () => number; /* Result */
   /* Emscripten's own wrappers: under MEMORY64 they exchange pointers
    * as JS numbers (unlike the uint64_t parameters above). */
   readonly _malloc: (size: number) => number;

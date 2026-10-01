@@ -50,6 +50,7 @@ EXPORT void emulator_set_program_path_ffi(uint64_t path);
 EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
 EXPORT void emulator_set_shared_font_ffi(uint64_t bytes, uint32_t size);
 EXPORT int emulator_sd_write_file_ffi(uint64_t path, uint64_t bytes, uint64_t size);
+EXPORT int emulator_sd_clear_ffi(void);
 
 /* The Switch's handheld resolution. */
 #define BOOT_FRAME_WIDTH 1280u
@@ -286,6 +287,15 @@ EXPORT int emulator_sd_write_file_ffi(uint64_t path, uint64_t bytes, uint64_t si
   if (!g_initialised || !path) return (int)RESULT_INVALID_ARGUMENT;
   const Error err = emulator_sd_card_write_file(&g_emulator, (const char *)(uintptr_t)path,
                                                 (const void *)(uintptr_t)bytes, size);
+  g_last_error_message = err.message;
+  return (int)err.code;
+}
+
+/* Empties the SD card; returns a Result code. */
+EXPORT int emulator_sd_clear_ffi(void)
+{
+  if (!g_initialised) return (int)RESULT_INVALID_ARGUMENT;
+  const Error err = emulator_sd_card_clear(&g_emulator);
   g_last_error_message = err.message;
   return (int)err.code;
 }

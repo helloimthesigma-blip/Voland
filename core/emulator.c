@@ -627,6 +627,12 @@ Error emulator_sd_card_create_directory(Emulator* emulator, const char* path) {
   return OK;
 }
 
+Error emulator_sd_card_clear(Emulator* emulator) {
+  if (!emulator || !emulator->ramfs_ready) return ERR(RESULT_INVALID_ARGUMENT, "sd card unavailable");
+  return sd_result(ramfs_delete_directory(&emulator->ramfs, emulator->fs.sd_root, "/", true, true),
+                   "sd card: clear failed (a file is open)");
+}
+
 Error emulator_sd_card_write_file(Emulator* emulator, const char* path, const void* data, uint64_t size) {
   if (!emulator || !path || !emulator->ramfs_ready) return ERR(RESULT_INVALID_ARGUMENT, "sd card unavailable");
   const char* slash = strrchr(path, '/');

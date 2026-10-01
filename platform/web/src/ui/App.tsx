@@ -18,6 +18,7 @@ interface AppProps {
   readonly guestRamMiB:  number;
   readonly loadGame:     (file: File) => Promise<GameLoadOutcome>;
   readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
+  readonly clearSdCard:  () => Promise<SdImportOutcome>;
 }
 
 function App(props: AppProps) {
@@ -51,7 +52,7 @@ function App(props: AppProps) {
           <h2>Runtime online.</h2>
           <p>Both workers initialised. Load a decrypted Program NCA or a homebrew NRO, or run the built-in demo. Homebrew you add to the SD card appears in a homebrew menu such as hbmenu.</p>
           <div class="voland-screen" data-voland-screen data-testid="screen" />
-          <LoadPanel loadGame={props.loadGame} addToSdCard={props.addToSdCard} />
+          <LoadPanel loadGame={props.loadGame} addToSdCard={props.addToSdCard} clearSdCard={props.clearSdCard} />
           <dl class="voland-facts">
             <div><dt>CPU backend</dt><dd>{props.cpuBackend}</dd></div>
             <div><dt>GPU adapter</dt><dd>{props.adapterLabel}</dd></div>

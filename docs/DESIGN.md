@@ -2409,9 +2409,13 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.43.0*
+*Document version: 3.44.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.43 → v3.44 (summary)
+
+- **The SD card persists in the browser (§15).** Files added with "Add homebrew to SD card…" are mirrored under `sdmc/` in the origin-private file system (`workers/sd-persistence.ts`) and restored into the core's SD card when the CPU worker starts; "Empty SD card" clears both (`emulator_sd_card_clear` / `emulator_sd_clear_ffi`, §16 lifecycle message `sd-clear`). What the guest itself writes to the SD card is not mirrored yet (save management, Phase 6). e2e: `sd-card.spec.ts` (add, reload, restored; empty, reload, gone).
 
 ### Changelog v3.42 → v3.43 (summary)
 

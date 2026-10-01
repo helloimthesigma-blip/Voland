@@ -188,6 +188,8 @@ void emulator_set_rtc(Emulator *emulator, int64_t unix_seconds);
  * --sdmc, the web shell's drop target). */
 Error emulator_sd_card_write_file(Emulator *emulator, const char *path, const void *data, uint64_t size);
 Error emulator_sd_card_create_directory(Emulator *emulator, const char *path);
+/* Empties the SD card (every file and directory). */
+Error emulator_sd_card_clear(Emulator *emulator);
 
 /* Where the next NRO loaded from the host appears on the SD card (and so
  * its argv[0], "sdmc:<path>"); default EMULATOR_DEFAULT_NRO_PATH. Platforms

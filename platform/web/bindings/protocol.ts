@@ -27,6 +27,9 @@ export type MainToCPUMessage =
    * (where homebrew menus look), anything else to the root. Answered by
    * exactly one sd-files-added. */
   | { readonly type: "sd-add-files"; readonly files: readonly File[] }
+  /* Empty the SD card (and its stored copy). Answered by sd-files-added
+   * with nothing added. */
+  | { readonly type: "sd-clear" }
   /* §18: slot connect/disconnect is a lifecycle event; the state itself
    * travels through the input region, never postMessage. */
   | { readonly type: "controller-connected"; readonly index: number; readonly profileId: number }
