@@ -7,6 +7,7 @@
 #include "common/input_region.h"
 #include "hle/hle.h"
 #include "hle/kernel/handle_table.h"
+#include "hle/services/service_util.h"
 
 #include <string.h>
 
@@ -223,51 +224,6 @@ void hid_update(Hid_State *s, HLE_Context *c, const void *input_region, uint64_t
 /* Commands.                                                           */
 /* ------------------------------------------------------------------ */
 
-static HLE_ServiceResult cmd_ok(HLE_Context *c, Service_Object *self, const IPC_Request *req, IPC_Response *res) {
-  (void)c;
-  (void)self;
-  (void)req;
-  (void)res;
-  return HLE_RESULT_SUCCESS;
-}
-
-static HLE_ServiceResult cmd_out_false(HLE_Context *c, Service_Object *self, const IPC_Request *req,
-                                       IPC_Response *res) {
-  (void)c;
-  (void)self;
-  (void)req;
-  (void)ipc_response_push_u32(res, 0);
-  return HLE_RESULT_SUCCESS;
-}
-
-static HLE_ServiceResult cmd_out_true(HLE_Context *c, Service_Object *self, const IPC_Request *req,
-                                      IPC_Response *res) {
-  (void)c;
-  (void)self;
-  (void)req;
-  (void)ipc_response_push_u32(res, 1);
-  return HLE_RESULT_SUCCESS;
-}
-
-static HLE_ServiceResult cmd_out_zero64(HLE_Context *c, Service_Object *self, const IPC_Request *req,
-                                        IPC_Response *res) {
-  (void)c;
-  (void)self;
-  (void)req;
-  (void)ipc_response_push_u64(res, 0);
-  return HLE_RESULT_SUCCESS;
-}
-
-static HLE_ServiceResult cmd_out_zero128(HLE_Context *c, Service_Object *self, const IPC_Request *req,
-                                         IPC_Response *res) {
-  (void)c;
-  (void)self;
-  (void)req;
-  (void)ipc_response_push_u64(res, 0);
-  (void)ipc_response_push_u64(res, 0);
-  return HLE_RESULT_SUCCESS;
-}
-
 static HLE_ServiceResult cmd_create_applet_resource(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                                     IPC_Response *res) {
   (void)req;
@@ -466,79 +422,79 @@ static HLE_ServiceResult cmd_create_vibration_list(HLE_Context *c, Service_Objec
 /* Sorted by id. "_stub" marks accepted-and-inert commands (§12). */
 static const Service_Command k_hid_commands[] = {
     {0, cmd_create_applet_resource, "CreateAppletResource"},
-    {1, cmd_ok, "ActivateDebugPad_stub"},
-    {11, cmd_ok, "ActivateTouchScreen_stub"},
-    {21, cmd_ok, "ActivateMouse_stub"},
-    {31, cmd_ok, "ActivateKeyboard_stub"},
-    {32, cmd_ok, "SendKeyboardLockKeyEvent_stub"},
-    {66, cmd_ok, "StartSixAxisSensor_stub"},
-    {67, cmd_ok, "StopSixAxisSensor_stub"},
-    {68, cmd_out_false, "IsSixAxisSensorFusionEnabled_stub"},
-    {69, cmd_ok, "EnableSixAxisSensorFusion_stub"},
-    {70, cmd_ok, "SetSixAxisSensorFusionParameters_stub"},
-    {71, cmd_out_zero64, "GetSixAxisSensorFusionParameters_stub"},
-    {72, cmd_ok, "ResetSixAxisSensorFusionParameters_stub"},
-    {79, cmd_ok, "SetGyroscopeZeroDriftMode_stub"},
-    {80, cmd_out_zero64, "GetGyroscopeZeroDriftMode_stub"},
-    {81, cmd_ok, "ResetGyroscopeZeroDriftMode_stub"},
-    {82, cmd_out_true, "IsSixAxisSensorAtRest_stub"},
-    {83, cmd_out_false, "IsFirmwareUpdateAvailableForSixAxisSensor_stub"},
-    {91, cmd_ok, "ActivateGesture_stub"},
+    {1, service_cmd_ok, "ActivateDebugPad_stub"},
+    {11, service_cmd_ok, "ActivateTouchScreen_stub"},
+    {21, service_cmd_ok, "ActivateMouse_stub"},
+    {31, service_cmd_ok, "ActivateKeyboard_stub"},
+    {32, service_cmd_ok, "SendKeyboardLockKeyEvent_stub"},
+    {66, service_cmd_ok, "StartSixAxisSensor_stub"},
+    {67, service_cmd_ok, "StopSixAxisSensor_stub"},
+    {68, service_cmd_out_u8_false, "IsSixAxisSensorFusionEnabled_stub"},
+    {69, service_cmd_ok, "EnableSixAxisSensorFusion_stub"},
+    {70, service_cmd_ok, "SetSixAxisSensorFusionParameters_stub"},
+    {71, service_cmd_out_u64_zero, "GetSixAxisSensorFusionParameters_stub"},
+    {72, service_cmd_ok, "ResetSixAxisSensorFusionParameters_stub"},
+    {79, service_cmd_ok, "SetGyroscopeZeroDriftMode_stub"},
+    {80, service_cmd_out_u64_zero, "GetGyroscopeZeroDriftMode_stub"},
+    {81, service_cmd_ok, "ResetGyroscopeZeroDriftMode_stub"},
+    {82, service_cmd_out_u8_true, "IsSixAxisSensorAtRest_stub"},
+    {83, service_cmd_out_u8_false, "IsFirmwareUpdateAvailableForSixAxisSensor_stub"},
+    {91, service_cmd_ok, "ActivateGesture_stub"},
     {100, cmd_set_supported_style_set, "SetSupportedNpadStyleSet"},
     {101, cmd_get_supported_style_set, "GetSupportedNpadStyleSet"},
     {102, cmd_set_supported_npad_id_type, "SetSupportedNpadIdType"},
-    {103, cmd_ok, "ActivateNpad"},
-    {104, cmd_ok, "DeactivateNpad"},
+    {103, service_cmd_ok, "ActivateNpad"},
+    {104, service_cmd_ok, "DeactivateNpad"},
     {106, cmd_acquire_style_event, "AcquireNpadStyleSetUpdateEventHandle"},
-    {107, cmd_ok, "DisconnectNpad_stub"},
+    {107, service_cmd_ok, "DisconnectNpad_stub"},
     {108, cmd_get_player_led_pattern, "GetPlayerLedPattern"},
-    {109, cmd_ok, "ActivateNpadWithRevision"},
+    {109, service_cmd_ok, "ActivateNpadWithRevision"},
     {120, cmd_set_joy_hold_type, "SetNpadJoyHoldType"},
     {121, cmd_get_joy_hold_type, "GetNpadJoyHoldType"},
-    {122, cmd_ok, "SetNpadJoyAssignmentModeSingleByDefault_stub"},
-    {123, cmd_ok, "SetNpadJoyAssignmentModeSingle_stub"},
-    {124, cmd_ok, "SetNpadJoyAssignmentModeDual_stub"},
-    {125, cmd_ok, "MergeSingleJoyAsDualJoy_stub"},
-    {126, cmd_ok, "StartLrAssignmentMode_stub"},
-    {127, cmd_ok, "StopLrAssignmentMode_stub"},
+    {122, service_cmd_ok, "SetNpadJoyAssignmentModeSingleByDefault_stub"},
+    {123, service_cmd_ok, "SetNpadJoyAssignmentModeSingle_stub"},
+    {124, service_cmd_ok, "SetNpadJoyAssignmentModeDual_stub"},
+    {125, service_cmd_ok, "MergeSingleJoyAsDualJoy_stub"},
+    {126, service_cmd_ok, "StartLrAssignmentMode_stub"},
+    {127, service_cmd_ok, "StopLrAssignmentMode_stub"},
     {128, cmd_set_handheld_activation_mode, "SetNpadHandheldActivationMode"},
     {129, cmd_get_handheld_activation_mode, "GetNpadHandheldActivationMode"},
-    {130, cmd_ok, "SwapNpadAssignment_stub"},
-    {131, cmd_out_false, "IsUnintendedHomeButtonInputProtectionEnabled_stub"},
-    {132, cmd_ok, "EnableUnintendedHomeButtonInputProtection_stub"},
+    {130, service_cmd_ok, "SwapNpadAssignment_stub"},
+    {131, service_cmd_out_u8_false, "IsUnintendedHomeButtonInputProtectionEnabled_stub"},
+    {132, service_cmd_ok, "EnableUnintendedHomeButtonInputProtection_stub"},
     {133, cmd_assignment_with_destination, "SetNpadJoyAssignmentModeSingleWithDestination_stub"},
-    {134, cmd_ok, "SetNpadAnalogStickUseCenterClamp_stub"},
-    {135, cmd_ok, "SetNpadCaptureButtonAssignment_stub"},
-    {136, cmd_ok, "ClearNpadCaptureButtonAssignment_stub"},
+    {134, service_cmd_ok, "SetNpadAnalogStickUseCenterClamp_stub"},
+    {135, service_cmd_ok, "SetNpadCaptureButtonAssignment_stub"},
+    {136, service_cmd_ok, "ClearNpadCaptureButtonAssignment_stub"},
     {200, cmd_get_vibration_device_info, "GetVibrationDeviceInfo"},
-    {201, cmd_ok, "SendVibrationValue_stub"},
-    {202, cmd_out_zero128, "GetActualVibrationValue_stub"},
+    {201, service_cmd_ok, "SendVibrationValue_stub"},
+    {202, service_cmd_out_zero128, "GetActualVibrationValue_stub"},
     {203, cmd_create_vibration_list, "CreateActiveVibrationDeviceList"},
-    {204, cmd_ok, "PermitVibration_stub"},
-    {205, cmd_out_true, "IsVibrationPermitted_stub"},
-    {206, cmd_ok, "SendVibrationValues_stub"},
-    {207, cmd_ok, "SendVibrationGcErmCommand_stub"},
-    {208, cmd_out_zero64, "GetActualVibrationGcErmCommand_stub"},
-    {209, cmd_ok, "BeginPermitVibrationSession_stub"},
-    {210, cmd_ok, "EndPermitVibrationSession_stub"},
-    {211, cmd_out_true, "IsVibrationDeviceMounted_stub"},
-    {300, cmd_ok, "ActivateConsoleSixAxisSensor_stub"},
-    {301, cmd_ok, "StartConsoleSixAxisSensor_stub"},
-    {302, cmd_ok, "StopConsoleSixAxisSensor_stub"},
-    {303, cmd_ok, "ActivateSevenSixAxisSensor_stub"},
-    {304, cmd_ok, "StartSevenSixAxisSensor_stub"},
-    {305, cmd_ok, "StopSevenSixAxisSensor_stub"},
-    {306, cmd_ok, "InitializeSevenSixAxisSensor_stub"},
-    {307, cmd_ok, "FinalizeSevenSixAxisSensor_stub"},
-    {308, cmd_ok, "SetSevenSixAxisSensorFusionStrength_stub"},
-    {309, cmd_out_zero64, "GetSevenSixAxisSensorFusionStrength_stub"},
-    {310, cmd_ok, "ResetSevenSixAxisSensorTimestamp_stub"},
-    {400, cmd_out_false, "IsUsbFullKeyControllerEnabled_stub"},
-    {401, cmd_ok, "EnableUsbFullKeyController_stub"},
+    {204, service_cmd_ok, "PermitVibration_stub"},
+    {205, service_cmd_out_u8_true, "IsVibrationPermitted_stub"},
+    {206, service_cmd_ok, "SendVibrationValues_stub"},
+    {207, service_cmd_ok, "SendVibrationGcErmCommand_stub"},
+    {208, service_cmd_out_u64_zero, "GetActualVibrationGcErmCommand_stub"},
+    {209, service_cmd_ok, "BeginPermitVibrationSession_stub"},
+    {210, service_cmd_ok, "EndPermitVibrationSession_stub"},
+    {211, service_cmd_out_u8_true, "IsVibrationDeviceMounted_stub"},
+    {300, service_cmd_ok, "ActivateConsoleSixAxisSensor_stub"},
+    {301, service_cmd_ok, "StartConsoleSixAxisSensor_stub"},
+    {302, service_cmd_ok, "StopConsoleSixAxisSensor_stub"},
+    {303, service_cmd_ok, "ActivateSevenSixAxisSensor_stub"},
+    {304, service_cmd_ok, "StartSevenSixAxisSensor_stub"},
+    {305, service_cmd_ok, "StopSevenSixAxisSensor_stub"},
+    {306, service_cmd_ok, "InitializeSevenSixAxisSensor_stub"},
+    {307, service_cmd_ok, "FinalizeSevenSixAxisSensor_stub"},
+    {308, service_cmd_ok, "SetSevenSixAxisSensorFusionStrength_stub"},
+    {309, service_cmd_out_u64_zero, "GetSevenSixAxisSensorFusionStrength_stub"},
+    {310, service_cmd_ok, "ResetSevenSixAxisSensorTimestamp_stub"},
+    {400, service_cmd_out_u8_false, "IsUsbFullKeyControllerEnabled_stub"},
+    {401, service_cmd_ok, "EnableUsbFullKeyController_stub"},
     {1000, cmd_set_communication_mode, "SetNpadCommunicationMode"},
     {1001, cmd_get_communication_mode, "GetNpadCommunicationMode"},
-    {1002, cmd_ok, "SetTouchScreenConfiguration_stub"},
-    {1003, cmd_out_false, "IsFirmwareUpdateNeededForNotification_stub"},
+    {1002, service_cmd_ok, "SetTouchScreenConfiguration_stub"},
+    {1003, service_cmd_out_u8_false, "IsFirmwareUpdateNeededForNotification_stub"},
 };
 
 static const Service_Command k_applet_resource_commands[] = {
@@ -546,21 +502,17 @@ static const Service_Command k_applet_resource_commands[] = {
 };
 
 static const Service_Command k_vibration_list_commands[] = {
-    {0, cmd_ok, "ActivateVibrationDevice_stub"},
+    {0, service_cmd_ok, "ActivateVibrationDevice_stub"},
 };
-
-#define COMMAND_COUNT(table) (sizeof(table) / sizeof((table)[0]))
 
 void hid_init(Hid_State *state, Shared_Memory_Pool *pool) {
   memset(state, 0, sizeof(*state));
   state->pool = pool;
   state->supported_styles = HID_STYLE_STANDARD;
   state->supported_ids = HID_ALL_IDS;
-  state->interface = (Service_Interface){"hid", k_hid_commands, COMMAND_COUNT(k_hid_commands), 0, state};
-  state->applet_resource = (Service_Interface){"IAppletResource", k_applet_resource_commands,
-                                               COMMAND_COUNT(k_applet_resource_commands), 0, state};
-  state->vibration_list = (Service_Interface){"IActiveVibrationDeviceList", k_vibration_list_commands,
-                                              COMMAND_COUNT(k_vibration_list_commands), 0, state};
+  state->interface = SERVICE_INTERFACE("hid", k_hid_commands, 0, state);
+  state->applet_resource = SERVICE_INTERFACE("IAppletResource", k_applet_resource_commands, 0, state);
+  state->vibration_list = SERVICE_INTERFACE("IActiveVibrationDeviceList", k_vibration_list_commands, 0, state);
 }
 
 Error hid_register(Hid_State *state, SM_Registry *registry) { return sm_registry_add(registry, "hid", &state->interface); }

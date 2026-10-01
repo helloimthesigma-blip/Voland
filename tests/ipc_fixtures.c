@@ -75,7 +75,8 @@ void ipc_fixture_boot(Emulator *emu) {
   const Byte_Source source = byte_source_from_memory(nca_image.bytes, nca_image.size);
   CHECK_OK(emulator_load_program(emu, &source, 0));
 
-  fixture_buffer_free(&nca_image);
+  /* nca_image stays allocated: the program's file must stay readable
+   * while it runs (emulator.h). */
   fixture_buffer_free(&exefs_image);
   fixture_buffer_free(&npdm_image);
   fixture_buffer_free(&nso_image);

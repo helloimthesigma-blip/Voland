@@ -9,6 +9,7 @@
 #include "hle/kernel/handle_table.h"
 #include "hle/kernel/ipc.h"
 #include "hle/kernel/shared_memory.h"
+#include "hle/kernel/svc_memory.h"
 
 #include <string.h>
 
@@ -125,6 +126,7 @@ void hle_svc_close_handle(HLE_Context *context, CPU_State *cpu_state) {
   if (type == KERNEL_OBJECT_EVENT_READABLE || type == KERNEL_OBJECT_EVENT_WRITABLE) {
     event_release((Kernel_Event *)object);
   }
+  if (type == KERNEL_OBJECT_TRANSFER_MEMORY) hle_transfer_memory_release(context, object);
   if (type == KERNEL_OBJECT_SHARED_MEMORY) {
     shared_memory_release(context->shared_memory, (Kernel_Shared_Memory *)object);
   }

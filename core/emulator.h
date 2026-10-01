@@ -19,15 +19,30 @@
 #include "hle/kernel/event.h"
 #include "hle/kernel/scheduler.h"
 #include "hle/kernel/shared_memory.h"
+#include "hle/kernel/transfer_memory.h"
+#include "hle/services/am/am.h"
+#include "hle/services/apm/apm.h"
+#include "hle/services/fs/fs.h"
 #include "hle/services/hid/hid.h"
+#include "hle/services/network/network.h"
+#include "hle/services/pl/pl.h"
+#include "hle/services/misc/misc.h"
+#include "hle/services/set/set.h"
+#include "hle/services/time/time.h"
+#include "hle/services/vi/vi.h"
 #include "hle/services/nvdrv/nvdrv.h"
 #include "hle/loader/byte_source.h"
+#include "hle/loader/nca_parse.h"
 
 /* Scratch for one bootstrap: the ExeFS directory plus the largest
  * compressed NSO segment staged for LZ4. A shipping title's biggest
  * `main` .text compresses to ~50-60MB; created for the duration of
  * emulator_load_program() only, then freed. */
 #define EMULATOR_LOADER_ARENA_BYTES ((size_t)96 * 1024 * 1024)
+#define EMULATOR_RAMFS_BYTES ((uint64_t)128 * 1024 * 1024) /* SD card + saves */
+#define EMULATOR_SERVICE_ARENA_BYTES ((size_t)12 * 1024 * 1024)
+#define EMULATOR_ARGV_BYTES 0x800u
+#define EMULATOR_DEFAULT_NRO_PATH "/switch/homebrew.nro"
 
 typedef struct Emulator
 {
@@ -60,7 +75,43 @@ typedef struct Emulator
   Event_Pool events; /* kernel events (event.h); reset with the process */
   Nvdrv_State nvdrv; /* the nvdrv service (§13); reset with the process */
   Shared_Memory_Pool shared_memory; /* shared_memory.h; reset with the process */
+  Transfer_Memory_Pool transfer_memory;
   Hid_State hid;     /* the hid service (§18); reset with the process */
+  Am_State am;       /* appletOE/appletAE (§12); reset with the process */
+  Apm_State apm;
+  Set_State set;
+  Time_State time;
+  Network_State network; /* offline bsd/nifm */
+  Pl_State pl;           /* shared font */
+  Misc_State misc;       /* psm, ts */
+  const uint8_t *shared_font;
+  uint32_t shared_font_size;
+  Vi_State vi;       /* display + BufferQueue (§13); reset with the process */
+  Fs_State fs;       /* fsp-srv; open files reset with the process */
+  Ramfs_Pool ramfs;  /* SD card + saves (§15); lives as long as the Emulator */
+  Arena service_arena; /* large service buffers (applet storages, compositor scratch) */
+  uint8_t *am_storage_pool;
+  uint8_t *vi_scratch;
+  bool ramfs_ready;
+
+  /* The loaded program's file (§12): kept readable until unload so the
+   * RomFS can be served (fsp-srv OpenDataStorageByCurrentProcess). */
+  Byte_Source content;
+  NCA_File content_nca;
+  Byte_Source_Slice romfs_slice;
+  const Byte_Source *romfs; /* NULL: the program has no RomFS */
+
+  /* Homebrew (hbloader ABI, v3.39). An NRO runs as "sdmc:<program_path>"
+   * (copied onto the SD card at load, since libnx reads its own RomFS
+   * from there); when it exits having set a next-load path, that NRO is
+   * loaded from the SD card, and when a chain-loaded app exits the first
+   * NRO (the menu) comes back - hbloader's loop. */
+  bool is_homebrew;
+  char program_path[FS_MAX_PATH_BYTES];
+  char home_path[FS_MAX_PATH_BYTES];
+  char next_argv[EMULATOR_ARGV_BYTES];
+  uint32_t content_node;    /* ramfs node of a chain-loaded NRO */
+  int64_t rtc;       /* Unix seconds the next process boots at (emulator_set_rtc) */
 } Emulator;
 
 /* What one emulator_run_slice() did (§7 scheduler status). */
@@ -90,9 +141,9 @@ void emulator_destroy(Emulator *emulator);
  * pre-decrypted only; RESULT_ENCRYPTED_INPUT otherwise, message naming
  * docs/DUMP.md), bootstraps the process (process.h) and arms `cpu_state`
  * with the main thread's entry state. `aslr_seed` 0 disables ASLR. The
- * source must stay readable for the duration of the call only: every
- * byte the guest needs is in guest RAM afterwards (RomFS access is
- * fsp-srv's business, Phase 4, and re-opens the NCA). One program per
+ * source (the struct is copied; what it reads from is not) must stay
+ * readable until emulator_unload_program(): fsp-srv serves the program's
+ * RomFS straight from it (v3.39). One program per
  * Emulator: a second call fails with RESULT_INVALID_ARGUMENT until
  * emulator_unload_program(). */
 Error emulator_load_program(Emulator *emulator, const Byte_Source *nca, uint64_t aslr_seed);
@@ -122,6 +173,28 @@ Emulator_Status emulator_run_slice(Emulator *emulator, uint64_t cycle_budget);
  * (CPU_EXIT_HALT when no thread ran). With nothing loaded it runs the
  * bare CPU_State, as before the scheduler existed. */
 CPU_ExitReason emulator_run(Emulator *emulator, uint64_t cycle_budget);
+
+/* The wall-clock time (Unix seconds) the next loaded program sees at
+ * boot; its clocks then advance with virtual time. Default
+ * TIME_DEFAULT_RTC, so headless runs are deterministic. */
+void emulator_set_rtc(Emulator *emulator, int64_t unix_seconds);
+
+/* Seeds the emulated SD card (§15): creates `path` (absolute, '/'-
+ * separated; missing parent directories are created) holding `size`
+ * bytes, replacing an existing file. For platform importers (the CLI's
+ * --sdmc, the web shell's drop target). */
+Error emulator_sd_card_write_file(Emulator *emulator, const char *path, const void *data, uint64_t size);
+Error emulator_sd_card_create_directory(Emulator *emulator, const char *path);
+
+/* Where the next NRO loaded from the host appears on the SD card (and so
+ * its argv[0], "sdmc:<path>"); default EMULATOR_DEFAULT_NRO_PATH. Platforms
+ * pass "/" + the file's name. */
+void emulator_set_program_path(Emulator *emulator, const char *sd_path);
+
+/* The font pl:u serves as every system font (§1.6: never Nintendo's).
+ * The bytes are the caller's and must outlive the Emulator; takes effect
+ * at the next program load. */
+void emulator_set_shared_font(Emulator *emulator, const uint8_t *ttf, uint32_t size);
 
 /* Routes svcOutputDebugString text to the platform. */
 void emulator_set_debug_output(Emulator *emulator, HLE_Debug_Output_Fn fn, void *userdata);

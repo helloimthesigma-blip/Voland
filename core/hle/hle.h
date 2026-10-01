@@ -35,6 +35,7 @@
 typedef struct Scheduler Scheduler;
 typedef struct Event_Pool Event_Pool;
 typedef struct Shared_Memory_Pool Shared_Memory_Pool;
+typedef struct Transfer_Memory_Pool Transfer_Memory_Pool;
 typedef struct Kernel_Event Kernel_Event;
 
 /* Where svcOutputDebugString text goes (the platform's console/log). */
@@ -95,6 +96,8 @@ typedef void (*HLE_Debug_Output_Fn)(void *userdata, const char *text, size_t len
 #define HLE_MAKE_RESULT(module, description) \
   ((uint32_t)(((description) << 9) | ((module) & 0x1FF)))
 
+#define HLE_SVC_COUNT 0x80u /* SVC numbers are 7-bit on Horizon */
+
 struct HLE_Context
 {
   const CPU_Backend *cpu_backend;
@@ -108,9 +111,11 @@ struct HLE_Context
   Scheduler *scheduler;            /* guest threads (§7); set by the Emulator */
   Event_Pool *events;              /* kernel events (event.h); set by the Emulator */
   Shared_Memory_Pool *shared_memory; /* shared_memory.h; set by the Emulator */
+  Transfer_Memory_Pool *transfer_memory; /* transfer_memory.h; set by the Emulator */
   HLE_Debug_Output_Fn debug_output; /* optional */
   void *debug_userdata;
   uint64_t svc_call_count;
+  uint64_t svc_counts[HLE_SVC_COUNT]; /* per-SVC diagnostics (voland-cli --svc-stats) */
 };
 
 /* Signals `event` and wakes every thread whose WaitSynchronization names

@@ -10,8 +10,10 @@
 #include "common/log.h"
 #include "hle/kernel/handle_table.h"
 #include "hle/kernel/shared_memory.h"
+#include "hle/kernel/transfer_memory.h"
 
 #include <stddef.h>
+#include <string.h>
 
 static bool ranges_overlap(uint64_t a_base, uint64_t a_size, uint64_t b_base, uint64_t b_size) {
   return a_base < b_base + b_size && b_base < a_base + a_size;
@@ -415,4 +417,110 @@ void hle_svc_unmap_shared_memory(HLE_Context *context, CPU_State *cpu_state) {
   object->mapped_gva = 0;
   process->shared_mappings[(uint32_t)index] = process->shared_mappings[--process->shared_mapping_count];
   regs->x[0] = HLE_RESULT_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/* SetMemoryPermission.                                                */
+/* ------------------------------------------------------------------ */
+
+static bool range_in_module(const Process *process, uint64_t base, uint64_t size) {
+  for (uint32_t m = 0; m < process->module_count; m++) {
+    const Address_Region image = {process->modules[m].base_gva, process->modules[m].image_size};
+    if (address_region_contains(&image, base, size)) return true;
+  }
+  return false;
+}
+
+void hle_svc_set_memory_permission(HLE_Context *context, CPU_State *cpu_state) {
+  CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
+  const Process *process = context->process;
+  const uint64_t addr = regs->x[0];
+  const uint64_t size = regs->x[1];
+  const uint32_t perm = (uint32_t)regs->x[2];
+  if (addr & VMM_PAGE_OFFSET_MASK) {
+    regs->x[0] = HLE_RESULT_INVALID_POINTER;
+    return;
+  }
+  if (size == 0 || (size & VMM_PAGE_OFFSET_MASK)) {
+    regs->x[0] = HLE_RESULT_INVALID_SIZE;
+    return;
+  }
+  if (perm != VMM_PERM_NONE && perm != VMM_PERM_R && perm != VMM_PERM_RW) {
+    regs->x[0] = HLE_RESULT_INVALID_NEW_MEMORY_PERMISSION;
+    return;
+  }
+  /* Reprotectable memory: the heap (outside MapMemory borrows) and the
+   * loaded images (libnx's crt0 makes .data.rel.ro read-only after
+   * relocating). */
+  const bool in_heap = process->heap_size &&
+                       address_region_contains(&(Address_Region){process->address_space.heap.base, process->heap_size},
+                                               addr, size) &&
+                       !borrow_overlaps_src(process, addr, size);
+  if (!in_heap && !range_in_module(process, addr, size)) {
+    regs->x[0] = HLE_RESULT_INVALID_MEMORY_STATE;
+    return;
+  }
+  if (!error_is_ok(vmm_reprotect(context->vmm, addr, size, perm))) {
+    regs->x[0] = HLE_RESULT_INVALID_MEMORY_STATE;
+    return;
+  }
+  regs->x[0] = HLE_RESULT_SUCCESS;
+}
+
+/* ------------------------------------------------------------------ */
+/* Transfer memory.                                                    */
+/* ------------------------------------------------------------------ */
+
+void hle_svc_create_transfer_memory(HLE_Context *context, CPU_State *cpu_state) {
+  CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
+  const Process *process = context->process;
+  const uint64_t addr = regs->x[1];
+  const uint64_t size = regs->x[2];
+  const uint32_t perm = (uint32_t)regs->x[3];
+  if (addr & VMM_PAGE_OFFSET_MASK) {
+    regs->x[0] = HLE_RESULT_INVALID_POINTER;
+    return;
+  }
+  if (size == 0 || (size & VMM_PAGE_OFFSET_MASK)) {
+    regs->x[0] = HLE_RESULT_INVALID_SIZE;
+    return;
+  }
+  if (perm != VMM_PERM_NONE && perm != VMM_PERM_R && perm != VMM_PERM_RW) {
+    regs->x[0] = HLE_RESULT_INVALID_NEW_MEMORY_PERMISSION;
+    return;
+  }
+  const Address_Region heap = {process->address_space.heap.base, process->heap_size};
+  if (!address_region_contains(&heap, addr, size) || borrow_overlaps_src(process, addr, size)) {
+    regs->x[0] = HLE_RESULT_INVALID_MEMORY_STATE;
+    return;
+  }
+  Transfer_Memory_Pool *pool = context->transfer_memory;
+  Kernel_Transfer_Memory *object = NULL;
+  for (uint32_t i = 0; pool && i < TRANSFER_MEMORY_POOL_CAPACITY && !object; i++) {
+    if (!pool->objects[i].references) object = &pool->objects[i];
+  }
+  if (!object) {
+    regs->x[0] = HLE_RESULT_RESOURCE_EXHAUSTED;
+    return;
+  }
+  uint32_t handle = 0;
+  if (!error_is_ok(handle_table_add(&context->process->handles, KERNEL_OBJECT_TRANSFER_MEMORY, object, &handle))) {
+    regs->x[0] = HLE_RESULT_OUT_OF_HANDLES;
+    return;
+  }
+  if (!error_is_ok(vmm_reprotect(context->vmm, addr, size, perm))) {
+    (void)handle_table_remove(&context->process->handles, handle, NULL, NULL);
+    regs->x[0] = HLE_RESULT_INVALID_MEMORY_STATE;
+    return;
+  }
+  *object = (Kernel_Transfer_Memory){1, addr, size, perm};
+  regs->x[0] = HLE_RESULT_SUCCESS;
+  regs->x[1] = handle;
+}
+
+void hle_transfer_memory_release(HLE_Context *context, void *object) {
+  Kernel_Transfer_Memory *tmem = (Kernel_Transfer_Memory *)object;
+  if (!tmem || !tmem->references || --tmem->references) return;
+  (void)vmm_reprotect(context->vmm, tmem->address, tmem->size, VMM_PERM_RW);
+  memset(tmem, 0, sizeof(*tmem));
 }

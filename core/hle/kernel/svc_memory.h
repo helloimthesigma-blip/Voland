@@ -151,4 +151,16 @@ void hle_svc_query_memory(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_map_shared_memory(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_unmap_shared_memory(HLE_Context *context, CPU_State *cpu_state);
 
+/* 0x02 SetMemoryPermission  X0 addr, X1 size, W2 perm (None, R or RW).
+ * Allowed on the committed heap (not a MapMemory source) and inside a
+ * loaded module's image - libnx's crt0 reprotects .data.rel.ro to R. */
+void hle_svc_set_memory_permission(HLE_Context *context, CPU_State *cpu_state);
+
+/* 0x15 CreateTransferMemory X1 addr, X2 size, W3 perm (None/R/RW) -> W1
+ * handle. The range must be page-aligned committed heap; it is
+ * reprotected to `perm` until the handle is closed
+ * (hle_transfer_memory_release restores read-write). */
+void hle_svc_create_transfer_memory(HLE_Context *context, CPU_State *cpu_state);
+void hle_transfer_memory_release(HLE_Context *context, void *object);
+
 #endif /* SWITCH_HLE_KERNEL_SVC_MEMORY_H */

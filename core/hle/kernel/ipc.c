@@ -447,8 +447,17 @@ IPC_Session *ipc_session_pool_open(IPC_Session_Pool *pool, const Service_Interfa
   return NULL;
 }
 
+static void close_object(Service_Object *object) {
+  const Service_Interface *interface = object->interface;
+  if (interface && interface->on_close) interface->on_close(interface->service_state, object->state);
+  memset(object, 0, sizeof(*object));
+}
+
 void ipc_session_pool_close(IPC_Session_Pool *pool, IPC_Session *session) {
   if (!pool || !session || !session->in_use) return;
+  for (uint32_t i = 0; i < IPC_DOMAIN_MAX_OBJECTS; i++) {
+    if (session->objects[i].interface) close_object(&session->objects[i]);
+  }
   memset(session, 0, sizeof(*session));
   pool->live_count--;
 }
@@ -503,6 +512,15 @@ static void close_handles(HLE_Context *context, const uint32_t *handles, uint32_
   }
 }
 
+/* Out objects [from, count) that never became guest-visible: their
+ * interfaces release whatever the handler allocated for them. */
+static void drop_unplaced_objects(const IPC_Response *response, uint32_t from) {
+  for (uint32_t i = from; i < response->out_object_count; i++) {
+    const Service_Interface *interface = response->out_objects[i].interface;
+    if (interface && interface->on_close) interface->on_close(interface->service_state, response->out_objects[i].state);
+  }
+}
+
 /* Turns handler-returned objects into domain ids or session handles.
  * All-or-nothing: on failure every object made so far is undone. */
 static void materialize_objects(HLE_Context *context, IPC_Session *session, bool domain,
@@ -521,8 +539,9 @@ static void materialize_objects(HLE_Context *context, IPC_Session *session, bool
     }
     if (assigned < count) {
       for (uint32_t i = 0; i < assigned; i++) {
-        memset(&session->objects[response->out_object_ids[i] - 1u], 0, sizeof(Service_Object));
+        close_object(&session->objects[response->out_object_ids[i] - 1u]);
       }
+      drop_unplaced_objects(response, assigned);
       clear_outputs(response);
       response->result = IPC_RESULT_SF_OUT_OF_DOMAIN_ENTRIES;
     }
@@ -530,6 +549,7 @@ static void materialize_objects(HLE_Context *context, IPC_Session *session, bool
   }
 
   if (count + response->move_handle_count > IPC_MAX_HANDLES) {
+    drop_unplaced_objects(response, 0);
     clear_outputs(response);
     response->result = IPC_RESULT_SF_INVALID_OUT_RAW_SIZE;
     return;
@@ -541,6 +561,7 @@ static void materialize_objects(HLE_Context *context, IPC_Session *session, bool
                                                     &object_handles[i]);
     if (result != HLE_RESULT_SUCCESS) {
       close_handles(context, object_handles, i);
+      drop_unplaced_objects(response, i);
       clear_outputs(response);
       response->result = result;
       return;
@@ -620,7 +641,7 @@ uint32_t ipc_dispatch(HLE_Context *context, IPC_Session *session, const IPC_Requ
     }
     target = &session->objects[id - 1u];
     if (request->domain_request_type == IPC_DOMAIN_CLOSE) {
-      memset(target, 0, sizeof(*target));
+      close_object(target);
       return HLE_RESULT_SUCCESS;
     }
   }
@@ -634,16 +655,19 @@ uint32_t ipc_dispatch(HLE_Context *context, IPC_Session *session, const IPC_Requ
     return HLE_RESULT_SUCCESS;
   }
 
+  log_debug("[ipc] %s:%s", interface->name, command->name);
   response->result = command->handler(context, target, request, response);
   if (response->overflowed) {
     log_error("[ipc] %s:%s overflowed its reply", interface->name, command->name);
     close_handles(context, response->move_handles, response->move_handle_count);
+    drop_unplaced_objects(response, 0);
     clear_outputs(response);
     response->result = IPC_RESULT_SF_INVALID_OUT_RAW_SIZE;
     return HLE_RESULT_SUCCESS;
   }
   if (response->result != HLE_RESULT_SUCCESS) {
     close_handles(context, response->move_handles, response->move_handle_count);
+    drop_unplaced_objects(response, 0);
     clear_outputs(response);
     return HLE_RESULT_SUCCESS;
   }

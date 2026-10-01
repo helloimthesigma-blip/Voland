@@ -407,6 +407,7 @@ void process_teardown(Process *process, VMM_Context *vmm, Page_Allocator *pages)
     mapped.ranges[mapped.count++] = process->main_thread_stack;
   }
   unmap_all(vmm, &mapped);
+  if (process->loader_env.size) (void)vmm_unmap(vmm, process->loader_env.base, process->loader_env.size);
   for (uint32_t i = 0; i < process->shared_mapping_count; i++) {
     (void)vmm_unmap(vmm, process->shared_mappings[i].base, process->shared_mappings[i].size);
   }

@@ -317,6 +317,9 @@ struct Service_Interface {
   size_t command_count;
   uint16_t pointer_buffer_size;    /* QueryPointerBufferSize answer */
   void *service_state;             /* service-global, not per object; may be NULL */
+  /* Called when an object of this interface dies (session closed, domain
+   * object closed, or an out object rolled back). May be NULL. */
+  void (*on_close)(void *service_state, uint64_t object_state);
 };
 
 /* One live object: an interface plus one word of per-object state. */

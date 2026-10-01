@@ -19,6 +19,7 @@ void scheduler_init(Scheduler *sched, const CPU_Backend *backend) {
   sched->backend = backend;
   sched->current = -1;
   sched->next_thread_id = 1;
+  sched->device_wake_at = SCHEDULER_WAIT_FOREVER;
 }
 
 uint64_t scheduler_ns_to_ticks(uint64_t ns) {
@@ -137,6 +138,11 @@ Scheduler_Status scheduler_tick(Scheduler *sched, const CPU_Backend *backend, ui
       }
     }
     if (!alive) return SCHEDULER_EXITED;
+    if (sched->device_wake_at < earliest) {
+      /* A device signals first: jump there; its update runs next slice. */
+      if (sched->device_wake_at > sched->ticks) sched->ticks = sched->device_wake_at;
+      return SCHEDULER_IDLE;
+    }
     if (earliest == SCHEDULER_WAIT_FOREVER) return SCHEDULER_DEADLOCK;
     sched->ticks = earliest;
     expire_timeouts(sched);

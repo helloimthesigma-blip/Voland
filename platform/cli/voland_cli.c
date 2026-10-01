@@ -10,6 +10,10 @@
  *       --test-card                  publish the core's test card before running
  *       --expect-output TEXT         exit 4 unless the guest printed TEXT
  *       --expect-frame-hash HEX      exit 5 unless the newest frame hashes to HEX
+ *       --sdmc DIR                   seed the emulated SD card with DIR's contents
+ *       --dump-frame FILE            write the newest frame as a binary PPM (P6)
+ *       --font FILE                  the TTF/OTF pl:u serves as the system font
+ *       --svc-stats                  print per-SVC call counts at the end
  *     Prints guest output (svcOutputDebugString) as it happens, then a
  *     summary with the newest frame's FNV-1a-64 hash (golden-image check).
  *     Exit: 0 exited, 1 crashed, 2 deadlock, 3 slice limit, 4/5 failed
@@ -33,9 +37,11 @@
 #include "hle/loader/nca_parse.h"
 #include "hle/loader/nro.h"
 
+#include <dirent.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 
 #define EXIT_EXITED 0
 #define EXIT_CRASHED 1
@@ -54,6 +60,8 @@
 #define FNV_OFFSET 0xCBF29CE484222325ull
 #define FNV_PRIME 0x100000001B3ull
 #define FINGERPRINT_CHUNK 65536u
+#define SDMC_PATH_BYTES 0x301u
+#define SDMC_MAX_FILE_BYTES ((uint64_t)64 * 1024 * 1024)
 
 /* ------------------------------------------------------------------ */
 /* File-backed Byte_Source (byte_source.h contract).                   */
@@ -102,6 +110,28 @@ static void on_guest_output(void *userdata, const char *text, size_t length) {
   }
 }
 
+/* The newest frame as a P6 PPM (RGB; alpha dropped). */
+static bool dump_frame(const char *path) {
+  const uint32_t published = framebuffer_published();
+  if (published == 0) return false;
+  const uint8_t *region = (const uint8_t *)(uintptr_t)layout_get()->framebuffer_slot_base;
+  const uint32_t slot = (published - 1u) % FRAMEBUFFER_SLOT_COUNT;
+  const uint8_t *meta = region + FRAMEBUFFER_OFFSET_METADATA + slot * FRAMEBUFFER_METADATA_BYTES;
+  uint32_t width = 0, height = 0, stride = 0;
+  memcpy(&width, meta, 4);
+  memcpy(&height, meta + 4, 4);
+  memcpy(&stride, meta + 8, 4);
+  const uint8_t *pixels = region + LAYOUT_FRAMEBUFFER_HEADER_BYTES + (uint64_t)slot * LAYOUT_FRAMEBUFFER_SLOT_BYTES;
+  FILE *out = fopen(path, "wb");
+  if (!out) return false;
+  fprintf(out, "P6\n%u %u\n255\n", width, height);
+  for (uint32_t y = 0; y < height; y++) {
+    for (uint32_t x = 0; x < width; x++) fwrite(pixels + (uint64_t)y * stride + x * 4u, 1, 3, out);
+  }
+  fclose(out);
+  return true;
+}
+
 /* FNV-1a-64 over the newest published frame's visible pixels, or 0. */
 static uint64_t newest_frame_hash(uint32_t *width, uint32_t *height) {
   const uint32_t published = framebuffer_published();
@@ -120,13 +150,50 @@ static uint64_t newest_frame_hash(uint32_t *width, uint32_t *height) {
   return hash;
 }
 
+/* Copies host directory `host` into the SD card at `guest` (recursive).
+ * Returns the number of files imported, or -1 on failure. */
+static int import_sdmc(Emulator *emu, const char *host, const char *guest) {
+  DIR *dir = opendir(host);
+  if (!dir) return -1;
+  int imported = 0;
+  const struct dirent *entry;
+  while ((entry = readdir(dir)) != NULL && imported >= 0) {
+    if (!strcmp(entry->d_name, ".") || !strcmp(entry->d_name, "..")) continue;
+    char host_path[4096], guest_path[SDMC_PATH_BYTES];
+    snprintf(host_path, sizeof(host_path), "%s/%s", host, entry->d_name);
+    if (snprintf(guest_path, sizeof(guest_path), "%s/%s", guest, entry->d_name) >= (int)sizeof(guest_path)) continue;
+    struct stat st;
+    if (stat(host_path, &st) != 0) continue;
+    if (S_ISDIR(st.st_mode)) {
+      if (!error_is_ok(emulator_sd_card_create_directory(emu, guest_path))) imported = -1;
+      else {
+        const int nested = import_sdmc(emu, host_path, guest_path);
+        imported = nested < 0 ? -1 : imported + nested;
+      }
+      continue;
+    }
+    if (!S_ISREG(st.st_mode) || (uint64_t)st.st_size > SDMC_MAX_FILE_BYTES) continue;
+    FILE *file = fopen(host_path, "rb");
+    if (!file) continue;
+    void *data = malloc((size_t)st.st_size + 1u);
+    const bool ok = data && fread(data, 1, (size_t)st.st_size, file) == (size_t)st.st_size &&
+                    error_is_ok(emulator_sd_card_write_file(emu, guest_path, data, (uint64_t)st.st_size));
+    free(data);
+    fclose(file);
+    if (!ok) imported = -1;
+    else imported++;
+  }
+  closedir(dir);
+  return imported;
+}
+
 static int run(int argc, char **argv) {
   if (argc < 1) return EXIT_USAGE;
   const char *path = argv[0];
   const CPU_Backend *backend = &CPU_BACKEND_INTERPRETER;
   uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES;
-  bool test_card = false;
-  const char *expect_output = NULL, *expect_hash = NULL;
+  bool test_card = false, svc_stats = false;
+  const char *expect_output = NULL, *expect_hash = NULL, *sdmc = NULL, *frame_path = NULL, *font_path = NULL;
   for (int i = 1; i < argc; i++) {
     const bool has_value = i + 1 < argc;
     if (!strcmp(argv[i], "--backend") && has_value) {
@@ -144,6 +211,14 @@ static int run(int argc, char **argv) {
       expect_output = argv[++i];
     } else if (!strcmp(argv[i], "--expect-frame-hash") && has_value) {
       expect_hash = argv[++i];
+    } else if (!strcmp(argv[i], "--svc-stats")) {
+      svc_stats = true;
+    } else if (!strcmp(argv[i], "--font") && has_value) {
+      font_path = argv[++i];
+    } else if (!strcmp(argv[i], "--dump-frame") && has_value) {
+      frame_path = argv[++i];
+    } else if (!strcmp(argv[i], "--sdmc") && has_value) {
+      sdmc = argv[++i];
     } else {
       fprintf(stderr, "voland-cli: unknown option %s\n", argv[i]);
       return EXIT_USAGE;
@@ -163,11 +238,37 @@ static int run(int argc, char **argv) {
   emulator_set_debug_output(&emu, on_guest_output, NULL);
   framebuffer_reset();
   if (test_card) (void)framebuffer_publish_test_card(TEST_CARD_WIDTH, TEST_CARD_HEIGHT);
+  if (sdmc) {
+    const int imported = import_sdmc(&emu, sdmc, "");
+    if (imported < 0) {
+      fprintf(stderr, "voland-cli: could not import %s into the SD card\n", sdmc);
+      emulator_destroy(&emu);
+      fclose(file);
+      return EXIT_LOAD_FAILED;
+    }
+    fprintf(stderr, "voland-cli: SD card seeded with %d files from %s\n", imported, sdmc);
+  }
+  static uint8_t *font;
+  if (font_path) {
+    FILE *f = fopen(font_path, "rb");
+    long size = 0;
+    if (f && fseek(f, 0, SEEK_END) == 0 && (size = ftell(f)) > 0 && fseek(f, 0, SEEK_SET) == 0 &&
+        (font = malloc((size_t)size)) != NULL && fread(font, 1, (size_t)size, f) == (size_t)size) {
+      emulator_set_shared_font(&emu, font, (uint32_t)size);
+    } else {
+      fprintf(stderr, "voland-cli: could not read font %s\n", font_path);
+    }
+    if (f) fclose(f);
+  }
+  /* Homebrew appears on the SD card under its own name (its argv[0]). */
+  const char *base = strrchr(path, '/');
+  emulator_set_program_path(&emu, base ? base + 1 : path);
+  /* The file stays open while the program runs: fsp-srv reads its RomFS. */
   err = emulator_load(&emu, &source, 0);
-  fclose(file);
   if (!error_is_ok(err)) {
     fprintf(stderr, "voland-cli: load failed: %s\n", err.message ? err.message : "(no message)");
     emulator_destroy(&emu);
+    fclose(file);
     return EXIT_LOAD_FAILED;
   }
 
@@ -175,6 +276,7 @@ static int run(int argc, char **argv) {
   uint64_t slices = 0;
   while (slices < max_slices && (status == EMULATOR_RUNNING || status == EMULATOR_IDLE)) {
     status = emulator_run_slice(&emu, budget);
+    framebuffer_consume_all(); /* the CLI "displays" every frame at once */
     slices++;
   }
 
@@ -185,10 +287,17 @@ static int run(int argc, char **argv) {
           k_status[status], (unsigned long long)slices, (unsigned long long)emu.scheduler.ticks,
           (unsigned long long)emu.hle.svc_call_count);
   if (width) fprintf(stderr, "voland-cli: frame %ux%u fnv1a64=%016llx\n", width, height, (unsigned long long)frame_hash);
+  if (svc_stats) {
+    for (uint32_t i = 0; i < HLE_SVC_COUNT; i++) {
+      if (emu.hle.svc_counts[i]) fprintf(stderr, "voland-cli: svc 0x%02x x %llu\n", i, (unsigned long long)emu.hle.svc_counts[i]);
+    }
+  }
+  if (frame_path && !dump_frame(frame_path)) fprintf(stderr, "voland-cli: no frame to dump to %s\n", frame_path);
   if (status == EMULATOR_CRASHED) {
     fprintf(stderr, "voland-cli: crashed at pc=0x%010llx\n", (unsigned long long)emu.scheduler.crash_pc);
   }
   emulator_destroy(&emu);
+  fclose(file);
 
   if (expect_output && !strstr(g_output, expect_output)) {
     fprintf(stderr, "voland-cli: expected output not seen: %s\n", expect_output);

@@ -62,6 +62,11 @@ void framebuffer_publish(uint32_t slot, const Framebuffer_Frame *frame);
 uint32_t framebuffer_published(void);
 uint32_t framebuffer_consumed(void);
 
+/* Consumer side for native hosts with no presenter thread (voland-cli):
+ * marks every published frame shown, as the GPU worker does after a
+ * present (§6). */
+void framebuffer_consume_all(void);
+
 /* Draws Voland's test card into a slot and publishes it: colour bars over
  * a gradient with a checker strip - the frame the display shows until a
  * guest presents (and the pixels the renderer tests assert on). Returns

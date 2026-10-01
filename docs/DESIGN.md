@@ -2284,9 +2284,9 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 - [ ] **GPU command ring** (§13): versioned records, CPU-side decode, GPU-side drain
 - [ ] Minimal shader path (stall-on-compile, no cache yet)
-- [ ] **vi: + buffer queue (nvnflinger)** — the present contract; without it Phase 4 has no screen
+- [x] **vi: + buffer queue (nvnflinger)** — the present contract; without it Phase 4 has no screen. *v3.39: `hle/services/vi/` - IGraphicBufferProducer over parcels, vsync compositor with block-linear deswizzle into the §6 slots.*
 - [x] hid: **shared-memory writer (N independent npads + style bits — enables same-console multiplayer, §20)**. *v3.38: `hle/services/hid/hid.{h,c}` over the new shared-memory kernel object; input region sampled at 200Hz virtual time.*
-- [ ] fsp-srv (RomFS on decrypted input), applet, time (virtual-time-backed)
+- [x] fsp-srv (RomFS on decrypted input), applet, time (virtual-time-backed). *v3.39: plus set, apm, offline bsd/nifm, pl (platform font), psm, ts; libnx homebrew boots through all of them.*
 - [ ] Audio ring + AudioWorkletProcessor output (§14)
 
 ### Phase 5 — Playable Core (+ Compatibility Database)
@@ -2409,9 +2409,22 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.38.0*
+*Document version: 3.39.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.38 → v3.39 (summary)
+
+- **First boot of real homebrew.** The released nx-hbmenu v3.6.1 (libnx + deko3d) now runs its whole startup on Voland, and libnx's own console renders to the screen through the real present path - the first pixels drawn by unmodified Switch software. (Used locally only; no third-party binary is in the repository.)
+- **Services** (each registered with sm:, each answering libnx's request layouts): `set`/`set:sys` (firmware 17.0.0, US English, settings items), `apm` (+ISession), `appletOE`/`appletAE` (`hle/services/am/`: proxy and its nine interfaces, a message queue that starts with FocusStateChanged, in focus, handheld, storages with real IStorage/IStorageAccessor, library applets that start and complete at once - the §12 stub map), `time:*` (`hle/services/time/`: clocks over virtual time from a platform-set RTC (`emulator_set_rtc`, default 2026-01-01 so headless runs are deterministic), the seqlock'd clock shared memory libnx reads, UTC calendar conversions), `fsp-srv` (`hle/services/fs/`: SD card, save data created on first open, IFile/IDirectory/IStorage, the program's RomFS through OpenDataStorageByCurrentProcess; system archives are not shipped - TargetNotFound, §1.6), `vi:u` (`hle/services/vi/`: display service, IHOSBinderDriver, the Android IGraphicBufferProducer over parcels), `bsd:u`/`bsd:s` + `nifm:*` (`hle/services/network/`: an offline console - sockets fail ENETDOWN, nothing connects anywhere, rule 9), `pl:u` (`hle/services/pl/`: the shared-font block, serving a platform-supplied font - never Nintendo's), `psm` and `ts` (`hle/services/misc/`).
+- **Presentation (§13):** queued BufferQueue buffers are composited at 60Hz virtual vsync - nvmap id → guest VA, Tegra block-linear deswizzle (`gpu/block_linear.{h,c}`, the 16Bx2 GOB formula) or pitch copy, RGBA8/RGBX8/BGRA8/RGB565/RGBA4444 → RGBA8 - into the §6 slots. The release event is signalled exactly while a buffer is free (libnx's eventWait + async dequeue never spins); a synchronous dequeue with nothing free reclaims the oldest queued buffer (frame dropped) rather than block (§7). The scheduler gained `device_wake_at`: with every thread waiting, time jumps to the next vsync instead of reporting deadlock (only once a program has a display).
+- **Kernel:** svcSetMemoryPermission (0x02; heap and loaded images - libnx's crt0 makes .data.rel.ro read-only), svcCreateTransferMemory (0x15; the range is reprotected while lent, closing returns it; unload restores lent pages before teardown), CNTPCT_EL0 reads (CNTVOFF = 0). `Service_Interface.on_close` lets services free per-object state when a session/domain object dies (storages, open files, directories, applets); objects a failed reply never delivered are released too.
+- **Homebrew ABI (hbloader):** NROs are entered with X0 = a config-entry list (main thread handle, next-load path/argv buffers, argv, syscall hints, applet type, HOS version, random seed, loader info) mapped in the stack region, X1 = -1, LR = an `svc ExitProcess` stub. The NRO is copied onto the SD card at its program path (`emulator_set_program_path`; libnx reads its RomFS via argv[0]). When it exits having set a next load, that NRO is loaded from the SD card; when a chain-loaded app exits, the first NRO returns - hbloader's loop, so a homebrew menu can launch apps.
+- **Storage (§15):** `hle/fs/ramfs.{h,c}` - an in-memory hierarchical filesystem (FAT-style block chains in one arena, Horizon fs Results) backing the SD card and saves for the Emulator's lifetime; `emulator_sd_card_write_file`/`_create_directory` for importers. Persisting it (OPFS on the web, a host directory natively) is the save-management task (Phase 6). Large service buffers (applet storages, compositor scratch, ramfs nodes) live in arenas, not the Emulator struct.
+- **voland-cli:** `--sdmc DIR` (seed the SD card), `--font FILE` (pl:u's font), `--dump-frame FILE` (PPM of the newest frame), `--svc-stats`; the CLI consumes frames itself (`framebuffer_consume_all`), and keeps the program file open while it runs.
+- **Contract change, stated (emulator.h):** the source passed to `emulator_load*` must now stay readable until unload (the RomFS is served from it).
+- **Tests:** `block_linear_test` (GOB formula against libnx's GOB writer, block order, sizes, round trips), `ramfs_test`, `services_test` (vi BufferQueue down to composited pixels and release-event state, fsp-srv file/dir/save/RomFS paths, time calendar and clock shared memory, set:sys firmware, apm, am messages and storages incl. on_close).
+- **Next, stated:** hbmenu draws its UI on the CPU and copies it to the swapchain image with the GPU's DMA engine (deko3d `dkCmdBufCopyBufferToImage`); until GPFIFO command processing exists the menu's frames are black. That is the next step (§13 GPU command ring).
 
 ### Changelog v3.37 → v3.38 (summary)
 

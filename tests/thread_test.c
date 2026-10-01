@@ -90,11 +90,10 @@ int main(void) {
 
   /* The state works with the HLE dispatcher: an SVC on the thread's
    * state is counted and answers in X0, as the emulator's state does.
-   * 0x02 (SetMemoryPermission) rather than 0x01: this test has no
-   * Process, and 0x01 (SetHeapSize) is a real handler now (svc_memory.h)
-   * that would dereference one - 0x02 is still genuinely unimplemented. */
+   * 0x7F is no syscall: this test has no Process, and real handlers
+   * (0x01, 0x02, ...) would dereference one. */
   const uint64_t svc_before = hle.svc_call_count;
-  hle_on_svc(b.cpu_state, 0x02, &hle);
+  hle_on_svc(b.cpu_state, 0x7F, &hle);
   CHECK(hle.svc_call_count == svc_before + 1);
   CHECK(cpu->get_reg(b.cpu_state, CPU_REG_X0) == HLE_RESULT_NOT_IMPLEMENTED);
   CHECK(cpu->get_reg(a.cpu_state, CPU_REG_X0) == ARGUMENT); /* a untouched */

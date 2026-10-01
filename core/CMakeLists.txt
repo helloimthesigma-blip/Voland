@@ -31,6 +31,17 @@ set(SWITCH_CORE_SOURCES
   hle/kernel/event.c
   hle/kernel/shared_memory.c
   hle/services/hid/hid.c
+  hle/services/am/am.c
+  hle/services/apm/apm.c
+  hle/services/set/set.c
+  hle/services/time/time.c
+  hle/services/fs/fs.c
+  hle/services/vi/vi.c
+  hle/services/network/network.c
+  hle/services/pl/pl.c
+  hle/services/misc/misc.c
+  gpu/block_linear.c
+  hle/fs/ramfs.c
   hle/kernel/svc_thread.c
   hle/services/sm/sm.c
   hle/services/nvdrv/nvdrv.c

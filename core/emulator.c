@@ -10,11 +10,265 @@
 #include "hle/kernel/handle_table.h"
 #include "hle/kernel/thread.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #define EMULATOR_HOMEBREW_PRIORITY 44u
 #define EMULATOR_HOMEBREW_STACK_BYTES 0x100000u
 #define EMULATOR_HOMEBREW_ARENA_BYTES ((size_t)1024 * 1024)
+
+/* Service state that lives and dies with a process. Registration with
+ * sm: happens once (emulator_create); the interfaces' addresses never
+ * change, so re-initializing in place keeps the registry valid. */
+/* Locates the program's RomFS in `emulator->content`: an NRO's asset
+ * section ("ASET" header right after the NRO image) or the program NCA's
+ * RomFS section. Leaves emulator->romfs NULL when there is none. */
+#define NRO_SIZE_OFFSET 0x18u
+#define NRO_ASSET_HEADER_BYTES 0x38u
+#define NRO_ASSET_ROMFS_OFFSET 0x28u
+
+static void locate_romfs(Emulator* emulator, bool is_nro) {
+  emulator->romfs = NULL;
+  const Byte_Source* content = &emulator->content;
+  if (is_nro) {
+    uint8_t word[4];
+    if (!error_is_ok(byte_source_read(content, NRO_SIZE_OFFSET, word, sizeof(word)))) return;
+    const uint64_t asset = byte_source_le32(word);
+    uint8_t header[NRO_ASSET_HEADER_BYTES];
+    if (asset + sizeof(header) > content->size ||
+        !error_is_ok(byte_source_read(content, asset, header, sizeof(header))) || memcmp(header, "ASET", 4) != 0) {
+      return;
+    }
+    const uint64_t offset = byte_source_le64(header + NRO_ASSET_ROMFS_OFFSET);
+    const uint64_t size = byte_source_le64(header + NRO_ASSET_ROMFS_OFFSET + 8);
+    if (size && error_is_ok(byte_source_slice(content, asset + offset, size, &emulator->romfs_slice))) {
+      emulator->romfs = &emulator->romfs_slice.source;
+    }
+    return;
+  }
+  if (!error_is_ok(nca_open(content, &emulator->content_nca))) return;
+  const int index = nca_find_section(&emulator->content_nca, NCA_FS_ROMFS);
+  if (index < 0 || !error_is_ok(nca_probe_section(&emulator->content_nca, (uint32_t)index))) return;
+  emulator->romfs = nca_section_source(&emulator->content_nca, (uint32_t)index);
+}
+
+/* ------------------------------------------------------------------ */
+/* Homebrew ABI (switchbrew "Homebrew ABI"; libnx runtime/env.c).      */
+/* ------------------------------------------------------------------ */
+
+#define ENV_PAGES 3u
+#define ENV_ENTRY_BYTES 24u
+#define ENV_MAX_ENTRIES 16u
+#define ENV_ARGV_OFFSET 0x200u
+#define ENV_ARGV_BYTES 0x400u
+#define ENV_INFO_OFFSET 0x600u
+#define ENV_NEXT_PATH_OFFSET 0x1000u
+#define ENV_NEXT_PATH_BYTES 0x200u
+#define ENV_NEXT_ARGV_OFFSET 0x1400u
+#define ENV_STUB_OFFSET 0x2000u
+#define ENV_KEY_END 0u
+#define ENV_KEY_MAIN_THREAD_HANDLE 1u
+#define ENV_KEY_NEXT_LOAD_PATH 2u
+#define ENV_KEY_ARGV 5u
+#define ENV_KEY_SYSCALL_HINT 6u
+#define ENV_KEY_APPLET_TYPE 7u
+#define ENV_KEY_LAST_LOAD_RESULT 11u
+#define ENV_KEY_RANDOM_SEED 14u
+#define ENV_KEY_HOS_VERSION 16u
+#define ENV_KEY_SYSCALL_HINT2 17u
+#define ENV_FLAG_MANDATORY 1u
+#define ENV_APPLET_TYPE_APPLICATION 0u
+#define ENV_HOS_VERSION ((17u << 16) | (0u << 8) | 0u)
+#define ENV_SEED_0 0x566F6C616E64ull /* "Voland" */
+#define ENV_SEED_1 0x686F6D6562726577ull
+#define ENV_SVC_EXIT_PROCESS 0xD40000E1u /* svc #0x7 */
+#define ENV_BRANCH_SELF 0x14000000u      /* b . */
+#define SDMC_PREFIX "sdmc:"
+#define LOADER_INFO "Voland homebrew loader\n"
+
+typedef struct Env_Writer {
+  uint8_t page[2u * VMM_PAGE_SIZE];
+  uint32_t count;
+} Env_Writer;
+
+static void env_entry(Env_Writer* w, uint32_t key, uint32_t flags, uint64_t v0, uint64_t v1) {
+  if (w->count >= ENV_MAX_ENTRIES) return;
+  uint8_t* e = w->page + w->count++ * ENV_ENTRY_BYTES;
+  memcpy(e, &key, 4);
+  memcpy(e + 4, &flags, 4);
+  memcpy(e + 8, &v0, 8);
+  memcpy(e + 16, &v1, 8);
+}
+
+/* First run of `pages` unmapped pages in the stack region, past the main
+ * stack and a guard page. */
+static uint64_t find_env_base(const Emulator* emulator, uint64_t pages) {
+  const Address_Region* stack = &emulator->process.address_space.stack;
+  const uint64_t bytes = pages * VMM_PAGE_SIZE;
+  uint64_t at = emulator->process.main_thread_stack.base + emulator->process.main_thread_stack.size + VMM_PAGE_SIZE;
+  if (!address_region_contains(stack, at, bytes)) at = stack->base;
+  for (; at + bytes <= stack->base + stack->size; at += VMM_PAGE_SIZE) {
+    VMM_Region_Info info;
+    if (error_is_ok(vmm_query(emulator->vmm, at, &info)) && !info.is_mapped && info.base_gva + info.size >= at + bytes) {
+      return at;
+    }
+  }
+  return 0;
+}
+
+static Error setup_homebrew_env(Emulator* emulator) {
+  Process* p = &emulator->process;
+  const uint64_t base = find_env_base(emulator, ENV_PAGES);
+  if (!base) return ERR(RESULT_OUT_OF_MEMORY, "homebrew env: no room in the stack region");
+  uint64_t pa = 0;
+  Error err = page_allocator_allocate(&emulator->pages, ENV_PAGES, &pa);
+  if (!error_is_ok(err)) return err;
+  (void)vmm_fill_physical(emulator->vmm, pa, 0, ENV_PAGES * VMM_PAGE_SIZE);
+  err = vmm_map(emulator->vmm, base, pa, 2u * VMM_PAGE_SIZE, VMM_PERM_RW);
+  if (error_is_ok(err)) {
+    err = vmm_map(emulator->vmm, base + ENV_STUB_OFFSET, pa + ENV_STUB_OFFSET, VMM_PAGE_SIZE, VMM_PERM_RX);
+    if (!error_is_ok(err)) (void)vmm_unmap(emulator->vmm, base, 2u * VMM_PAGE_SIZE);
+  }
+  if (!error_is_ok(err)) return err;
+  p->loader_env = (Address_Region){base, ENV_PAGES * VMM_PAGE_SIZE};
+
+  static Env_Writer w;
+  memset(&w, 0, sizeof(w));
+  const uint64_t all = UINT64_MAX;
+  env_entry(&w, ENV_KEY_MAIN_THREAD_HANDLE, ENV_FLAG_MANDATORY, p->main_thread_handle, 0);
+  env_entry(&w, ENV_KEY_NEXT_LOAD_PATH, 0, base + ENV_NEXT_PATH_OFFSET, base + ENV_NEXT_ARGV_OFFSET);
+  env_entry(&w, ENV_KEY_ARGV, 0, 0, base + ENV_ARGV_OFFSET);
+  env_entry(&w, ENV_KEY_SYSCALL_HINT, 0, all, all);
+  env_entry(&w, ENV_KEY_SYSCALL_HINT2, 0, all, 0);
+  env_entry(&w, ENV_KEY_APPLET_TYPE, 0, ENV_APPLET_TYPE_APPLICATION, 0);
+  env_entry(&w, ENV_KEY_LAST_LOAD_RESULT, 0, 0, 0);
+  env_entry(&w, ENV_KEY_RANDOM_SEED, 0, ENV_SEED_0, ENV_SEED_1);
+  env_entry(&w, ENV_KEY_HOS_VERSION, 0, ENV_HOS_VERSION, 0);
+  env_entry(&w, ENV_KEY_END, 0, base + ENV_INFO_OFFSET, sizeof(LOADER_INFO) - 1u);
+  /* argv: what the loader was asked to pass, else the program's own path. */
+  char* argv = (char*)w.page + ENV_ARGV_OFFSET;
+  if (emulator->next_argv[0]) snprintf(argv, ENV_ARGV_BYTES, "%s", emulator->next_argv);
+  else snprintf(argv, ENV_ARGV_BYTES, SDMC_PREFIX "%s", emulator->program_path);
+  memcpy(w.page + ENV_INFO_OFFSET, LOADER_INFO, sizeof(LOADER_INFO) - 1u);
+  (void)vmm_write_physical(emulator->vmm, pa, w.page, sizeof(w.page));
+  const uint32_t stub[2] = {ENV_SVC_EXIT_PROCESS, ENV_BRANCH_SELF};
+  (void)vmm_write_physical(emulator->vmm, pa + ENV_STUB_OFFSET, stub, sizeof(stub));
+
+  /* X0 = the entry list, X1 = -1 (libnx crt0: a context with any other
+   * X1 is an exception entry), LR = the "return to loader" stub. */
+  emulator->cpu_backend->set_reg(emulator->cpu_state, CPU_REG_X0, base);
+  emulator->cpu_backend->set_reg(emulator->cpu_state, CPU_REG_X0 + 1u, UINT64_MAX);
+  emulator->cpu_backend->set_reg(emulator->cpu_state, CPU_REG_X30, base + ENV_STUB_OFFSET);
+  return OK;
+}
+
+/* Copies the loaded NRO onto the SD card at program_path (libnx reads its
+ * RomFS through argv[0]). Skipped when it already came from there. */
+static void copy_program_to_sd(Emulator* emulator) {
+  if (!emulator->ramfs_ready || emulator->content_node != RAMFS_NO_NODE) return;
+  Ramfs_Pool* pool = &emulator->ramfs;
+  const uint32_t root = emulator->fs.sd_root;
+  if (!error_is_ok(emulator_sd_card_write_file(emulator, emulator->program_path, NULL, 0))) return;
+  uint32_t node = 0;
+  if (ramfs_lookup(pool, root, emulator->program_path, &node) != 0) return;
+  for (uint64_t at = 0; at < emulator->content.size;) {
+    const uint64_t n = emulator->content.size - at < FS_BOUNCE_BYTES ? emulator->content.size - at : FS_BOUNCE_BYTES;
+    if (!error_is_ok(byte_source_read(&emulator->content, at, emulator->fs.bounce, n)) ||
+        ramfs_write(pool, node, at, emulator->fs.bounce, n) != 0) {
+      (void)ramfs_delete_file(pool, root, emulator->program_path);
+      return;
+    }
+    at += n;
+  }
+}
+
+static Error ramfs_source_read(void* user, uint64_t offset, void* out, uint64_t size) {
+  Emulator* emulator = (Emulator*)user;
+  uint64_t read = 0;
+  if (ramfs_read(&emulator->ramfs, emulator->content_node, offset, out, size, &read) != 0 || read != size) {
+    return ERR(RESULT_IO_ERROR, "sd card read failed");
+  }
+  return OK;
+}
+
+/* hbloader's loop: after an NRO exits, load what it asked for, or go
+ * back to the first NRO. True if a program was (re)loaded. */
+static bool chain_load(Emulator* emulator) {
+  char next[ENV_NEXT_PATH_BYTES];
+  memset(next, 0, sizeof(next));
+  memset(emulator->next_argv, 0, sizeof(emulator->next_argv));
+  const uint64_t env = emulator->process.loader_env.base;
+  if (env) {
+    (void)vmm_read_block(emulator->vmm, env + ENV_NEXT_PATH_OFFSET, next, sizeof(next) - 1u);
+    (void)vmm_read_block(emulator->vmm, env + ENV_NEXT_ARGV_OFFSET, emulator->next_argv,
+                         sizeof(emulator->next_argv) - 1u);
+  }
+  char target[FS_MAX_PATH_BYTES];
+  if (next[0]) {
+    const char* path = strncmp(next, SDMC_PREFIX, strlen(SDMC_PREFIX)) == 0 ? next + strlen(SDMC_PREFIX) : next;
+    snprintf(target, sizeof(target), "%s", path);
+  } else if (strcmp(emulator->program_path, emulator->home_path) != 0) {
+    snprintf(target, sizeof(target), "%s", emulator->home_path);
+    memset(emulator->next_argv, 0, sizeof(emulator->next_argv));
+  } else {
+    return false;
+  }
+  log_info("[emulator] homebrew chain-load: sdmc:%s", target);
+  char home[FS_MAX_PATH_BYTES];
+  snprintf(home, sizeof(home), "%s", emulator->home_path);
+  char argv[EMULATOR_ARGV_BYTES];
+  memcpy(argv, emulator->next_argv, sizeof(argv));
+  emulator_unload_program(emulator);
+  uint32_t node = 0;
+  if (!emulator->ramfs_ready || ramfs_lookup(&emulator->ramfs, emulator->fs.sd_root, target, &node) != 0 ||
+      emulator->ramfs.nodes[node].is_dir) {
+    log_warn("[emulator] chain-load target sdmc:%s not found", target);
+    return false;
+  }
+  emulator->content_node = node;
+  snprintf(emulator->program_path, sizeof(emulator->program_path), "%s", target);
+  memcpy(emulator->next_argv, argv, sizeof(argv));
+  const Byte_Source source = {emulator, emulator->ramfs.nodes[node].size, ramfs_source_read};
+  const Error err = emulator_load_nro(emulator, &source, 0);
+  snprintf(emulator->home_path, sizeof(emulator->home_path), "%s", home);
+  if (!error_is_ok(err)) {
+    log_warn("[emulator] chain-load of sdmc:%s failed: %s", target, err.message ? err.message : "");
+    return false;
+  }
+  return true;
+}
+
+static void reset_process_services(Emulator* emulator) {
+  event_pool_init(&emulator->events);
+  nvdrv_init(&emulator->nvdrv); /* fds, nvmap handles and syncpoints die with the process */
+  shared_memory_pool_init(&emulator->shared_memory, &emulator->pages);
+  memset(&emulator->transfer_memory, 0, sizeof(emulator->transfer_memory));
+  hid_init(&emulator->hid, &emulator->shared_memory);
+  am_init(&emulator->am, emulator->am_storage_pool);
+  apm_init(&emulator->apm);
+  set_init(&emulator->set);
+  time_init(&emulator->time, &emulator->shared_memory, emulator->rtc);
+  fs_reset_process(&emulator->fs, NULL);
+  vi_init(&emulator->vi, &emulator->nvdrv, emulator->vi_scratch);
+  network_init(&emulator->network);
+  misc_init(&emulator->misc);
+  pl_init(&emulator->pl, &emulator->shared_memory, emulator->shared_font, emulator->shared_font_size);
+}
+
+static Error register_services(Emulator* emulator) {
+  Error err = nvdrv_register(&emulator->nvdrv, &emulator->sm);
+  if (error_is_ok(err)) err = hid_register(&emulator->hid, &emulator->sm);
+  if (error_is_ok(err)) err = am_register(&emulator->am, &emulator->sm);
+  if (error_is_ok(err)) err = apm_register(&emulator->apm, &emulator->sm);
+  if (error_is_ok(err)) err = set_register(&emulator->set, &emulator->sm);
+  if (error_is_ok(err)) err = time_register(&emulator->time, &emulator->sm);
+  if (error_is_ok(err)) err = fs_register(&emulator->fs, &emulator->sm);
+  if (error_is_ok(err)) err = vi_register(&emulator->vi, &emulator->sm);
+  if (error_is_ok(err)) err = network_register(&emulator->network, &emulator->sm);
+  if (error_is_ok(err)) err = pl_register(&emulator->pl, &emulator->sm);
+  if (error_is_ok(err)) err = misc_register(&emulator->misc, &emulator->sm);
+  return err;
+}
 
 Error emulator_create(Emulator* out) {
   return emulator_create_with_backend(out, cpu_get_active_backend());
@@ -72,15 +326,22 @@ Error emulator_create_with_backend(Emulator* out, const CPU_Backend* backend) {
                    &out->sessions, &out->sm);
   scheduler_init(&out->scheduler, out->cpu_backend);
   out->hle.scheduler = &out->scheduler;
-  event_pool_init(&out->events);
   out->hle.events = &out->events;
-  /* Services (§12) register with sm: once; their state resets per process. */
-  nvdrv_init(&out->nvdrv);
-  shared_memory_pool_init(&out->shared_memory, &out->pages);
+  out->rtc = TIME_DEFAULT_RTC;
+  out->content_node = RAMFS_NO_NODE;
+  snprintf(out->program_path, sizeof(out->program_path), "%s", EMULATOR_DEFAULT_NRO_PATH);
+  if (arena_create(&out->service_arena, EMULATOR_SERVICE_ARENA_BYTES)) {
+    out->am_storage_pool = ARENA_ALLOC_ARRAY(&out->service_arena, uint8_t, (size_t)AM_STORAGE_POOL_BYTES);
+    out->vi_scratch = ARENA_ALLOC_ARRAY(&out->service_arena, uint8_t, (size_t)VI_SCRATCH_BYTES);
+  }
+  out->ramfs_ready = ramfs_pool_init(&out->ramfs, EMULATOR_RAMFS_BYTES);
+  if (!out->ramfs_ready) log_warn("[emulator] no RAM for the SD card / saves; fsp-srv filesystems will be full");
+  fs_init(&out->fs, out->ramfs_ready ? &out->ramfs : NULL);
   out->hle.shared_memory = &out->shared_memory;
-  hid_init(&out->hid, &out->shared_memory);
-  Error service_err = nvdrv_register(&out->nvdrv, &out->sm);
-  if (error_is_ok(service_err)) service_err = hid_register(&out->hid, &out->sm);
+  out->hle.transfer_memory = &out->transfer_memory;
+  /* Services (§12) register with sm: once; their state resets per process. */
+  reset_process_services(out);
+  const Error service_err = register_services(out);
   SWITCH_ASSERT_ALWAYS(error_is_ok(service_err), "services register into an empty sm: registry");
   out->cpu_backend->set_svc_handler(out->cpu_state, hle_on_svc);
   out->cpu_backend->set_undefined_handler(out->cpu_state, hle_on_undefined);
@@ -98,6 +359,8 @@ void emulator_destroy(Emulator* emulator) {
   if (emulator->cpu_backend && emulator->cpu_state) {
     emulator->cpu_backend->destroy(emulator->cpu_state);
   }
+  if (emulator->ramfs_ready) ramfs_pool_destroy(&emulator->ramfs);
+  arena_destroy(&emulator->service_arena);
   vmm_destroy(emulator->vmm);
   layout_destroy();
   memset(emulator, 0, sizeof(*emulator));
@@ -105,7 +368,7 @@ void emulator_destroy(Emulator* emulator) {
 
 /* Shared tail of every load: arm the main thread (Horizon entry ABI) and
  * adopt it into the scheduler. On failure the process is torn down. */
-static Error finish_load(Emulator* emulator) {
+static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_nro) {
   Error err = OK;
   err = process_enter_main_thread(&emulator->process, emulator->cpu_backend, emulator->cpu_state);
   if (!error_is_ok(err)) {
@@ -131,6 +394,22 @@ static Error finish_load(Emulator* emulator) {
   err = handle_table_replace(&emulator->process.handles, main_thread->handle, KERNEL_OBJECT_THREAD, main_thread);
   SWITCH_ASSERT_ALWAYS(error_is_ok(err), "main thread handle is live");
 
+  emulator->content = *source;
+  emulator->is_homebrew = is_nro;
+  if (is_nro) {
+    err = setup_homebrew_env(emulator);
+    if (!error_is_ok(err)) {
+      process_teardown(&emulator->process, emulator->vmm, &emulator->pages);
+      page_allocator_reset(&emulator->pages);
+      return err;
+    }
+    copy_program_to_sd(emulator);
+    if (emulator->content_node == RAMFS_NO_NODE) {
+      snprintf(emulator->home_path, sizeof(emulator->home_path), "%s", emulator->program_path);
+    }
+  }
+  locate_romfs(emulator, is_nro);
+  fs_reset_process(&emulator->fs, emulator->romfs);
   emulator->program_loaded = true;
   log_info("[emulator] program '%s' loaded; main thread armed at pc=0x%010llx",
            emulator->process.npdm.name, (unsigned long long)emulator->process.entry_point);
@@ -209,7 +488,7 @@ Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
   arena_destroy(&scratch);
   if (!error_is_ok(err)) return err;
 
-  return finish_load(emulator);
+  return finish_load(emulator, nca_source, false);
 }
 
 Error emulator_load_nro(Emulator* emulator, const Byte_Source* nro_source, uint64_t aslr_seed) {
@@ -251,7 +530,7 @@ Error emulator_load_nro(Emulator* emulator, const Byte_Source* nro_source, uint6
     page_allocator_reset(&emulator->pages);
     return err;
   }
-  return finish_load(emulator);
+  return finish_load(emulator, nro_source, true);
 }
 
 Error emulator_load(Emulator* emulator, const Byte_Source* source, uint64_t aslr_seed) {
@@ -272,13 +551,20 @@ void emulator_unload_program(Emulator* emulator) {
     if (t->state != THREAD_STATE_FREE && t->owns_cpu_state) thread_destroy(&env, &t->thread);
   }
   scheduler_init(&emulator->scheduler, emulator->cpu_backend);
-  event_pool_init(&emulator->events);
-  nvdrv_init(&emulator->nvdrv); /* fds, nvmap handles and syncpoints die with the process */
+  /* Transfer memory still lent at exit: the heap gets its pages back
+   * read-write, so teardown can release them. */
+  for (uint32_t i = 0; i < TRANSFER_MEMORY_POOL_CAPACITY; i++) {
+    const Kernel_Transfer_Memory* tmem = &emulator->transfer_memory.objects[i];
+    if (tmem->references) (void)vmm_reprotect(emulator->vmm, tmem->address, tmem->size, VMM_PERM_RW);
+  }
   process_teardown(&emulator->process, emulator->vmm, &emulator->pages);
   page_allocator_reset(&emulator->pages);
-  shared_memory_pool_init(&emulator->shared_memory, &emulator->pages); /* pages went with the reset */
-  hid_init(&emulator->hid, &emulator->shared_memory);
+  reset_process_services(emulator); /* shared-memory pages went with the reset */
   ipc_session_pool_init(&emulator->sessions); /* every session belonged to the process */
+  emulator->romfs = NULL;
+  memset(&emulator->content, 0, sizeof(emulator->content));
+  emulator->content_node = RAMFS_NO_NODE;
+  emulator->is_homebrew = false;
   emulator->program_loaded = false;
 }
 
@@ -292,10 +578,13 @@ Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
   const Memory_Layout* layout = layout_get();
   hid_update(&emulator->hid, &emulator->hle, layout ? (const void*)(uintptr_t)layout->input_region_base : NULL,
              emulator->scheduler.ticks);
+  /* Display (§13): vsync composites queued buffers into the §6 slots. */
+  vi_update(&emulator->vi, &emulator->hle, emulator->scheduler.ticks);
+  emulator->scheduler.device_wake_at = vi_next_wake(&emulator->vi);
   switch (scheduler_tick(&emulator->scheduler, emulator->cpu_backend, cycle_budget, &reason)) {
   case SCHEDULER_RAN: return EMULATOR_RUNNING;
   case SCHEDULER_IDLE: return EMULATOR_IDLE;
-  case SCHEDULER_EXITED: return EMULATOR_EXITED;
+  case SCHEDULER_EXITED: return emulator->is_homebrew && chain_load(emulator) ? EMULATOR_RUNNING : EMULATOR_EXITED;
   case SCHEDULER_CRASHED: return EMULATOR_CRASHED;
   default: return EMULATOR_DEADLOCK;
   }
@@ -309,6 +598,66 @@ CPU_ExitReason emulator_run(Emulator* emulator, uint64_t cycle_budget) {
     return CPU_EXIT_HALT;
   }
   return reason;
+}
+
+static Error sd_result(uint32_t rc, const char *what) {
+  return rc ? ERR(rc == FS_RESULT_USABLE_SPACE_NOT_ENOUGH ? RESULT_OUT_OF_MEMORY : RESULT_INVALID_ARGUMENT, what) : OK;
+}
+
+Error emulator_sd_card_create_directory(Emulator* emulator, const char* path) {
+  if (!emulator || !path || !emulator->ramfs_ready) return ERR(RESULT_INVALID_ARGUMENT, "sd card unavailable");
+  char partial[FS_MAX_PATH_BYTES];
+  const size_t length = strlen(path);
+  if (length >= sizeof(partial)) return ERR(RESULT_INVALID_ARGUMENT, "sd card path too long");
+  /* mkdir -p: every prefix ending at a '/', then the whole path. */
+  for (size_t i = 1; i <= length; i++) {
+    if (i < length && path[i] != '/') continue;
+    memcpy(partial, path, i);
+    partial[i] = '\0';
+    const uint32_t rc = ramfs_create_directory(&emulator->ramfs, emulator->fs.sd_root, partial);
+    if (rc && rc != FS_RESULT_PATH_ALREADY_EXISTS) return sd_result(rc, "sd card: create directory failed");
+  }
+  return OK;
+}
+
+Error emulator_sd_card_write_file(Emulator* emulator, const char* path, const void* data, uint64_t size) {
+  if (!emulator || !path || !emulator->ramfs_ready) return ERR(RESULT_INVALID_ARGUMENT, "sd card unavailable");
+  const char* slash = strrchr(path, '/');
+  if (slash && slash != path) {
+    char parent[FS_MAX_PATH_BYTES];
+    const size_t length = (size_t)(slash - path);
+    if (length >= sizeof(parent)) return ERR(RESULT_INVALID_ARGUMENT, "sd card path too long");
+    memcpy(parent, path, length);
+    parent[length] = '\0';
+    const Error err = emulator_sd_card_create_directory(emulator, parent);
+    if (!error_is_ok(err)) return err;
+  }
+  (void)ramfs_delete_file(&emulator->ramfs, emulator->fs.sd_root, path);
+  uint32_t rc = ramfs_create_file(&emulator->ramfs, emulator->fs.sd_root, path, 0);
+  uint32_t node = 0;
+  if (!rc) rc = ramfs_lookup(&emulator->ramfs, emulator->fs.sd_root, path, &node);
+  if (!rc) rc = ramfs_write(&emulator->ramfs, node, 0, data, size);
+  return sd_result(rc, "sd card: write failed");
+}
+
+void emulator_set_program_path(Emulator* emulator, const char* sd_path) {
+  if (!emulator || !sd_path || !sd_path[0]) return;
+  snprintf(emulator->program_path, sizeof(emulator->program_path), "%s%s", sd_path[0] == '/' ? "" : "/", sd_path);
+}
+
+void emulator_set_shared_font(Emulator* emulator, const uint8_t* ttf, uint32_t size) {
+  if (!emulator) return;
+  emulator->shared_font = ttf;
+  emulator->shared_font_size = ttf ? size : 0;
+  if (!emulator->program_loaded) {
+    pl_init(&emulator->pl, &emulator->shared_memory, emulator->shared_font, emulator->shared_font_size);
+  }
+}
+
+void emulator_set_rtc(Emulator* emulator, int64_t unix_seconds) {
+  if (!emulator) return;
+  emulator->rtc = unix_seconds;
+  if (!emulator->program_loaded) emulator->time.rtc_at_boot = unix_seconds;
 }
 
 void emulator_set_debug_output(Emulator* emulator, HLE_Debug_Output_Fn fn, void* userdata) {

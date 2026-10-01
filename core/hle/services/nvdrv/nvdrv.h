@@ -128,6 +128,10 @@ void nvdrv_init(Nvdrv_State *state);
 /* Registers the four service names with sm:. */
 Error nvdrv_register(Nvdrv_State *state, SM_Registry *registry);
 
+/* The guest VA and size behind an nvmap id (ids are handles here), for
+ * the display compositor. False if the id is unknown or unallocated. */
+bool nvdrv_nvmap_lookup(const Nvdrv_State *state, uint32_t id, uint64_t *address, uint64_t *size);
+
 /* Applies GPU completion-ring records and signals async waiters whose
  * syncpoint threshold was reached. Called every scheduler slice. */
 void nvdrv_poll_completions(Nvdrv_State *state, HLE_Context *context);

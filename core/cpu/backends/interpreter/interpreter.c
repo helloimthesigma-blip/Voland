@@ -274,6 +274,7 @@ uint64_t interp_read_sys_reg(const Interp_State *s, uint32_t reg, bool *known) {
   case CPU_SYSREG_FPSR: return s->fpsr;
   case CPU_SYSREG_CNTFRQ_EL0: return INTERP_CNTFRQ_HZ;
   case CPU_SYSREG_CNTVCT_EL0:
+  case CPU_SYSREG_CNTPCT_EL0:
     /* The scheduler's virtual time at run() entry plus this run's cycles. */
     return s->cntvct_base +
            (s->total_cycles - s->cntvct_origin) * (INTERP_CNTFRQ_HZ / 100000ull) / (INTERP_CPU_HZ / 100000ull);

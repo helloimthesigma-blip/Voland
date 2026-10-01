@@ -497,6 +497,7 @@ static uint32_t run_ioctl(HLE_Context *c, Nvdrv_State *s, const IPC_Request *req
   }
   (void)total;
   const uint32_t error = dispatch_ioctl(s, f, request, s->ioctl_buffer);
+  log_debug("[nvdrv] ioctl dev %d req %08x -> %u", (int)f->device, request, error);
   if (dir & NV_IOC_READ) {
     const IPC_Buffer *out = out_buffer(req, 0);
     if (!out || out->size < size || !error_is_ok(vmm_write_block(c->vmm, out->gva, s->ioctl_buffer, size))) {
@@ -669,4 +670,13 @@ void nvdrv_poll_completions(Nvdrv_State *state, HLE_Context *context) {
     e->waiting = false;
     if (e->event) hle_signal_event(context, e->event);
   }
+}
+
+bool nvdrv_nvmap_lookup(const Nvdrv_State *state, uint32_t id, uint64_t *address, uint64_t *size) {
+  if (id == 0 || id > NVMAP_MAX_HANDLES) return false;
+  const Nvmap_Handle *h = &state->handles[id - 1u];
+  if (!h->references || !h->allocated) return false;
+  *address = h->address;
+  *size = h->size;
+  return true;
 }

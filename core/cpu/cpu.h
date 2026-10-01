@@ -152,6 +152,7 @@ struct CPU_Backend
 #define CPU_SYSREG_FPSR CPU_SYSREG_ENCODE(3u, 3u, 4u, 4u, 1u)         /* S3_3_C4_C4_1 */
 #define CPU_SYSREG_CNTFRQ_EL0 CPU_SYSREG_ENCODE(3u, 3u, 14u, 0u, 0u)  /* S3_3_C14_C0_0 */
 #define CPU_SYSREG_CNTVCT_EL0 CPU_SYSREG_ENCODE(3u, 3u, 14u, 0u, 2u)  /* S3_3_C14_C0_2 */
+#define CPU_SYSREG_CNTPCT_EL0 CPU_SYSREG_ENCODE(3u, 3u, 14u, 0u, 1u)  /* S3_3_C14_C0_1; Horizon: CNTVOFF = 0 */
 #define CPU_SYSREG_CTR_EL0 CPU_SYSREG_ENCODE(3u, 3u, 0u, 0u, 1u)      /* S3_3_C0_C0_1 */
 #define CPU_SYSREG_DCZID_EL0 CPU_SYSREG_ENCODE(3u, 3u, 0u, 0u, 7u)    /* S3_3_C0_C0_7 */
 

@@ -152,6 +152,7 @@ typedef struct Process {
   Memory_Borrow heap_borrows[PROCESS_MAX_HEAP_BORROWS]; /* active svcMapMemory aliases */
   uint32_t heap_borrow_count;
   Shared_Mapping shared_mappings[PROCESS_MAX_SHARED_MAPPINGS]; /* active svcMapSharedMemory views */
+  Address_Region loader_env; /* the homebrew-ABI block the emulator maps for NROs; size 0 if none */
   uint32_t shared_mapping_count;
 } Process;
 

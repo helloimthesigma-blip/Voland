@@ -86,7 +86,7 @@ static const Service_Command k_test_commands[] = {
 
 static const Service_Interface k_test_interface = {
     "test:a", k_test_commands, sizeof(k_test_commands) / sizeof(k_test_commands[0]),
-    TEST_POINTER_BUFFER_SIZE, NULL,
+    TEST_POINTER_BUFFER_SIZE, NULL, NULL,
 };
 
 static const Service_Interface *test_interface(void) { return &k_test_interface; }

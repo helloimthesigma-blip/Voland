@@ -231,6 +231,14 @@ static void test_system_registers(void) {
   g_undefined_count = 0;
   CHECK(g_cpu->step(g_state) == CPU_EXIT_FAULT && g_undefined_count == 1);
   CHECK(g_cpu->get_sys_reg(g_state, CPU_SYSREG_TPIDRRO_EL0) == 0xABCD000);
+
+  /* The physical counter reads the same virtual time (CNTVOFF = 0). */
+  const uint32_t timers[] = {0xD53BE045u /* mrs x5, cntvct_el0 */, 0xD53BE026u /* mrs x6, cntpct_el0 */};
+  load_code(timers, 2);
+  reset_state();
+  g_cpu->set_sys_reg(g_state, CPU_SYSREG_CNTVCT_EL0, 1000000u);
+  CHECK(g_cpu->run(g_state, 2) == CPU_EXIT_CYCLES_ELAPSED);
+  CHECK(g_cpu->get_reg(g_state, 5) >= 1000000u && g_cpu->get_reg(g_state, 6) - g_cpu->get_reg(g_state, 5) <= 1u);
 }
 
 /* ------------------------------------------------------------------ */

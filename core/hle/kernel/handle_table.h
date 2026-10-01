@@ -57,7 +57,8 @@ typedef enum Kernel_Object_Type {
   KERNEL_OBJECT_EVENT_READABLE, /* Kernel_Event (event.h): wait / reset */
   KERNEL_OBJECT_EVENT_WRITABLE, /* Kernel_Event: signal / clear */
   KERNEL_OBJECT_SHARED_MEMORY,  /* Kernel_Shared_Memory (shared_memory.h) */
-  /* Transfer memory, ports: added with their SVCs. */
+  KERNEL_OBJECT_TRANSFER_MEMORY, /* Kernel_Transfer_Memory (transfer_memory.h) */
+  /* Ports: added with their SVCs. */
 } Kernel_Object_Type;
 
 typedef struct Handle_Entry {

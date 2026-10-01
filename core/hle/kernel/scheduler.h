@@ -74,6 +74,10 @@ typedef struct Scheduler {
   Sched_Thread threads[SCHEDULER_MAX_THREADS];
   const CPU_Backend *backend; /* set by scheduler_init's caller; reaches woken threads' registers */
   uint64_t ticks;           /* virtual time */
+  /* The earliest time a device (vsync) will signal something, or
+   * SCHEDULER_WAIT_FOREVER. Set by the Emulator before each tick: when
+   * every thread waits, time jumps here instead of reporting deadlock. */
+  uint64_t device_wake_at;
   uint64_t cycle_remainder; /* sub-tick cycles carried between runs */
   uint64_t run_counter;
   uint64_t wait_counter;

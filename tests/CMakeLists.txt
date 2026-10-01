@@ -167,10 +167,22 @@ add_executable(nvdrv_test nvdrv_test.c)
 target_link_libraries(nvdrv_test PRIVATE switch_core ipc_fixtures loader_fixtures)
 add_test(NAME nvdrv_test COMMAND nvdrv_test)
 
+# Block-linear layout and ramfs (pure units).
+foreach(unit block_linear_test ramfs_test)
+  add_executable(${unit} ${unit}.c)
+  target_link_libraries(${unit} PRIVATE switch_core)
+  add_test(NAME ${unit} COMMAND ${unit})
+endforeach()
+
 # hid + shared memory (§12, §18) over real IPC and SVCs.
 add_executable(hid_test hid_test.c)
 target_link_libraries(hid_test PRIVATE switch_core ipc_fixtures loader_fixtures)
 add_test(NAME hid_test COMMAND hid_test)
+
+# The boot-path services (vi/BufferQueue, fsp-srv, time, set, apm, am) over real IPC.
+add_executable(services_test services_test.c)
+target_link_libraries(services_test PRIVATE switch_core ipc_fixtures loader_fixtures)
+add_test(NAME services_test COMMAND services_test)
 
 #
 # voland-cli (§17) as the golden-image / end-to-end harness.

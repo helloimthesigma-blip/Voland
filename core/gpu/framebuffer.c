@@ -35,6 +35,10 @@ uint32_t framebuffer_consumed(void) {
   return atomic_load_explicit(counter(FRAMEBUFFER_OFFSET_CONSUME), memory_order_acquire);
 }
 
+void framebuffer_consume_all(void) {
+  atomic_store_explicit(counter(FRAMEBUFFER_OFFSET_CONSUME), framebuffer_published(), memory_order_release);
+}
+
 uint32_t framebuffer_acquire(uint8_t **pixels) {
   const uint32_t published = framebuffer_published();
   if (published - framebuffer_consumed() >= FRAMEBUFFER_SLOT_COUNT) return FRAMEBUFFER_BUSY;
