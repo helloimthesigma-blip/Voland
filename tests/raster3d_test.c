@@ -327,6 +327,95 @@ static void test_render_to_texture(Raster3d *r) {
         *(const uint32_t *)(const void *)pixel(RT, false, 30, 30));
 }
 
+/* Stencil, the way NanoVG fills a path: a colour-masked pass counts
+ * coverage with two-sided INCR/DECR_WRAP, then a cover pass draws where
+ * the count is non-zero and zeroes it. T1 (lower-left half) is drawn
+ * twice one way and once the other (net +-1); T2 (upper-right half)
+ * once each way (net 0). */
+#define ZT (GPU_BASE + 0x40000u)
+#define ZT_Z24S8 0x14u
+#define OP_KEEP 0x1e00u
+#define OP_ZERO 0x0u
+#define OP_INCR_WRAP 0x8507u
+#define OP_DECR_WRAP 0x8508u
+#define FUNC_ALWAYS 0x207u
+#define FUNC_NOTEQUAL 0x205u
+
+static void stencil_ops(uint32_t base, uint32_t fail, uint32_t zfail, uint32_t zpass, uint32_t func) {
+  g_regs[base] = fail;
+  g_regs[base + 1u] = zfail;
+  g_regs[base + 2u] = zpass;
+  g_regs[base + 3u] = func;
+}
+
+static void triangle(float ax, float ay, float bx, float by, float cx, float cy) {
+  vertex(0, ax, ay, 1, 0, 0, 1);
+  vertex(1, bx, by, 1, 0, 0, 1);
+  vertex(2, cx, cy, 1, 0, 0, 1);
+}
+
+static void test_stencil(Raster3d *r) {
+  base_state(RT, false, PS_OFFSET);
+  g_regs[0x3f8] = (uint32_t)(ZT >> 32);
+  g_regs[0x3f9] = (uint32_t)ZT;
+  g_regs[0x3fa] = ZT_Z24S8;
+  g_regs[0x3fb] = 0;              /* block height 1 GOB */
+  g_regs[0x48a] = RT_SIZE;
+  g_regs[0x48b] = RT_SIZE;
+  g_regs[0x54e] = 1;              /* zeta enabled */
+  memset(g_gpu + (ZT - GPU_BASE), 0xA5, RT_SIZE * RT_SIZE * 4u);
+  raster3d_begin_submission(r);
+  g_regs[0x368] = 0;              /* stencil clear value */
+  g_regs[0x4e7] = 0xff;           /* stencil write mask (clears use it too) */
+  memcpy(&g_regs[0x360], &(float){0.0f}, 4);
+  memcpy(&g_regs[0x361], &(float){0.0f}, 4);
+  memcpy(&g_regs[0x362], &(float){1.0f}, 4);
+  memcpy(&g_regs[0x363], &(float){1.0f}, 4);
+  raster3d_clear(r, g_regs, &k_mem, 0x3cu | 2u);
+  /* Pass 1: count. */
+  g_regs[0x680] = 0;              /* colour writes off */
+  g_regs[0x4e0] = 1;
+  stencil_ops(0x4e1, OP_KEEP, OP_KEEP, OP_INCR_WRAP, FUNC_ALWAYS);
+  g_regs[0x4e5] = 0;
+  g_regs[0x4e6] = 0xff;
+  g_regs[0x565] = 1;              /* two-sided */
+  stencil_ops(0x566, OP_KEEP, OP_KEEP, OP_DECR_WRAP, FUNC_ALWAYS);
+  g_regs[0x3d5] = 0;
+  g_regs[0x3d6] = 0xff;
+  g_regs[0x3d7] = 0xff;
+  triangle(-1, -1, 1, -1, -1, 1);
+  draw_arrays(r, 4, 3);
+  draw_arrays(r, 4, 3);
+  triangle(-1, -1, -1, 1, 1, -1);
+  draw_arrays(r, 4, 3);
+  triangle(1, 1, 1, -1, -1, 1);
+  draw_arrays(r, 4, 3);
+  triangle(1, 1, -1, 1, 1, -1);
+  draw_arrays(r, 4, 3);
+  CHECK(r->stats.skipped_draws == 0, "stencil-only draws are not skipped (%llu)", (unsigned long long)r->stats.skipped_draws);
+  /* Pass 2: cover where non-zero, zeroing. */
+  g_regs[0x680] = 0x1111;
+  g_regs[0x565] = 0;
+  stencil_ops(0x4e1, OP_KEEP, OP_KEEP, OP_ZERO, FUNC_NOTEQUAL);
+  vertex(0, -1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(1, 1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(2, -1.0f, 1.0f, 1, 0, 0, 1);
+  vertex(3, 1.0f, 1.0f, 1, 0, 0, 1);
+  draw_arrays(r, 5, 4);
+  raster3d_flush(r, &k_mem);
+  CHECK(rgba_is(pixel(RT, false, 10, 10), 255, 0, 0, 255), "non-zero count is covered");
+  CHECK(rgba_is(pixel(RT, false, 60, 60), 0, 0, 255, 255), "zero count is not");
+  const uint8_t *zt = g_gpu + (ZT - GPU_BASE);
+  const uint32_t at10 = (uint32_t)block_linear_offset(10u * 4u, 10, RT_SIZE * 4u, 0);
+  const uint32_t at60 = (uint32_t)block_linear_offset(60u * 4u, 60, RT_SIZE * 4u, 0);
+  CHECK(zt[at10] == 0 && zt[at60] == 0, "stencil zeroed by the cover pass (%u %u)", zt[at10], zt[at60]);
+  /* Depth bits were cleared? No - only stencil was cleared: they keep the
+   * guest's bytes. */
+  CHECK(zt[at10 + 3u] == 0xA5, "depth bytes untouched by a stencil-only clear");
+  g_regs[0x4e0] = 0;
+  g_regs[0x54e] = 0;
+}
+
 int main(void) {
   const size_t bytes = raster3d_storage_bytes();
   uint8_t *storage = (uint8_t *)malloc(bytes + 64u);
@@ -342,6 +431,7 @@ int main(void) {
   test_triangle_and_blend(&r, true);
   test_texture(&r);
   test_render_to_texture(&r);
+  test_stencil(&r);
   CHECK(r.stats.shader_faults == 0, "no shader faults");
   free(storage);
   if (g_failures) {

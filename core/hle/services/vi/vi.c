@@ -255,6 +255,13 @@ static void convert_row(uint8_t *row, uint32_t width, uint32_t format) {
   }
 }
 
+/* QueueBufferInput (flattened): {s64 timestamp, s32 auto timestamp,
+ * Rect crop {l, t, r, b}, s32 scaling mode, u32 transform, ...}. */
+#define QBI_CROP 12u
+#define QBI_TRANSFORM 32u
+#define VI_TRANSFORM_FLIP_H 1u /* NATIVE_WINDOW_TRANSFORM_FLIP_H */
+#define VI_TRANSFORM_FLIP_V 2u
+
 static void composite(Vi_State *s, HLE_Context *c, const Vi_Slot *slot) {
   uint64_t base = 0, nvmap_size = 0;
   if (!s->scratch || !nvdrv_nvmap_lookup(s->nvdrv, slot->nvmap_id, &base, &nvmap_size)) {
@@ -287,8 +294,46 @@ static void composite(Vi_State *s, HLE_Context *c, const Vi_Slot *slot) {
       memcpy(pixels + (uint64_t)y * stride, s->scratch + (uint64_t)y * slot->pitch, (size_t)width * bpp);
     }
   }
-  for (uint32_t y = 0; y < height; y++) convert_row(pixels + (uint64_t)y * stride, width, slot->format);
-  const Framebuffer_Frame frame = {width, height, stride, FRAMEBUFFER_FORMAT_RGBA8};
+  /* The source rectangle QueueBuffer named: pack it to the top left
+   * (rows only move towards the start, so in-place copies are safe). */
+  uint32_t out_w = width, out_h = height;
+  if (slot->crop_right > slot->crop_left && slot->crop_bottom > slot->crop_top) {
+    const uint32_t left = (uint32_t)(slot->crop_left < 0 ? 0 : slot->crop_left);
+    const uint32_t top = (uint32_t)(slot->crop_top < 0 ? 0 : slot->crop_top);
+    const uint32_t right = (uint32_t)slot->crop_right < width ? (uint32_t)slot->crop_right : width;
+    const uint32_t bottom = (uint32_t)slot->crop_bottom < height ? (uint32_t)slot->crop_bottom : height;
+    if (right > left && bottom > top && (right - left != width || bottom - top != height)) {
+      out_w = right - left;
+      out_h = bottom - top;
+      for (uint32_t y = 0; y < out_h; y++)
+        memmove(pixels + (uint64_t)y * out_w * 4u, pixels + (uint64_t)(y + top) * stride + (uint64_t)left * 4u,
+                (size_t)out_w * 4u);
+    }
+  }
+  const uint32_t out_stride = out_w * 4u;
+  for (uint32_t y = 0; y < out_h; y++) convert_row(pixels + (uint64_t)y * out_stride, out_w, slot->format);
+  if (slot->transform & VI_TRANSFORM_FLIP_H) {
+    for (uint32_t y = 0; y < out_h; y++) {
+      uint32_t *row = (uint32_t *)(void *)(pixels + (uint64_t)y * out_stride);
+      for (uint32_t a = 0, b = out_w - 1u; a < b; a++, b--) {
+        const uint32_t t = row[a];
+        row[a] = row[b];
+        row[b] = t;
+      }
+    }
+  }
+  if (slot->transform & VI_TRANSFORM_FLIP_V) {
+    for (uint32_t a = 0, b = out_h - 1u; a < b; a++, b--) {
+      uint32_t *ra = (uint32_t *)(void *)(pixels + (uint64_t)a * out_stride);
+      uint32_t *rb = (uint32_t *)(void *)(pixels + (uint64_t)b * out_stride);
+      for (uint32_t x = 0; x < out_w; x++) {
+        const uint32_t t = ra[x];
+        ra[x] = rb[x];
+        rb[x] = t;
+      }
+    }
+  }
+  const Framebuffer_Frame frame = {out_w, out_h, out_stride, FRAMEBUFFER_FORMAT_RGBA8};
   framebuffer_publish(fb_slot, &frame);
   s->frames_presented++;
 }
@@ -418,8 +463,20 @@ static int32_t transact(Vi_State *s, HLE_Context *c, Vi_Layer *layer, uint32_t c
       put_buffer_output(w, layer);
       return BQ_BAD_VALUE;
     }
-    layer->slots[index].state = VI_SLOT_QUEUED;
-    layer->slots[index].queue_order = ++layer->queue_counter;
+    Vi_Slot *slot = &layer->slots[index];
+    uint32_t input_size = 0;
+    const uint8_t *input = parcel_flattened(r, &input_size);
+    slot->crop_left = slot->crop_top = slot->crop_right = slot->crop_bottom = 0;
+    slot->transform = 0;
+    if (input && input_size >= QBI_TRANSFORM + 4u) {
+      slot->crop_left = (int32_t)rd32(input + QBI_CROP);
+      slot->crop_top = (int32_t)rd32(input + QBI_CROP + 4u);
+      slot->crop_right = (int32_t)rd32(input + QBI_CROP + 8u);
+      slot->crop_bottom = (int32_t)rd32(input + QBI_CROP + 12u);
+      slot->transform = rd32(input + QBI_TRANSFORM);
+    }
+    slot->state = VI_SLOT_QUEUED;
+    slot->queue_order = ++layer->queue_counter;
     put_buffer_output(w, layer);
     return BQ_OK;
   }

@@ -76,6 +76,10 @@ typedef struct Vi_Slot {
   uint64_t size;
   uint8_t gbfr[VI_GBFR_MAX_BYTES]; /* REQUEST_BUFFER echoes it */
   uint32_t gbfr_size;
+  /* From the last QueueBuffer: the source rectangle shown (empty = the
+   * whole buffer) and the NATIVE_WINDOW_TRANSFORM_* flips. */
+  int32_t crop_left, crop_top, crop_right, crop_bottom;
+  uint32_t transform;
 } Vi_Slot;
 
 typedef struct Vi_Layer {

@@ -26,6 +26,12 @@
 #define REG_Z_CLIP_RANGE 0x35fu
 #define REG_CLEAR_COLOR 0x360u
 #define REG_Z_CLEAR 0x364u
+#define REG_STENCIL_CLEAR 0x368u
+#define REG_BACK_STENCIL_REF 0x3d5u      /* ref, write mask, func mask */
+#define REG_STENCIL_ENABLE 0x4e0u
+#define REG_STENCIL_FRONT 0x4e1u         /* op fail, zfail, zpass, func, ref, func mask, write mask */
+#define REG_STENCIL_TWO_SIDED 0x565u
+#define REG_STENCIL_BACK 0x566u          /* op fail, zfail, zpass, func */
 #define REG_SCISSOR 0x380u          /* enable, horizontal, vertical */
 #define REG_SINGLE_CT_WRITE 0x3e4u
 #define REG_CT_MRT_ENABLE 0x3ebu
@@ -226,9 +232,12 @@ static const Color_Format *color_format(uint32_t format) {
 #define ZT_S8Z24 0x16u
 #define ZT_V8Z24 0x18u
 #define ZT_ZF32_X24S8 0x19u
+#define ZT_S8 0x17u
+#define ZT_NO_STENCIL 0xffu
 
 static uint32_t zeta_bytes(uint32_t format) {
   switch (format) {
+  case ZT_S8: return 1;
   case ZT_Z16: return 2;
   case ZT_ZF32_X24S8: return 8;
   case ZT_ZF32: case ZT_Z24S8: case ZT_X8Z24: case ZT_S8Z24: case ZT_V8Z24: return 4;
@@ -254,6 +263,30 @@ static void write_depth(uint32_t format, uint8_t *p, float z) {
   case ZT_Z24S8: memcpy(&v, p, 4); v = (v & 0xffu) | ((uint32_t)lrintf(z * 16777215.0f) << 8); memcpy(p, &v, 4); return;
   case ZT_ZF32: case ZT_ZF32_X24S8: v = u32f(z); memcpy(p, &v, 4); return;
   default: memcpy(&v, p, 4); v = (v & 0xff000000u) | ((uint32_t)lrintf(z * 16777215.0f) & 0xffffffu); memcpy(p, &v, 4); return;
+  }
+}
+
+/* Byte of a zeta texel holding stencil, or ZT_NO_STENCIL. */
+static uint32_t stencil_byte(uint32_t format) {
+  switch (format) {
+  case ZT_Z24S8: case ZT_S8: return 0;
+  case ZT_S8Z24: return 3;
+  case ZT_ZF32_X24S8: return 4;
+  default: return ZT_NO_STENCIL;
+  }
+}
+
+/* Stencil operations, OGL and D3D enums (NVB197_SET_STENCIL_OP_*). */
+static uint8_t stencil_apply(uint32_t op, uint8_t value, uint8_t ref) {
+  switch (op) {
+  case 0x0000: case 2: return 0;                                     /* ZERO */
+  case 0x1e01: case 3: return ref;                                   /* REPLACE */
+  case 0x1e02: case 4: return value == 0xffu ? value : (uint8_t)(value + 1u); /* INCR_SAT */
+  case 0x1e03: case 5: return value == 0 ? value : (uint8_t)(value - 1u);    /* DECR_SAT */
+  case 0x150a: case 6: return (uint8_t)~value;                       /* INVERT */
+  case 0x8507: case 7: return (uint8_t)(value + 1u);                 /* INCR (wrap) */
+  case 0x8508: case 8: return (uint8_t)(value - 1u);                 /* DECR (wrap) */
+  default: return value;                                             /* KEEP */
   }
 }
 
@@ -595,6 +628,7 @@ void raster3d_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, ui
   const uint32_t control = regs[REG_CLEAR_CONTROL];
   const bool color = (clear & 0x3cu) != 0;
   const bool depth = (clear & 1u) != 0;
+  const bool stencil = (clear & 2u) != 0;
   if (color) {
     const uint32_t mrt = (clear >> 6) & 0xfu;
     const uint32_t select = regs[REG_CT_SELECT];
@@ -652,19 +686,32 @@ void raster3d_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, ui
       }
     }
   }
-  if (depth) {
+  if (depth || stencil) {
     Surface_Desc d;
     if (zeta_desc(regs, &d)) {
       Rect rect = {0, 0, (int32_t)d.width, (int32_t)d.height};
       if (control & 0x100u) rect_scissor(&rect, regs);
-      const bool full = rect.x0 == 0 && rect.y0 == 0 && rect.x1 == (int32_t)d.width && rect.y1 == (int32_t)d.height;
-      Raster3d_Surface *s = surface_get(r, &d, mem, !full);
-      if (full) s->loaded = true;
-      const float z = f32(regs[REG_Z_CLEAR]);
-      for (int32_t y = rect.y0; y < rect.y1; y++)
-        for (int32_t x = rect.x0; x < rect.x1; x++)
-          write_depth(s->format, s->pixels + ((uint64_t)y * s->width + (uint64_t)x) * s->bytes_per_pixel, z);
-      s->dirty = true;
+      const uint32_t sbyte = stencil_byte(d.format);
+      const bool has_depth = d.format != ZT_S8;
+      const bool clear_depth = depth && has_depth;
+      /* Stencil clears go through the front write mask. */
+      const uint8_t smask = (uint8_t)regs[REG_STENCIL_FRONT + 6u];
+      const bool clear_stencil = stencil && sbyte != ZT_NO_STENCIL && smask;
+      const bool full = rect.x0 == 0 && rect.y0 == 0 && rect.x1 == (int32_t)d.width && rect.y1 == (int32_t)d.height &&
+                        (clear_depth || !has_depth) && (clear_stencil ? smask == 0xffu : sbyte == ZT_NO_STENCIL);
+      if (clear_depth || clear_stencil) {
+        Raster3d_Surface *s = surface_get(r, &d, mem, !full);
+        if (full) s->loaded = true;
+        const float z = f32(regs[REG_Z_CLEAR]);
+        const uint8_t sv = (uint8_t)regs[REG_STENCIL_CLEAR];
+        for (int32_t y = rect.y0; y < rect.y1; y++)
+          for (int32_t x = rect.x0; x < rect.x1; x++) {
+            uint8_t *p = s->pixels + ((uint64_t)y * s->width + (uint64_t)x) * s->bytes_per_pixel;
+            if (clear_depth) write_depth(s->format, p, z);
+            if (clear_stencil) p[sbyte] = (uint8_t)((p[sbyte] & ~smask) | (sv & smask));
+          }
+        s->dirty = true;
+      }
     }
   }
 }
@@ -1125,6 +1172,12 @@ typedef struct Raster_State {
   bool alpha_test;
   uint32_t alpha_func;
   float alpha_ref;
+  /* Stencil (front = [0], back = [1]); `front` is the current triangle's facing. */
+  bool stencil;
+  uint32_t stencil_byte;
+  uint32_t stencil_op_fail[2], stencil_op_zfail[2], stencil_op_zpass[2], stencil_func[2];
+  uint8_t stencil_ref[2], stencil_func_mask[2], stencil_write_mask[2];
+  bool front;
   float blend_const[4];
   Rect clip;
   int32_t surface_height;
@@ -1299,7 +1352,23 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
     rs->depth_test = (regs[REG_DEPTH_TEST] & 1u) != 0;
     rs->depth_write = (regs[REG_DEPTH_WRITE] & 1u) != 0;
     rs->depth_func = regs[REG_DEPTH_FUNC];
-    if (rs->depth_test || rs->depth_write) {
+    rs->stencil_byte = stencil_byte(zd.format);
+    rs->stencil = (regs[REG_STENCIL_ENABLE] & 1u) != 0 && rs->stencil_byte != ZT_NO_STENCIL;
+    if (rs->stencil) {
+      const bool two_sided = (regs[REG_STENCIL_TWO_SIDED] & 1u) != 0;
+      for (uint32_t f = 0; f < 2u; f++) {
+        const uint32_t *ops = (f == 1u && two_sided) ? regs + REG_STENCIL_BACK : regs + REG_STENCIL_FRONT;
+        rs->stencil_op_fail[f] = ops[0];
+        rs->stencil_op_zfail[f] = ops[1];
+        rs->stencil_op_zpass[f] = ops[2];
+        rs->stencil_func[f] = ops[3];
+        const bool back = f == 1u && two_sided;
+        rs->stencil_ref[f] = (uint8_t)(back ? regs[REG_BACK_STENCIL_REF] : regs[REG_STENCIL_FRONT + 4u]);
+        rs->stencil_write_mask[f] = (uint8_t)(back ? regs[REG_BACK_STENCIL_REF + 1u] : regs[REG_STENCIL_FRONT + 6u]);
+        rs->stencil_func_mask[f] = (uint8_t)(back ? regs[REG_BACK_STENCIL_REF + 2u] : regs[REG_STENCIL_FRONT + 5u]);
+      }
+    }
+    if (rs->depth_test || rs->depth_write || rs->stencil) {
       rs->depth = surface_get(r, &zd, ctx->mem, true);
       if ((int32_t)zd.width < width) width = (int32_t)zd.width;
       if ((int32_t)zd.height < height) height = (int32_t)zd.height;
@@ -1395,7 +1464,7 @@ static void setup_lane(const Raster_State *rs, Sm_Thread *t, uint32_t l, int32_t
 }
 
 static bool early_depth_reject(const Raster_State *rs, int32_t px, int32_t py, float depth) {
-  if (!rs->depth || !rs->depth_test || rs->depth_reg != 0xffu) return false;
+  if (!rs->depth || !rs->depth_test || rs->depth_reg != 0xffu || rs->stencil) return false;
   const uint8_t *zp = rs->depth->pixels + ((uint64_t)py * rs->depth->width + (uint64_t)px) * rs->depth->bytes_per_pixel;
   return !depth_compare(rs->depth_func, depth, read_depth(rs->depth->format, zp));
 }
@@ -1489,7 +1558,7 @@ static void target_color(const Raster_State *rs, uint32_t target, const uint32_t
 /* Whether this draw's fixed-function state lets flat triangles fill spans:
  * no depth or alpha test, no depth write, every bound target plain RGBA8. */
 static bool span_state_ok(const Raster_State *rs) {
-  if (rs->alpha_test || (rs->depth && (rs->depth_test || rs->depth_write))) return false;
+  if (rs->alpha_test || rs->stencil || (rs->depth && (rs->depth_test || rs->depth_write))) return false;
   for (uint32_t i = 0; i < rs->target_count; i++)
     if (rs->targets[i].surface && !target_is_plain_rgba8(&rs->targets[i])) return false;
   return true;
@@ -1551,7 +1620,34 @@ static void output_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, 
     if (!depth_compare(rs->alpha_func, alpha, rs->alpha_ref)) return;
   }
   if (rs->depth_reg != 0xffu) depth = f32(out_regs[rs->depth_reg]);
-  if (rs->depth) {
+  if (rs->stencil) {
+    /* Stencil test, then depth; each outcome applies its op through the
+     * write mask, and a failure discards the fragment. */
+    const uint32_t f = rs->front ? 0u : 1u;
+    uint8_t *sp = zp + rs->stencil_byte;
+    const uint8_t stored = *sp, mask = rs->stencil_func_mask[f], ref = rs->stencil_ref[f];
+    uint32_t op;
+    bool pass = depth_compare(rs->stencil_func[f], (float)(ref & mask), (float)(stored & mask));
+    if (!pass) {
+      op = rs->stencil_op_fail[f];
+    } else if (rs->depth_test && !depth_compare(rs->depth_func, depth, read_depth(rs->depth->format, zp))) {
+      op = rs->stencil_op_zfail[f];
+      pass = false;
+    } else {
+      op = rs->stencil_op_zpass[f];
+    }
+    const uint8_t wmask = rs->stencil_write_mask[f];
+    const uint8_t next = (uint8_t)((stored & ~wmask) | (stencil_apply(op, stored, ref) & wmask));
+    if (next != stored) {
+      *sp = next;
+      rs->depth->dirty = true;
+    }
+    if (!pass) return;
+    if (rs->depth_write && zeta_bytes(rs->depth->format) > 1u) {
+      write_depth(rs->depth->format, zp, depth);
+      rs->depth->dirty = true;
+    }
+  } else if (rs->depth) {
     if (rs->depth_test && rs->depth_reg != 0xffu &&
         !depth_compare(rs->depth_func, depth, read_depth(rs->depth->format, zp)))
       return;
@@ -1634,6 +1730,7 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
   /* Facing: positive area is clockwise on screen (y down). */
   const bool clockwise = area > 0;
   const bool front = rs->front_ccw ? !clockwise : clockwise;
+  rs->front = front;
   if (rs->cull) {
     if (rs->cull_face == 0x408u) return;
     if (rs->cull_face == 0x404u && front) return;
