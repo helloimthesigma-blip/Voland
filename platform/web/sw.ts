@@ -5,10 +5,14 @@
  *    should set these at the server/hosting-config level; the SW path is
  *    the fallback for self-hosters who can't - and requires one reload on
  *    first visit before it can control the page (handled in main.ts).
- * 2. Cache strategy: app shell cache-first (navigations always resolve to
- *    the cached shell, so client-side routing survives a hard refresh at
- *    e.g. /game/:titleId), `.wasm` aggressively cache-first, `/api/`
- *    network-only, everything else network-first.
+ * 2. Cache strategy: network-first for everything same-origin (the cache is
+ *    the offline fallback), `/api/` network-only. Navigations resolve to the
+ *    shell so client-side routing survives a hard refresh at e.g.
+ *    /game/:titleId. The core's `.wasm` is NOT cache-first: its URL is not
+ *    content-hashed, so a cached copy outlives updates while the matching
+ *    switch_core.js does not - a stale wasm under a new loader fails at init
+ *    (missing exports). Activation deletes every cache this version does not
+ *    use, purging such stale copies.
  *
  * Phase 0 has no build-time precache manifest (that needs a bundler
  * plugin, e.g. vite-plugin-pwa, which is not wired up yet) - caches are
@@ -17,8 +21,9 @@
 
 const sw: ServiceWorkerGlobalScope = globalThis as unknown as ServiceWorkerGlobalScope;
 
-const SHELL_CACHE = "voland-shell-v1";
-const WASM_CACHE = "voland-wasm-v1";
+const SHELL_CACHE = "voland-shell-v2";
+const WASM_CACHE = "voland-wasm-v2";
+const CURRENT_CACHES: ReadonlySet<string> = new Set([SHELL_CACHE, WASM_CACHE]);
 const SHELL_URL = "/index.html";
 
 /* COOP must be strict "same-origin" - "same-origin-allow-popups" never
@@ -42,24 +47,15 @@ function addCrossOriginIsolationHeaders(response: Response): Response {
   });
 }
 
-async function cacheFirst(request: Request, cacheName: string): Promise<Response> {
+/* Network first; the cached copy only when the network fails (offline). */
+async function networkFirst(request: Request, cacheName: string, key: Request = request): Promise<Response> {
   const cache = await sw.caches.open(cacheName);
-  const cached = await cache.match(request);
-  if (cached) return addCrossOriginIsolationHeaders(cached);
-
-  const response = await fetch(request);
-  if (response.ok) await cache.put(request, response.clone());
-  return addCrossOriginIsolationHeaders(response);
-}
-
-async function networkFirst(request: Request): Promise<Response> {
-  const cache = await sw.caches.open(SHELL_CACHE);
   try {
     const response = await fetch(request);
-    if (response.ok) await cache.put(request, response.clone());
+    if (response.ok) await cache.put(key, response.clone());
     return addCrossOriginIsolationHeaders(response);
   } catch (e) {
-    const cached = await cache.match(request);
+    const cached = await cache.match(key);
     if (cached) return addCrossOriginIsolationHeaders(cached);
     throw e;
   }
@@ -70,7 +66,11 @@ sw.addEventListener("install", () => {
 });
 
 sw.addEventListener("activate", (event: ExtendableEvent) => {
-  event.waitUntil(sw.clients.claim());
+  event.waitUntil((async (): Promise<void> => {
+    const names = await sw.caches.keys();
+    await Promise.all(names.filter((name) => !CURRENT_CACHES.has(name)).map((name) => sw.caches.delete(name)));
+    await sw.clients.claim();
+  })());
 });
 
 sw.addEventListener("fetch", (event: FetchEvent) => {
@@ -83,16 +83,16 @@ sw.addEventListener("fetch", (event: FetchEvent) => {
   }
 
   if (url.pathname.endsWith(".wasm")) {
-    event.respondWith(cacheFirst(event.request, WASM_CACHE));
+    event.respondWith(networkFirst(event.request, WASM_CACHE));
     return;
   }
 
   if (event.request.mode === "navigate") {
     // Navigation API + client-side routing (§16): every navigate request
     // resolves to the cached shell so a hard refresh at any route works.
-    event.respondWith(cacheFirst(new Request(SHELL_URL), SHELL_CACHE));
+    event.respondWith(networkFirst(event.request, SHELL_CACHE, new Request(SHELL_URL)));
     return;
   }
 
-  event.respondWith(networkFirst(event.request));
+  event.respondWith(networkFirst(event.request, SHELL_CACHE));
 });

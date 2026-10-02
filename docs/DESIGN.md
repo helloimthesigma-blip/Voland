@@ -1766,7 +1766,7 @@ type CompilerToCPUMessage =
 
 ### Service Worker
 
-Cache strategy unchanged from v2 (shell cache-first, `.wasm` aggressively cache-first, `/api/` network-only, rest network-first) with `addCrossOriginIsolationHeaders()` applied to every served response.
+Cache strategy (v3.61): network-first for the shell, `.wasm` and everything else same-origin, the cache serving only when the network fails; `/api/` network-only; `addCrossOriginIsolationHeaders()` applied to every served response. **Deviation, stated:** v2's cache-first `.wasm` is dropped - the core's URL is not content-hashed, so a cached `switch_core.wasm` outlived updates while the freshly fetched `switch_core.js` expected newer exports, and the CPU worker failed at init. Activation deletes every cache the current worker does not name (cache names carry a version), purging stale copies (e2e `sw-cache.spec.ts` seeds a stale core in the old cache and requires boot plus the purge; it fails on the old worker). Cache-first can return once the core is emitted under a content hash.
 
 ### Progressive enhancement
 
@@ -2425,9 +2425,13 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.60.0*
+*Document version: 3.61.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.60 → v3.61 (summary)
+
+- **Service worker (§16):** network-first everywhere (cache = offline fallback) and old caches purged on activation; cache-first `.wasm` served a previous session's core under a new loader, so the CPU worker failed at init ("NaN cannot be converted to a BigInt", shared font "f is not a function") on any browser that had visited before an update.
 
 ### Changelog v3.59 → v3.60 (summary)
 
