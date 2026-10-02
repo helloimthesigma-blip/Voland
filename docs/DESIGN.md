@@ -2425,9 +2425,17 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.63.0*
+*Document version: 3.64.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.63 → v3.64 (summary)
+
+The Unity title now renders its splash (the developer logo) and autosave notice with correct colours and runs past 400,000 slices (about 9 s of virtual time, ~6,000 draws) without faulting.
+
+- **Shaders:** FP16x2 arithmetic - HADD2, HMUL2, HFMA2, HSET2, HSETP2 in register, constant-buffer, immediate (paired 9-bit halves) and 32-bit-immediate forms, with operand swizzles (H1_H0 / F32 / H0_H0 / H1_H1), result merges (both halves, F32, MRG_H0, MRG_H1), abs/neg/sat and the FMZ rule (anything × 0 = 0). Unity's post-processing shaders are FP16; without them every colour pass produced garbage. Bindless TEX.B takes its texture handle from Rb.
+- **Kernel:** threads whose handle is closed are reclaimed once dead or never started (CreateThread frees them lazily - not at ExitThread, where the backend is still running the exiting thread's state). Unity creates and joins short-lived workers; the 128-slot table filled, CreateThread failed with LimitReached and the SDK aborted (0xe401 on the following StartThread).
+- **Known limit:** the software renderer is the bottleneck - ~90% of wall time is shader interpretation and texture sampling (~6 M shaded pixels per 720p frame); the title runs well below real time. The WebGPU renderer (§13) is the path to speed.
 
 ### Changelog v3.62 → v3.63 (summary)
 
