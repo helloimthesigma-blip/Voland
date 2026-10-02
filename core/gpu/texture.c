@@ -6,6 +6,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "gpu/astc.h"
 #include "gpu/block_linear.h"
 
 /* MW(hi:lo) field of the 256-bit header. */
@@ -124,24 +125,29 @@ void tex_sampler_parse(const uint32_t words[8], Tex_Sampler *out) {
 typedef struct Format_Info {
   uint8_t format;
   uint8_t bytes;
-  uint8_t block; /* 1 or 4 */
+  uint8_t bw, bh; /* block footprint: 1x1, 4x4 (BCn), ASTC sizes */
   uint8_t bits[4];
 } Format_Info;
 
 static const Format_Info k_formats[] = {
-    {FMT_R32_G32_B32_A32, 16, 1, {32, 32, 32, 32}}, {FMT_R32_G32_B32, 12, 1, {32, 32, 32, 0}},
-    {FMT_R16_G16_B16_A16, 8, 1, {16, 16, 16, 16}}, {FMT_R32_G32, 8, 1, {32, 32, 0, 0}},
-    {FMT_X8B8G8R8, 4, 1, {8, 8, 8, 0}}, {FMT_A8B8G8R8, 4, 1, {8, 8, 8, 8}},
-    {FMT_A2B10G10R10, 4, 1, {10, 10, 10, 2}}, {FMT_R16_G16, 4, 1, {16, 16, 0, 0}},
-    {FMT_G8R24, 4, 1, {24, 8, 0, 0}}, {FMT_G24R8, 4, 1, {8, 24, 0, 0}}, {FMT_R32, 4, 1, {32, 0, 0, 0}},
-    {FMT_A4B4G4R4, 2, 1, {4, 4, 4, 4}}, {FMT_A5B5G5R1, 2, 1, {1, 5, 5, 5}}, {FMT_A1B5G5R5, 2, 1, {5, 5, 5, 1}},
-    {FMT_B5G6R5, 2, 1, {5, 6, 5, 0}}, {FMT_B6G5R5, 2, 1, {5, 5, 6, 0}}, {FMT_G8R8, 2, 1, {8, 8, 0, 0}},
-    {FMT_R16, 2, 1, {16, 0, 0, 0}}, {FMT_Y8_VIDEO, 1, 1, {8, 0, 0, 0}}, {FMT_R8, 1, 1, {8, 0, 0, 0}},
-    {FMT_G4R4, 1, 1, {4, 4, 0, 0}}, {FMT_E5B9G9R9, 4, 1, {0}}, {FMT_BF10GF11RF11, 4, 1, {0}},
-    {FMT_DXT1, 8, 4, {0}}, {FMT_DXT23, 16, 4, {0}}, {FMT_DXT45, 16, 4, {0}}, {FMT_DXN1, 8, 4, {0}},
-    {FMT_DXN2, 16, 4, {0}}, {FMT_BC7U, 16, 4, {0}},
-    {FMT_Z24S8, 4, 1, {0}}, {FMT_X8Z24, 4, 1, {0}}, {FMT_S8Z24, 4, 1, {0}}, {FMT_ZF32, 4, 1, {0}},
-    {FMT_ZF32_X24S8, 8, 1, {0}}, {FMT_Z16, 2, 1, {0}},
+    {FMT_R32_G32_B32_A32, 16, 1, 1, {32, 32, 32, 32}}, {FMT_R32_G32_B32, 12, 1, 1, {32, 32, 32, 0}},
+    {FMT_R16_G16_B16_A16, 8, 1, 1, {16, 16, 16, 16}}, {FMT_R32_G32, 8, 1, 1, {32, 32, 0, 0}},
+    {FMT_X8B8G8R8, 4, 1, 1, {8, 8, 8, 0}}, {FMT_A8B8G8R8, 4, 1, 1, {8, 8, 8, 8}},
+    {FMT_A2B10G10R10, 4, 1, 1, {10, 10, 10, 2}}, {FMT_R16_G16, 4, 1, 1, {16, 16, 0, 0}},
+    {FMT_G8R24, 4, 1, 1, {24, 8, 0, 0}}, {FMT_G24R8, 4, 1, 1, {8, 24, 0, 0}}, {FMT_R32, 4, 1, 1, {32, 0, 0, 0}},
+    {FMT_A4B4G4R4, 2, 1, 1, {4, 4, 4, 4}}, {FMT_A5B5G5R1, 2, 1, 1, {1, 5, 5, 5}}, {FMT_A1B5G5R5, 2, 1, 1, {5, 5, 5, 1}},
+    {FMT_B5G6R5, 2, 1, 1, {5, 6, 5, 0}}, {FMT_B6G5R5, 2, 1, 1, {5, 5, 6, 0}}, {FMT_G8R8, 2, 1, 1, {8, 8, 0, 0}},
+    {FMT_R16, 2, 1, 1, {16, 0, 0, 0}}, {FMT_Y8_VIDEO, 1, 1, 1, {8, 0, 0, 0}}, {FMT_R8, 1, 1, 1, {8, 0, 0, 0}},
+    {FMT_G4R4, 1, 1, 1, {4, 4, 0, 0}}, {FMT_E5B9G9R9, 4, 1, 1, {0}}, {FMT_BF10GF11RF11, 4, 1, 1, {0}},
+    {FMT_DXT1, 8, 4, 4, {0}}, {FMT_DXT23, 16, 4, 4, {0}}, {FMT_DXT45, 16, 4, 4, {0}}, {FMT_DXN1, 8, 4, 4, {0}},
+    {FMT_DXN2, 16, 4, 4, {0}}, {FMT_BC7U, 16, 4, 4, {0}},
+    {FMT_Z24S8, 4, 1, 1, {0}}, {FMT_X8Z24, 4, 1, 1, {0}}, {FMT_S8Z24, 4, 1, 1, {0}}, {FMT_ZF32, 4, 1, 1, {0}},
+    {FMT_ZF32_X24S8, 8, 1, 1, {0}}, {FMT_Z16, 2, 1, 1, {0}},
+    /* ASTC: 16-byte blocks of various footprints. */
+    {0x40, 16, 4, 4, {0}}, {0x50, 16, 5, 4, {0}}, {0x41, 16, 5, 5, {0}}, {0x51, 16, 6, 5, {0}},
+    {0x42, 16, 6, 6, {0}}, {0x55, 16, 8, 5, {0}}, {0x52, 16, 8, 6, {0}}, {0x44, 16, 8, 8, {0}},
+    {0x56, 16, 10, 5, {0}}, {0x57, 16, 10, 6, {0}}, {0x53, 16, 10, 8, {0}}, {0x45, 16, 10, 10, {0}},
+    {0x54, 16, 12, 10, {0}}, {0x46, 16, 12, 12, {0}},
 };
 
 static const Format_Info *format_info(uint32_t format) {
@@ -154,8 +160,8 @@ bool tex_format_info(uint32_t format, uint32_t *bytes_per_element, uint32_t *blo
   const Format_Info *f = format_info(format);
   if (!f) return false;
   *bytes_per_element = f->bytes;
-  *block_width = f->block;
-  *block_height = f->block;
+  *block_width = f->bw;
+  *block_height = f->bh;
   return true;
 }
 
@@ -163,7 +169,7 @@ static uint32_t max1(uint32_t v) { return v ? v : 1u; }
 
 static uint64_t bl_level_bytes(const Tex_Header *h, const Format_Info *f, uint32_t level) {
   const uint32_t w = max1(h->width >> level), ht = max1(h->height >> level);
-  const uint32_t cols = (w + f->block - 1u) / f->block, rows = (ht + f->block - 1u) / f->block;
+  const uint32_t cols = (w + f->bw - 1u) / f->bw, rows = (ht + f->bh - 1u) / f->bh;
   uint32_t bh = h->block_height_log2;
   const uint32_t gob_rows = (rows + BLOCK_LINEAR_GOB_HEIGHT - 1u) / BLOCK_LINEAR_GOB_HEIGHT;
   while (bh > 0 && (1u << (bh - 1u)) >= gob_rows) bh--;
@@ -173,7 +179,7 @@ static uint64_t bl_level_bytes(const Tex_Header *h, const Format_Info *f, uint32
 uint64_t tex_level0_bytes(const Tex_Header *h) {
   const Format_Info *f = format_info(h->format);
   if (!f) return 0;
-  const uint32_t cols = (h->width + f->block - 1u) / f->block, rows = (h->height + f->block - 1u) / f->block;
+  const uint32_t cols = (h->width + f->bw - 1u) / f->bw, rows = (h->height + f->bh - 1u) / f->bh;
   switch (h->layout) {
   case TEX_LAYOUT_BLOCK_LINEAR: return bl_level_bytes(h, f, 0);
   case TEX_LAYOUT_PITCH: return (uint64_t)h->pitch * rows;
@@ -228,9 +234,9 @@ uint64_t tex_decoded_bytes(const Tex_Header *h) {
   const Format_Info *f = format_info(h->format);
   if (!f) return 0;
   const uint32_t layers = layer_count(h);
-  const uint32_t cols = (h->width + f->block - 1u) / f->block, rows = (h->height + f->block - 1u) / f->block;
+  const uint32_t cols = (h->width + f->bw - 1u) / f->bw, rows = (h->height + f->bh - 1u) / f->bh;
   const uint64_t linear = (uint64_t)cols * f->bytes * rows * layers;
-  if (f->block == 1u && !expands_to_rgba8(h)) return linear;
+  if (f->bw == 1u && !expands_to_rgba8(h)) return linear;
   /* Expanded RGBA8 plus the linear compressed staging. */
   return (uint64_t)h->width * h->height * 4u * layers + linear;
 }
@@ -245,7 +251,7 @@ static void rgb565(uint32_t v, uint8_t out[3]) {
 }
 
 /* BC1 colour block -> 16 RGBA texels. */
-static void bc1_colors(const uint8_t *block, bool force_four, uint8_t out[16][4]) {
+static void bc1_colors(const uint8_t *block, bool force_four, uint8_t out[][4]) {
   const uint32_t c0 = block[0] | (block[1] << 8), c1 = block[2] | (block[3] << 8);
   uint8_t pal[4][4];
   rgb565(c0, pal[0]);
@@ -287,7 +293,7 @@ static void bc4_values(const uint8_t *block, uint8_t out[16]) {
   for (uint32_t i = 0; i < 16u; i++) out[i] = (uint8_t)pal[(bits >> (3u * i)) & 7u];
 }
 
-static void decode_bc_block(uint32_t format, const uint8_t *block, uint8_t out[16][4]) {
+static void decode_bc_block(uint32_t format, const uint8_t *block, uint8_t out[][4]) {
   uint8_t v[16];
   switch (format) {
   case FMT_DXT1:
@@ -339,12 +345,12 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
   const Format_Info *f = format_info(h->format);
   if (!f) return false;
   const uint32_t layers = layer_count(h);
-  const uint32_t cols = (h->width + f->block - 1u) / f->block, rows = (h->height + f->block - 1u) / f->block;
+  const uint32_t cols = (h->width + f->bw - 1u) / f->bw, rows = (h->height + f->bh - 1u) / f->bh;
   const uint32_t row_bytes = cols * f->bytes;
   const uint64_t linear_layer = (uint64_t)row_bytes * rows;
   const uint64_t stride = tex_layer_stride(h);
   const bool expand = expands_to_rgba8(h);
-  uint8_t *linear = (f->block == 1u && !expand) ? dst : dst + (uint64_t)h->width * h->height * 4u * layers;
+  uint8_t *linear = (f->bw == 1u && !expand) ? dst : dst + (uint64_t)h->width * h->height * 4u * layers;
   for (uint32_t layer = 0; layer < layers; layer++) {
     const uint8_t *src = raw + stride * layer;
     uint8_t *to = linear + linear_layer * layer;
@@ -387,7 +393,7 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
     out->valid = true;
     return true;
   }
-  if (f->block == 1u) {
+  if (f->bw == 1u) {
     out->format = h->format;
     out->bytes_per_texel = f->bytes;
     out->row_bytes = row_bytes;
@@ -398,15 +404,18 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
   }
   /* Expand blocks to A8B8G8R8. */
   const uint32_t out_row = h->width * 4u;
+  const bool astc = f->bytes == ASTC_BLOCK_BYTES && h->format >= 0x40u;
   for (uint32_t layer = 0; layer < layers; layer++) {
     const uint8_t *blocks = linear + linear_layer * layer;
     uint8_t *texels = dst + (uint64_t)out_row * h->height * layer;
     for (uint32_t by = 0; by < rows; by++) {
       for (uint32_t bx = 0; bx < cols; bx++) {
-        uint8_t px[16][4];
-        decode_bc_block(h->format, blocks + (uint64_t)by * row_bytes + (uint64_t)bx * f->bytes, px);
-        for (uint32_t i = 0; i < 16u; i++) {
-          const uint32_t x = bx * 4u + i % 4u, y = by * 4u + i / 4u;
+        uint8_t px[ASTC_MAX_FOOTPRINT * ASTC_MAX_FOOTPRINT][4];
+        const uint8_t *block = blocks + (uint64_t)by * row_bytes + (uint64_t)bx * f->bytes;
+        if (astc) (void)astc_decode_block(block, f->bw, f->bh, h->srgb, px);
+        else decode_bc_block(h->format, block, px);
+        for (uint32_t i = 0; i < (uint32_t)f->bw * f->bh; i++) {
+          const uint32_t x = bx * f->bw + i % f->bw, y = by * f->bh + i / f->bw;
           if (x >= h->width || y >= h->height) continue;
           memcpy(texels + (uint64_t)y * out_row + (uint64_t)x * 4u, px[i], 4);
         }
@@ -516,7 +525,7 @@ void tex_decode_texel(uint32_t format, const uint8_t data_type[4], bool srgb, co
     break;
   }
   const Format_Info *f = format_info(format);
-  if (!f || f->block != 1u) {
+  if (!f || f->bw != 1u) {
     out[0] = out[2] = u32f(1.0f); /* magenta: unsupported */
     return;
   }

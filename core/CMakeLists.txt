@@ -49,6 +49,7 @@ set(SWITCH_CORE_SOURCES
   gpu/gpu_channel.c
   gpu/maxwell_shader.c
   gpu/texture.c
+  gpu/astc.c
   gpu/raster3d.c
   hle/fs/ramfs.c
   hle/kernel/svc_thread.c
@@ -121,6 +122,7 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   gpu/syncpoint.h
   gpu/maxwell_shader.h
   gpu/texture.h
+  gpu/astc.h
   gpu/raster3d.h
   emulator.h
 )

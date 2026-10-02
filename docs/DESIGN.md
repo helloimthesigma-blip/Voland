@@ -1317,7 +1317,7 @@ Command records reference guest memory (vertex/index/uniform data, textures) by 
 
 - **Shaders:** `core/gpu/maxwell_shader` decodes SM 5.x microcode (SPH + scheduling bundles; the opcode subset NVN and deko3d/UAM emit: float/integer ALU, XMAD, conversions, predicates, attribute load/store, IPA, constant/global/local memory, TEX/TEXS/TLD/TLDS/TLD4/TXQ, SSY/SYNC, PBK/BRK, PCNT/CONT, CAL/RET, KIL) and interprets one invocation at a time. Warp behaviour collapses to a single lane: derivatives are zero, so implicit-LOD sampling reads level 0.
 - **Fixed function:** vertex fetch (SET_VERTEX_ATTRIBUTE_A, streams, instancing), primitive assembly (all non-adjacency topologies; points/lines as 1-pixel quads), clipping (near/far, guard band), viewport transform, a half-space rasterizer (8 subpixel bits, top-left rule, scissor / viewport clip / surface clip), interpolation per the pixel program's SPH (perspective / screen-linear / flat), early or late depth test, alpha test, OGL and D3D blend enums, colour write masks, ~60 colour-target formats and the zeta formats. Not yet: stencil, tessellation and geometry stages, MSAA, mipmapped sampling.
-- **Textures:** `core/gpu/texture` parses TIC/TSC (open-gpu-doc clb197tex.h layouts), deswizzles block-linear/pitch images once per submission into a texture pool, expands BC1-5 and 8-bit UNORM formats to RGBA8, and samples with wrap modes, nearest/bilinear filtering, depth compare and gather.
+- **Textures:** `core/gpu/texture` parses TIC/TSC (open-gpu-doc clb197tex.h layouts), deswizzles block-linear/pitch images once per submission into a texture pool, expands BC1-5, ASTC (LDR, every 2D footprint; `core/gpu/astc`, per the Khronos Data Format Specification) and 8-bit UNORM formats to RGBA8, and samples with wrap modes, nearest/bilinear filtering, depth compare and gather.
 - **Render targets** live in host-linear copies (`raster3d` surface cache) and are written back to guest memory at the end of every submission and before any DMA copy, so vi/BufferQueue presents them unchanged and `voland-cli --dump-frame` golden-hashes them.
 - **Cost control:** a triangle whose pixel-program inputs do not vary (flat ImGui rectangles) is shaded once and only depth-tested / blended per pixel; RGBA8 targets and textures have byte-wise fast paths.
 
@@ -2421,9 +2421,13 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.47.0*
+*Document version: 3.48.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.47 → v3.48 (summary)
+
+- **Textures (§13): ASTC.** `core/gpu/astc` decodes ASTC LDR blocks - all 2D footprints (4x4 .. 12x12), integer sequence encoding with trits/quints, every LDR endpoint mode, 1-4 partitions, dual-plane weights, void-extent blocks; HDR content returns the error colour, as the LDR profile requires. TIC formats 0x40-0x57 are expanded to RGBA8 at texture load. ftpd's ASTC 12x12 background now draws. Tests: `astc_test`.
 
 ### Changelog v3.46 → v3.47 (summary)
 

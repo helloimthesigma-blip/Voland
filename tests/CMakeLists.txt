@@ -173,7 +173,7 @@ target_link_libraries(nvdrv_test PRIVATE switch_core ipc_fixtures loader_fixture
 add_test(NAME nvdrv_test COMMAND nvdrv_test)
 
 # Block-linear layout and ramfs (pure units).
-foreach(unit block_linear_test ramfs_test gpu_channel_test maxwell_shader_test raster3d_test)
+foreach(unit block_linear_test ramfs_test gpu_channel_test maxwell_shader_test raster3d_test astc_test)
   add_executable(${unit} ${unit}.c)
   target_link_libraries(${unit} PRIVATE switch_core)
   add_test(NAME ${unit} COMMAND ${unit})
