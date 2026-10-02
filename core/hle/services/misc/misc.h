@@ -18,6 +18,11 @@
  *        version set: reports): 0 OpenDsService -> IDsService; descriptors,
  *        interfaces and endpoints are accepted, the state is always
  *        Detached (no cable), events never fire, transfers never complete.
+ *   usb:hs USB host mode (the 2.0.0+ layout): 0 BindClientProcess, 1-3
+ *        Query{All,Available,Acquired}Interfaces (always none), 4/5
+ *        Create/DestroyInterfaceAvailableEvent, 6 GetInterfaceStateChange-
+ *        Event; nothing is ever plugged in, so the events never fire and
+ *        7 AcquireUsbIf fails.
  *   pdm:qry play-history queries: Voland records no play history, so every
  *        query reports nothing (zero counts, zeroed statistics) and the
  *        update event never fires.
@@ -36,6 +41,8 @@
 #define CSRNG_CHUNK_BYTES 256u
 #define PDM_ZERO_WORDS 12u
 #define PM_MODULE 15u
+#define USB_MODULE 140u
+#define USB_RESULT_NOT_FOUND ((2u << 9) | USB_MODULE) /* no such interface */
 #define PM_RESULT_PROCESS_NOT_FOUND ((1u << 9) | PM_MODULE) /* the largest fixed pdm:qry reply (PlayStatistics, 0x28 bytes) */
 
 typedef struct Misc_State {
@@ -55,6 +62,8 @@ typedef struct Misc_State {
   Service_Interface usb_interface;
   Service_Interface usb_endpoint;
   Kernel_Event *usb_event;
+  Service_Interface usb_hs;
+  Kernel_Event *usb_hs_event;
 } Misc_State;
 
 void misc_init(Misc_State *state);

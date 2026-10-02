@@ -78,6 +78,8 @@ typedef struct Raster3d_Texture {
   uint32_t tic[8];
   uint64_t raw_hash;     /* of the guest bytes it was decoded from */
   uint32_t validated;    /* submission it was last checked against guest memory */
+  uint64_t address;      /* guest bytes it was decoded from */
+  uint64_t raw_bytes;
   Tex_Image image;
 } Raster3d_Texture;
 

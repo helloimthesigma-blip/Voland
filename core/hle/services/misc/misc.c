@@ -253,6 +253,43 @@ static const Service_Command k_ts_commands[] = {
     {3, cmd_temperature_milli, "GetTemperatureMilliC"},
 };
 
+/* usb:hs (§12 stub tier): no device is ever attached. */
+static HLE_ServiceResult cmd_usb_hs_event(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                          IPC_Response *res) {
+  (void)req;
+  Misc_State *s = (Misc_State *)self->interface->service_state;
+  return service_push_event(c, res, &s->usb_hs_event);
+}
+
+static HLE_ServiceResult cmd_usb_hs_none(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                         IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)ipc_response_push_u32(res, 0); /* total entries */
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_usb_hs_acquire(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                            IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)res;
+  return USB_RESULT_NOT_FOUND;
+}
+
+static const Service_Command k_usb_hs_commands[] = {
+    {0, service_cmd_ok, "BindClientProcess"},
+    {1, cmd_usb_hs_none, "QueryAllInterfaces"},
+    {2, cmd_usb_hs_none, "QueryAvailableInterfaces"},
+    {3, cmd_usb_hs_none, "QueryAcquiredInterfaces"},
+    {4, cmd_usb_hs_event, "CreateInterfaceAvailableEvent"},
+    {5, service_cmd_ok, "DestroyInterfaceAvailableEvent"},
+    {6, cmd_usb_hs_event, "GetInterfaceStateChangeEvent"},
+    {7, cmd_usb_hs_acquire, "AcquireUsbIf"},
+};
+
 void misc_init(Misc_State *s) {
   memset(s, 0, sizeof(*s));
   s->psm = SERVICE_INTERFACE("psm", k_psm_commands, 0, s);
@@ -267,6 +304,7 @@ void misc_init(Misc_State *s) {
   s->usb_service = SERVICE_INTERFACE("IDsService", k_usb_service_commands, 0, s);
   s->usb_interface = SERVICE_INTERFACE("IDsInterface", k_usb_interface_commands, 0, s);
   s->usb_endpoint = SERVICE_INTERFACE("IDsEndpoint", k_usb_endpoint_commands, 0, s);
+  s->usb_hs = SERVICE_INTERFACE("usb:hs", k_usb_hs_commands, 0, s);
 }
 
 Error misc_register(Misc_State *s, SM_Registry *registry) {
@@ -277,5 +315,6 @@ Error misc_register(Misc_State *s, SM_Registry *registry) {
   if (error_is_ok(err)) err = sm_registry_add(registry, "pm:shell", &s->pm_shell);
   if (error_is_ok(err)) err = sm_registry_add(registry, "pm:info", &s->pm_info);
   if (error_is_ok(err)) err = sm_registry_add(registry, "usb:ds", &s->usb_ds);
+  if (error_is_ok(err)) err = sm_registry_add(registry, "usb:hs", &s->usb_hs);
   return err;
 }

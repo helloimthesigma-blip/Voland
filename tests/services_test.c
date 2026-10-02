@@ -549,6 +549,17 @@ static void test_system_queries(void) {
   const uint32_t ds = object(usb, 0, NULL, 0);
   r = call(ds, 3, NULL, 0, NULL);
   CHECK(test_le32(r.data) == 0);
+  /* usb:hs (2.0.0+ layout): nothing plugged in; events are real handles
+   * (a USB-drive thread waits on them), acquiring fails. */
+  const uint32_t hs = service("usb:hs");
+  CHECK(call(hs, 0, NULL, 0, NULL).result == 0);
+  r = call(hs, 2, NULL, 0, NULL);
+  CHECK(r.result == 0 && test_le32(r.data) == 0);
+  r = call(hs, 4, NULL, 0, NULL);
+  CHECK(r.result == 0 && r.copy_count == 1);
+  r = call(hs, 6, NULL, 0, NULL);
+  CHECK(r.result == 0 && r.copy_count == 1);
+  (void)call_ex(hs, 7, NULL, 0, NULL, USB_RESULT_NOT_FOUND);
 }
 
 

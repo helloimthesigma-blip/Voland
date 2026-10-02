@@ -494,11 +494,23 @@ static void surface_load(Raster3d *r, Raster3d_Surface *s, const Gpu_Memory *mem
   s->loaded = true;
 }
 
-/* Finds or creates the cached copy of a surface. `load`: fetch guest
- * contents now (false when the caller overwrites all of it). */
+/* Render-to-texture: a decoded texture over memory the GPU is about to
+ * draw into is re-checked against guest memory at its next use, even
+ * within the submission that already validated it. */
+static void textures_invalidate(Raster3d *r, uint64_t address, uint64_t bytes) {
+  for (uint32_t i = 0; i < r->texture_count; i++) {
+    Raster3d_Texture *t = &r->textures[i];
+    if (t->valid && t->address < address + bytes && address < t->address + t->raw_bytes) t->validated = r->submission - 1u;
+  }
+}
+
+/* Finds or creates the cached copy of a surface, which the caller then
+ * draws into. `load`: fetch guest contents now (false when the caller
+ * overwrites all of it). */
 static Raster3d_Surface *surface_get(Raster3d *r, const Surface_Desc *d, const Gpu_Memory *mem, bool load) {
   Raster3d_Surface *victim = NULL;
   r->tick++;
+  textures_invalidate(r, d->address, surface_guest_bytes(d));
   for (uint32_t i = 0; i < RASTER_SURFACES; i++) {
     Raster3d_Surface *s = &r->surfaces[i];
     if (s->in_use && s->address == d->address) {
@@ -800,6 +812,8 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
             h.width, h.height, h.format, h.data_type[0], h.data_type[1], h.data_type[2], h.data_type[3], h.swizzle[0],
             h.swizzle[1], h.swizzle[2], h.swizzle[3], h.layout, h.type, h.srgb, (unsigned long long)h.address);
   memcpy(slot->tic, tic, sizeof(slot->tic));
+  slot->address = h.address;
+  slot->raw_bytes = raw_bytes;
   slot->raw_hash = hash;
   slot->validated = r->submission;
   slot->valid = true;

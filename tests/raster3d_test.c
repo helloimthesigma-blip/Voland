@@ -293,6 +293,40 @@ static void test_texture(Raster3d *r) {
   CHECK(r->stats.texture_misses == 0, "no texture misses (%llu)", (unsigned long long)r->stats.texture_misses);
 }
 
+/* Render-to-texture inside one submission: a texture already sampled
+ * (and so validated for this submission) is re-read after the GPU draws
+ * into its memory again - SDL_FontCache draws glyphs this way. Reuses
+ * test_texture's pools and bindings. */
+static void set_target(uint64_t rt) {
+  g_regs[0x200] = (uint32_t)(rt >> 32);
+  g_regs[0x201] = (uint32_t)rt;
+}
+
+static void test_render_to_texture(Raster3d *r) {
+  const uint64_t target = RT_BL; /* a 64x64 pitch surface, sampled as a texture */
+  uint32_t tic[8];
+  memset(tic, 0, sizeof(tic));
+  tic[0] = 0x08u | (2u << 7) | (2u << 10) | (2u << 13) | (2u << 16) | (2u << 19) | (3u << 22) | (4u << 25) | (5u << 28);
+  tic[1] = (uint32_t)target;
+  tic[2] = (uint32_t)(target >> 32) | (2u << 21);
+  tic[3] = (RT_SIZE * 4u) >> 5;
+  tic[4] = (RT_SIZE - 1u) | (1u << 23);
+  tic[5] = (RT_SIZE - 1u) | (1u << 31);
+  memcpy(g_gpu + (TIC_POOL - GPU_BASE), tic, sizeof(tic));
+  raster3d_begin_submission(r);
+  set_target(target);
+  clear_to(r, 1, 0, 0, 1);
+  set_target(RT);
+  draw_arrays(r, 5, 4);
+  set_target(target);
+  clear_to(r, 0, 1, 0, 1);
+  set_target(RT);
+  draw_arrays(r, 5, 4);
+  raster3d_flush(r, &k_mem);
+  CHECK(rgba_is(pixel(RT, false, 30, 30), 0, 255, 0, 255), "second draw samples the re-rendered texture: %08x",
+        *(const uint32_t *)(const void *)pixel(RT, false, 30, 30));
+}
+
 int main(void) {
   const size_t bytes = raster3d_storage_bytes();
   uint8_t *storage = (uint8_t *)malloc(bytes + 64u);
@@ -307,6 +341,7 @@ int main(void) {
   test_triangle_and_blend(&r, false);
   test_triangle_and_blend(&r, true);
   test_texture(&r);
+  test_render_to_texture(&r);
   CHECK(r.stats.shader_faults == 0, "no shader faults");
   free(storage);
   if (g_failures) {
