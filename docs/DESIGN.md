@@ -1315,7 +1315,7 @@ Command records reference guest memory (vertex/index/uniform data, textures) by 
 
 **Stated deviation from the ring design above.** Before the command ring and the GPU Worker exist, 3D work executes in the core, synchronously, in the CPU worker: `gpu_channel` hands CLEAR_SURFACE and every draw (DRAW_VERTEX_ARRAY / DRAW_INDEX_BUFFER and their BEGIN_END forms, inline indices) to `core/gpu/raster3d`, a software implementation of the Maxwell 3D pipeline:
 
-- **Shaders:** `core/gpu/maxwell_shader` decodes SM 5.x microcode (SPH + scheduling bundles; the opcode subset NVN and deko3d/UAM emit: float/integer ALU, XMAD, conversions, predicates, attribute load/store, IPA, constant/global/local memory, TEX/TEXS/TLD/TLDS/TLD4/TXQ, SSY/SYNC, PBK/BRK, PCNT/CONT, CAL/RET, KIL) and interprets one invocation at a time. Warp behaviour collapses to a single lane: derivatives are zero, so implicit-LOD sampling reads level 0.
+- **Shaders:** `core/gpu/maxwell_shader` decodes SM 5.x microcode (SPH + scheduling bundles; the opcode subset NVN and deko3d/UAM emit: float/integer ALU, XMAD, conversions, predicates, attribute load/store, IPA, constant/global/local memory, TEX/TEXS/TLD/TLDS/TLD4/TXQ, SSY/SYNC, PBK/BRK, PCNT/CONT, CAL/RET, KIL) and interprets it SIMT-style over up to 16 lanes (pixels of one triangle): each instruction is decoded once and applied to every active lane; lanes whose branches disagree split into separate warps with their own reconvergence stacks, so every lane sees scalar semantics. Derivatives are zero, so implicit-LOD sampling reads level 0.
 - **Fixed function:** vertex fetch (SET_VERTEX_ATTRIBUTE_A, streams, instancing), primitive assembly (all non-adjacency topologies; points/lines as 1-pixel quads), clipping (near/far, guard band), viewport transform, a half-space rasterizer (8 subpixel bits, top-left rule, scissor / viewport clip / surface clip), interpolation per the pixel program's SPH (perspective / screen-linear / flat), early or late depth test, alpha test, OGL and D3D blend enums, colour write masks, ~60 colour-target formats and the zeta formats. Not yet: stencil, tessellation and geometry stages, MSAA, mipmapped sampling.
 - **Textures:** `core/gpu/texture` parses TIC/TSC (open-gpu-doc clb197tex.h layouts), deswizzles block-linear/pitch images once per submission into a texture pool, expands BC1-5, ASTC (LDR, every 2D footprint; `core/gpu/astc`, per the Khronos Data Format Specification) and 8-bit UNORM formats to RGBA8, and samples with wrap modes, nearest/bilinear filtering, depth compare and gather.
 - **Render targets** live in host-linear copies (`raster3d` surface cache) and are written back to guest memory at the end of every submission and before any DMA copy, so vi/BufferQueue presents them unchanged and `voland-cli --dump-frame` golden-hashes them.
@@ -2421,9 +2421,15 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.52.0*
+*Document version: 3.53.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.52 → v3.53 (summary)
+
+- **Shaders (§13): SIMT interpretation.** `Sm_Thread` is lane-major (registers r[reg][lane], predicates and condition codes as lane masks); `sm_run` executes up to 16 lanes per instruction and splits warps on divergent BRA/SYNC/BRK/CONT/RET, each split keeping its own SSY/PBK/PCNT and call stacks. The rasterizer batches up to 16 covered pixels of a triangle per run (flat triangles still shade once). JKSV's frames render ~25% faster end to end, bit-identical.
+- **MME fix:** an exit flag in the delay slot of a *taken* branch does not end the macro - deko3d's counted loops (FillRegisters / SetRegisterInArray) depend on it. Before, only the first element of every register-array fill was written: deko3d's driver constant buffer was bound for the vertex group only, and only scissor/viewport 0 were initialised. With the fix the power-on SET_PIPELINE_BINDING values (pixel -> group 4) serve both deko3d and nouveau-style drivers.
+- **Tests:** `maxwell_shader_test` gains a 16-lane divergence vector (per-lane loop trip counts and if/else through SSY/SYNC and PBK/BRK).
 
 ### Changelog v3.51 → v3.52 (summary)
 

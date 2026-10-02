@@ -4,6 +4,7 @@
  */
 #include "gpu/gpu_channel.h"
 
+#include "common/log.h"
 #include "gpu/block_linear.h"
 
 #include <string.h>
@@ -468,6 +469,10 @@ static void mme_run(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t macro, cons
     const bool end = (insn >> 7) & 1u, is_branch = (insn & 7u) == MME_OP_BRANCH;
     const int32_t target = mme_step(ch, mem, &m, insn, ip);
     if (exiting) return; /* that was the exit's delay slot */
+    /* The delay slot of a taken branch cannot exit: deko3d's counted
+     * loops put the exit-flagged write there and rely on it repeating
+     * until the branch falls through. */
+    const bool taken_branch_slot = pending_target >= 0;
     uint32_t next = ip + 1u;
     if (pending_target >= 0) { /* this instruction was a branch's delay slot */
       next = (uint32_t)pending_target;
@@ -479,7 +484,7 @@ static void mme_run(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t macro, cons
     }
     /* An exit flag on a delayed branch (taken or not) is ignored. */
     const bool delayed_branch = is_branch && !((insn >> 5) & 1u);
-    if (end && !delayed_branch) exiting = true;
+    if (end && !delayed_branch && !taken_branch_slot) exiting = true;
     ip = next;
   }
   ch->mme_faults++;

@@ -345,19 +345,23 @@ static uint32_t u32f(float f) {
   return v;
 }
 
-static uint32_t reg(const Sm_Thread *t, uint32_t r) { return r == SM_RZ ? 0u : t->r[r]; }
+#define LANE(m, l) (((m) >> (l)) & 1u)
+#define FOR_LANES(m) for (uint32_t l = 0; l < SM_LANES; l++) if (LANE(m, l))
 
-static void set_reg(Sm_Thread *t, uint32_t r, uint32_t v) {
-  if (r != SM_RZ) t->r[r] = v;
+/* Destination row: writes to RZ go to the discard row. */
+static uint32_t *dst_row(Sm_Thread *t, uint32_t r) { return r == SM_RZ ? t->discard : t->r[r]; }
+
+static Sm_Mask pred_mask(const Sm_Thread *t, uint32_t p, uint32_t negate) {
+  const Sm_Mask m = p >= SM_PT ? SM_ALL_LANES : t->p[p];
+  return negate ? (Sm_Mask)~m : m;
 }
 
-static bool pred(const Sm_Thread *t, uint32_t p) { return p >= SM_PT ? true : t->p[p]; }
-
-static bool pred_neg(const Sm_Thread *t, uint32_t p, uint32_t negate) { return pred(t, p) != (negate != 0); }
-
-static void set_pred(Sm_Thread *t, uint32_t p, bool v) {
-  if (p < SM_PT) t->p[p] = v;
+/* Sets predicate `p` to `value` in the lanes of `m`. */
+static void set_pred(Sm_Thread *t, uint32_t p, Sm_Mask m, Sm_Mask value) {
+  if (p < SM_PT) t->p[p] = (Sm_Mask)((t->p[p] & ~m) | (value & m));
 }
+
+static void set_mask(Sm_Mask *flag, Sm_Mask m, Sm_Mask value) { *flag = (Sm_Mask)((*flag & ~m) | (value & m)); }
 
 static uint32_t cbuf_read(const Sm_Env *env, uint32_t slot, uint32_t offset) {
   if (slot >= SM_CBUF_SLOTS || !env->cbuf[slot]) return 0;
@@ -367,20 +371,25 @@ static uint32_t cbuf_read(const Sm_Env *env, uint32_t slot, uint32_t offset) {
   return v;
 }
 
-/* The second (B) operand by form. */
-static uint32_t op_b(const Sm_Insn *in, const Sm_Env *env, const Sm_Thread *t) {
+static const uint32_t *splat(uint32_t v, uint32_t tmp[SM_LANES]) {
+  for (uint32_t l = 0; l < SM_LANES; l++) tmp[l] = v;
+  return tmp;
+}
+
+/* The second (B) operand, per lane, by form. */
+static const uint32_t *op_b(const Sm_Insn *in, const Sm_Env *env, const Sm_Thread *t, uint32_t tmp[SM_LANES]) {
   switch (in->form) {
-  case SM_FORM_REG: return reg(t, REG_B(in->raw));
-  case SM_FORM_CBUF: return cbuf_read(env, in->cbuf, in->imm);
-  case SM_FORM_REG_CBUF: return reg(t, REG_C(in->raw));
-  default: return in->imm;
+  case SM_FORM_REG: return t->r[REG_B(in->raw)];
+  case SM_FORM_CBUF: return splat(cbuf_read(env, in->cbuf, in->imm), tmp);
+  case SM_FORM_REG_CBUF: return t->r[REG_C(in->raw)];
+  default: return splat(in->imm, tmp);
   }
 }
 
 /* The third (C) operand of three-source ops. */
-static uint32_t op_c(const Sm_Insn *in, const Sm_Env *env, const Sm_Thread *t) {
-  if (in->form == SM_FORM_REG_CBUF) return cbuf_read(env, in->cbuf, in->imm);
-  return reg(t, REG_C(in->raw));
+static const uint32_t *op_c(const Sm_Insn *in, const Sm_Env *env, const Sm_Thread *t, uint32_t tmp[SM_LANES]) {
+  if (in->form == SM_FORM_REG_CBUF) return splat(cbuf_read(env, in->cbuf, in->imm), tmp);
+  return t->r[REG_C(in->raw)];
 }
 
 static float fmod_abs_neg(float v, uint32_t abs_bit, uint32_t neg_bit) {
@@ -579,32 +588,33 @@ static uint32_t access_bytes(uint32_t size) {
   }
 }
 
-static void load_to_regs(Sm_Thread *t, uint32_t d, uint32_t size, const uint8_t *src) {
+static void load_to_regs(Sm_Thread *t, uint32_t d, uint32_t size, const uint8_t *src, uint32_t l) {
   const uint32_t n = access_bytes(size);
   if (n < 4u) {
     uint32_t v = 0;
     memcpy(&v, src, n);
     if (size == 1) v = (uint32_t)(int32_t)(int8_t)v;
     if (size == 3) v = (uint32_t)(int32_t)(int16_t)v;
-    set_reg(t, d, v);
+    dst_row(t, d)[l] = v;
     return;
   }
   for (uint32_t i = 0; i < n / 4u; i++) {
     uint32_t v;
     memcpy(&v, src + i * 4u, sizeof(v));
-    if (d != SM_RZ) set_reg(t, (d + i) & 0xffu, v);
+    if (d != SM_RZ) t->r[(d + i) & 0xffu][l] = v;
   }
+  t->r[SM_RZ][l] = 0;
 }
 
-static void regs_to_bytes(const Sm_Thread *t, uint32_t d, uint32_t size, uint8_t *dst) {
+static void regs_to_bytes(const Sm_Thread *t, uint32_t d, uint32_t size, uint8_t *dst, uint32_t l) {
   const uint32_t n = access_bytes(size);
   if (n < 4u) {
-    const uint32_t v = reg(t, d);
+    const uint32_t v = t->r[d][l];
     memcpy(dst, &v, n);
     return;
   }
   for (uint32_t i = 0; i < n / 4u; i++) {
-    const uint32_t v = d == SM_RZ ? 0u : reg(t, (d + i) & 0xffu);
+    const uint32_t v = d == SM_RZ ? 0u : t->r[(d + i) & 0xffu][l];
     memcpy(dst + i * 4u, &v, sizeof(v));
   }
 }
@@ -615,38 +625,39 @@ static uint32_t texture_handle(const Sm_Env *env, uint32_t index) {
   return cbuf_read(env, env->texture_cbuf_slot, index * 4u);
 }
 
-/* Reads `n` packed texture arguments: the first `split` from Ra.., the
- * rest from Rb.. (TEXS/TLDS packing - see the table users). */
-static void tex_args(const Sm_Thread *t, uint64_t w, uint32_t n, uint32_t args[8]) {
+/* Reads `n` packed texture arguments: TEXS/TLDS put the first one or two
+ * in Ra.. and the rest in Rb... */
+static void tex_args(const Sm_Thread *t, uint64_t w, uint32_t n, uint32_t args[8], uint32_t l) {
   const uint32_t a = REG_A(w), b = REG_B(w);
   uint32_t in_a, in_b;
   if (n <= 1u) { in_a = n; in_b = 0; }
   else if (n == 2u) { in_a = 1; in_b = 1; }
   else { in_a = 2; in_b = n - 2u; }
-  for (uint32_t i = 0; i < in_a; i++) args[i] = a == SM_RZ ? 0u : reg(t, (a + i) & 0xffu);
-  for (uint32_t i = 0; i < in_b; i++) args[in_a + i] = b == SM_RZ ? 0u : reg(t, (b + i) & 0xffu);
+  for (uint32_t i = 0; i < in_a; i++) args[i] = a == SM_RZ ? 0u : t->r[(a + i) & 0xffu][l];
+  for (uint32_t i = 0; i < in_b; i++) args[in_a + i] = b == SM_RZ ? 0u : t->r[(b + i) & 0xffu][l];
 }
 
 /* TEX/TLD/TLD4 vector packing: up to four arguments in Ra.., the rest
  * in Rb... */
-static void tex_args_vec(const Sm_Thread *t, uint64_t w, uint32_t n, uint32_t args[8]) {
+static void tex_args_vec(const Sm_Thread *t, uint64_t w, uint32_t n, uint32_t args[8], uint32_t l) {
   const uint32_t a = REG_A(w), b = REG_B(w);
   for (uint32_t i = 0; i < n && i < 8u; i++) {
     const uint32_t base = i < 4u ? a : b;
     const uint32_t k = i < 4u ? i : i - 4u;
-    args[i] = base == SM_RZ ? 0u : reg(t, (base + k) & 0xffu);
+    args[i] = base == SM_RZ ? 0u : t->r[(base + k) & 0xffu][l];
   }
 }
 
 /* TEXS/TLDS/TLD4S destinations: components in order to Rd, Rd+1, Rd2,
  * Rd2+1. */
-static void write_scalar_results(Sm_Thread *t, uint64_t w, const uint32_t *values, uint32_t count) {
+static void write_scalar_results(Sm_Thread *t, uint64_t w, const uint32_t *values, uint32_t count, uint32_t l) {
   const uint32_t d0 = REG_D(w), d1 = BITS(w, 28, 8);
   for (uint32_t i = 0; i < count; i++) {
     const uint32_t base = i < 2u ? d0 : d1;
     if (base == SM_RZ) continue;
-    set_reg(t, (base + (i & 1u)) & 0xffu, values[i]);
+    t->r[(base + (i & 1u)) & 0xffu][l] = values[i];
   }
+  t->r[SM_RZ][l] = 0;
 }
 
 /* Component lists for the 3-bit TEXS/TLDS mask, single / dual dest. */
@@ -674,209 +685,210 @@ static void tex_call(const Sm_Env *env, Sm_Tex_Request *req, uint32_t out[4]) {
   if (env->texture) env->texture(env->user, req, out);
 }
 
-static void exec_texs(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t) {
+static void exec_texs(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask m) {
   const uint64_t w = in->raw;
   const uint32_t target = BITS(w, 53, 4);
-  Sm_Tex_Request req;
-  memset(&req, 0, sizeof(req));
-  req.kind = SM_TEX_SAMPLE;
-  req.handle = texture_handle(env, BITS(w, 36, 13));
-  uint32_t args[8] = {0};
-  float x = 0, y = 0, z = 0;
-  switch (target) {
-  case 0: tex_args(t, w, 1, args); req.dims = 1; req.has_lod = true; x = f32(args[0]); break;
-  case 1: tex_args(t, w, 2, args); req.dims = 2; x = f32(args[0]); y = f32(args[1]); break;
-  case 2: tex_args(t, w, 2, args); req.dims = 2; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); break;
-  case 3: tex_args(t, w, 3, args); req.dims = 2; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); req.lod = f32(args[2]); break;
-  case 4: tex_args(t, w, 3, args); req.dims = 2; req.shadow = true; x = f32(args[0]); y = f32(args[1]); req.dref = f32(args[2]); break;
-  case 5: tex_args(t, w, 4, args); req.dims = 2; req.shadow = true; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); req.lod = f32(args[2]); req.dref = f32(args[3]); break;
-  case 6: tex_args(t, w, 3, args); req.dims = 2; req.shadow = true; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); req.dref = f32(args[2]); break;
-  case 7: tex_args(t, w, 3, args); req.dims = 2; req.array = true; req.layer = (float)args[0]; x = f32(args[1]); y = f32(args[2]); break;
-  case 8: tex_args(t, w, 3, args); req.dims = 2; req.array = true; req.has_lod = true; req.layer = (float)args[0]; x = f32(args[1]); y = f32(args[2]); break;
-  case 9: tex_args(t, w, 4, args); req.dims = 2; req.array = true; req.shadow = true; req.has_lod = true; req.layer = (float)args[0]; x = f32(args[1]); y = f32(args[2]); req.dref = f32(args[3]); break;
-  case 10: case 11: tex_args(t, w, 3, args); req.dims = 3; req.has_lod = target == 11u; x = f32(args[0]); y = f32(args[1]); z = f32(args[2]); break;
-  case 12: tex_args(t, w, 3, args); req.dims = 3; req.cube = true; x = f32(args[0]); y = f32(args[1]); z = f32(args[2]); break;
-  case 13: tex_args(t, w, 4, args); req.dims = 3; req.cube = true; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); z = f32(args[2]); req.lod = f32(args[3]); break;
-  default: req.dims = 2; break;
-  }
-  req.coords[0] = x;
-  req.coords[1] = y;
-  req.coords[2] = z;
-  uint32_t texel[4];
-  tex_call(env, &req, texel);
+  const uint32_t handle = texture_handle(env, BITS(w, 36, 13));
   uint32_t comps[4];
   const uint32_t n = scalar_components(BITS(w, 50, 3), BITS(w, 28, 8) != SM_RZ, comps);
-  uint32_t values[4];
-  for (uint32_t i = 0; i < n; i++) values[i] = texel[comps[i]];
-  write_scalar_results(t, w, values, n);
+  FOR_LANES(m) {
+    Sm_Tex_Request req;
+    memset(&req, 0, sizeof(req));
+    req.kind = SM_TEX_SAMPLE;
+    req.handle = handle;
+    uint32_t args[8] = {0};
+    float x = 0, y = 0, z = 0;
+    switch (target) {
+    case 0: tex_args(t, w, 1, args, l); req.dims = 1; req.has_lod = true; x = f32(args[0]); break;
+    case 1: tex_args(t, w, 2, args, l); req.dims = 2; x = f32(args[0]); y = f32(args[1]); break;
+    case 2: tex_args(t, w, 2, args, l); req.dims = 2; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); break;
+    case 3: tex_args(t, w, 3, args, l); req.dims = 2; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); req.lod = f32(args[2]); break;
+    case 4: tex_args(t, w, 3, args, l); req.dims = 2; req.shadow = true; x = f32(args[0]); y = f32(args[1]); req.dref = f32(args[2]); break;
+    case 5: tex_args(t, w, 4, args, l); req.dims = 2; req.shadow = true; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); req.lod = f32(args[2]); req.dref = f32(args[3]); break;
+    case 6: tex_args(t, w, 3, args, l); req.dims = 2; req.shadow = true; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); req.dref = f32(args[2]); break;
+    case 7: tex_args(t, w, 3, args, l); req.dims = 2; req.array = true; req.layer = (float)args[0]; x = f32(args[1]); y = f32(args[2]); break;
+    case 8: tex_args(t, w, 3, args, l); req.dims = 2; req.array = true; req.has_lod = true; req.layer = (float)args[0]; x = f32(args[1]); y = f32(args[2]); break;
+    case 9: tex_args(t, w, 4, args, l); req.dims = 2; req.array = true; req.shadow = true; req.has_lod = true; req.layer = (float)args[0]; x = f32(args[1]); y = f32(args[2]); req.dref = f32(args[3]); break;
+    case 10: case 11: tex_args(t, w, 3, args, l); req.dims = 3; req.has_lod = target == 11u; x = f32(args[0]); y = f32(args[1]); z = f32(args[2]); break;
+    case 12: tex_args(t, w, 3, args, l); req.dims = 3; req.cube = true; x = f32(args[0]); y = f32(args[1]); z = f32(args[2]); break;
+    case 13: tex_args(t, w, 4, args, l); req.dims = 3; req.cube = true; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); z = f32(args[2]); req.lod = f32(args[3]); break;
+    default: req.dims = 2; break;
+    }
+    req.coords[0] = x;
+    req.coords[1] = y;
+    req.coords[2] = z;
+    uint32_t texel[4];
+    tex_call(env, &req, texel);
+    uint32_t values[4];
+    for (uint32_t i = 0; i < n; i++) values[i] = texel[comps[i]];
+    write_scalar_results(t, w, values, n, l);
+  }
 }
 
-static void exec_tlds(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t) {
+static void exec_tlds(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask m) {
   const uint64_t w = in->raw;
   const uint32_t target = BITS(w, 53, 4);
-  Sm_Tex_Request req;
-  memset(&req, 0, sizeof(req));
-  req.kind = SM_TEX_FETCH;
-  req.handle = texture_handle(env, BITS(w, 36, 13));
-  uint32_t args[8] = {0};
-  switch (target) {
-  case 0: tex_args(t, w, 1, args); req.dims = 1; req.icoords[0] = (int32_t)args[0]; break;
-  case 1: tex_args(t, w, 2, args); req.dims = 1; req.icoords[0] = (int32_t)args[0]; req.ilod = (int32_t)args[1]; break;
-  case 2: tex_args(t, w, 2, args); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; break;
-  case 4: tex_args(t, w, 3, args); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1];
-    req.offset[0] = (int32_t)(args[2] << 28) >> 28; req.offset[1] = (int32_t)(args[2] << 24) >> 28; break;
-  case 5: tex_args(t, w, 3, args); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; req.ilod = (int32_t)args[2]; break;
-  case 6: tex_args(t, w, 3, args); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; break;
-  case 7: tex_args(t, w, 3, args); req.dims = 3; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; req.icoords[2] = (int32_t)args[2]; break;
-  case 8: tex_args(t, w, 3, args); req.dims = 2; req.array = true; req.layer = (float)args[0]; req.icoords[0] = (int32_t)args[1]; req.icoords[1] = (int32_t)args[2]; break;
-  case 12: tex_args(t, w, 4, args); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; req.ilod = (int32_t)args[2];
-    req.offset[0] = (int32_t)(args[3] << 28) >> 28; req.offset[1] = (int32_t)(args[3] << 24) >> 28; break;
-  default: req.dims = 2; break;
-  }
-  uint32_t texel[4];
-  tex_call(env, &req, texel);
+  const uint32_t handle = texture_handle(env, BITS(w, 36, 13));
   uint32_t comps[4];
   const uint32_t n = scalar_components(BITS(w, 50, 3), BITS(w, 28, 8) != SM_RZ, comps);
-  uint32_t values[4];
-  for (uint32_t i = 0; i < n; i++) values[i] = texel[comps[i]];
-  write_scalar_results(t, w, values, n);
+  FOR_LANES(m) {
+    Sm_Tex_Request req;
+    memset(&req, 0, sizeof(req));
+    req.kind = SM_TEX_FETCH;
+    req.handle = handle;
+    uint32_t args[8] = {0};
+    switch (target) {
+    case 0: tex_args(t, w, 1, args, l); req.dims = 1; req.icoords[0] = (int32_t)args[0]; break;
+    case 1: tex_args(t, w, 2, args, l); req.dims = 1; req.icoords[0] = (int32_t)args[0]; req.ilod = (int32_t)args[1]; break;
+    case 2: tex_args(t, w, 2, args, l); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; break;
+    case 4: tex_args(t, w, 3, args, l); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1];
+      req.offset[0] = (int32_t)(args[2] << 28) >> 28; req.offset[1] = (int32_t)(args[2] << 24) >> 28; break;
+    case 5: tex_args(t, w, 3, args, l); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; req.ilod = (int32_t)args[2]; break;
+    case 6: tex_args(t, w, 3, args, l); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; break;
+    case 7: tex_args(t, w, 3, args, l); req.dims = 3; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; req.icoords[2] = (int32_t)args[2]; break;
+    case 8: tex_args(t, w, 3, args, l); req.dims = 2; req.array = true; req.layer = (float)args[0]; req.icoords[0] = (int32_t)args[1]; req.icoords[1] = (int32_t)args[2]; break;
+    case 12: tex_args(t, w, 4, args, l); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; req.ilod = (int32_t)args[2];
+      req.offset[0] = (int32_t)(args[3] << 28) >> 28; req.offset[1] = (int32_t)(args[3] << 24) >> 28; break;
+    default: req.dims = 2; break;
+    }
+    uint32_t texel[4];
+    tex_call(env, &req, texel);
+    uint32_t values[4];
+    for (uint32_t i = 0; i < n; i++) values[i] = texel[comps[i]];
+    write_scalar_results(t, w, values, n, l);
+  }
 }
 
-static void exec_tld4s(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t) {
+static void exec_tld4s(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask m) {
   const uint64_t w = in->raw;
-  Sm_Tex_Request req;
-  memset(&req, 0, sizeof(req));
-  req.kind = SM_TEX_GATHER;
-  req.handle = texture_handle(env, BITS(w, 36, 13));
-  req.dims = 2;
-  req.gather_component = (uint8_t)BITS(w, 52, 2);
-  req.has_offset = BIT(w, 51) != 0;
-  req.shadow = BIT(w, 50) != 0;
-  const uint32_t n = 2u + (req.has_offset ? 1u : 0u) + (req.shadow ? 1u : 0u);
-  uint32_t args[8] = {0};
-  tex_args(t, w, n, args);
-  req.coords[0] = f32(args[0]);
-  req.coords[1] = f32(args[1]);
-  uint32_t k = 2;
-  if (req.has_offset) {
-    req.offset[0] = (int32_t)(args[k] << 26) >> 26;
-    req.offset[1] = (int32_t)(args[k] << 18) >> 26;
-    k++;
+  const uint32_t handle = texture_handle(env, BITS(w, 36, 13));
+  FOR_LANES(m) {
+    Sm_Tex_Request req;
+    memset(&req, 0, sizeof(req));
+    req.kind = SM_TEX_GATHER;
+    req.handle = handle;
+    req.dims = 2;
+    req.gather_component = (uint8_t)BITS(w, 52, 2);
+    req.has_offset = BIT(w, 51) != 0;
+    req.shadow = BIT(w, 50) != 0;
+    const uint32_t n = 2u + (req.has_offset ? 1u : 0u) + (req.shadow ? 1u : 0u);
+    uint32_t args[8] = {0};
+    tex_args(t, w, n, args, l);
+    req.coords[0] = f32(args[0]);
+    req.coords[1] = f32(args[1]);
+    uint32_t k = 2;
+    if (req.has_offset) {
+      req.offset[0] = (int32_t)(args[k] << 26) >> 26;
+      req.offset[1] = (int32_t)(args[k] << 18) >> 26;
+      k++;
+    }
+    if (req.shadow) req.dref = f32(args[k]);
+    uint32_t texel[4];
+    tex_call(env, &req, texel);
+    write_scalar_results(t, w, texel, 4, l);
   }
-  if (req.shadow) req.dref = f32(args[k]);
-  uint32_t texel[4];
-  tex_call(env, &req, texel);
-  write_scalar_results(t, w, texel, 4);
 }
 
 /* TEX / TLD / TLD4 / TXD / TXQ / TMML (vector forms). */
-static void exec_tex_vector(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t) {
+static void exec_tex_vector(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask m) {
   const uint64_t w = in->raw;
-  Sm_Tex_Request req;
-  memset(&req, 0, sizeof(req));
-  req.handle = texture_handle(env, BITS(w, 36, 13));
-  const uint32_t dim = BITS(w, 29, 2);
-  req.dims = (uint8_t)(dim == 3u ? 3u : dim + 1u);
-  req.cube = dim == 3u;
-  req.array = BIT(w, 28) != 0;
+  const uint32_t handle = texture_handle(env, BITS(w, 36, 13));
   const uint32_t mask = BITS(w, 31, 4);
-  uint32_t coord_count = req.dims;
-  uint32_t args[8] = {0};
-  uint32_t n = (req.array ? 1u : 0u) + coord_count;
-  bool lod = false, bias = false, offset = false, dc = false, ms = false;
-  switch (in->op) {
-  case SM_OP_TEX: {
-    const uint32_t lodm = BITS(w, 55, 2);
-    req.kind = SM_TEX_SAMPLE;
-    lod = lodm == 3u;
-    bias = lodm == 2u;
-    req.has_lod = lodm == 1u || lodm == 3u;
-    offset = BIT(w, 54) != 0;
-    dc = BIT(w, 50) != 0;
-    break;
-  }
-  case SM_OP_TLD:
-    req.kind = SM_TEX_FETCH;
-    lod = BIT(w, 55) != 0;
-    ms = BIT(w, 50) != 0;
-    offset = BIT(w, 35) != 0;
-    break;
-  case SM_OP_TLD4:
-    req.kind = SM_TEX_GATHER;
-    req.gather_component = (uint8_t)BITS(w, 56, 2);
-    offset = BITS(w, 54, 2) != 0;
-    dc = BIT(w, 50) != 0;
-    break;
-  case SM_OP_TXD:
-    req.kind = SM_TEX_SAMPLE;
-    req.has_lod = true; /* derivatives ignored: base level */
-    break;
-  case SM_OP_TXQ:
-    req.kind = SM_TEX_QUERY_DIMS;
-    break;
-  default: /* TMML */
-    req.kind = SM_TEX_QUERY_LOD;
-    break;
-  }
-  if (req.kind == SM_TEX_QUERY_DIMS) {
-    const uint32_t query = BITS(w, 22, 6);
-    req.ilod = (int32_t)reg(t, REG_A(w));
+  FOR_LANES(m) {
+    Sm_Tex_Request req;
+    memset(&req, 0, sizeof(req));
+    req.handle = handle;
+    const uint32_t dim = BITS(w, 29, 2);
+    req.dims = (uint8_t)(dim == 3u ? 3u : dim + 1u);
+    req.cube = dim == 3u;
+    req.array = BIT(w, 28) != 0;
+    const uint32_t coord_count = req.dims;
+    uint32_t args[8] = {0};
+    uint32_t n = (req.array ? 1u : 0u) + coord_count;
+    bool lod = false, bias = false, offset = false, dc = false, ms = false;
+    switch (in->op) {
+    case SM_OP_TEX: {
+      const uint32_t lodm = BITS(w, 55, 2);
+      req.kind = SM_TEX_SAMPLE;
+      lod = lodm == 3u;
+      bias = lodm == 2u;
+      req.has_lod = lodm == 1u || lodm == 3u;
+      offset = BIT(w, 54) != 0;
+      dc = BIT(w, 50) != 0;
+      break;
+    }
+    case SM_OP_TLD:
+      req.kind = SM_TEX_FETCH;
+      lod = BIT(w, 55) != 0;
+      ms = BIT(w, 50) != 0;
+      offset = BIT(w, 35) != 0;
+      break;
+    case SM_OP_TLD4:
+      req.kind = SM_TEX_GATHER;
+      req.gather_component = (uint8_t)BITS(w, 56, 2);
+      offset = BITS(w, 54, 2) != 0;
+      dc = BIT(w, 50) != 0;
+      break;
+    case SM_OP_TXD:
+      req.kind = SM_TEX_SAMPLE;
+      req.has_lod = true; /* derivatives ignored: base level */
+      break;
+    case SM_OP_TXQ:
+      req.kind = SM_TEX_QUERY_DIMS;
+      break;
+    default: /* TMML */
+      req.kind = SM_TEX_QUERY_LOD;
+      break;
+    }
     uint32_t out[4];
-    tex_call(env, &req, out);
-    if (query != 1u) out[0] = out[1] = out[2] = out[3] = 0;
+    if (req.kind == SM_TEX_QUERY_DIMS) {
+      const uint32_t query = BITS(w, 22, 6);
+      req.ilod = (int32_t)t->r[REG_A(w)][l];
+      tex_call(env, &req, out);
+      if (query != 1u) out[0] = out[1] = out[2] = out[3] = 0;
+    } else if (req.kind == SM_TEX_QUERY_LOD) {
+      out[0] = out[1] = out[2] = out[3] = 0;
+    } else {
+      n += (lod || bias) ? 1u : 0u;
+      n += offset ? 1u : 0u;
+      n += ms ? 1u : 0u;
+      n += dc ? 1u : 0u;
+      tex_args_vec(t, w, n, args, l);
+      uint32_t k = 0;
+      if (req.array) req.layer = (float)(args[k++] & 0xffffu);
+      for (uint32_t c = 0; c < coord_count; c++) {
+        if (req.kind == SM_TEX_FETCH) req.icoords[c] = (int32_t)args[k];
+        else req.coords[c] = f32(args[k]);
+        k++;
+      }
+      if (lod || bias) {
+        if (req.kind == SM_TEX_FETCH) req.ilod = (int32_t)args[k];
+        else req.lod = f32(args[k]);
+        req.has_lod = lod;
+        req.has_bias = bias;
+        k++;
+      }
+      if (offset) {
+        req.has_offset = true;
+        for (uint32_t c = 0; c < coord_count && c < 3u; c++) req.offset[c] = (int32_t)(args[k] << (28u - 4u * c)) >> 28;
+        k++;
+      }
+      if (ms) k++;
+      if (dc) {
+        req.shadow = true;
+        req.dref = f32(args[k]);
+      }
+      tex_call(env, &req, out);
+    }
     uint32_t d = REG_D(w);
     for (uint32_t c = 0; c < 4; c++) {
       if (!(mask & (1u << c))) continue;
-      set_reg(t, d, out[c]);
-      if (d != SM_RZ) d = (d + 1u) & 0xffu;
+      if (d != SM_RZ) {
+        t->r[d][l] = out[c];
+        d = (d + 1u) & 0xffu;
+      }
     }
-    return;
-  }
-  if (req.kind == SM_TEX_QUERY_LOD) {
-    uint32_t d = REG_D(w);
-    for (uint32_t c = 0; c < 4; c++) {
-      if (!(mask & (1u << c))) continue;
-      set_reg(t, d, 0);
-      if (d != SM_RZ) d = (d + 1u) & 0xffu;
-    }
-    return;
-  }
-  n += (lod || bias) ? 1u : 0u;
-  n += offset ? 1u : 0u;
-  n += ms ? 1u : 0u;
-  n += dc ? 1u : 0u;
-  tex_args_vec(t, w, n, args);
-  uint32_t k = 0;
-  if (req.array) req.layer = (float)(args[k++] & 0xffffu);
-  for (uint32_t c = 0; c < coord_count; c++) {
-    if (req.kind == SM_TEX_FETCH) req.icoords[c] = (int32_t)args[k];
-    else req.coords[c] = f32(args[k]);
-    k++;
-  }
-  if (lod || bias) {
-    if (req.kind == SM_TEX_FETCH) req.ilod = (int32_t)args[k];
-    else req.lod = f32(args[k]);
-    req.has_lod = lod;
-    req.has_bias = bias;
-    k++;
-  }
-  if (offset) {
-    req.has_offset = true;
-    for (uint32_t c = 0; c < coord_count && c < 3u; c++) req.offset[c] = (int32_t)(args[k] << (28u - 4u * c)) >> 28;
-    k++;
-  }
-  if (ms) k++;
-  if (dc) {
-    req.shadow = true;
-    req.dref = f32(args[k]);
-  }
-  uint32_t texel[4];
-  tex_call(env, &req, texel);
-  uint32_t d = REG_D(w);
-  for (uint32_t c = 0; c < 4; c++) {
-    if (!(mask & (1u << c))) continue;
-    set_reg(t, d, texel[c]);
-    if (d != SM_RZ) d = (d + 1u) & 0xffu;
+    t->r[SM_RZ][l] = 0;
   }
 }
 
@@ -887,701 +899,946 @@ typedef struct Stack_Entry {
   uint32_t target;
 } Stack_Entry;
 
-typedef struct Flow {
-  Stack_Entry entries[SM_STACK_DEPTH * 3u];
-  uint32_t depth;
-} Flow;
+#define FLOW_DEPTH (SM_STACK_DEPTH * 3u)
+#define MAX_WARPS SM_LANES
 
-static bool flow_push(Flow *f, uint32_t kind, int32_t target) {
-  if (target < 0 || f->depth >= SM_STACK_DEPTH * 3u) return false;
-  f->entries[f->depth].kind = kind;
-  f->entries[f->depth].target = (uint32_t)target;
-  f->depth++;
+/* A group of lanes at one program counter, with its own reconvergence
+ * (SSY/PBK/PCNT) and call stacks. */
+typedef struct Warp {
+  Sm_Mask mask;
+  uint32_t pc;
+  uint32_t depth;
+  Stack_Entry flow[FLOW_DEPTH];
+  uint32_t call_depth;
+  uint32_t calls[SM_STACK_DEPTH];
+} Warp;
+
+static bool flow_push(Warp *w, uint32_t kind, int32_t target) {
+  if (target < 0 || w->depth >= FLOW_DEPTH) return false;
+  w->flow[w->depth].kind = kind;
+  w->flow[w->depth].target = (uint32_t)target;
+  w->depth++;
   return true;
 }
 
 /* Pops to the most recent entry of `kind`; keeps it when `keep`.
  * Returns its target or -1. */
-static int32_t flow_pop_to(Flow *f, uint32_t kind, bool keep) {
-  while (f->depth > 0) {
-    const Stack_Entry e = f->entries[f->depth - 1u];
+static int32_t flow_pop_to(Warp *w, uint32_t kind, bool keep) {
+  while (w->depth > 0) {
+    const Stack_Entry e = w->flow[w->depth - 1u];
     if (e.kind == kind) {
-      if (!keep) f->depth--;
+      if (!keep) w->depth--;
       return (int32_t)e.target;
     }
-    f->depth--;
+    w->depth--;
   }
   return -1;
 }
 
-void sm_thread_reset(Sm_Thread *t) {
+void sm_thread_reset(Sm_Thread *t, uint32_t lanes) {
   memset(t->r, 0, sizeof(t->r));
-  for (uint32_t i = 0; i < SM_PREDICATES; i++) t->p[i] = false;
-  t->p[SM_PT] = true;
-  t->cc_carry = t->cc_zero = t->cc_sign = t->cc_overflow = false;
-  t->killed = false;
+  sm_thread_reset_light(t, lanes);
+}
+
+void sm_thread_reset_light(Sm_Thread *t, uint32_t lanes) {
+  t->lanes = lanes == 0 ? 1u : (lanes > SM_LANES ? SM_LANES : lanes);
+  for (uint32_t i = 0; i < SM_PREDICATES; i++) t->p[i] = 0;
+  t->p[SM_PT] = SM_ALL_LANES;
+  t->cc_carry = t->cc_zero = t->cc_sign = t->cc_overflow = 0;
+  t->killed = 0;
   t->faulted = false;
-  t->ssy_depth = t->pbk_depth = t->pcnt_depth = t->call_depth = 0;
+  memset(t->r[SM_RZ], 0, sizeof(t->r[SM_RZ]));
 }
 
-void sm_thread_reset_light(Sm_Thread *t) {
-  for (uint32_t i = 0; i < SM_PREDICATES; i++) t->p[i] = false;
-  t->p[SM_PT] = true;
-  t->cc_carry = t->cc_zero = t->cc_sign = t->cc_overflow = false;
-  t->killed = false;
-  t->faulted = false;
-}
-
-static void set_cc_from(Sm_Thread *t, uint32_t v) {
-  t->cc_zero = v == 0;
-  t->cc_sign = (v >> 31) != 0;
-}
-
-static uint32_t sysreg(const Sm_Thread *t, uint32_t id) {
+static uint32_t sysreg(uint32_t id, uint32_t lane) {
   static uint32_t clock;
   switch (id) {
+  case 0x00: return lane;        /* lane id */
   case 0x12: return u32f(1.0f);  /* Y direction */
-  case 0x38: return 1;           /* lanemask eq */
-  case 0x3a: return 1;           /* lanemask le */
-  case 0x3c: return 0xffffffffu; /* lanemask ge */
+  case 0x38: return 1u << lane;  /* lanemask eq */
+  case 0x39: return (1u << lane) - 1u;
+  case 0x3a: return (2u << lane) - 1u;
+  case 0x3b: return ~((2u << lane) - 1u);
+  case 0x3c: return ~((1u << lane) - 1u);
   case 0x50: return clock++;
-  case 0x51: return 0;
-  default: (void)t; return 0;
+  default: return 0;
   }
 }
 
-bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
-  Flow flow;
-  flow.depth = 0;
-  uint32_t calls[SM_STACK_DEPTH];
-  uint32_t call_depth = 0;
-  uint32_t pc = 1;
-  for (uint32_t step = 0; step < SM_MAX_STEPS; step++) {
-    if (pc >= program->word_count) {
-      t->faulted = true;
-      return false;
-    }
-    if (pc % 4u == 0) {
-      pc++;
-      continue;
-    }
-    const Sm_Insn *in = &program->insns[pc];
-    const uint64_t w = in->raw;
-    uint32_t next = pc + 1u;
-    if ((in->pred & 7u) != SM_PT || (in->pred & 8u)) {
-      if (!pred_neg(t, in->pred & 7u, in->pred & 8u)) {
-        pc = next;
-        continue;
-      }
-    }
-    switch ((Sm_Op)in->op) {
-    case SM_OP_NOP:
-    case SM_OP_SCHED:
-    case SM_OP_BARRIER:
-      break;
+/* Executes the non-control instruction `in` for the lanes in `m`. */
+static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask m) {
+  const uint64_t w = in->raw;
+  uint32_t tb[SM_LANES], tc[SM_LANES];
+  switch ((Sm_Op)in->op) {
+  case SM_OP_NOP:
+  case SM_OP_SCHED:
+  case SM_OP_BARRIER:
+    return;
 
-    /* ---- float ---- */
-    case SM_OP_FADD: {
-      const float a = fmod_abs_neg(f32(reg(t, REG_A(w))), BIT(w, 46), BIT(w, 48));
-      const float b = fmod_abs_neg(f32(op_b(in, env, t)), BIT(w, 49), BIT(w, 45));
-      float r = a + b;
-      if (BIT(w, 50)) r = saturate(r);
-      set_reg(t, REG_D(w), u32f(r));
-      break;
+  /* ---- float ---- */
+  case SM_OP_FADD: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t aa = BIT(w, 46), na = BIT(w, 48), ab = BIT(w, 49), nb = BIT(w, 45), sat = BIT(w, 50);
+    FOR_LANES(m) {
+      float r = fmod_abs_neg(f32(a[l]), aa, na) + fmod_abs_neg(f32(b[l]), ab, nb);
+      if (sat) r = saturate(r);
+      d[l] = u32f(r);
     }
-    case SM_OP_FADD32I: {
-      const float a = fmod_abs_neg(f32(reg(t, REG_A(w))), BIT(w, 54), BIT(w, 56));
-      const float b = fmod_abs_neg(f32(in->imm), BIT(w, 57), BIT(w, 53));
-      set_reg(t, REG_D(w), u32f(a + b));
-      break;
+    return;
+  }
+  case SM_OP_FADD32I: {
+    const uint32_t *a = t->r[REG_A(w)];
+    uint32_t *d = dst_row(t, REG_D(w));
+    const float b = fmod_abs_neg(f32(in->imm), BIT(w, 57), BIT(w, 53));
+    const uint32_t aa = BIT(w, 54), na = BIT(w, 56);
+    FOR_LANES(m) d[l] = u32f(fmod_abs_neg(f32(a[l]), aa, na) + b);
+    return;
+  }
+  case SM_OP_FMUL: {
+    /* @41: 1-3 divide by 2^n, 4-6 multiply by 8, 4, 2. */
+    static const float scale[8] = {1.0f, 0.5f, 0.25f, 0.125f, 8.0f, 4.0f, 2.0f, 1.0f};
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const float k = scale[BITS(w, 41, 3)] * (BIT(w, 48) ? -1.0f : 1.0f);
+    const uint32_t sat = BIT(w, 50);
+    FOR_LANES(m) {
+      float r = f32(a[l]) * f32(b[l]) * k;
+      if (sat) r = saturate(r);
+      d[l] = u32f(r);
     }
-    case SM_OP_FMUL: {
-      float r = f32(reg(t, REG_A(w))) * f32(op_b(in, env, t));
-      /* @41: 1-3 divide by 2^n, 4-6 multiply by 8, 4, 2. */
-      static const float scale[8] = {1.0f, 0.5f, 0.25f, 0.125f, 8.0f, 4.0f, 2.0f, 1.0f};
-      r *= scale[BITS(w, 41, 3)];
-      if (BIT(w, 48)) r = -r;
-      if (BIT(w, 50)) r = saturate(r);
-      set_reg(t, REG_D(w), u32f(r));
-      break;
+    return;
+  }
+  case SM_OP_FMUL32I: {
+    const uint32_t *a = t->r[REG_A(w)];
+    uint32_t *d = dst_row(t, REG_D(w));
+    const float b = f32(in->imm);
+    const uint32_t sat = BIT(w, 55);
+    FOR_LANES(m) {
+      float r = f32(a[l]) * b;
+      if (sat) r = saturate(r);
+      d[l] = u32f(r);
     }
-    case SM_OP_FMUL32I: {
-      float r = f32(reg(t, REG_A(w))) * f32(in->imm);
-      if (BIT(w, 55)) r = saturate(r);
-      set_reg(t, REG_D(w), u32f(r));
-      break;
+    return;
+  }
+  case SM_OP_FFMA: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb), *c = op_c(in, env, t, tc);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const float nab = BIT(w, 48) ? -1.0f : 1.0f, nc = BIT(w, 49) ? -1.0f : 1.0f;
+    const uint32_t sat = BIT(w, 50);
+    FOR_LANES(m) {
+      float r = f32(a[l]) * f32(b[l]) * nab + f32(c[l]) * nc;
+      if (sat) r = saturate(r);
+      d[l] = u32f(r);
     }
-    case SM_OP_FFMA: {
-      float ab = f32(reg(t, REG_A(w))) * f32(op_b(in, env, t));
-      float c = f32(op_c(in, env, t));
-      if (BIT(w, 48)) ab = -ab;
-      if (BIT(w, 49)) c = -c;
-      float r = ab + c;
-      if (BIT(w, 50)) r = saturate(r);
-      set_reg(t, REG_D(w), u32f(r));
-      break;
+    return;
+  }
+  case SM_OP_FFMA32I: {
+    const uint32_t *a = t->r[REG_A(w)];
+    uint32_t *d = dst_row(t, REG_D(w));
+    const float b = f32(in->imm) * (BIT(w, 56) ? -1.0f : 1.0f), nc = BIT(w, 57) ? -1.0f : 1.0f;
+    const uint32_t sat = BIT(w, 55);
+    FOR_LANES(m) {
+      float r = f32(a[l]) * b + f32(d[l]) * nc;
+      if (sat) r = saturate(r);
+      d[l] = u32f(r);
     }
-    case SM_OP_FFMA32I: {
-      float ab = f32(reg(t, REG_A(w))) * f32(in->imm);
-      float c = f32(reg(t, REG_D(w)));
-      if (BIT(w, 56)) ab = -ab;
-      if (BIT(w, 57)) c = -c;
-      float r = ab + c;
-      if (BIT(w, 55)) r = saturate(r);
-      set_reg(t, REG_D(w), u32f(r));
-      break;
+    return;
+  }
+  case SM_OP_FMNMX: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const Sm_Mask mins = pred_mask(t, BITS(w, 39, 3), BIT(w, 42));
+    const uint32_t aa = BIT(w, 46), na = BIT(w, 48), ab = BIT(w, 49), nb = BIT(w, 45);
+    FOR_LANES(m) {
+      const float x = fmod_abs_neg(f32(a[l]), aa, na), y = fmod_abs_neg(f32(b[l]), ab, nb);
+      d[l] = u32f(LANE(mins, l) ? fminf(x, y) : fmaxf(x, y));
     }
-    case SM_OP_FMNMX: {
-      const float a = fmod_abs_neg(f32(reg(t, REG_A(w))), BIT(w, 46), BIT(w, 48));
-      const float b = fmod_abs_neg(f32(op_b(in, env, t)), BIT(w, 49), BIT(w, 45));
-      const bool min = pred_neg(t, BITS(w, 39, 3), BIT(w, 42));
-      set_reg(t, REG_D(w), u32f(min ? fminf(a, b) : fmaxf(a, b)));
-      break;
+    return;
+  }
+  case SM_OP_FSET: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const Sm_Mask pc = pred_mask(t, BITS(w, 39, 3), BIT(w, 42));
+    const uint32_t cond = BITS(w, 48, 4), bop = BITS(w, 45, 2), aa = BIT(w, 54), na = BIT(w, 43), ab = BIT(w, 44),
+                   nb = BIT(w, 53);
+    const uint32_t yes = BIT(w, 52) ? u32f(1.0f) : 0xffffffffu;
+    FOR_LANES(m) {
+      const bool r = bool_op(bop, fcompare(cond, fmod_abs_neg(f32(a[l]), aa, na), fmod_abs_neg(f32(b[l]), ab, nb)),
+                             LANE(pc, l) != 0);
+      d[l] = r ? yes : 0u;
     }
-    case SM_OP_FSET: {
-      const float a = fmod_abs_neg(f32(reg(t, REG_A(w))), BIT(w, 54), BIT(w, 43));
-      const float b = fmod_abs_neg(f32(op_b(in, env, t)), BIT(w, 44), BIT(w, 53));
-      const bool r = bool_op(BITS(w, 45, 2), fcompare(BITS(w, 48, 4), a, b), pred_neg(t, BITS(w, 39, 3), BIT(w, 42)));
-      set_reg(t, REG_D(w), r ? (BIT(w, 52) ? u32f(1.0f) : 0xffffffffu) : 0u);
-      break;
+    return;
+  }
+  case SM_OP_FSETP: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    const Sm_Mask pc = pred_mask(t, BITS(w, 39, 3), BIT(w, 42));
+    const uint32_t cond = BITS(w, 48, 4), bop = BITS(w, 45, 2), aa = BIT(w, 7), na = BIT(w, 43), ab = BIT(w, 44),
+                   nb = BIT(w, 6);
+    Sm_Mask p0 = 0, p1 = 0;
+    FOR_LANES(m) {
+      const bool cmp = fcompare(cond, fmod_abs_neg(f32(a[l]), aa, na), fmod_abs_neg(f32(b[l]), ab, nb));
+      const bool c = LANE(pc, l) != 0;
+      if (bool_op(bop, cmp, c)) p0 |= (Sm_Mask)(1u << l);
+      if (bool_op(bop, !cmp, c)) p1 |= (Sm_Mask)(1u << l);
     }
-    case SM_OP_FSETP: {
-      const float a = fmod_abs_neg(f32(reg(t, REG_A(w))), BIT(w, 7), BIT(w, 43));
-      const float b = fmod_abs_neg(f32(op_b(in, env, t)), BIT(w, 44), BIT(w, 6));
-      const bool cmp = fcompare(BITS(w, 48, 4), a, b);
-      const bool pc_v = pred_neg(t, BITS(w, 39, 3), BIT(w, 42));
-      const uint32_t bop = BITS(w, 45, 2);
-      set_pred(t, BITS(w, 3, 3), bool_op(bop, cmp, pc_v));
-      set_pred(t, BITS(w, 0, 3), bool_op(bop, !cmp, pc_v));
-      break;
-    }
-    case SM_OP_FCMP: {
-      const float c = f32(op_c(in, env, t));
-      const bool r = fcompare(BITS(w, 48, 4), c, 0.0f);
-      set_reg(t, REG_D(w), r ? reg(t, REG_A(w)) : op_b(in, env, t));
-      break;
-    }
-    case SM_OP_MUFU: {
-      const float a = fmod_abs_neg(f32(reg(t, REG_A(w))), BIT(w, 46), BIT(w, 48));
+    set_pred(t, BITS(w, 3, 3), m, p0);
+    set_pred(t, BITS(w, 0, 3), m, p1);
+    return;
+  }
+  case SM_OP_FCMP: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb), *c = op_c(in, env, t, tc);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t cond = BITS(w, 48, 4);
+    FOR_LANES(m) d[l] = fcompare(cond, f32(c[l]), 0.0f) ? a[l] : b[l];
+    return;
+  }
+  case SM_OP_MUFU: {
+    const uint32_t *a = t->r[REG_A(w)];
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t fn = BITS(w, 20, 4), aa = BIT(w, 46), na = BIT(w, 48), sat = BIT(w, 50);
+    FOR_LANES(m) {
+      const float x = fmod_abs_neg(f32(a[l]), aa, na);
       float r;
-      switch (BITS(w, 20, 4)) {
-      case 0: r = cosf(a); break;
-      case 1: r = sinf(a); break;
-      case 2: r = exp2f(a); break;
-      case 3: r = log2f(a); break;
-      case 4: r = 1.0f / a; break;
-      case 5: r = 1.0f / sqrtf(a); break;
-      case 8: r = sqrtf(a); break;
-      default: r = a; break;
+      switch (fn) {
+      case 0: r = cosf(x); break;
+      case 1: r = sinf(x); break;
+      case 2: r = exp2f(x); break;
+      case 3: r = log2f(x); break;
+      case 4: r = 1.0f / x; break;
+      case 5: r = 1.0f / sqrtf(x); break;
+      case 8: r = sqrtf(x); break;
+      default: r = x; break;
       }
-      if (BIT(w, 50)) r = saturate(r);
-      set_reg(t, REG_D(w), u32f(r));
-      break;
+      if (sat) r = saturate(r);
+      d[l] = u32f(r);
     }
-    case SM_OP_RRO:
-      set_reg(t, REG_D(w), u32f(fmod_abs_neg(f32(op_b(in, env, t)), BIT(w, 49), BIT(w, 45))));
-      break;
-    case SM_OP_FSWZADD:
-      set_reg(t, REG_D(w), 0); /* derivatives of a single invocation */
-      break;
-    case SM_OP_F2F: {
-      const uint32_t src_size = BITS(w, 10, 2), dst_size = BITS(w, 8, 2);
-      const uint32_t raw = op_b(in, env, t);
-      float v = src_size == 1u ? half_to_float((uint16_t)(raw >> (BIT(w, 41) ? 16u : 0u))) : f32(raw);
-      v = fmod_abs_neg(v, BIT(w, 49), BIT(w, 45));
-      if (BIT(w, 42)) v = round_mode(v, BITS(w, 39, 2));
-      if (BIT(w, 50)) v = saturate(v);
-      set_reg(t, REG_D(w), dst_size == 1u ? (uint32_t)float_to_half(v) : u32f(v));
-      break;
+    return;
+  }
+  case SM_OP_RRO: {
+    const uint32_t *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t ab = BIT(w, 49), nb = BIT(w, 45);
+    FOR_LANES(m) d[l] = u32f(fmod_abs_neg(f32(b[l]), ab, nb));
+    return;
+  }
+  case SM_OP_FSWZADD: {
+    uint32_t *d = dst_row(t, REG_D(w));
+    FOR_LANES(m) d[l] = 0; /* derivatives across lanes are not modelled */
+    return;
+  }
+  case SM_OP_F2F: {
+    const uint32_t *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t src_size = BITS(w, 10, 2), dst_size = BITS(w, 8, 2), hi = BIT(w, 41), ab = BIT(w, 49),
+                   nb = BIT(w, 45), ri = BIT(w, 42), rm = BITS(w, 39, 2), sat = BIT(w, 50);
+    FOR_LANES(m) {
+      float v = src_size == 1u ? half_to_float((uint16_t)(b[l] >> (hi ? 16u : 0u))) : f32(b[l]);
+      v = fmod_abs_neg(v, ab, nb);
+      if (ri) v = round_mode(v, rm);
+      if (sat) v = saturate(v);
+      d[l] = dst_size == 1u ? (uint32_t)float_to_half(v) : u32f(v);
     }
-    case SM_OP_F2I: {
-      const uint32_t src_size = BITS(w, 10, 2);
-      const uint32_t raw = op_b(in, env, t);
-      float v = src_size == 1u ? half_to_float((uint16_t)raw) : f32(raw);
-      v = fmod_abs_neg(v, BIT(w, 49), BIT(w, 45));
-      v = round_mode(v, BITS(w, 39, 2));
-      set_reg(t, REG_D(w), float_to_int(v, BIT(w, 12) != 0, BITS(w, 8, 2)));
-      break;
+    return;
+  }
+  case SM_OP_F2I: {
+    const uint32_t *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t src_size = BITS(w, 10, 2), ab = BIT(w, 49), nb = BIT(w, 45), rm = BITS(w, 39, 2),
+                   dst_size = BITS(w, 8, 2);
+    const bool is_signed = BIT(w, 12) != 0;
+    FOR_LANES(m) {
+      float v = src_size == 1u ? half_to_float((uint16_t)b[l]) : f32(b[l]);
+      v = round_mode(fmod_abs_neg(v, ab, nb), rm);
+      d[l] = float_to_int(v, is_signed, dst_size);
     }
-    case SM_OP_I2F: {
-      const bool is_signed = BIT(w, 13) != 0;
-      int64_t v = int_source(op_b(in, env, t), BITS(w, 10, 2), BITS(w, 41, 2), is_signed);
-      if (BIT(w, 49) && v < 0) v = -v;
-      if (BIT(w, 45)) v = -v;
+    return;
+  }
+  case SM_OP_I2F: {
+    const uint32_t *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const bool is_signed = BIT(w, 13) != 0;
+    const uint32_t src_size = BITS(w, 10, 2), sel = BITS(w, 41, 2), ab = BIT(w, 49), nb = BIT(w, 45),
+                   dst_size = BITS(w, 8, 2);
+    FOR_LANES(m) {
+      int64_t v = int_source(b[l], src_size, sel, is_signed);
+      if (ab && v < 0) v = -v;
+      if (nb) v = -v;
       const float f = is_signed || v < 0 ? (float)v : (float)(uint64_t)v;
-      set_reg(t, REG_D(w), BITS(w, 8, 2) == 1u ? (uint32_t)float_to_half(f) : u32f(f));
-      break;
+      d[l] = dst_size == 1u ? (uint32_t)float_to_half(f) : u32f(f);
     }
-    case SM_OP_I2I: {
-      const bool src_signed = BIT(w, 13) != 0, dst_signed = BIT(w, 12) != 0;
-      int64_t v = int_source(op_b(in, env, t), BITS(w, 10, 2), BITS(w, 41, 2), src_signed);
-      if (BIT(w, 49) && v < 0) v = -v;
-      if (BIT(w, 45)) v = -v;
-      set_reg(t, REG_D(w), clamp_int(v, BITS(w, 8, 2), dst_signed, BIT(w, 50) != 0));
-      break;
+    return;
+  }
+  case SM_OP_I2I: {
+    const uint32_t *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const bool src_signed = BIT(w, 13) != 0, dst_signed = BIT(w, 12) != 0, sat = BIT(w, 50) != 0;
+    const uint32_t src_size = BITS(w, 10, 2), sel = BITS(w, 41, 2), ab = BIT(w, 49), nb = BIT(w, 45),
+                   dst_size = BITS(w, 8, 2);
+    FOR_LANES(m) {
+      int64_t v = int_source(b[l], src_size, sel, src_signed);
+      if (ab && v < 0) v = -v;
+      if (nb) v = -v;
+      d[l] = clamp_int(v, dst_size, dst_signed, sat);
     }
+    return;
+  }
 
-    /* ---- integer ---- */
-    case SM_OP_IADD:
-    case SM_OP_IADD32I: {
-      const bool is32i = in->op == SM_OP_IADD32I;
-      uint32_t a = reg(t, REG_A(w));
-      uint32_t b = op_b(in, env, t);
-      if (is32i ? BIT(w, 56) : BIT(w, 49)) a = (uint32_t)(-(int64_t)a);
-      if (!is32i && BIT(w, 48)) b = (uint32_t)(-(int64_t)b);
-      const bool x = is32i ? BIT(w, 53) != 0 : BIT(w, 43) != 0;
-      const uint64_t sum = (uint64_t)a + (uint64_t)b + (x && t->cc_carry ? 1u : 0u);
+  /* ---- integer ---- */
+  case SM_OP_IADD:
+  case SM_OP_IADD32I: {
+    const bool is32i = in->op == SM_OP_IADD32I;
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t na = is32i ? BIT(w, 56) : BIT(w, 49), nb = is32i ? 0u : BIT(w, 48);
+    const bool x = is32i ? BIT(w, 53) != 0 : BIT(w, 43) != 0;
+    const bool sat = is32i ? BIT(w, 54) != 0 : BIT(w, 50) != 0;
+    const bool cc = is32i ? BIT(w, 52) != 0 : BIT(w, 47) != 0;
+    Sm_Mask carry = 0, zero = 0, sign = 0, over = 0;
+    FOR_LANES(m) {
+      uint32_t av = a[l], bv = b[l];
+      if (na) av = (uint32_t)(-(int64_t)av);
+      if (nb) bv = (uint32_t)(-(int64_t)bv);
+      const uint64_t sum = (uint64_t)av + (uint64_t)bv + (x && LANE(t->cc_carry, l) ? 1u : 0u);
       uint32_t r = (uint32_t)sum;
-      const bool sat = is32i ? BIT(w, 54) != 0 : BIT(w, 50) != 0;
       if (sat) {
-        const int64_t s = (int64_t)(int32_t)a + (int64_t)(int32_t)b;
+        const int64_t s = (int64_t)(int32_t)av + (int64_t)(int32_t)bv;
         r = s > INT32_MAX ? (uint32_t)INT32_MAX : s < INT32_MIN ? (uint32_t)INT32_MIN : (uint32_t)s;
       }
-      if (is32i ? BIT(w, 52) : BIT(w, 47)) {
-        t->cc_carry = (sum >> 32) != 0;
-        t->cc_overflow = ((~(a ^ b) & (a ^ r)) >> 31) != 0;
-        set_cc_from(t, r);
-      }
-      set_reg(t, REG_D(w), r);
+      if (sum >> 32) carry |= (Sm_Mask)(1u << l);
+      if (((~(av ^ bv) & (av ^ r)) >> 31) != 0) over |= (Sm_Mask)(1u << l);
+      if (r == 0) zero |= (Sm_Mask)(1u << l);
+      if (r >> 31) sign |= (Sm_Mask)(1u << l);
+      d[l] = r;
+    }
+    if (cc) {
+      set_mask(&t->cc_carry, m, carry);
+      set_mask(&t->cc_overflow, m, over);
+      set_mask(&t->cc_zero, m, zero);
+      set_mask(&t->cc_sign, m, sign);
+    }
+    return;
+  }
+  case SM_OP_ISCADD: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t na = BIT(w, 49), nb = BIT(w, 48), shift = BITS(w, 39, 5);
+    Sm_Mask zero = 0, sign = 0;
+    FOR_LANES(m) {
+      uint32_t av = a[l], bv = b[l];
+      if (na) av = (uint32_t)(-(int64_t)av);
+      if (nb) bv = (uint32_t)(-(int64_t)bv);
+      const uint32_t r = (av << shift) + bv;
+      if (r == 0) zero |= (Sm_Mask)(1u << l);
+      if (r >> 31) sign |= (Sm_Mask)(1u << l);
+      d[l] = r;
+    }
+    if (BIT(w, 47)) {
+      set_mask(&t->cc_zero, m, zero);
+      set_mask(&t->cc_sign, m, sign);
+    }
+    return;
+  }
+  case SM_OP_IMNMX: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const bool is_signed = BIT(w, 48) != 0;
+    const Sm_Mask mins = pred_mask(t, BITS(w, 39, 3), BIT(w, 42));
+    FOR_LANES(m) {
+      const bool a_less = is_signed ? (int32_t)a[l] < (int32_t)b[l] : a[l] < b[l];
+      d[l] = LANE(mins, l) ? (a_less ? a[l] : b[l]) : (a_less ? b[l] : a[l]);
+    }
+    return;
+  }
+  case SM_OP_ISET: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const Sm_Mask pc = pred_mask(t, BITS(w, 39, 3), BIT(w, 42));
+    const uint32_t cond = BITS(w, 49, 3), bop = BITS(w, 45, 2);
+    const bool is_signed = BIT(w, 48) != 0;
+    const uint32_t yes = BIT(w, 44) ? u32f(1.0f) : 0xffffffffu;
+    FOR_LANES(m) d[l] = bool_op(bop, icompare(cond, a[l], b[l], is_signed), LANE(pc, l) != 0) ? yes : 0u;
+    return;
+  }
+  case SM_OP_ISETP: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    const Sm_Mask pc = pred_mask(t, BITS(w, 39, 3), BIT(w, 42));
+    const uint32_t cond = BITS(w, 49, 3), bop = BITS(w, 45, 2);
+    const bool is_signed = BIT(w, 48) != 0;
+    Sm_Mask p0 = 0, p1 = 0;
+    FOR_LANES(m) {
+      const bool cmp = icompare(cond, a[l], b[l], is_signed);
+      const bool c = LANE(pc, l) != 0;
+      if (bool_op(bop, cmp, c)) p0 |= (Sm_Mask)(1u << l);
+      if (bool_op(bop, !cmp, c)) p1 |= (Sm_Mask)(1u << l);
+    }
+    set_pred(t, BITS(w, 3, 3), m, p0);
+    set_pred(t, BITS(w, 0, 3), m, p1);
+    return;
+  }
+  case SM_OP_ICMP: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb), *c = op_c(in, env, t, tc);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t cond = BITS(w, 49, 3);
+    const bool is_signed = BIT(w, 48) != 0;
+    FOR_LANES(m) d[l] = icompare(cond, c[l], 0, is_signed) ? a[l] : b[l];
+    return;
+  }
+  case SM_OP_IMUL:
+  case SM_OP_IMUL32I: {
+    const bool is32i = in->op == SM_OP_IMUL32I;
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const bool sa = is32i ? BIT(w, 55) != 0 : BIT(w, 41) != 0;
+    const bool high = is32i ? BIT(w, 53) != 0 : BIT(w, 39) != 0;
+    FOR_LANES(m) {
+      const int64_t p = sa ? (int64_t)(int32_t)a[l] * (int64_t)(int32_t)b[l] : (int64_t)((uint64_t)a[l] * (uint64_t)b[l]);
+      d[l] = high ? (uint32_t)((uint64_t)p >> 32) : (uint32_t)p;
+    }
+    return;
+  }
+  case SM_OP_IMAD: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb), *c = op_c(in, env, t, tc);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const bool is_signed = BIT(w, 53) != 0, nab = BIT(w, 51) != 0, nc = BIT(w, 52) != 0, high = BIT(w, 54) != 0;
+    FOR_LANES(m) {
+      int64_t p = is_signed ? (int64_t)(int32_t)a[l] * (int64_t)(int32_t)b[l] : (int64_t)((uint64_t)a[l] * (uint64_t)b[l]);
+      if (nab) p = -p;
+      const uint32_t cv = nc ? (uint32_t)(-(int64_t)c[l]) : c[l];
+      d[l] = (high ? (uint32_t)((uint64_t)p >> 32) : (uint32_t)p) + cv;
+    }
+    return;
+  }
+  case SM_OP_XMAD: {
+    const uint32_t *a = t->r[REG_A(w)];
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t *b, *c;
+    bool psl, mrg, b_hi;
+    uint32_t cmode;
+    switch (in->form) {
+    case SM_FORM_REG:
+      b = t->r[REG_B(w)]; c = t->r[REG_C(w)];
+      psl = BIT(w, 36) != 0; mrg = BIT(w, 37) != 0; b_hi = BIT(w, 35) != 0; cmode = BITS(w, 50, 3);
+      break;
+    case SM_FORM_CBUF:
+      b = splat(cbuf_read(env, in->cbuf, in->imm), tb); c = t->r[REG_C(w)];
+      psl = BIT(w, 55) != 0; mrg = BIT(w, 56) != 0; b_hi = BIT(w, 52) != 0; cmode = BITS(w, 50, 2);
+      break;
+    case SM_FORM_IMM:
+      b = splat(in->imm, tb); c = t->r[REG_C(w)];
+      psl = BIT(w, 36) != 0; mrg = BIT(w, 37) != 0; b_hi = false; cmode = BITS(w, 50, 3);
+      break;
+    default: /* REG_CBUF: b = Rc slot, c = cbuf */
+      b = t->r[REG_C(w)]; c = splat(cbuf_read(env, in->cbuf, in->imm), tc);
+      psl = false; mrg = false; b_hi = BIT(w, 52) != 0; cmode = BITS(w, 50, 2);
       break;
     }
-    case SM_OP_ISCADD: {
-      uint32_t a = reg(t, REG_A(w));
-      uint32_t b = op_b(in, env, t);
-      if (BIT(w, 49)) a = (uint32_t)(-(int64_t)a);
-      if (BIT(w, 48)) b = (uint32_t)(-(int64_t)b);
-      const uint32_t r = (a << BITS(w, 39, 5)) + b;
-      if (BIT(w, 47)) set_cc_from(t, r);
-      set_reg(t, REG_D(w), r);
-      break;
-    }
-    case SM_OP_IMNMX: {
-      const uint32_t a = reg(t, REG_A(w)), b = op_b(in, env, t);
-      const bool is_signed = BIT(w, 48) != 0;
-      const bool min = pred_neg(t, BITS(w, 39, 3), BIT(w, 42));
-      const bool a_less = is_signed ? (int32_t)a < (int32_t)b : a < b;
-      set_reg(t, REG_D(w), min ? (a_less ? a : b) : (a_less ? b : a));
-      break;
-    }
-    case SM_OP_ISET: {
-      const bool cmp = icompare(BITS(w, 49, 3), reg(t, REG_A(w)), op_b(in, env, t), BIT(w, 48) != 0);
-      const bool r = bool_op(BITS(w, 45, 2), cmp, pred_neg(t, BITS(w, 39, 3), BIT(w, 42)));
-      set_reg(t, REG_D(w), r ? (BIT(w, 44) ? u32f(1.0f) : 0xffffffffu) : 0u);
-      break;
-    }
-    case SM_OP_ISETP: {
-      const bool cmp = icompare(BITS(w, 49, 3), reg(t, REG_A(w)), op_b(in, env, t), BIT(w, 48) != 0);
-      const bool pc_v = pred_neg(t, BITS(w, 39, 3), BIT(w, 42));
-      const uint32_t bop = BITS(w, 45, 2);
-      set_pred(t, BITS(w, 3, 3), bool_op(bop, cmp, pc_v));
-      set_pred(t, BITS(w, 0, 3), bool_op(bop, !cmp, pc_v));
-      break;
-    }
-    case SM_OP_ICMP: {
-      const bool r = icompare(BITS(w, 49, 3), op_c(in, env, t), 0, BIT(w, 48) != 0);
-      set_reg(t, REG_D(w), r ? reg(t, REG_A(w)) : op_b(in, env, t));
-      break;
-    }
-    case SM_OP_IMUL:
-    case SM_OP_IMUL32I: {
-      const bool is32i = in->op == SM_OP_IMUL32I;
-      const bool sa = is32i ? BIT(w, 55) != 0 : BIT(w, 41) != 0;
-      const bool high = is32i ? BIT(w, 53) != 0 : BIT(w, 39) != 0;
-      const uint32_t a = reg(t, REG_A(w)), b = op_b(in, env, t);
-      const int64_t p = sa ? (int64_t)(int32_t)a * (int64_t)(int32_t)b : (int64_t)((uint64_t)a * (uint64_t)b);
-      set_reg(t, REG_D(w), high ? (uint32_t)((uint64_t)p >> 32) : (uint32_t)p);
-      break;
-    }
-    case SM_OP_IMAD: {
-      const bool is_signed = BIT(w, 53) != 0;
-      const uint32_t a = reg(t, REG_A(w)), b = op_b(in, env, t);
-      uint32_t c = op_c(in, env, t);
-      int64_t p = is_signed ? (int64_t)(int32_t)a * (int64_t)(int32_t)b : (int64_t)((uint64_t)a * (uint64_t)b);
-      if (BIT(w, 51)) p = -p;
-      if (BIT(w, 52)) c = (uint32_t)(-(int64_t)c);
-      const uint32_t base = BIT(w, 54) ? (uint32_t)((uint64_t)p >> 32) : (uint32_t)p;
-      set_reg(t, REG_D(w), base + c);
-      break;
-    }
-    case SM_OP_XMAD: {
-      const uint32_t a = reg(t, REG_A(w));
-      uint32_t b, c;
-      bool psl, mrg, b_hi;
-      uint32_t cmode;
-      switch (in->form) {
-      case SM_FORM_REG:
-        b = reg(t, REG_B(w)); c = reg(t, REG_C(w));
-        psl = BIT(w, 36) != 0; mrg = BIT(w, 37) != 0; b_hi = BIT(w, 35) != 0; cmode = BITS(w, 50, 3);
-        break;
-      case SM_FORM_CBUF:
-        b = cbuf_read(env, in->cbuf, in->imm); c = reg(t, REG_C(w));
-        psl = BIT(w, 55) != 0; mrg = BIT(w, 56) != 0; b_hi = BIT(w, 52) != 0; cmode = BITS(w, 50, 2);
-        break;
-      case SM_FORM_IMM:
-        b = in->imm; c = reg(t, REG_C(w));
-        psl = BIT(w, 36) != 0; mrg = BIT(w, 37) != 0; b_hi = false; cmode = BITS(w, 50, 3);
-        break;
-      default: /* REG_CBUF: b = Rc slot, c = cbuf */
-        b = reg(t, REG_C(w)); c = cbuf_read(env, in->cbuf, in->imm);
-        psl = false; mrg = false; b_hi = BIT(w, 52) != 0; cmode = BITS(w, 50, 2);
-        break;
-      }
-      const uint32_t a16 = BIT(w, 53) ? a >> 16 : a & 0xffffu;
-      const uint32_t b16 = b_hi ? b >> 16 : b & 0xffffu;
+    const bool a_hi = BIT(w, 53) != 0;
+    FOR_LANES(m) {
+      const uint32_t a16 = a_hi ? a[l] >> 16 : a[l] & 0xffffu;
+      const uint32_t b16 = b_hi ? b[l] >> 16 : b[l] & 0xffffu;
       uint32_t prod = a16 * b16;
       if (psl) prod <<= 16;
       uint32_t cv;
       switch (cmode) {
-      case 1: cv = c & 0xffffu; break;
-      case 2: cv = c >> 16; break;
-      case 4: cv = c + (b << 16); break;
-      default: cv = c; break;
+      case 1: cv = c[l] & 0xffffu; break;
+      case 2: cv = c[l] >> 16; break;
+      case 4: cv = c[l] + (b[l] << 16); break;
+      default: cv = c[l]; break;
       }
       uint32_t r = prod + cv;
-      if (mrg) r = (r & 0xffffu) | (b << 16);
-      set_reg(t, REG_D(w), r);
-      break;
+      if (mrg) r = (r & 0xffffu) | (b[l] << 16);
+      d[l] = r;
     }
-    case SM_OP_LOP: {
-      uint32_t a = reg(t, REG_A(w)), b = op_b(in, env, t);
-      if (BIT(w, 39)) a = ~a;
-      if (BIT(w, 40)) b = ~b;
-      const uint32_t r = lop(BITS(w, 41, 2), a, b);
-      set_pred(t, BITS(w, 48, 3), r != 0);
-      if (BIT(w, 47)) set_cc_from(t, r);
-      set_reg(t, REG_D(w), r);
-      break;
+    return;
+  }
+  case SM_OP_LOP: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t ia = BIT(w, 39) ? 0xffffffffu : 0u, ib = BIT(w, 40) ? 0xffffffffu : 0u, op = BITS(w, 41, 2);
+    Sm_Mask nonzero = 0, zero = 0, sign = 0;
+    FOR_LANES(m) {
+      const uint32_t r = lop(op, a[l] ^ ia, b[l] ^ ib);
+      if (r) nonzero |= (Sm_Mask)(1u << l);
+      else zero |= (Sm_Mask)(1u << l);
+      if (r >> 31) sign |= (Sm_Mask)(1u << l);
+      d[l] = r;
     }
-    case SM_OP_LOP32I: {
-      uint32_t a = reg(t, REG_A(w)), b = in->imm;
-      if (BIT(w, 55)) a = ~a;
-      if (BIT(w, 56)) b = ~b;
-      const uint32_t r = lop(BITS(w, 53, 2), a, b);
-      if (BIT(w, 52)) set_cc_from(t, r);
-      set_reg(t, REG_D(w), r);
-      break;
+    set_pred(t, BITS(w, 48, 3), m, nonzero);
+    if (BIT(w, 47)) {
+      set_mask(&t->cc_zero, m, zero);
+      set_mask(&t->cc_sign, m, sign);
     }
-    case SM_OP_LOP3: {
-      const uint32_t lut = in->form == SM_FORM_REG ? BITS(w, 28, 8) : BITS(w, 48, 8);
-      const uint32_t b = in->form == SM_FORM_IMM ? in->imm : op_b(in, env, t);
-      set_reg(t, REG_D(w), lop3(lut, reg(t, REG_A(w)), b, reg(t, REG_C(w))));
-      break;
+    return;
+  }
+  case SM_OP_LOP32I: {
+    const uint32_t *a = t->r[REG_A(w)];
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t ia = BIT(w, 55) ? 0xffffffffu : 0u, b = BIT(w, 56) ? ~in->imm : in->imm, op = BITS(w, 53, 2);
+    Sm_Mask zero = 0, sign = 0;
+    FOR_LANES(m) {
+      const uint32_t r = lop(op, a[l] ^ ia, b);
+      if (r == 0) zero |= (Sm_Mask)(1u << l);
+      if (r >> 31) sign |= (Sm_Mask)(1u << l);
+      d[l] = r;
     }
-    case SM_OP_SHL: {
-      const uint32_t a = reg(t, REG_A(w));
-      uint32_t s = op_b(in, env, t);
-      if (BIT(w, 39)) s &= 31u;
-      set_reg(t, REG_D(w), s >= 32u ? 0u : a << s);
-      break;
+    if (BIT(w, 52)) {
+      set_mask(&t->cc_zero, m, zero);
+      set_mask(&t->cc_sign, m, sign);
     }
-    case SM_OP_SHR: {
-      const uint32_t a = reg(t, REG_A(w));
-      uint32_t s = op_b(in, env, t);
-      if (BIT(w, 39)) s &= 31u;
-      uint32_t r;
-      if (BIT(w, 48)) r = s >= 32u ? (uint32_t)((int32_t)a >> 31) : (uint32_t)((int32_t)a >> s);
-      else r = s >= 32u ? 0u : a >> s;
-      set_reg(t, REG_D(w), r);
-      break;
+    return;
+  }
+  case SM_OP_LOP3: {
+    const uint32_t lut = in->form == SM_FORM_REG ? BITS(w, 28, 8) : BITS(w, 48, 8);
+    const uint32_t *a = t->r[REG_A(w)], *c = t->r[REG_C(w)];
+    const uint32_t *b = in->form == SM_FORM_IMM ? splat(in->imm, tb) : op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    FOR_LANES(m) d[l] = lop3(lut, a[l], b[l], c[l]);
+    return;
+  }
+  case SM_OP_SHL: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const bool wrap = BIT(w, 39) != 0;
+    FOR_LANES(m) {
+      const uint32_t s = wrap ? b[l] & 31u : b[l];
+      d[l] = s >= 32u ? 0u : a[l] << s;
     }
-    case SM_OP_BFE: {
-      uint32_t a = reg(t, REG_A(w));
-      if (BIT(w, 40)) a = bit_reverse(a);
-      const uint32_t b = op_b(in, env, t);
-      const uint32_t pos = b & 0xffu, len = (b >> 8) & 0xffu;
+    return;
+  }
+  case SM_OP_SHR: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const bool wrap = BIT(w, 39) != 0, is_signed = BIT(w, 48) != 0;
+    FOR_LANES(m) {
+      const uint32_t s = wrap ? b[l] & 31u : b[l];
+      if (is_signed) d[l] = s >= 32u ? (uint32_t)((int32_t)a[l] >> 31) : (uint32_t)((int32_t)a[l] >> s);
+      else d[l] = s >= 32u ? 0u : a[l] >> s;
+    }
+    return;
+  }
+  case SM_OP_BFE: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const bool brev = BIT(w, 40) != 0, is_signed = BIT(w, 48) != 0;
+    FOR_LANES(m) {
+      const uint32_t av = brev ? bit_reverse(a[l]) : a[l];
+      const uint32_t pos = b[l] & 0xffu, len = (b[l] >> 8) & 0xffu;
       uint32_t r;
       if (len == 0) r = 0;
-      else if (pos >= 32u) r = BIT(w, 48) ? (uint32_t)((int32_t)a >> 31) : 0u;
+      else if (pos >= 32u) r = is_signed ? (uint32_t)((int32_t)av >> 31) : 0u;
       else {
-        const uint32_t l = len > 32u - pos ? 32u - pos : len;
-        r = (a >> pos) & (l >= 32u ? 0xffffffffu : ((1u << l) - 1u));
-        if (BIT(w, 48) && l < 32u && (r >> (l - 1u)) & 1u) r |= ~((1u << l) - 1u);
+        const uint32_t n = len > 32u - pos ? 32u - pos : len;
+        r = (av >> pos) & (n >= 32u ? 0xffffffffu : ((1u << n) - 1u));
+        if (is_signed && n < 32u && (r >> (n - 1u)) & 1u) r |= ~((1u << n) - 1u);
       }
-      set_reg(t, REG_D(w), r);
-      break;
+      d[l] = r;
     }
-    case SM_OP_BFI: {
-      const uint32_t a = reg(t, REG_A(w));
-      const uint32_t b = op_b(in, env, t);
-      const uint32_t c = op_c(in, env, t);
-      const uint32_t pos = b & 0xffu, len = (b >> 8) & 0xffu;
+    return;
+  }
+  case SM_OP_BFI: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb), *c = op_c(in, env, t, tc);
+    uint32_t *d = dst_row(t, REG_D(w));
+    FOR_LANES(m) {
+      const uint32_t pos = b[l] & 0xffu, len = (b[l] >> 8) & 0xffu;
       if (pos >= 32u || len == 0) {
-        set_reg(t, REG_D(w), c);
-        break;
+        d[l] = c[l];
+        continue;
       }
-      const uint32_t l = len > 32u - pos ? 32u - pos : len;
-      const uint32_t mask = (l >= 32u ? 0xffffffffu : ((1u << l) - 1u)) << pos;
-      set_reg(t, REG_D(w), (c & ~mask) | ((a << pos) & mask));
-      break;
+      const uint32_t n = len > 32u - pos ? 32u - pos : len;
+      const uint32_t mask = (n >= 32u ? 0xffffffffu : ((1u << n) - 1u)) << pos;
+      d[l] = (c[l] & ~mask) | ((a[l] << pos) & mask);
     }
-    case SM_OP_POPC: {
-      uint32_t b = op_b(in, env, t);
-      if (BIT(w, 40)) b = ~b;
-      set_reg(t, REG_D(w), popcount(b));
-      break;
-    }
-    case SM_OP_FLO: {
-      uint32_t b = op_b(in, env, t);
-      if (BIT(w, 40)) b = ~b;
-      if (BIT(w, 48) && (b >> 31)) b = ~b;
+    return;
+  }
+  case SM_OP_POPC: {
+    const uint32_t *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t inv = BIT(w, 40) ? 0xffffffffu : 0u;
+    FOR_LANES(m) d[l] = popcount(b[l] ^ inv);
+    return;
+  }
+  case SM_OP_FLO: {
+    const uint32_t *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t inv = BIT(w, 40) ? 0xffffffffu : 0u;
+    const bool is_signed = BIT(w, 48) != 0, shift = BIT(w, 41) != 0;
+    FOR_LANES(m) {
+      uint32_t v = b[l] ^ inv;
+      if (is_signed && (v >> 31)) v = ~v;
       uint32_t r = 0xffffffffu;
       for (int32_t i = 31; i >= 0; i--) {
-        if ((b >> i) & 1u) {
+        if ((v >> i) & 1u) {
           r = (uint32_t)i;
           break;
         }
       }
-      if (BIT(w, 41) && r != 0xffffffffu) r = 31u - r;
-      set_reg(t, REG_D(w), r);
-      break;
+      if (shift && r != 0xffffffffu) r = 31u - r;
+      d[l] = r;
     }
-    case SM_OP_PRMT: {
-      const uint64_t src = (uint64_t)reg(t, REG_A(w)) | ((uint64_t)op_c(in, env, t) << 32);
-      const uint32_t sel = op_b(in, env, t);
+    return;
+  }
+  case SM_OP_PRMT: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb), *c = op_c(in, env, t, tc);
+    uint32_t *d = dst_row(t, REG_D(w));
+    FOR_LANES(m) {
+      const uint64_t src = (uint64_t)a[l] | ((uint64_t)c[l] << 32);
       uint32_t r = 0;
       for (uint32_t i = 0; i < 4u; i++) {
-        const uint32_t s = (sel >> (i * 4u)) & 0xfu;
+        const uint32_t s = (b[l] >> (i * 4u)) & 0xfu;
         uint32_t byte = (uint32_t)(src >> ((s & 7u) * 8u)) & 0xffu;
         if (s & 8u) byte = (byte & 0x80u) ? 0xffu : 0u;
         r |= byte << (i * 8u);
       }
-      set_reg(t, REG_D(w), r);
-      break;
+      d[l] = r;
     }
-    case SM_OP_SEL:
-      set_reg(t, REG_D(w), pred_neg(t, BITS(w, 39, 3), BIT(w, 42)) ? reg(t, REG_A(w)) : op_b(in, env, t));
-      break;
-    case SM_OP_MOV:
-      set_reg(t, REG_D(w), op_b(in, env, t));
-      break;
-    case SM_OP_MOV32I:
-      set_reg(t, REG_D(w), in->imm);
-      break;
-    case SM_OP_PSETP: {
-      const bool a = pred_neg(t, BITS(w, 12, 3), BIT(w, 15));
-      const bool b = pred_neg(t, BITS(w, 29, 3), BIT(w, 32));
-      const bool c = pred_neg(t, BITS(w, 39, 3), BIT(w, 42));
-      const bool ab = bool_op(BITS(w, 24, 2), a, b);
-      const uint32_t bop2 = BITS(w, 45, 2);
-      set_pred(t, BITS(w, 3, 3), bool_op(bop2, ab, c));
-      set_pred(t, BITS(w, 0, 3), bool_op(bop2, !ab, c));
-      break;
+    return;
+  }
+  case SM_OP_SEL: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const Sm_Mask choose = pred_mask(t, BITS(w, 39, 3), BIT(w, 42));
+    FOR_LANES(m) d[l] = LANE(choose, l) ? a[l] : b[l];
+    return;
+  }
+  case SM_OP_MOV:
+  case SM_OP_MOV32I: {
+    const uint32_t *b = in->op == SM_OP_MOV32I ? splat(in->imm, tb) : op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    FOR_LANES(m) d[l] = b[l];
+    return;
+  }
+  case SM_OP_PSETP: {
+    const Sm_Mask pa = pred_mask(t, BITS(w, 12, 3), BIT(w, 15));
+    const Sm_Mask pb = pred_mask(t, BITS(w, 29, 3), BIT(w, 32));
+    const Sm_Mask pc = pred_mask(t, BITS(w, 39, 3), BIT(w, 42));
+    const uint32_t bop1 = BITS(w, 24, 2), bop2 = BITS(w, 45, 2);
+    Sm_Mask p0 = 0, p1 = 0;
+    FOR_LANES(m) {
+      const bool ab = bool_op(bop1, LANE(pa, l) != 0, LANE(pb, l) != 0);
+      const bool c = LANE(pc, l) != 0;
+      if (bool_op(bop2, ab, c)) p0 |= (Sm_Mask)(1u << l);
+      if (bool_op(bop2, !ab, c)) p1 |= (Sm_Mask)(1u << l);
     }
-    case SM_OP_P2R: {
+    set_pred(t, BITS(w, 3, 3), m, p0);
+    set_pred(t, BITS(w, 0, 3), m, p1);
+    return;
+  }
+  case SM_OP_P2R: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t shift = BITS(w, 41, 2) * 8u;
+    FOR_LANES(m) {
       uint32_t bits = 0;
-      for (uint32_t i = 0; i < 7u; i++) bits |= (t->p[i] ? 1u : 0u) << i;
-      const uint32_t mask = op_b(in, env, t);
-      const uint32_t shift = BITS(w, 41, 2) * 8u;
-      const uint32_t a = reg(t, REG_A(w));
-      set_reg(t, REG_D(w), (a & ~(mask << shift)) | ((bits & mask) << shift));
-      break;
+      for (uint32_t i = 0; i < 7u; i++) bits |= LANE(t->p[i], l) << i;
+      d[l] = (a[l] & ~(b[l] << shift)) | ((bits & b[l]) << shift);
     }
-    case SM_OP_R2P: {
-      const uint32_t mask = op_b(in, env, t);
-      const uint32_t v = reg(t, REG_A(w)) >> (BITS(w, 41, 2) * 8u);
-      for (uint32_t i = 0; i < 7u; i++)
-        if (mask & (1u << i)) t->p[i] = ((v >> i) & 1u) != 0;
-      break;
-    }
-    case SM_OP_CSETP: {
-      const bool pc_v = pred_neg(t, BITS(w, 39, 3), BIT(w, 42));
-      bool cond = true;
-      switch (BITS(w, 8, 5)) {
-      case 0x02: cond = t->cc_zero; break;          /* EQ */
-      case 0x05: cond = !t->cc_zero; break;         /* NE */
-      case 0x01: cond = t->cc_sign; break;          /* LT */
-      case 0x00: cond = false; break;
-      default: break;
+    return;
+  }
+  case SM_OP_R2P: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    const uint32_t shift = BITS(w, 41, 2) * 8u;
+    FOR_LANES(m) {
+      const uint32_t v = a[l] >> shift;
+      for (uint32_t i = 0; i < 7u; i++) {
+        if (!(b[l] & (1u << i))) continue;
+        if ((v >> i) & 1u) t->p[i] |= (Sm_Mask)(1u << l);
+        else t->p[i] &= (Sm_Mask)~(1u << l);
       }
-      const uint32_t bop = BITS(w, 45, 2);
-      set_pred(t, BITS(w, 3, 3), bool_op(bop, cond, pc_v));
-      set_pred(t, BITS(w, 0, 3), bool_op(bop, !cond, pc_v));
-      break;
     }
-
-    /* ---- system ---- */
-    case SM_OP_S2R:
-    case SM_OP_CS2R:
-      set_reg(t, REG_D(w), sysreg(t, BITS(w, 20, 8)));
-      break;
-    case SM_OP_VOTE: {
-      const bool v = pred_neg(t, BITS(w, 39, 3), BIT(w, 42));
-      set_reg(t, REG_D(w), v ? 1u : 0u);
-      set_pred(t, BITS(w, 45, 3), BITS(w, 48, 2) == 2u ? true : v);
-      break;
+    return;
+  }
+  case SM_OP_CSETP: {
+    const Sm_Mask pc = pred_mask(t, BITS(w, 39, 3), BIT(w, 42));
+    const uint32_t bop = BITS(w, 45, 2);
+    Sm_Mask cond;
+    switch (BITS(w, 8, 5)) {
+    case 0x00: cond = 0; break;
+    case 0x01: cond = t->cc_sign; break;          /* LT */
+    case 0x02: cond = t->cc_zero; break;          /* EQ */
+    case 0x05: cond = (Sm_Mask)~t->cc_zero; break; /* NE */
+    default: cond = SM_ALL_LANES; break;
     }
-    case SM_OP_SHFL:
-      set_reg(t, REG_D(w), reg(t, REG_A(w)));
-      set_pred(t, BITS(w, 48, 3), true);
-      break;
+    Sm_Mask p0 = 0, p1 = 0;
+    FOR_LANES(m) {
+      const bool c = LANE(cond, l) != 0, p = LANE(pc, l) != 0;
+      if (bool_op(bop, c, p)) p0 |= (Sm_Mask)(1u << l);
+      if (bool_op(bop, !c, p)) p1 |= (Sm_Mask)(1u << l);
+    }
+    set_pred(t, BITS(w, 3, 3), m, p0);
+    set_pred(t, BITS(w, 0, 3), m, p1);
+    return;
+  }
 
-    /* ---- memory ---- */
-    case SM_OP_ALD: {
-      const uint32_t count = BITS(w, 47, 2) + 1u;
-      const uint32_t base = BITS(w, 20, 10) + reg(t, REG_A(w));
-      const uint32_t *src = BIT(w, 32) ? t->attr_out : t->attr_in;
+  /* ---- system ---- */
+  case SM_OP_S2R:
+  case SM_OP_CS2R: {
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t id = BITS(w, 20, 8);
+    FOR_LANES(m) d[l] = sysreg(id, l);
+    return;
+  }
+  case SM_OP_VOTE: {
+    const Sm_Mask v = pred_mask(t, BITS(w, 39, 3), BIT(w, 42)) & m;
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t mode = BITS(w, 48, 2);
+    const bool all = (v & m) == m, any = v != 0;
+    const bool r = mode == 0u ? all : (mode == 1u ? any : (all || !any));
+    FOR_LANES(m) d[l] = v;
+    set_pred(t, BITS(w, 45, 3), m, r ? SM_ALL_LANES : 0);
+    return;
+  }
+  case SM_OP_SHFL: {
+    const uint32_t *a = t->r[REG_A(w)];
+    uint32_t *d = dst_row(t, REG_D(w));
+    FOR_LANES(m) d[l] = a[l];
+    set_pred(t, BITS(w, 48, 3), m, SM_ALL_LANES);
+    return;
+  }
+
+  /* ---- memory ---- */
+  case SM_OP_ALD: {
+    const uint32_t count = BITS(w, 47, 2) + 1u, d = REG_D(w);
+    const uint32_t *idx = t->r[REG_A(w)];
+    const bool out = BIT(w, 32) != 0;
+    FOR_LANES(m) {
+      const uint32_t base = BITS(w, 20, 10) + idx[l];
+      for (uint32_t i = 0; i < count; i++) {
+        const uint32_t addr = base + i * 4u, word = (addr / 4u) % SM_ATTRIBUTE_WORDS;
+        uint32_t v = out ? t->attr_out[word][l] : t->attr_in[word][l];
+        if (!out && addr == SM_ATTR_VERTEX_ID) v = t->vertex_id[l];
+        if (!out && addr == SM_ATTR_INSTANCE_ID) v = t->instance_id[l];
+        if (d != SM_RZ) t->r[(d + i) & 0xffu][l] = v;
+      }
+    }
+    memset(t->r[SM_RZ], 0, sizeof(t->r[SM_RZ]));
+    return;
+  }
+  case SM_OP_AST: {
+    const uint32_t count = BITS(w, 47, 2) + 1u, d = REG_D(w);
+    const uint32_t *idx = t->r[REG_A(w)];
+    FOR_LANES(m) {
+      const uint32_t base = BITS(w, 20, 10) + idx[l];
       for (uint32_t i = 0; i < count; i++) {
         const uint32_t word = (base / 4u + i) % SM_ATTRIBUTE_WORDS;
-        uint32_t v = src[word];
-        if (!BIT(w, 32)) {
-          if (base + i * 4u == SM_ATTR_VERTEX_ID) v = t->vertex_id;
-          if (base + i * 4u == SM_ATTR_INSTANCE_ID) v = t->instance_id;
-        }
-        if (REG_D(w) != SM_RZ) set_reg(t, (REG_D(w) + i) & 0xffu, v);
+        t->attr_out[word][l] = d == SM_RZ ? 0u : t->r[(d + i) & 0xffu][l];
       }
-      break;
     }
-    case SM_OP_AST: {
-      const uint32_t count = BITS(w, 47, 2) + 1u;
-      const uint32_t base = BITS(w, 20, 10) + reg(t, REG_A(w));
-      for (uint32_t i = 0; i < count; i++) {
-        const uint32_t word = (base / 4u + i) % SM_ATTRIBUTE_WORDS;
-        t->attr_out[word] = REG_D(w) == SM_RZ ? 0u : reg(t, (REG_D(w) + i) & 0xffu);
-      }
-      break;
-    }
-    case SM_OP_IPA: {
-      uint32_t addr = BITS(w, 28, 10);
-      if (BIT(w, 38)) addr += reg(t, REG_A(w));
-      const uint32_t word = (addr / 4u) % SM_ATTRIBUTE_WORDS;
-      uint32_t v = t->attr_in[word];
+    return;
+  }
+  case SM_OP_IPA: {
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t *idx = t->r[REG_A(w)], *mul = t->r[REG_B(w)];
+    const uint32_t addr0 = BITS(w, 28, 10);
+    const bool indexed = BIT(w, 38) != 0, multiply = BITS(w, 54, 2) == 1u, sat = BIT(w, 51) != 0;
+    FOR_LANES(m) {
+      const uint32_t addr = indexed ? addr0 + idx[l] : addr0;
       if (addr == SM_ATTR_FRONT_FACING) {
-        v = t->front_facing ? 0xffffffffu : 0u;
-      } else {
-        float f = f32(v);
-        if (BITS(w, 54, 2) == 1u) f *= f32(reg(t, REG_B(w)));
-        if (BIT(w, 51)) f = saturate(f);
-        v = u32f(f);
+        d[l] = LANE(t->front_facing, l) ? 0xffffffffu : 0u;
+        continue;
       }
-      set_reg(t, REG_D(w), v);
-      break;
+      float f = f32(t->attr_in[(addr / 4u) % SM_ATTRIBUTE_WORDS][l]);
+      if (multiply) f *= f32(mul[l]);
+      if (sat) f = saturate(f);
+      d[l] = u32f(f);
     }
-    case SM_OP_LDC: {
-      const uint32_t slot = BITS(w, 36, 5);
-      const uint32_t size = BITS(w, 48, 3);
-      const int32_t off = (int32_t)(BITS(w, 20, 16) << 16) >> 16;
-      const uint32_t addr = reg(t, REG_A(w)) + (uint32_t)off;
+    return;
+  }
+  case SM_OP_LDC: {
+    const uint32_t slot = BITS(w, 36, 5), size = BITS(w, 48, 3), n = access_bytes(size);
+    const int32_t off = (int32_t)(BITS(w, 20, 16) << 16) >> 16;
+    const uint32_t *idx = t->r[REG_A(w)];
+    FOR_LANES(m) {
+      const uint32_t addr = idx[l] + (uint32_t)off;
       uint8_t buf[16];
       memset(buf, 0, sizeof(buf));
-      const uint32_t n = access_bytes(size);
       if (slot < SM_CBUF_SLOTS && env->cbuf[slot] && (uint64_t)addr + n <= env->cbuf_size[slot])
         memcpy(buf, env->cbuf[slot] + addr, n);
-      load_to_regs(t, REG_D(w), size, buf);
-      break;
+      load_to_regs(t, REG_D(w), size, buf, l);
     }
-    case SM_OP_LD:
-    case SM_OP_ST:
-    case SM_OP_LDG:
-    case SM_OP_STG: {
-      const bool generic = in->op == SM_OP_LD || in->op == SM_OP_ST;
-      const uint32_t size = generic ? BITS(w, 53, 3) : BITS(w, 48, 3);
-      const bool wide = generic ? BIT(w, 52) != 0 : BIT(w, 45) != 0;
-      int64_t off = generic ? (int64_t)(int32_t)BITS(w, 20, 32) : (int64_t)((int32_t)(BITS(w, 20, 24) << 8) >> 8);
-      uint64_t addr = reg(t, REG_A(w));
-      if (wide && REG_A(w) != SM_RZ) addr |= (uint64_t)reg(t, (REG_A(w) + 1u) & 0xffu) << 32;
+    return;
+  }
+  case SM_OP_LD:
+  case SM_OP_ST:
+  case SM_OP_LDG:
+  case SM_OP_STG: {
+    const bool generic = in->op == SM_OP_LD || in->op == SM_OP_ST;
+    const bool load = in->op == SM_OP_LD || in->op == SM_OP_LDG;
+    const uint32_t size = generic ? BITS(w, 53, 3) : BITS(w, 48, 3), n = access_bytes(size);
+    const bool wide = generic ? BIT(w, 52) != 0 : BIT(w, 45) != 0;
+    const int64_t off = generic ? (int64_t)(int32_t)BITS(w, 20, 32) : (int64_t)((int32_t)(BITS(w, 20, 24) << 8) >> 8);
+    const uint32_t ra = REG_A(w);
+    FOR_LANES(m) {
+      uint64_t addr = t->r[ra][l];
+      if (wide && ra != SM_RZ) addr |= (uint64_t)t->r[(ra + 1u) & 0xffu][l] << 32;
       addr += (uint64_t)off;
       uint8_t buf[16];
       memset(buf, 0, sizeof(buf));
-      const uint32_t n = access_bytes(size);
-      if (in->op == SM_OP_LD || in->op == SM_OP_LDG) {
+      if (load) {
         if (env->global_read) (void)env->global_read(env->user, addr, buf, n);
-        load_to_regs(t, REG_D(w), size, buf);
+        load_to_regs(t, REG_D(w), size, buf, l);
       } else {
-        regs_to_bytes(t, REG_D(w), size, buf);
+        regs_to_bytes(t, REG_D(w), size, buf, l);
         if (env->global_write) (void)env->global_write(env->user, addr, buf, n);
       }
-      break;
     }
-    case SM_OP_LDL:
-    case SM_OP_STL: {
-      const uint32_t size = BITS(w, 48, 3);
-      const int32_t off = (int32_t)(BITS(w, 20, 24) << 8) >> 8;
-      const uint32_t addr = reg(t, REG_A(w)) + (uint32_t)off;
-      const uint32_t n = access_bytes(size);
+    return;
+  }
+  case SM_OP_LDL:
+  case SM_OP_STL: {
+    const uint32_t size = BITS(w, 48, 3), n = access_bytes(size);
+    const int32_t off = (int32_t)(BITS(w, 20, 24) << 8) >> 8;
+    const uint32_t *idx = t->r[REG_A(w)];
+    FOR_LANES(m) {
+      const uint32_t addr = idx[l] + (uint32_t)off;
       uint8_t buf[16];
       memset(buf, 0, sizeof(buf));
       if (in->op == SM_OP_LDL) {
-        if ((uint64_t)addr + n <= SM_LOCAL_BYTES) memcpy(buf, t->local + addr, n);
-        load_to_regs(t, REG_D(w), size, buf);
+        if ((uint64_t)addr + n <= SM_LOCAL_BYTES) memcpy(buf, t->local[l] + addr, n);
+        load_to_regs(t, REG_D(w), size, buf, l);
       } else {
-        regs_to_bytes(t, REG_D(w), size, buf);
-        if ((uint64_t)addr + n <= SM_LOCAL_BYTES) memcpy(t->local + addr, buf, n);
+        regs_to_bytes(t, REG_D(w), size, buf, l);
+        if ((uint64_t)addr + n <= SM_LOCAL_BYTES) memcpy(t->local[l] + addr, buf, n);
       }
-      break;
     }
-    case SM_OP_OUT:
-      set_reg(t, REG_D(w), 0);
-      break;
+    return;
+  }
+  case SM_OP_OUT: {
+    uint32_t *d = dst_row(t, REG_D(w));
+    FOR_LANES(m) d[l] = 0;
+    return;
+  }
 
-    /* ---- texture ---- */
-    case SM_OP_TEXS: exec_texs(in, env, t); break;
-    case SM_OP_TLDS: exec_tlds(in, env, t); break;
-    case SM_OP_TLD4S: exec_tld4s(in, env, t); break;
-    case SM_OP_TEX:
-    case SM_OP_TLD:
-    case SM_OP_TLD4:
-    case SM_OP_TXD:
-    case SM_OP_TXQ:
-    case SM_OP_TMML:
-      exec_tex_vector(in, env, t);
-      break;
+  /* ---- texture ---- */
+  case SM_OP_TEXS: exec_texs(in, env, t, m); return;
+  case SM_OP_TLDS: exec_tlds(in, env, t, m); return;
+  case SM_OP_TLD4S: exec_tld4s(in, env, t, m); return;
+  case SM_OP_TEX:
+  case SM_OP_TLD:
+  case SM_OP_TLD4:
+  case SM_OP_TXD:
+  case SM_OP_TXQ:
+  case SM_OP_TMML:
+    exec_tex_vector(in, env, t, m);
+    return;
 
-    /* ---- control ---- */
-    case SM_OP_BRA:
-      if (in->target < 0) {
+  default:
+    /* Unknown or unsupported: skip it (counted at decode). */
+    return;
+  }
+}
+
+/* Splits `w`: lanes in `stay` continue at w->pc + 1 in a new warp (same
+ * stacks); the rest keep `w`. Returns false when out of warp slots. */
+static bool split(Warp *warps, uint32_t *count, Warp *w, Sm_Mask stay) {
+  if (!stay) return true;
+  if (*count >= MAX_WARPS) return false;
+  Warp *copy = &warps[(*count)++];
+  *copy = *w;
+  copy->mask = stay;
+  copy->pc = w->pc + 1u;
+  w->mask &= (Sm_Mask)~stay;
+  return true;
+}
+
+bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
+  static Warp warps[MAX_WARPS]; /* single-threaded core; too big for small stacks */
+  uint32_t count = 1;
+  warps[0].mask = (Sm_Mask)(t->lanes >= SM_LANES ? SM_ALL_LANES : ((1u << t->lanes) - 1u));
+  warps[0].pc = 1;
+  warps[0].depth = 0;
+  warps[0].call_depth = 0;
+  uint32_t steps = 0;
+  while (count > 0) {
+    Warp *w = &warps[count - 1u];
+    bool done = false;
+    while (!done) {
+      if (++steps > SM_MAX_STEPS || w->pc >= program->word_count) {
         t->faulted = true;
         return false;
       }
-      next = (uint32_t)in->target;
-      break;
-    case SM_OP_SSY:
-      if (!flow_push(&flow, STACK_SSY, in->target)) { t->faulted = true; return false; }
-      break;
-    case SM_OP_PBK:
-      if (!flow_push(&flow, STACK_PBK, in->target)) { t->faulted = true; return false; }
-      break;
-    case SM_OP_PCNT:
-      if (!flow_push(&flow, STACK_PCNT, in->target)) { t->faulted = true; return false; }
-      break;
-    case SM_OP_SYNC: {
-      const int32_t target = flow_pop_to(&flow, STACK_SSY, false);
-      if (target < 0) { t->faulted = true; return false; }
-      next = (uint32_t)target;
-      break;
+      if (w->pc % 4u == 0) {
+        w->pc++;
+        continue;
+      }
+      const Sm_Insn *in = &program->insns[w->pc];
+      const Sm_Mask guard = pred_mask(t, in->pred & 7u, in->pred & 8u) & w->mask;
+      switch ((Sm_Op)in->op) {
+      case SM_OP_BRA:
+        if (!guard) {
+          w->pc++;
+          break;
+        }
+        if (in->target < 0) {
+          t->faulted = true;
+          return false;
+        }
+        if (!split(warps, &count, w, (Sm_Mask)(w->mask & ~guard))) { t->faulted = true; return false; }
+        w->pc = (uint32_t)in->target;
+        break;
+      case SM_OP_SSY:
+      case SM_OP_PBK:
+      case SM_OP_PCNT: {
+        const uint32_t kind = in->op == SM_OP_SSY ? STACK_SSY : (in->op == SM_OP_PBK ? STACK_PBK : STACK_PCNT);
+        if (!flow_push(w, kind, in->target)) { t->faulted = true; return false; }
+        w->pc++;
+        break;
+      }
+      case SM_OP_SYNC:
+      case SM_OP_BRK:
+      case SM_OP_CONT: {
+        if (!guard) {
+          w->pc++;
+          break;
+        }
+        if (!split(warps, &count, w, (Sm_Mask)(w->mask & ~guard))) { t->faulted = true; return false; }
+        const uint32_t kind = in->op == SM_OP_SYNC ? STACK_SSY : (in->op == SM_OP_BRK ? STACK_PBK : STACK_PCNT);
+        const int32_t target = flow_pop_to(w, kind, in->op == SM_OP_CONT);
+        if (target < 0) { t->faulted = true; return false; }
+        w->pc = (uint32_t)target;
+        break;
+      }
+      case SM_OP_CAL:
+        if (in->target < 0 || w->call_depth >= SM_STACK_DEPTH) { t->faulted = true; return false; }
+        w->calls[w->call_depth++] = w->pc + 1u;
+        w->pc = (uint32_t)in->target;
+        break;
+      case SM_OP_RET:
+        if (!guard) {
+          w->pc++;
+          break;
+        }
+        if (!split(warps, &count, w, (Sm_Mask)(w->mask & ~guard))) { t->faulted = true; return false; }
+        if (w->call_depth == 0) {
+          w->mask = 0; /* return from the entry point: exit */
+        } else {
+          w->pc = w->calls[--w->call_depth];
+        }
+        break;
+      case SM_OP_EXIT:
+        w->mask &= (Sm_Mask)~guard;
+        w->pc++;
+        break;
+      case SM_OP_KIL:
+        t->killed |= guard;
+        w->mask &= (Sm_Mask)~guard;
+        w->pc++;
+        break;
+      default:
+        if (guard) execute(in, env, t, guard);
+        w->pc++;
+        break;
+      }
+      if (!w->mask) done = true;
+      /* A split appended a warp after `w`: finish the newest first. */
+      if (!done && &warps[count - 1u] != w) break;
     }
-    case SM_OP_BRK: {
-      const int32_t target = flow_pop_to(&flow, STACK_PBK, false);
-      if (target < 0) { t->faulted = true; return false; }
-      next = (uint32_t)target;
-      break;
+    if (done) {
+      /* Remove `w` (it may not be the last entry). */
+      const uint32_t index = (uint32_t)(w - warps);
+      warps[index] = warps[count - 1u];
+      count--;
     }
-    case SM_OP_CONT: {
-      const int32_t target = flow_pop_to(&flow, STACK_PCNT, true);
-      if (target < 0) { t->faulted = true; return false; }
-      next = (uint32_t)target;
-      break;
-    }
-    case SM_OP_CAL:
-      if (in->target < 0 || call_depth >= SM_STACK_DEPTH) { t->faulted = true; return false; }
-      calls[call_depth++] = next;
-      next = (uint32_t)in->target;
-      break;
-    case SM_OP_RET:
-      if (call_depth == 0) return true;
-      next = calls[--call_depth];
-      break;
-    case SM_OP_EXIT:
-      return true;
-    case SM_OP_KIL:
-      t->killed = true;
-      return true;
-
-    default:
-      /* Unknown or unsupported: skip it (counted at decode). */
-      break;
-    }
-    pc = next;
   }
-  t->faulted = true;
-  return false;
+  return true;
 }

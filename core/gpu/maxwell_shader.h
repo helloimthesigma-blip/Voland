@@ -35,7 +35,7 @@
 #define SM_ATTRIBUTE_WORDS 0x100u /* attribute space 0x000-0x3FC, by word */
 #define SM_CBUF_SLOTS 18u
 #define SM_STACK_DEPTH 16u
-#define SM_LOCAL_BYTES 0x1000u  /* per-invocation local memory (LDL/STL) */
+#define SM_LOCAL_BYTES 0x400u   /* per-invocation local memory (LDL/STL) */
 #define SM_MAX_STEPS 1000000u   /* runaway guard per invocation */
 
 /* Attribute addresses (bytes). */
@@ -185,25 +185,33 @@ typedef struct Sm_Env {
   bool (*global_write)(void *user, uint64_t gpu_va, const void *src, uint32_t size);
 } Sm_Env;
 
+/* Invocations run SIMT-style in up to SM_LANES lanes: each instruction
+ * is decoded once and applied to every active lane. Register files are
+ * lane-minor (r[register][lane]); predicates and condition codes are lane
+ * masks. Lanes whose branches disagree split into separate warps that
+ * each keep their own reconvergence stack, so every lane observes exactly
+ * the scalar semantics. */
+#define SM_LANES 16u
+typedef uint16_t Sm_Mask;
+#define SM_ALL_LANES ((Sm_Mask)0xFFFFu)
+
 typedef struct Sm_Thread {
-  uint32_t r[SM_REGISTERS];
-  bool p[SM_PREDICATES];
-  bool cc_carry;
-  bool cc_zero;
-  bool cc_sign;
-  bool cc_overflow;
-  uint32_t attr_in[SM_ATTRIBUTE_WORDS];  /* VTG inputs; PS interpolated values */
-  uint32_t attr_out[SM_ATTRIBUTE_WORDS]; /* VTG outputs */
-  uint32_t vertex_id;
-  uint32_t instance_id;
-  bool front_facing;
-  bool killed;
-  bool faulted;                          /* runaway / bad branch */
-  uint32_t ssy_stack[SM_STACK_DEPTH]; uint32_t ssy_depth;
-  uint32_t pbk_stack[SM_STACK_DEPTH]; uint32_t pbk_depth;
-  uint32_t pcnt_stack[SM_STACK_DEPTH]; uint32_t pcnt_depth;
-  uint32_t call_stack[SM_STACK_DEPTH]; uint32_t call_depth;
-  uint8_t local[SM_LOCAL_BYTES];
+  uint32_t lanes;                        /* lanes in use, 1..SM_LANES */
+  uint32_t r[SM_REGISTERS][SM_LANES];    /* r[SM_RZ] stays zero */
+  Sm_Mask p[SM_PREDICATES];              /* p[SM_PT] = every lane */
+  Sm_Mask cc_carry;
+  Sm_Mask cc_zero;
+  Sm_Mask cc_sign;
+  Sm_Mask cc_overflow;
+  uint32_t attr_in[SM_ATTRIBUTE_WORDS][SM_LANES];  /* VTG inputs; PS interpolated values */
+  uint32_t attr_out[SM_ATTRIBUTE_WORDS][SM_LANES]; /* VTG outputs */
+  uint32_t vertex_id[SM_LANES];
+  uint32_t instance_id[SM_LANES];
+  Sm_Mask front_facing;
+  Sm_Mask killed;
+  bool faulted;                          /* runaway / bad branch (any lane) */
+  uint32_t discard[SM_LANES];            /* writes to RZ land here */
+  uint8_t local[SM_LANES][SM_LOCAL_BYTES];
 } Sm_Thread;
 
 /* Parses the 0x50-byte header. */
@@ -219,17 +227,18 @@ uint32_t sm_program_extent(const uint8_t *bytes, uint32_t size);
 /* FNV-1a over a byte range (program cache validation). */
 uint32_t sm_hash(const uint8_t *bytes, uint32_t size);
 
-/* Clears registers (RZ reads zero regardless), predicates, stacks, flags.
- * Attribute arrays are left to the caller. */
-void sm_thread_reset(Sm_Thread *thread);
+/* Clears registers, predicates and flags for `lanes` lanes. Attribute
+ * arrays are left to the caller. */
+void sm_thread_reset(Sm_Thread *thread, uint32_t lanes);
 
 /* Predicates and flags only: registers keep stale values (programs never
  * read a register they did not write; RZ is not stored). For per-pixel
  * use. */
-void sm_thread_reset_light(Sm_Thread *thread);
+void sm_thread_reset_light(Sm_Thread *thread, uint32_t lanes);
 
-/* Runs one invocation from the first instruction to EXIT (or KIL).
- * Returns false when the program faulted (runaway, bad stack). */
+/* Runs `thread->lanes` invocations from the first instruction until every
+ * lane has reached EXIT (or KIL). Returns false when the program faulted
+ * (runaway, bad stack). */
 bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *thread);
 
 /* Short mnemonic for diagnostics. */

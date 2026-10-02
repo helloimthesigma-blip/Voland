@@ -174,12 +174,12 @@ static void test_float_arith(void) {
   emit(&b, EXIT());
   load(&b);
   put_cb(1, 8, (uint32_t)f_bits(2.0f));
-  sm_thread_reset(&g_thread);
+  sm_thread_reset(&g_thread, 1);
   CHECK(run(), "float program runs");
-  CHECK(as_f(g_thread.r[2]) == 3.75f, "FADD %f", as_f(g_thread.r[2]));
-  CHECK(as_f(g_thread.r[3]) == 7.5f, "FMUL c[2][8] %f", as_f(g_thread.r[3]));
-  CHECK(as_f(g_thread.r[4]) == 10.875f, "FFMA %f", as_f(g_thread.r[4]));
-  CHECK(fabsf(as_f(g_thread.r[5]) - 1.0f / 2.25f) < 1e-6f, "MUFU.RCP %f", as_f(g_thread.r[5]));
+  CHECK(as_f(g_thread.r[2][0]) == 3.75f, "FADD %f", as_f(g_thread.r[2][0]));
+  CHECK(as_f(g_thread.r[3][0]) == 7.5f, "FMUL c[2][8] %f", as_f(g_thread.r[3][0]));
+  CHECK(as_f(g_thread.r[4][0]) == 10.875f, "FFMA %f", as_f(g_thread.r[4][0]));
+  CHECK(fabsf(as_f(g_thread.r[5][0]) - 1.0f / 2.25f) < 1e-6f, "MUFU.RCP %f", as_f(g_thread.r[5][0]));
   CHECK(g_prog.cbuf_used == (1u << 2) && g_prog.cbuf_extent[2] == 12u, "cbuf usage recorded (%x, %u)", g_prog.cbuf_used,
         g_prog.cbuf_extent[2]);
 }
@@ -201,15 +201,15 @@ static void test_integer_arith(void) {
   emit(&b, F2I_R(11, 10));                   /* trunc -> -2 */
   emit(&b, EXIT());
   load(&b);
-  sm_thread_reset(&g_thread);
+  sm_thread_reset(&g_thread, 1);
   CHECK(run(), "integer program runs");
-  CHECK(g_thread.r[2] == 0x12355679u, "IADD %08x", g_thread.r[2]);
-  CHECK(g_thread.r[3] == 0x12345677u, "IADD32I %08x", g_thread.r[3]);
-  CHECK(g_thread.r[4] == 0x00100010u, "SHL %08x", g_thread.r[4]);
-  CHECK(g_thread.r[5] == (0x12345678u ^ 0x00010001u), "LOP.XOR %08x", g_thread.r[5]);
-  CHECK(g_thread.r[8] == 7u, "XMAD %08x", g_thread.r[8]);
-  CHECK(as_f(g_thread.r[9]) == 7.0f, "I2F %f", as_f(g_thread.r[9]));
-  CHECK((int32_t)g_thread.r[11] == -2, "F2I.TRUNC %d", (int32_t)g_thread.r[11]);
+  CHECK(g_thread.r[2][0] == 0x12355679u, "IADD %08x", g_thread.r[2][0]);
+  CHECK(g_thread.r[3][0] == 0x12345677u, "IADD32I %08x", g_thread.r[3][0]);
+  CHECK(g_thread.r[4][0] == 0x00100010u, "SHL %08x", g_thread.r[4][0]);
+  CHECK(g_thread.r[5][0] == (0x12345678u ^ 0x00010001u), "LOP.XOR %08x", g_thread.r[5][0]);
+  CHECK(g_thread.r[8][0] == 7u, "XMAD %08x", g_thread.r[8][0]);
+  CHECK(as_f(g_thread.r[9][0]) == 7.0f, "I2F %f", as_f(g_thread.r[9][0]));
+  CHECK((int32_t)g_thread.r[11][0] == -2, "F2I.TRUNC %d", (int32_t)g_thread.r[11][0]);
 }
 
 /* if (c[2][0] != 0) r0 = 1 else r0 = 2, through SSY/BRA/SYNC. */
@@ -235,9 +235,9 @@ static void test_branches(void) {
     memcpy(b.bytes + SM_SPH_BYTES + 8u * bra_at, &w, 8);
     load(&b);
     put_cb(1, 0, pass);
-    sm_thread_reset(&g_thread);
+    sm_thread_reset(&g_thread, 1);
     CHECK(run(), "branch program runs (pass %u)", pass);
-    CHECK(g_thread.r[0] == (pass ? 1u : 2u), "branch pass %u -> r0=%u", pass, g_thread.r[0]);
+    CHECK(g_thread.r[0][0] == (pass ? 1u : 2u), "branch pass %u -> r0=%u", pass, g_thread.r[0][0]);
   }
 }
 
@@ -263,9 +263,9 @@ static void test_loop(void) {
   w = BRA(offset_to(back_at, loop_at), (uint32_t)PT, false);
   memcpy(b.bytes + SM_SPH_BYTES + 8u * back_at, &w, 8);
   load(&b);
-  sm_thread_reset(&g_thread);
+  sm_thread_reset(&g_thread, 1);
   CHECK(run(), "loop runs");
-  CHECK(g_thread.r[0] == 5u, "loop counter %u", g_thread.r[0]);
+  CHECK(g_thread.r[0][0] == 5u, "loop counter %u", g_thread.r[0][0]);
 }
 
 static void test_attributes_and_select(void) {
@@ -278,14 +278,14 @@ static void test_attributes_and_select(void) {
   emit(&b, AST(4, SM_ATTR_GENERIC + 16u, 1));
   emit(&b, EXIT());
   load(&b);
-  sm_thread_reset(&g_thread);
-  memset(g_thread.attr_out, 0, sizeof(g_thread.attr_out));
+  sm_thread_reset(&g_thread, 1);
   const float in[4] = {3.0f, 4.0f, 5.0f, 1.0f};
-  memcpy(&g_thread.attr_in[SM_ATTR_GENERIC / 4u], in, sizeof(in));
+  for (uint32_t c = 0; c < 4u; c++) memcpy(&g_thread.attr_in[SM_ATTR_GENERIC / 4u + c][0], &in[c], 4);
+  for (uint32_t i = 0; i < SM_ATTRIBUTE_WORDS; i++) g_thread.attr_out[i][0] = 0;
   CHECK(run(), "attribute program runs");
-  CHECK(memcmp(&g_thread.attr_out[SM_ATTR_POSITION / 4u], in, sizeof(in)) == 0, "ALD/AST copy");
-  CHECK(as_f(g_thread.attr_out[SM_ATTR_GENERIC / 4u + 4u]) == 3.0f, "SEL picked min %f",
-        as_f(g_thread.attr_out[SM_ATTR_GENERIC / 4u + 4u]));
+  for (uint32_t c = 0; c < 4u; c++) CHECK(as_f(g_thread.attr_out[SM_ATTR_POSITION / 4u + c][0]) == in[c], "ALD/AST copy %u", c);
+  CHECK(as_f(g_thread.attr_out[SM_ATTR_GENERIC / 4u + 4u][0]) == 3.0f, "SEL picked min %f",
+        as_f(g_thread.attr_out[SM_ATTR_GENERIC / 4u + 4u][0]));
 }
 
 static void test_pixel_ops(void) {
@@ -301,17 +301,17 @@ static void test_pixel_ops(void) {
   load(&b);
   put_cb(0, 12, 0x00500007u);
   put_cb(0, 4, 0xabcdu);
-  sm_thread_reset(&g_thread);
-  g_thread.attr_in[0x7c / 4u] = (uint32_t)f_bits(0.5f);           /* w = 2 */
-  g_thread.attr_in[SM_ATTR_GENERIC / 4u] = (uint32_t)f_bits(0.125f); /* u = 0.25 */
-  g_thread.attr_in[SM_ATTR_GENERIC / 4u + 1u] = (uint32_t)f_bits(0.25f);
+  sm_thread_reset(&g_thread, 1);
+  g_thread.attr_in[0x7c / 4u][0] = (uint32_t)f_bits(0.5f);           /* w = 2 */
+  g_thread.attr_in[SM_ATTR_GENERIC / 4u][0] = (uint32_t)f_bits(0.125f); /* u = 0.25 */
+  g_thread.attr_in[SM_ATTR_GENERIC / 4u + 1u][0] = (uint32_t)f_bits(0.25f);
   CHECK(run(), "pixel program runs");
-  CHECK(as_f(g_thread.r[0]) == 0.25f && as_f(g_thread.r[1]) == 0.5f, "IPA.MUL perspective (%f, %f)",
-        as_f(g_thread.r[0]), as_f(g_thread.r[1]));
+  CHECK(as_f(g_thread.r[0][0]) == 0.25f && as_f(g_thread.r[1][0]) == 0.5f, "IPA.MUL perspective (%f, %f)",
+        as_f(g_thread.r[0][0]), as_f(g_thread.r[1][0]));
   CHECK(g_last_handle == 0x00500007u, "TEXS handle from the bound-texture buffer: %08x", g_last_handle);
-  CHECK(as_f(g_thread.r[2]) == 0.25f && as_f(g_thread.r[3]) == 0.5f, "TEXS RG");
-  CHECK(as_f(g_thread.r[6]) == 0.75f && as_f(g_thread.r[7]) == 0.5f, "TEXS BA -> second destination");
-  CHECK(g_thread.r[8] == 0xabcdu, "LDC %x", g_thread.r[8]);
+  CHECK(as_f(g_thread.r[2][0]) == 0.25f && as_f(g_thread.r[3][0]) == 0.5f, "TEXS RG");
+  CHECK(as_f(g_thread.r[6][0]) == 0.75f && as_f(g_thread.r[7][0]) == 0.5f, "TEXS BA -> second destination");
+  CHECK(g_thread.r[8][0] == 0xabcdu, "LDC %x", g_thread.r[8][0]);
 }
 
 static void test_kill_and_header(void) {
@@ -329,10 +329,10 @@ static void test_kill_and_header(void) {
   CHECK(g_prog.header.omap_target == 0x0fu, "SPH omap %x", g_prog.header.omap_target);
   CHECK(g_prog.header.input_interp[0] == SM_INTERP_PERSPECTIVE && g_prog.header.input_interp[2] == SM_INTERP_UNUSED,
         "SPH interpolation map");
-  sm_thread_reset(&g_thread);
-  g_thread.r[0] = 9;
+  sm_thread_reset(&g_thread, 1);
+  g_thread.r[0][0] = 9;
   CHECK(run(), "kill program runs");
-  CHECK(g_thread.killed && g_thread.r[0] == 9u, "KIL stops the invocation");
+  CHECK((g_thread.killed & 1u) && g_thread.r[0][0] == 9u, "KIL stops the invocation");
 }
 
 static void test_extent(void) {
@@ -349,6 +349,58 @@ static void test_extent(void) {
         sm_program_extent(b.bytes, size));
 }
 
+
+/* SIMT: 16 lanes run one program whose branches and loop trip counts
+ * depend on per-lane inputs; every lane must end with its scalar result:
+ * r0 = n (loop count = lane's input), r1 = 1 if n is odd else 2. */
+static void test_divergence(void) {
+  Builder b;
+  begin(&b, SM_STAGE_VERTEX);
+  emit(&b, ALD(2, SM_ATTR_GENERIC, 1));      /* r2 = n (integer) */
+  emit(&b, MOV32I(0, 0));
+  /* loop: if (r0 == r2) break; r0++ */
+  const uint32_t pbk_at = next_index(&b);
+  emit(&b, 0);
+  const uint32_t loop_at = next_index(&b);
+  emit(&b, (0x5b60ull << 48) | GUARD | (2ull << 49) | (PT << 39) | rb(2) | ra(0) | (0ull << 3) | PT); /* ISETP.EQ P0 = r0 == r2 */
+  emit(&b, BRK(0, false));
+  emit(&b, IADD32I(0, 0, 1));
+  const uint32_t back_at = next_index(&b);
+  emit(&b, 0);
+  const uint32_t after_loop = next_index(&b);
+  /* if (n & 1) r1 = 1 else r1 = 2, through SSY/SYNC */
+  const uint32_t ssy_at = next_index(&b);
+  emit(&b, 0);
+  emit(&b, (0x3840ull << 48) | GUARD | (PT << 48) | (0ull << 41) | (1ull << 20) | ra(2) | rd(3)); /* LOP.AND r3 = r2 & 1 */
+  emit(&b, (0x3660ull << 48) | GUARD | (5ull << 49) | (PT << 39) | (0ull << 20) | ra(3) | (1ull << 3) | PT); /* ISETP.NE P1 = r3 != 0 */
+  const uint32_t bra_at = next_index(&b);
+  emit(&b, 0);
+  emit(&b, MOV32I(1, 1));
+  emit(&b, SYNC());
+  const uint32_t even_at = next_index(&b);
+  emit(&b, MOV32I(1, 2));
+  emit(&b, SYNC());
+  const uint32_t join_at = next_index(&b);
+  emit(&b, EXIT());
+  uint64_t w = PBK(offset_to(pbk_at, after_loop));
+  memcpy(b.bytes + SM_SPH_BYTES + 8u * pbk_at, &w, 8);
+  w = BRA(offset_to(back_at, loop_at), (uint32_t)PT, false);
+  memcpy(b.bytes + SM_SPH_BYTES + 8u * back_at, &w, 8);
+  w = SSY(offset_to(ssy_at, join_at));
+  memcpy(b.bytes + SM_SPH_BYTES + 8u * ssy_at, &w, 8);
+  w = BRA(offset_to(bra_at, even_at), 1, true); /* @!P1 BRA even */
+  memcpy(b.bytes + SM_SPH_BYTES + 8u * bra_at, &w, 8);
+  load(&b);
+  sm_thread_reset(&g_thread, SM_LANES);
+  for (uint32_t l = 0; l < SM_LANES; l++) g_thread.attr_in[SM_ATTR_GENERIC / 4u][l] = (l * 7u) % 11u;
+  CHECK(run(), "divergent program runs");
+  for (uint32_t l = 0; l < SM_LANES; l++) {
+    const uint32_t n = (l * 7u) % 11u;
+    CHECK(g_thread.r[0][l] == n && g_thread.r[1][l] == ((n & 1u) ? 1u : 2u), "lane %u: r0=%u r1=%u (n=%u)", l,
+          g_thread.r[0][l], g_thread.r[1][l], n);
+  }
+}
+
 int main(void) {
   test_float_arith();
   test_integer_arith();
@@ -358,6 +410,7 @@ int main(void) {
   test_pixel_ops();
   test_kill_and_header();
   test_extent();
+  test_divergence();
   if (g_failures) {
     fprintf(stderr, "maxwell_shader_test: %d failure(s)\n", g_failures);
     return 1;

@@ -1051,7 +1051,7 @@ typedef struct Vertex_Cache {
 
 static bool run_vertex(Draw_Context *ctx, uint32_t index, Vertex *out) {
   Sm_Thread *t = ctx->r->thread;
-  sm_thread_reset(t);
+  sm_thread_reset(t, 1);
   const Sm_Header *h = &ctx->vs->header;
   for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++) {
     const uint32_t mask = (h->input_generic[v / 8u] >> ((v % 8u) * 4u)) & 0xfu;
@@ -1059,18 +1059,18 @@ static bool run_vertex(Draw_Context *ctx, uint32_t index, Vertex *out) {
     if (!mask) continue;
     uint32_t value[4];
     fetch_attribute(ctx, v, index, value);
-    for (uint32_t c = 0; c < 4; c++) t->attr_in[base + c] = value[c];
+    for (uint32_t c = 0; c < 4; c++) t->attr_in[base + c][0] = value[c];
   }
-  memset(t->attr_out, 0, sizeof(t->attr_out));
-  t->attr_out[(SM_ATTR_POSITION / 4u) + 3u] = u32f(1.0f);
-  t->vertex_id = index;
-  t->instance_id = ctx->instance;
+  for (uint32_t i = 0; i < SM_ATTRIBUTE_WORDS; i++) t->attr_out[i][0] = 0;
+  t->attr_out[(SM_ATTR_POSITION / 4u) + 3u][0] = u32f(1.0f);
+  t->vertex_id[0] = index;
+  t->instance_id[0] = ctx->instance;
   if (!sm_run(ctx->vs, &ctx->env[0], t)) {
     ctx->r->stats.shader_faults++;
     return false;
   }
-  for (uint32_t c = 0; c < 4; c++) out->pos[c] = f32(t->attr_out[SM_ATTR_POSITION / 4u + c]);
-  memcpy(out->varying, t->attr_out + SM_ATTR_GENERIC / 4u, sizeof(out->varying));
+  for (uint32_t c = 0; c < 4; c++) out->pos[c] = f32(t->attr_out[SM_ATTR_POSITION / 4u + c][0]);
+  for (uint32_t i = 0; i < MAX_VARYINGS; i++) out->varying[i] = t->attr_out[SM_ATTR_GENERIC / 4u + i][0];
   return true;
 }
 
@@ -1348,45 +1348,83 @@ static void plane_setup(Plane *p, const Screen_Vertex *v0, const Screen_Vertex *
 
 static float plane_at(const Plane *p, float dx, float dy) { return p->a * dx + p->b * dy + p->c; }
 
+/* Loads one pixel's inputs into lane `l`. */
+static void setup_lane(const Raster_State *rs, Sm_Thread *t, uint32_t l, int32_t px, int32_t py, float depth,
+                       const Plane *planes, const Plane *inv_w, float x0, float y0, const Screen_Vertex *provoking) {
+  const float cx = (float)px + 0.5f, cy = (float)py + 0.5f;
+  const float dx = cx - x0, dy = cy - y0;
+  const float fy = rs->lower_left ? (float)rs->surface_height - cy : cy;
+  t->attr_in[SM_ATTR_POSITION / 4u + 0u][l] = u32f(cx);
+  t->attr_in[SM_ATTR_POSITION / 4u + 1u][l] = u32f(fy);
+  t->attr_in[SM_ATTR_POSITION / 4u + 2u][l] = u32f(depth);
+  t->attr_in[SM_ATTR_POSITION / 4u + 3u][l] = u32f(plane_at(inv_w, dx, dy));
+  for (uint32_t i = 0; i < rs->varyings.count; i++) {
+    const uint32_t word = SM_ATTR_GENERIC / 4u + rs->varyings.word[i];
+    if (rs->varyings.interp[i] == SM_INTERP_CONSTANT)
+      t->attr_in[word][l] = provoking->src->varying[rs->varyings.word[i]];
+    else
+      t->attr_in[word][l] = u32f(plane_at(&planes[i], dx, dy));
+  }
+}
+
+static bool early_depth_reject(const Raster_State *rs, int32_t px, int32_t py, float depth) {
+  if (!rs->depth || !rs->depth_test || rs->depth_reg != 0xffu) return false;
+  const uint8_t *zp = rs->depth->pixels + ((uint64_t)py * rs->depth->width + (uint64_t)px) * rs->depth->bytes_per_pixel;
+  return !depth_compare(rs->depth_func, depth, read_depth(rs->depth->format, zp));
+}
+
+static void output_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, const uint32_t *out_regs);
+
+/* Shades one pixel, or reuses `shared` (a flat triangle's one result). */
 static void shade_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, const Plane *planes, const Plane *inv_w,
                         float x0, float y0, bool front, const Screen_Vertex *provoking, Frag_Result *shared) {
-  Draw_Context *ctx = rs->ctx;
-  Raster3d *r = ctx->r;
-  uint8_t *zp = NULL;
-  if (rs->depth) {
-    zp = rs->depth->pixels + ((uint64_t)py * rs->depth->width + (uint64_t)px) * rs->depth->bytes_per_pixel;
-    if (rs->depth_test && rs->depth_reg == 0xffu &&
-        !depth_compare(rs->depth_func, depth, read_depth(rs->depth->format, zp)))
-      return;
-  }
-  Frag_Result local;
-  Frag_Result *frag = shared ? shared : &local;
-  if (!shared || !shared->valid) {
-    const float cx = (float)px + 0.5f, cy = (float)py + 0.5f;
-    const float dx = cx - x0, dy = cy - y0;
+  if (early_depth_reject(rs, px, py, depth)) return;
+  if (!shared->valid) {
+    Raster3d *r = rs->ctx->r;
     Sm_Thread *t = r->thread;
-    sm_thread_reset_light(t);
-    t->front_facing = front;
-    const float fy = rs->lower_left ? (float)rs->surface_height - cy : cy;
-    t->attr_in[SM_ATTR_POSITION / 4u + 0u] = u32f(cx);
-    t->attr_in[SM_ATTR_POSITION / 4u + 1u] = u32f(fy);
-    t->attr_in[SM_ATTR_POSITION / 4u + 2u] = u32f(depth);
-    t->attr_in[SM_ATTR_POSITION / 4u + 3u] = u32f(plane_at(inv_w, dx, dy));
-    for (uint32_t i = 0; i < rs->varyings.count; i++) {
-      const uint32_t word = SM_ATTR_GENERIC / 4u + rs->varyings.word[i];
-      if (rs->varyings.interp[i] == SM_INTERP_CONSTANT)
-        t->attr_in[word] = provoking->src->varying[rs->varyings.word[i]];
-      else
-        t->attr_in[word] = u32f(plane_at(&planes[i], dx, dy));
-    }
-    const bool ok = sm_run(ctx->ps, &ctx->env[1], t);
+    sm_thread_reset_light(t, 1);
+    t->front_facing = front ? SM_ALL_LANES : 0;
+    setup_lane(rs, t, 0, px, py, depth, planes, inv_w, x0, y0, provoking);
+    const bool ok = sm_run(rs->ctx->ps, &rs->ctx->env[1], t);
     if (!ok) r->stats.shader_faults++;
-    frag->killed = !ok || t->killed;
-    for (uint32_t i = 0; i < rs->out_regs; i++) frag->regs[i] = t->r[i];
-    frag->valid = true;
+    shared->killed = !ok || (t->killed & 1u);
+    for (uint32_t i = 0; i < rs->out_regs; i++) shared->regs[i] = t->r[i][0];
+    shared->valid = true;
   }
-  if (frag->killed) return;
-  const uint32_t *out_regs = frag->regs;
+  if (!shared->killed) output_pixel(rs, px, py, depth, shared->regs);
+}
+
+/* Pixels waiting to be shaded together. */
+typedef struct Pixel_Batch {
+  uint32_t count;
+  int32_t x[SM_LANES], y[SM_LANES];
+  float z[SM_LANES];
+} Pixel_Batch;
+
+static void shade_batch(Raster_State *rs, Pixel_Batch *b, const Plane *planes, const Plane *inv_w, float x0, float y0,
+                        bool front, const Screen_Vertex *provoking) {
+  if (!b->count) return;
+  Raster3d *r = rs->ctx->r;
+  Sm_Thread *t = r->thread;
+  sm_thread_reset_light(t, b->count);
+  t->front_facing = front ? SM_ALL_LANES : 0;
+  for (uint32_t l = 0; l < b->count; l++) setup_lane(rs, t, l, b->x[l], b->y[l], b->z[l], planes, inv_w, x0, y0, provoking);
+  const bool ok = sm_run(rs->ctx->ps, &rs->ctx->env[1], t);
+  if (!ok) r->stats.shader_faults++;
+  for (uint32_t l = 0; ok && l < b->count; l++) {
+    if ((t->killed >> l) & 1u) continue;
+    uint32_t regs[MAX_TARGETS * 4u + 1u];
+    for (uint32_t i = 0; i < rs->out_regs; i++) regs[i] = t->r[i][l];
+    output_pixel(rs, b->x[l], b->y[l], b->z[l], regs);
+  }
+  b->count = 0;
+}
+
+/* Depth, alpha test, blending and the colour write for one shaded pixel. */
+static void output_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, const uint32_t *out_regs) {
+  Raster3d *r = rs->ctx->r;
+  uint8_t *zp = rs->depth ? rs->depth->pixels + ((uint64_t)py * rs->depth->width + (uint64_t)px) * rs->depth->bytes_per_pixel
+                          : NULL;
   if (rs->alpha_test) {
     const uint8_t reg = rs->color_reg[0][3];
     const float alpha = reg == 0xffu ? 1.0f : f32(out_regs[reg]);
@@ -1554,6 +1592,8 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
     if (planes[i].a != 0.0f || planes[i].b != 0.0f) uniform = false;
   Frag_Result shared;
   shared.valid = false;
+  Pixel_Batch batch;
+  batch.count = 0;
   for (int64_t y = y0; y <= y1; y++) {
     int64_t e0 = e_row[0], e1 = e_row[1], e2 = e_row[2];
     for (int64_t x = x0; x <= x1; x++) {
@@ -1561,8 +1601,14 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
         const float dx = (float)x + 0.5f - sv[0].x, dy = (float)y + 0.5f - sv[0].y;
         float z = plane_at(&zp, dx, dy);
         z = z < 0.0f ? 0.0f : (z > 1.0f ? 1.0f : z);
-        shade_pixel(rs, (int32_t)x, (int32_t)y, z, planes, &wp, sv[0].x, sv[0].y, front, &prov,
-                    uniform ? &shared : NULL);
+        if (uniform) {
+          shade_pixel(rs, (int32_t)x, (int32_t)y, z, planes, &wp, sv[0].x, sv[0].y, front, &prov, &shared);
+        } else if (!early_depth_reject(rs, (int32_t)x, (int32_t)y, z)) {
+          batch.x[batch.count] = (int32_t)x;
+          batch.y[batch.count] = (int32_t)y;
+          batch.z[batch.count] = z;
+          if (++batch.count == SM_LANES) shade_batch(rs, &batch, planes, &wp, sv[0].x, sv[0].y, front, &prov);
+        }
       }
       e0 += ex[0];
       e1 += ex[1];
@@ -1572,6 +1618,7 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
     e_row[1] += ey[1];
     e_row[2] += ey[2];
   }
+  shade_batch(rs, &batch, planes, &wp, sv[0].x, sv[0].y, front, &prov);
 }
 
 /* ---- clipping ----------------------------------------------------- */
