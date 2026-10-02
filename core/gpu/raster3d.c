@@ -796,6 +796,9 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     r->stats.texture_misses++;
     return NULL;
   }
+  log_debug("[gpu] texture %ux%u fmt 0x%02x types %u%u%u%u swizzle %u%u%u%u layout %u type %u srgb %d @%llx",
+            h.width, h.height, h.format, h.data_type[0], h.data_type[1], h.data_type[2], h.data_type[3], h.swizzle[0],
+            h.swizzle[1], h.swizzle[2], h.swizzle[3], h.layout, h.type, h.srgb, (unsigned long long)h.address);
   memcpy(slot->tic, tic, sizeof(slot->tic));
   slot->raw_hash = hash;
   slot->validated = r->submission;

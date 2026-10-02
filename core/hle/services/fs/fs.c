@@ -476,6 +476,33 @@ static HLE_ServiceResult cmd_unsupported(HLE_Context *c, Service_Object *self, c
 /* Tables.                                                             */
 /* ------------------------------------------------------------------ */
 
+/* ISaveDataInfoReader: Voland keeps no save-data index yet, so readers
+ * list nothing (homebrew save managers then show an empty list). */
+static HLE_ServiceResult cmd_read_save_info(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                            IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)ipc_response_push_u64(res, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static const Service_Command k_save_info_reader_commands[] = {
+    {0, cmd_read_save_info, "ReadSaveDataInfo"},
+};
+
+static Service_Interface g_save_info_reader =
+    SERVICE_INTERFACE("ISaveDataInfoReader", k_save_info_reader_commands, 0, NULL);
+
+static HLE_ServiceResult cmd_open_save_info_reader(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                                   IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)ipc_response_push_object(res, &g_save_info_reader, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
 static const Service_Command k_proxy_commands[] = {
     {1, service_cmd_ok, "SetCurrentProcess"},
     {18, cmd_open_sd_card, "OpenSdCardFileSystem"},
@@ -484,6 +511,10 @@ static const Service_Command k_proxy_commands[] = {
     {51, cmd_open_save_data, "OpenSaveDataFileSystem"},
     {52, cmd_open_save_data, "OpenSaveDataFileSystemBySystemSaveDataId"},
     {53, cmd_open_save_data, "OpenReadOnlySaveDataFileSystem"},
+    {60, cmd_open_save_info_reader, "OpenSaveDataInfoReader"},
+    {61, cmd_open_save_info_reader, "OpenSaveDataInfoReaderBySaveDataSpaceId"},
+    {62, cmd_open_save_info_reader, "OpenSaveDataInfoReaderOnlyCacheStorage"},
+    {68, cmd_open_save_info_reader, "OpenSaveDataInfoReaderWithFilter"},
     {200, cmd_open_data_storage_self, "OpenDataStorageByCurrentProcess"},
     {202, cmd_open_data_storage_by_id, "OpenDataStorageByDataId"},
     {203, cmd_open_data_storage_self, "OpenPatchDataStorageByCurrentProcess"},

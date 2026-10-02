@@ -80,6 +80,18 @@
 #define M3D_REPORT_SEMAPHORE_B 0x6C1u
 #define M3D_REPORT_SEMAPHORE_C 0x6C2u
 #define M3D_REPORT_SEMAPHORE_D 0x6C3u
+#define I2M_LINE_LENGTH 0x0u   /* offsets from GPU_I2M_FIRST */
+#define I2M_LINE_COUNT 0x1u
+#define I2M_OFFSET_UPPER 0x2u
+#define I2M_OFFSET 0x3u
+#define I2M_PITCH 0x4u
+#define I2M_BLOCK_SIZE 0x5u
+#define I2M_WIDTH 0x6u
+#define I2M_ORIGIN_X 0xAu
+#define I2M_ORIGIN_Y 0xBu
+#define I2M_LAUNCH 0xCu
+#define I2M_DATA 0xDu
+#define I2M_LAYOUT_PITCH 1u
 #define M3D_VERTEX_ARRAY_START 0x35Du
 #define M3D_DRAW_VERTEX_ARRAY 0x35Eu
 #define M3D_DRAW_VERTEX_ARRAY_FIRST 0x485u       /* ..._BEGIN_END_INSTANCE_FIRST */
@@ -131,7 +143,17 @@
 #define GOB_RUN 16u
 #define SEMAPHORE_FOUR_WORD_BYTES 16u
 
-void gpu_channel_init(Gpu_Channel *channel) { memset(channel, 0, sizeof(*channel)); }
+/* SET_PIPELINE_BINDING(j) power-on values: each program stage reads the
+ * bind group of its pipeline stage (vertex A/B -> 0, tessellation init
+ * -> 1, tessellation -> 2, geometry -> 3, pixel -> 4). Drivers that bind
+ * constant buffers per stage (nouveau's) never write these. */
+#define M3D_PIPELINE_BINDING(j) (0x804u + 16u * (j))
+static const uint8_t k_default_binding_group[6] = {0, 0, 1, 2, 3, 4};
+
+void gpu_channel_init(Gpu_Channel *channel) {
+  memset(channel, 0, sizeof(*channel));
+  for (uint32_t j = 0; j < 6u; j++) channel->engine3d[M3D_PIPELINE_BINDING(j)] = k_default_binding_group[j];
+}
 
 static uint64_t addr40(uint32_t upper, uint32_t lower) { return ((uint64_t)(upper & 0xFFu) << 32) | lower; }
 
@@ -495,6 +517,61 @@ static void constant_buffer_load(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_
   ch->engine3d[M3D_CB_LOAD_OFFSET] = offset + 4u;
 }
 
+/* ---- inline to memory ----------------------------------------------- */
+
+/* Writes one complete (or final partial) line from ch->line. */
+static void i2m_write_line(Gpu_Channel *ch, const Gpu_Memory *mem, uint64_t line, uint32_t bytes) {
+  const uint64_t base = addr40(ch->i2m[I2M_OFFSET_UPPER], ch->i2m[I2M_OFFSET]);
+  if (ch->i2m[I2M_LAUNCH] & I2M_LAYOUT_PITCH) {
+    if (!mem->write(mem->user, base + line * ch->i2m[I2M_PITCH], ch->line, bytes)) ch->faults++;
+    return;
+  }
+  const uint32_t bh = (ch->i2m[I2M_BLOCK_SIZE] >> 4) & 0xFu;
+  const uint32_t width = ch->i2m[I2M_WIDTH];
+  const uint32_t y = ch->i2m[I2M_ORIGIN_Y] + (uint32_t)line;
+  for (uint32_t x = 0; x < bytes;) {
+    const uint32_t gx = ch->i2m[I2M_ORIGIN_X] + x;
+    const uint32_t span = 16u - gx % 16u < bytes - x ? 16u - gx % 16u : bytes - x;
+    if (!mem->write(mem->user, base + block_linear_offset(gx, y, width, bh), ch->line + x, span)) ch->faults++;
+    x += span;
+  }
+}
+
+static void i2m_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t index, uint32_t data) {
+  if (index == I2M_DATA) {
+    if (!ch->i2m_active) return;
+    const uint32_t line_length = ch->i2m[I2M_LINE_LENGTH];
+    const uint64_t total = (uint64_t)line_length * ch->i2m[I2M_LINE_COUNT];
+    if (!line_length || line_length > GPU_LINE_BYTES) {
+      ch->i2m_active = false;
+      return;
+    }
+    for (uint32_t b = 0; b < 4u && ch->i2m_received < total; b++) {
+      ch->line[ch->i2m_line_fill++] = (uint8_t)(data >> (8u * b));
+      ch->i2m_received++;
+      if (ch->i2m_line_fill == line_length) {
+        i2m_write_line(ch, mem, (ch->i2m_received - 1u) / line_length, line_length);
+        ch->i2m_line_fill = 0;
+      }
+    }
+    if (ch->i2m_received >= total) {
+      ch->i2m_active = false;
+      ch->i2m_uploads++;
+      /* Shader code and textures may have changed under the renderer. */
+      if (mem->renderer) raster3d_begin_submission(mem->renderer);
+    }
+    return;
+  }
+  ch->i2m[index] = data;
+  if (index == I2M_LAUNCH) {
+    ch->i2m_active = true;
+    ch->i2m_received = 0;
+    ch->i2m_line_fill = 0;
+  }
+}
+
+static bool is_i2m_method(uint32_t method) { return method >= GPU_I2M_FIRST && method < GPU_I2M_FIRST + GPU_I2M_WORDS; }
+
 static void run_draw(Gpu_Channel *ch, const Gpu_Memory *mem, Raster3d_Draw_Kind kind, uint32_t topology,
                      uint32_t first, uint32_t count, uint32_t index_size) {
   ch->draws++;
@@ -587,6 +664,11 @@ static void engine3d_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t met
     constant_buffer_load(ch, mem, data);
     return;
   }
+  if (is_i2m_method(method)) {
+    ch->engine3d[method] = data;
+    i2m_method(ch, mem, method - GPU_I2M_FIRST, data);
+    return;
+  }
   if (method == M3D_LOAD_MME_INSTRUCTION_RAM) {
     const uint32_t at = ch->engine3d[M3D_LOAD_MME_INSTRUCTION_RAM_POINTER]++;
     if (at < GPU_MME_CODE_WORDS) ch->mme_code[at] = data;
@@ -624,6 +706,11 @@ void gpu_channel_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t subchan
     /* Any method that is not this call's data ends the call. */
     if (ch->mme_pending && method != M3D_MACRO_FIRST + 2u * ch->mme_macro + 1u) gpu_channel_flush_macro(ch, mem);
     engine3d_method(ch, mem, method, data);
+    return;
+  }
+  const uint32_t cls = ch->subchannel_class[subchannel];
+  if ((cls == GPU_CLASS_COMPUTE || cls == GPU_CLASS_I2M) && is_i2m_method(method)) {
+    i2m_method(ch, mem, method - GPU_I2M_FIRST, data);
     return;
   }
   ch->ignored_methods++;

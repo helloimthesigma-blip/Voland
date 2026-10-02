@@ -245,6 +245,9 @@ uint32_t sm_program_extent(const uint8_t *bytes, uint32_t size) {
   for (uint32_t i = 0; i < words && i < SM_MAX_WORDS; i++) {
     if (i % 4u == 0) continue;
     const uint64_t w = rd64(bytes + SM_SPH_BYTES + i * 8u);
+    /* An all-zero instruction word is not an instruction: padding after
+     * the program (compilers that emit no end marker). */
+    if (w == 0) return SM_SPH_BYTES + i * 8u;
     /* BRA to itself (possibly via the scheduling word before it): the
      * end-of-program marker. */
     if ((w >> 52) == 0xe24u) {

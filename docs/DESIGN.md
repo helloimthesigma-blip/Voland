@@ -2421,9 +2421,16 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.50.0*
+*Document version: 3.51.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.50 → v3.51 (summary)
+
+- **SDL2/Mesa-style GPU homebrew renders (§13).** Inline-to-memory (methods 0x60-0x6D of the 3D, compute and I2M classes: LAUNCH_DMA + LOAD_INLINE_DATA to pitch or block-linear destinations) - how nouveau-derived drivers upload shader code, texture headers and small textures; each upload invalidates the renderer's caches. SET_PIPELINE_BINDING power-on values (pixel stage reads bind group 4, etc.) for drivers that never write them. Shader extent stops at the first all-zero instruction word (compilers without an end marker).
+- **Services (§12):** `ns:am2`/`ec`/`rid`/`rt`/`web`/`ro` (IServiceGetterInterface -> application manager, control data, records; empty unless a title is loaded from an NCA), `pdm:qry` (no play history), `pm:shell`/`pm:info` (no other application process), fsp-srv save-data info readers (60/61/62/68, empty), GetInfo 27/28.
+- **Compatibility probes (local):** JKSV now boots to its main UI (user list with account icons, SDL2 rendering).
+- **Tests:** `gpu_channel_test` (I2M pitch / block-linear, default bind groups), `services_test` (ns, pdm, pm, save-data readers).
 
 ### Changelog v3.49 → v3.50 (summary)
 

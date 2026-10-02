@@ -498,6 +498,35 @@ static void test_sd_manifest(void) {
   CHECK(emulator_sd_card_read_file(&g_emu, "/mirror/missing", data, sizeof(data)) == -1);
 }
 
+
+/* ns:am2 (no installed titles), pdm:qry (no history), pm:shell (no other
+ * application), fsp-srv save-data info readers (empty). */
+static void test_system_queries(void) {
+  const uint32_t ns = service("ns:am2");
+  const uint32_t manager = object(ns, 7996, NULL, 0);
+  Test_Ipc_Message m;
+  memset(&m, 0, sizeof(m));
+  m.receives[0] = (Test_Ipc_Buffer){SCRATCH(0x9000), 0x180, 0};
+  m.receive_count = 1;
+  const uint32_t offset = 0;
+  Test_Ipc_Reply r = call(manager, 0, &offset, sizeof(offset), &m);
+  CHECK(test_le32(r.data) == 0);
+  r = call(manager, 1, NULL, 0, NULL);
+  CHECK(test_le64(r.data) == 0);
+  const uint8_t control_in[16] = {0};
+  (void)call_ex(manager, 400, control_in, sizeof(control_in), &m, NS_RESULT_APPLICATION_NOT_FOUND);
+  const uint32_t pdm = service("pdm:qry");
+  r = call(pdm, 5, NULL, 0, NULL);
+  CHECK(test_le64(r.data) == 0 && test_le64(r.data + 8) == 0);
+  const uint32_t pm = service("pm:shell");
+  (void)call_ex(pm, 6, NULL, 0, NULL, PM_RESULT_PROCESS_NOT_FOUND);
+  const uint32_t fs = service("fsp-srv");
+  const uint8_t space = 1;
+  const uint32_t reader = object(fs, 61, &space, sizeof(space));
+  r = call(reader, 0, NULL, 0, &m);
+  CHECK(test_le64(r.data) == 0);
+}
+
 static void test_audren(void) {
   const uint32_t manager = service("audren:u");
   /* AudioRendererParameter {48000, 240, mix buffers 2, submixes 0, voices 2,
@@ -730,6 +759,7 @@ int main(void) {
   test_audout();
   test_audren();
   test_sd_manifest();
+  test_system_queries();
   test_acc();
   emulator_destroy(&g_emu);
   printf("[services_test] passed\n");

@@ -556,6 +556,7 @@ void hle_svc_get_info(HLE_Context *c, CPU_State *s) {
   case 24: value = SCHEDULER_MAX_THREADS; break;
   case 25: case 0xF0000002u: value = c->scheduler->ticks; break;
   case 26: value = 1; break;
+  case 27: case 28: value = 0; break; /* IoRegionHint, AliasRegionExtraSize (18.0.0+) */
   default:
     log_warn("[hle] GetInfo: unimplemented info type %u (subtype %llu)", type, (unsigned long long)subtype);
     r->x[0] = HLE_RESULT_INVALID_ENUM_VALUE;

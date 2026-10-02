@@ -60,6 +60,80 @@ static HLE_ServiceResult cmd_random_bytes(HLE_Context *c, Service_Object *self, 
   return HLE_RESULT_SUCCESS;
 }
 
+/* pdm:qry: counts and statistics are all zero (no play history). */
+static HLE_ServiceResult cmd_pdm_nothing(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                         IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  for (uint32_t i = 0; i < PDM_ZERO_WORDS; i++) (void)ipc_response_push_u32(res, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_pdm_event(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                       IPC_Response *res) {
+  (void)req;
+  Misc_State *s = (Misc_State *)self->interface->service_state;
+  return service_push_event(c, res, &s->pdm_event);
+}
+
+static const Service_Command k_pdm_commands[] = {
+    {0, cmd_pdm_nothing, "QueryAppletEvent"},
+    {1, cmd_pdm_nothing, "QueryPlayStatistics"},
+    {2, cmd_pdm_nothing, "QueryPlayStatisticsByUserAccountId"},
+    {3, cmd_pdm_nothing, "QueryPlayStatisticsByNetworkServiceAccountId"},
+    {4, cmd_pdm_nothing, "QueryPlayStatisticsByApplicationId"},
+    {5, cmd_pdm_nothing, "QueryPlayStatisticsByApplicationIdAndUserAccountId"},
+    {6, cmd_pdm_nothing, "QueryPlayStatisticsByApplicationIdAndNetworkServiceAccountId"},
+    {7, cmd_pdm_nothing, "QueryLastPlayTimeV0"},
+    {8, cmd_pdm_nothing, "QueryPlayEvent"},
+    {9, cmd_pdm_nothing, "GetAvailablePlayEventRange"},
+    {10, cmd_pdm_nothing, "QueryAccountEvent"},
+    {11, cmd_pdm_nothing, "QueryAccountPlayEvent"},
+    {12, cmd_pdm_nothing, "GetAvailableAccountPlayEventRange"},
+    {13, cmd_pdm_nothing, "QueryApplicationPlayStatisticsForSystem"},
+    {14, cmd_pdm_nothing, "QueryRecentlyPlayedApplication"},
+    {15, cmd_pdm_event, "GetRecentlyPlayedApplicationUpdateEvent"},
+    {16, cmd_pdm_nothing, "QueryApplicationPlayStatisticsByUserAccountIdForSystem"},
+    {17, cmd_pdm_nothing, "QueryLastPlayTime"},
+    {18, cmd_pdm_nothing, "QueryApplicationPlayStatisticsByUid"},
+};
+
+/* pm:shell / pm:info. */
+static HLE_ServiceResult cmd_pm_not_found(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                          IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)res;
+  return PM_RESULT_PROCESS_NOT_FOUND;
+}
+
+static HLE_ServiceResult cmd_pm_event(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                      IPC_Response *res) {
+  (void)req;
+  Misc_State *s = (Misc_State *)self->interface->service_state;
+  return service_push_event(c, res, &s->pm_event);
+}
+
+static const Service_Command k_pm_shell_commands[] = {
+    {0, cmd_pm_not_found, "LaunchProgram"},
+    {1, cmd_pm_not_found, "TerminateProcess"},
+    {2, cmd_pm_not_found, "TerminateProgram"},
+    {3, cmd_pm_event, "GetProcessEventHandle"},
+    {4, service_cmd_out_zero128, "GetProcessEventInfo"},
+    {5, service_cmd_ok, "NotifyBootFinished"},
+    {6, cmd_pm_not_found, "GetApplicationProcessIdForShell"},
+    {7, service_cmd_ok, "BoostSystemMemoryResourceLimit"},
+    {8, service_cmd_ok, "BoostApplicationThreadResourceLimit"},
+    {9, cmd_pm_event, "GetBootFinishedEventHandle"},
+};
+
+static const Service_Command k_pm_info_commands[] = {
+    {0, cmd_pm_not_found, "GetProgramId"},
+    {65000, cmd_pm_not_found, "AtmosphereGetProcessId"},
+};
+
 static const Service_Command k_csrng_commands[] = {
     {0, cmd_random_bytes, "GetRandomBytes"},
 };
@@ -98,11 +172,17 @@ void misc_init(Misc_State *s) {
   s->ts = SERVICE_INTERFACE("ts", k_ts_commands, 0, s);
   s->csrng = SERVICE_INTERFACE("csrng", k_csrng_commands, 0, s);
   s->random_state = CSRNG_SEED;
+  s->pdm_query = SERVICE_INTERFACE("pdm:qry", k_pdm_commands, 0, s);
+  s->pm_shell = SERVICE_INTERFACE("pm:shell", k_pm_shell_commands, 0, s);
+  s->pm_info = SERVICE_INTERFACE("pm:info", k_pm_info_commands, 0, s);
 }
 
 Error misc_register(Misc_State *s, SM_Registry *registry) {
   Error err = sm_registry_add(registry, "psm", &s->psm);
   if (error_is_ok(err)) err = sm_registry_add(registry, "ts", &s->ts);
   if (error_is_ok(err)) err = sm_registry_add(registry, "csrng", &s->csrng);
+  if (error_is_ok(err)) err = sm_registry_add(registry, "pdm:qry", &s->pdm_query);
+  if (error_is_ok(err)) err = sm_registry_add(registry, "pm:shell", &s->pm_shell);
+  if (error_is_ok(err)) err = sm_registry_add(registry, "pm:info", &s->pm_info);
   return err;
 }

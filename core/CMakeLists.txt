@@ -44,6 +44,7 @@ set(SWITCH_CORE_SOURCES
   hle/services/audio/audout.c
   hle/services/audio/audren.c
   hle/services/acc/acc.c
+  hle/services/ns/ns.c
   hle/services/acc/acc_icon.c
   audio/audio_ring.c
   gpu/block_linear.c

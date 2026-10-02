@@ -284,12 +284,50 @@ static void test_mme(void) {
   CHECK(got[0] == 0x11111111 && got[1] == 0x22222222 && got[2] == 0x33333333 && g_channel.engine3d[0x8E3] == 20);
 }
 
+
+/* Inline-to-memory (3D class methods 0x60-0x6D, and the I2M class):
+ * LAUNCH_DMA then LOAD_INLINE_DATA words land in pitch and block-linear
+ * destinations; the pipeline bind groups power up per stage. */
+static void test_inline_to_memory(void) {
+  gpu_channel_init(&g_channel);
+  CHECK(g_channel.engine3d[0x804 + 16u * 5u] == 4u && g_channel.engine3d[0x804 + 16u * 1u] == 0u);
+  one(2, 0, 0xB197);
+  /* Pitch: 2 lines of 6 bytes, pitch 0x40, at MEM_BASE + 0x2000. */
+  const uint64_t dst = MEM_BASE + 0x2000u;
+  memset(g_mem + 0x2000, 0xEE, 0x100);
+  const uint32_t setup[5] = {6, 2, (uint32_t)(dst >> 32), (uint32_t)dst, 0x40};
+  inc(2, 0x60, setup, 5);
+  one(2, 0x6C, 1); /* LAUNCH_DMA: pitch destination */
+  const uint32_t data[3] = {0x04030201u, 0x08070605u, 0x0C0B0A09u};
+  port(2, 0x6D, data, 3);
+  submit();
+  CHECK(memcmp(g_mem + 0x2000, "\x01\x02\x03\x04\x05\x06", 6) == 0 && g_mem[0x2006] == 0xEE);
+  CHECK(memcmp(g_mem + 0x2040, "\x07\x08\x09\x0A\x0B\x0C", 6) == 0);
+  CHECK(g_channel.i2m_uploads == 1);
+  /* Block linear through the I2M class: 64-byte rows, 2 rows at y=0. */
+  one(3, 0, 0xA140);
+  memset(g_mem + 0x3000, 0, 0x800);
+  const uint64_t bl = MEM_BASE + 0x3000u;
+  const uint32_t bl_setup[7] = {64, 2, (uint32_t)(bl >> 32), (uint32_t)bl, 0, 0 /* block: 1 GOB */, 64 /* width bytes */};
+  inc(3, 0x60, bl_setup, 7);
+  one(3, 0x6C, 0); /* block-linear destination */
+  uint32_t words[32];
+  for (uint32_t i = 0; i < 32u; i++) words[i] = 0x01010101u * (i + 1u);
+  port(3, 0x6D, words, 32);
+  submit();
+  /* Row 1, byte 0 lives at the GOB's (x=0, y=1) slot. */
+  CHECK(g_mem[0x3000 + block_linear_offset(0, 0, 64, 0)] == 1);
+  CHECK(g_mem[0x3000 + block_linear_offset(0, 1, 64, 0)] == 17);
+  CHECK(g_mem[0x3000 + block_linear_offset(63, 1, 64, 0)] == 32);
+}
+
 int main(void) {
   test_headers_and_host();
   test_pitch_to_block_linear();
   test_linear_and_remap();
   test_3d_sync();
   test_mme();
+  test_inline_to_memory();
   printf("[gpu_channel_test] passed\n");
   return 0;
 }

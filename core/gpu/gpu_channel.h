@@ -25,8 +25,10 @@
  * and their BEGIN_END forms, inline indices) run on the reference
  * renderer (gpu/raster3d) when the memory interface provides one; it
  * renders into guest memory and is flushed at the end of each
- * submission and before DMA copies. Compute, 2D and inline-to-memory
- * are counted and ignored.
+ * submission and before DMA copies. Inline-to-memory uploads (methods
+ * 0x60-0x6D of the 3D, compute and I2M classes: LAUNCH_DMA then
+ * LOAD_INLINE_DATA words) are written to pitch or block-linear
+ * destinations. Compute dispatch and 2D are counted and ignored.
  *
  * Wire formats (NVIDIA's published host/class headers, e.g. open-gpu-doc
  * clb06f.h / clb0b5.h):
@@ -57,6 +59,8 @@
 #define GPU_LINE_BYTES 0x10000u       /* longest DMA line handled */
 #define GPU_FETCH_WORDS 0x1000u       /* pushbuffer words fetched at a time */
 #define GPU_INLINE_INDICES 0x4000u    /* DRAW_INLINE_INDEX words between BEGIN and END */
+#define GPU_I2M_FIRST 0x60u           /* inline-to-memory methods (3D, compute, I2M classes) */
+#define GPU_I2M_WORDS 0x0Eu
 
 #define GPU_CLASS_DMA 0xB0B5u
 #define GPU_CLASS_3D 0xB197u
@@ -96,6 +100,13 @@ typedef struct Gpu_Channel {
   uint32_t inline_count;
   uint32_t inline_indices[GPU_INLINE_INDICES];
   uint64_t draws;
+  /* Inline-to-memory (LAUNCH_DMA + LOAD_INLINE_DATA): shader code and
+   * small uploads written straight from the pushbuffer. */
+  uint32_t i2m[GPU_I2M_WORDS];
+  bool i2m_active;
+  uint64_t i2m_received;                     /* bytes so far */
+  uint32_t i2m_line_fill;
+  uint64_t i2m_uploads;
   uint64_t mme_runs;
   uint64_t mme_faults;                       /* runaway or out-of-range macros */
   uint64_t methods;                          /* diagnostics */

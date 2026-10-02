@@ -34,6 +34,7 @@
 #include "hle/services/time/time.h"
 #include "hle/services/vi/vi.h"
 #include "hle/services/nvdrv/nvdrv.h"
+#include "hle/services/ns/ns.h"
 #include "hle/loader/byte_source.h"
 #include "hle/loader/nca_parse.h"
 
@@ -89,6 +90,7 @@ typedef struct Emulator
   Misc_State misc;       /* psm, ts */
   Audout_State audout;   /* PCM audio out (§14) */
   Audren_State *audren;  /* the audio renderer (§14); service arena */
+  Ns_State ns;           /* application records (§12) */
   Acc_State acc;         /* one local user */
   const uint8_t *shared_font;
   uint32_t shared_font_size;

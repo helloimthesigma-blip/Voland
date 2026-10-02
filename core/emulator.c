@@ -257,6 +257,7 @@ static void reset_process_services(Emulator* emulator) {
   audout_init(&emulator->audout);
   if (emulator->audren) audren_init(emulator->audren);
   acc_init(&emulator->acc);
+  ns_init(&emulator->ns);
   pl_init(&emulator->pl, &emulator->shared_memory, emulator->shared_font, emulator->shared_font_size);
 }
 
@@ -275,6 +276,7 @@ static Error register_services(Emulator* emulator) {
   if (error_is_ok(err)) err = audout_register(&emulator->audout, &emulator->sm);
   if (error_is_ok(err) && emulator->audren) err = audren_register(emulator->audren, &emulator->sm);
   if (error_is_ok(err)) err = acc_register(&emulator->acc, &emulator->sm);
+  if (error_is_ok(err)) err = ns_register(&emulator->ns, &emulator->sm);
   return err;
 }
 
