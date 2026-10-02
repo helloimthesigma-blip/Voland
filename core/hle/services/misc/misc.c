@@ -35,6 +35,35 @@ static HLE_ServiceResult cmd_state_event(HLE_Context *c, Service_Object *self, c
   return service_push_event(c, res, &state_of(self)->psm_event);
 }
 
+static uint64_t splitmix64(uint64_t *state) {
+  uint64_t z = (*state += 0x9E3779B97F4A7C15ull);
+  z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ull;
+  z = (z ^ (z >> 27)) * 0x94D049BB133111EBull;
+  return z ^ (z >> 31);
+}
+
+static HLE_ServiceResult cmd_random_bytes(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                          IPC_Response *res) {
+  (void)res;
+  Misc_State *s = state_of(self);
+  const IPC_Buffer *buf = service_out_buffer(req, 0);
+  if (!buf) return HLE_RESULT_SUCCESS;
+  uint8_t chunk[CSRNG_CHUNK_BYTES];
+  for (uint64_t at = 0; at < buf->size; at += sizeof(chunk)) {
+    for (uint32_t i = 0; i < sizeof(chunk); i += 8) {
+      const uint64_t v = splitmix64(&s->random_state);
+      memcpy(chunk + i, &v, 8);
+    }
+    const uint64_t n = buf->size - at < sizeof(chunk) ? buf->size - at : sizeof(chunk);
+    if (!error_is_ok(vmm_write_block(c->vmm, buf->gva + at, chunk, n))) return HLE_RESULT_INVALID_POINTER;
+  }
+  return HLE_RESULT_SUCCESS;
+}
+
+static const Service_Command k_csrng_commands[] = {
+    {0, cmd_random_bytes, "GetRandomBytes"},
+};
+
 static const Service_Command k_psm_commands[] = {
     {0, cmd_battery_percent, "GetBatteryChargePercentage"},
     {1, cmd_charger_type, "GetChargerType"},
@@ -67,10 +96,13 @@ void misc_init(Misc_State *s) {
   s->psm = SERVICE_INTERFACE("psm", k_psm_commands, 0, s);
   s->psm_session = SERVICE_INTERFACE("IPsmSession", k_psm_session_commands, 0, s);
   s->ts = SERVICE_INTERFACE("ts", k_ts_commands, 0, s);
+  s->csrng = SERVICE_INTERFACE("csrng", k_csrng_commands, 0, s);
+  s->random_state = CSRNG_SEED;
 }
 
 Error misc_register(Misc_State *s, SM_Registry *registry) {
   Error err = sm_registry_add(registry, "psm", &s->psm);
   if (error_is_ok(err)) err = sm_registry_add(registry, "ts", &s->ts);
+  if (error_is_ok(err)) err = sm_registry_add(registry, "csrng", &s->csrng);
   return err;
 }

@@ -11,9 +11,16 @@
  *     between pitch-linear and block-linear surfaces, with component
  *     remapping and semaphore release - what deko3d/NVN use for buffer <->
  *     image copies (homebrew menus present this way).
- *   - Maxwell 3D (class B197), synchronization only: the register file is
- *     kept, and SYNCPT_ACTION increments and REPORT_SEMAPHORE releases
- *     execute - deko3d/NVN signal their fences this way.
+ *   - Maxwell 3D (class B197), the non-rendering half: the register file
+ *     is kept; SYNCPT_ACTION increments, REPORT_SEMAPHORE releases and
+ *     LOAD_CONSTANT_BUFFER uploads execute; and the Macro Method Expander
+ *     (MME) runs - macros are uploaded with LOAD_MME_* and invoked by
+ *     CALL_MME_MACRO(j)/CALL_MME_DATA(j) (methods 0xE00+2j / +1); a macro
+ *     runs once its call's data ends (a different method, or the end of
+ *     the submission) and the methods it emits go through the same 3D
+ *     method path. deko3d issues most of its state and every draw this
+ *     way. MME ISA: the Fermi-family macro processor (behaviour per
+ *     envytools / Mesa's MIT-licensed simulator; Voland's own code).
  * Rendering methods (3D draws, compute, 2D, inline-to-memory) are kept or
  * counted and otherwise ignored until their engines land in the GPU
  * worker (§13 command ring).
@@ -38,7 +45,10 @@
 
 #define GPU_SUBCHANNELS 8u
 #define GPU_DMA_REGISTER_WORDS 0x200u /* B0B5 method space through 0x7FC */
-#define GPU_3D_REGISTER_WORDS 0xE00u  /* B197 method space */
+#define GPU_3D_REGISTER_WORDS 0x1000u /* B197 method space (0x4000 bytes) */
+#define GPU_MME_CODE_WORDS 0x1000u
+#define GPU_MME_MACROS 0x80u
+#define GPU_MME_MAX_PARAMS 0x4000u
 #define GPU_LINE_BYTES 0x10000u       /* longest DMA line handled */
 #define GPU_FETCH_WORDS 0x1000u       /* pushbuffer words fetched at a time */
 
@@ -63,6 +73,15 @@ typedef struct Gpu_Channel {
   uint32_t host[0x40];                       /* host method registers */
   uint32_t dma[GPU_DMA_REGISTER_WORDS];      /* B0B5 registers, by word address */
   uint32_t engine3d[GPU_3D_REGISTER_WORDS];  /* B197 registers, by word address */
+  /* Macro Method Expander. */
+  uint32_t mme_code[GPU_MME_CODE_WORDS];
+  uint32_t mme_start[GPU_MME_MACROS];
+  bool mme_pending;                          /* a CALL_MME_MACRO is collecting data */
+  uint32_t mme_macro;
+  uint32_t mme_param_count;
+  uint32_t mme_params[GPU_MME_MAX_PARAMS];
+  uint64_t mme_runs;
+  uint64_t mme_faults;                       /* runaway or out-of-range macros */
   uint64_t methods;                          /* diagnostics */
   uint64_t ignored_methods;
   uint64_t dma_copies;
@@ -80,5 +99,9 @@ void gpu_channel_submit(Gpu_Channel *channel, const Gpu_Memory *memory, const ui
 /* One method write, as the pushbuffer decoder issues it (tests). */
 void gpu_channel_method(Gpu_Channel *channel, const Gpu_Memory *memory, uint32_t subchannel, uint32_t method,
                         uint32_t data);
+
+/* Runs a macro call still collecting data (gpu_channel_submit does this
+ * at the end of every submission; tests driving methods call it). */
+void gpu_channel_flush_macro(Gpu_Channel *channel, const Gpu_Memory *memory);
 
 #endif /* SWITCH_GPU_GPU_CHANNEL_H */

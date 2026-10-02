@@ -36,6 +36,7 @@
 #define GPU_BIG_PAGE_SIZE 0x20000u
 #define GPU_SMALL_PAGE_SIZE 0x1000u
 #define SUBMIT_FLAG_FENCE_GET (1u << 1)
+#define MAP_FLAG_MODIFY (1u << 8)
 
 /* GM20B (Tegra X1) facts returned by GET_CHARACTERISTICS. */
 #define GM20B_ARCH 0x120u
@@ -309,6 +310,17 @@ static uint32_t as_gpu_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
   case 0x06: { /* MAP_BUFFER_EX {flags, kind, handle, page_size io, buffer_offset, mapping_size, offset io} */
     const uint32_t flags = rd32(d), handle = rd32(d + 8);
     Nvmap_Handle *h = nvmap_of(s, handle);
+    if (flags & MAP_FLAG_MODIFY) {
+      /* Modify (flag 0x100, no handle): re-kind part of an existing mapping
+       * - e.g. deko3d marking image memory compressible. Kinds do not
+       * change how memory reads here, so the range just has to exist. */
+      const uint64_t va = rd64(d + 32), size = rd64(d + 24);
+      for (uint32_t i = 0; i < NVDRV_MAX_GPU_MAPPINGS; i++) {
+        const Gpu_Mapping *m = &s->mappings[i];
+        if (m->in_use && va >= m->gpu_va && va - m->gpu_va + size <= m->size) return NV_SUCCESS;
+      }
+      return NV_BAD_VALUE;
+    }
     if (!h) return NV_BAD_VALUE;
     uint64_t size = rd64(d + 24);
     if (size == 0) size = h->size;
@@ -570,7 +582,6 @@ static uint32_t run_ioctl(HLE_Context *c, Nvdrv_State *s, const IPC_Request *req
   (void)total;
   s->hle = c;
   const uint32_t error = dispatch_ioctl(s, f, request, s->ioctl_buffer);
-  log_debug("[nvdrv] ioctl dev %d req %08x -> %u", (int)f->device, request, error);
   if (dir & NV_IOC_READ) {
     const IPC_Buffer *out = out_buffer(req, 0);
     if (!out || out->size < size || !error_is_ok(vmm_write_block(c->vmm, out->gva, s->ioctl_buffer, size))) {

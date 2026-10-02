@@ -63,7 +63,18 @@
 #define DMA_SRC_HEIGHT (0x730u / 4u)
 #define DMA_SRC_ORIGIN (0x73Cu / 4u)
 
-/* B197 (word addresses). */
+/* B197 (word addresses; NVIDIA clb197.h byte offsets / 4). */
+#define M3D_LOAD_MME_INSTRUCTION_RAM_POINTER 0x45u
+#define M3D_LOAD_MME_INSTRUCTION_RAM 0x46u
+#define M3D_LOAD_MME_START_ADDRESS_RAM_POINTER 0x47u
+#define M3D_LOAD_MME_START_ADDRESS_RAM 0x48u
+#define M3D_CB_SELECTOR_SIZE 0x8E0u
+#define M3D_CB_SELECTOR_ADDRESS_HI 0x8E1u
+#define M3D_CB_SELECTOR_ADDRESS_LO 0x8E2u
+#define M3D_CB_LOAD_OFFSET 0x8E3u
+#define M3D_CB_LOAD_FIRST 0x8E4u
+#define M3D_CB_LOAD_LAST 0x8F3u
+#define M3D_MACRO_FIRST 0xE00u
 #define M3D_SYNCPT_ACTION 0xB2u
 #define M3D_REPORT_SEMAPHORE_A 0x6C0u
 #define M3D_REPORT_SEMAPHORE_B 0x6C1u
@@ -277,7 +288,206 @@ static void report_semaphore(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t op
   if (!mem->write(mem->user, va, release, (operation & M3D_REPORT_ONE_WORD) ? 4u : sizeof(release))) ch->faults++;
 }
 
+/* ------------------------------------------------------------------ */
+/* Macro Method Expander.                                              */
+/* ------------------------------------------------------------------ */
+
+#define MME_REGS 8u
+#define MME_STEP_LIMIT 0x100000u
+#define MME_OP_ALU 0u
+#define MME_OP_ADD_IMMEDIATE 1u
+#define MME_OP_MERGE 2u
+#define MME_OP_BFE_LSL_IMMEDIATE 3u
+#define MME_OP_BFE_LSL_REGISTER 4u
+#define MME_OP_STATE 5u
+#define MME_OP_BRANCH 7u
+#define MME_METHOD_ADDRESS_MASK 0xFFFu
+#define MME_METHOD_INCREMENT_SHIFT 12u
+#define MME_METHOD_INCREMENT_MASK 0x3Fu
+
+typedef struct Mme_Run {
+  uint32_t r[MME_REGS]; /* r[0] reads as zero */
+  uint32_t carry;
+  uint32_t method;      /* word address of the next emit */
+  uint32_t increment;
+  bool has_method;
+  const uint32_t *params;
+  uint32_t param_count, param_next;
+} Mme_Run;
+
+static void engine3d_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t method, uint32_t data);
+
+static uint32_t mme_fetch(Mme_Run *m) { return m->param_next < m->param_count ? m->params[m->param_next++] : 0u; }
+
+static void mme_store(Mme_Run *m, uint32_t reg, uint32_t value) {
+  if (reg) m->r[reg] = value;
+}
+
+static uint32_t mme_mask(uint32_t size) { return size >= 32u ? 0xFFFFFFFFu : (1u << size) - 1u; }
+
+static uint32_t mme_bfe_lsl(uint32_t value, uint32_t src_bit, uint32_t dst_bit, uint32_t size) {
+  if (src_bit > 31u || dst_bit > 31u) return 0;
+  return ((value >> src_bit) & mme_mask(size)) << dst_bit;
+}
+
+static int32_t mme_immediate(uint32_t insn) { return (int32_t)(insn >> 14) << 14 >> 14; } /* 18-bit signed */
+
+/* The non-branch operations' result. */
+static uint32_t mme_evaluate(Gpu_Channel *ch, Mme_Run *m, uint32_t insn) {
+  const uint32_t x = m->r[(insn >> 11) & 7u], y = m->r[(insn >> 14) & 7u];
+  const uint32_t src_bit = (insn >> 17) & 0x1Fu, size = (insn >> 22) & 0x1Fu, dst_bit = (insn >> 27) & 0x1Fu;
+  switch (insn & 7u) {
+  case MME_OP_ALU: {
+    uint32_t result = 0;
+    switch ((insn >> 17) & 0x1Fu) {
+    case 0: result = x + y; m->carry = result < x; break;                 /* ADD */
+    case 1: result = x + y + m->carry; m->carry = result < x; break;      /* ADDC */
+    case 2: result = x - y; m->carry = result > x; break;                 /* SUB */
+    case 3: result = x - y - m->carry; m->carry = result > x; break;      /* SUBB */
+    case 8: result = x ^ y; break;
+    case 9: result = x | y; break;
+    case 10: result = x & y; break;
+    case 11: result = x & ~y; break;
+    case 12: result = ~(x & y); break;
+    default: ch->mme_faults++; break;
+    }
+    return result;
+  }
+  case MME_OP_ADD_IMMEDIATE: return x + (uint32_t)mme_immediate(insn);
+  case MME_OP_MERGE: return (x & ~(mme_mask(size) << dst_bit)) | (((y >> src_bit) & mme_mask(size)) << dst_bit);
+  case MME_OP_BFE_LSL_IMMEDIATE: return mme_bfe_lsl(y, x, dst_bit, size);
+  case MME_OP_BFE_LSL_REGISTER: return mme_bfe_lsl(y, src_bit, x, size);
+  case MME_OP_STATE: return ch->engine3d[(x + (uint32_t)mme_immediate(insn)) & (GPU_3D_REGISTER_WORDS - 1u)];
+  default: ch->mme_faults++; return 0;
+  }
+}
+
+static void mme_set_method(Mme_Run *m, uint32_t value) {
+  m->method = value & MME_METHOD_ADDRESS_MASK;
+  m->increment = (value >> MME_METHOD_INCREMENT_SHIFT) & MME_METHOD_INCREMENT_MASK;
+  m->has_method = true;
+}
+
+static void mme_emit(Gpu_Channel *ch, const Gpu_Memory *mem, Mme_Run *m, uint32_t value) {
+  if (!m->has_method) return;
+  engine3d_method(ch, mem, m->method, value);
+  m->method = (m->method + m->increment) & MME_METHOD_ADDRESS_MASK;
+}
+
+/* One instruction; returns the branch target (or -1). */
+static int32_t mme_step(Gpu_Channel *ch, const Gpu_Memory *mem, Mme_Run *m, uint32_t insn, uint32_t ip) {
+  if ((insn & 7u) == MME_OP_BRANCH) {
+    const uint32_t value = m->r[(insn >> 11) & 7u];
+    const bool not_zero = (insn >> 4) & 1u;
+    if ((value != 0) == not_zero) return (int32_t)ip + mme_immediate(insn);
+    return -1;
+  }
+  const uint32_t result = mme_evaluate(ch, m, insn), dst = (insn >> 8) & 7u;
+  switch ((insn >> 4) & 7u) {
+  case 0: mme_store(m, dst, mme_fetch(m)); break;                                     /* fetch */
+  case 1: mme_store(m, dst, result); break;                                           /* move */
+  case 2: mme_store(m, dst, result); mme_set_method(m, result); break;                /* move, set method */
+  case 3: mme_store(m, dst, mme_fetch(m)); mme_emit(ch, mem, m, result); break;       /* fetch, send */
+  case 4: mme_store(m, dst, result); mme_emit(ch, mem, m, result); break;             /* move, send */
+  case 5: mme_store(m, dst, mme_fetch(m)); mme_set_method(m, result); break;          /* fetch, set method */
+  case 6: mme_store(m, dst, result); mme_set_method(m, result); mme_emit(ch, mem, m, mme_fetch(m)); break;
+  default:                                                                            /* set method, send bits */
+    mme_store(m, dst, result);
+    mme_set_method(m, result);
+    mme_emit(ch, mem, m, (result >> MME_METHOD_INCREMENT_SHIFT) & MME_METHOD_INCREMENT_MASK);
+    break;
+  }
+  return -1;
+}
+
+/* Runs macro `macro` with its parameters: r1 starts as the first, the
+ * rest are fetched in order. Branches have a delay slot unless marked
+ * no-delay; an exit executes the next instruction before stopping. */
+static void mme_run(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t macro, const uint32_t *params, uint32_t count) {
+  Mme_Run m;
+  memset(&m, 0, sizeof(m));
+  m.params = params;
+  m.param_count = count;
+  m.r[1] = mme_fetch(&m);
+  uint32_t ip = ch->mme_start[macro % GPU_MME_MACROS];
+  int32_t pending_target = -1; /* a delayed branch, taken after the slot */
+  bool exiting = false;
+  ch->mme_runs++;
+  for (uint32_t steps = 0; steps < MME_STEP_LIMIT; steps++) {
+    if (ip >= GPU_MME_CODE_WORDS) break;
+    const uint32_t insn = ch->mme_code[ip];
+    const bool end = (insn >> 7) & 1u, is_branch = (insn & 7u) == MME_OP_BRANCH;
+    const int32_t target = mme_step(ch, mem, &m, insn, ip);
+    if (exiting) return; /* that was the exit's delay slot */
+    uint32_t next = ip + 1u;
+    if (pending_target >= 0) { /* this instruction was a branch's delay slot */
+      next = (uint32_t)pending_target;
+      pending_target = -1;
+    }
+    if (target >= 0) {
+      if ((insn >> 5) & 1u) next = (uint32_t)target; /* no delay slot */
+      else pending_target = target;
+    }
+    /* An exit flag on a delayed branch (taken or not) is ignored. */
+    const bool delayed_branch = is_branch && !((insn >> 5) & 1u);
+    if (end && !delayed_branch) exiting = true;
+    ip = next;
+  }
+  ch->mme_faults++;
+}
+
+void gpu_channel_flush_macro(Gpu_Channel *ch, const Gpu_Memory *mem) {
+  if (!ch->mme_pending) return;
+  ch->mme_pending = false;
+  mme_run(ch, mem, ch->mme_macro, ch->mme_params, ch->mme_param_count);
+}
+
+/* CALL_MME_MACRO(j) starts collecting, CALL_MME_DATA(j) appends. */
+static void macro_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t method, uint32_t data) {
+  const uint32_t macro = (method - M3D_MACRO_FIRST) >> 1;
+  if (((method - M3D_MACRO_FIRST) & 1u) == 0) {
+    gpu_channel_flush_macro(ch, mem);
+    ch->mme_pending = true;
+    ch->mme_macro = macro;
+    ch->mme_param_count = 0;
+  } else if (!ch->mme_pending || ch->mme_macro != macro) {
+    return; /* data without its call */
+  }
+  if (ch->mme_param_count < GPU_MME_MAX_PARAMS) ch->mme_params[ch->mme_param_count++] = data;
+  else ch->mme_faults++;
+}
+
+/* LOAD_CONSTANT_BUFFER(i): a word into the selected buffer at the load
+ * offset, which then advances. */
+static void constant_buffer_load(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t data) {
+  const uint32_t offset = ch->engine3d[M3D_CB_LOAD_OFFSET];
+  if (offset + 4u <= ch->engine3d[M3D_CB_SELECTOR_SIZE]) {
+    const uint64_t va = addr40(ch->engine3d[M3D_CB_SELECTOR_ADDRESS_HI], ch->engine3d[M3D_CB_SELECTOR_ADDRESS_LO]);
+    if (!mem->write(mem->user, va + offset, &data, sizeof(data))) ch->faults++;
+  }
+  ch->engine3d[M3D_CB_LOAD_OFFSET] = offset + 4u;
+}
+
 static void engine3d_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t method, uint32_t data) {
+  method &= GPU_3D_REGISTER_WORDS - 1u;
+  if (method >= M3D_MACRO_FIRST) {
+    macro_method(ch, mem, method, data);
+    return;
+  }
+  if (method >= M3D_CB_LOAD_FIRST && method <= M3D_CB_LOAD_LAST) {
+    constant_buffer_load(ch, mem, data);
+    return;
+  }
+  if (method == M3D_LOAD_MME_INSTRUCTION_RAM) {
+    const uint32_t at = ch->engine3d[M3D_LOAD_MME_INSTRUCTION_RAM_POINTER]++;
+    if (at < GPU_MME_CODE_WORDS) ch->mme_code[at] = data;
+    return;
+  }
+  if (method == M3D_LOAD_MME_START_ADDRESS_RAM) {
+    const uint32_t at = ch->engine3d[M3D_LOAD_MME_START_ADDRESS_RAM_POINTER]++;
+    if (at < GPU_MME_MACROS) ch->mme_start[at] = data;
+    return;
+  }
   ch->engine3d[method] = data;
   if (method == M3D_SYNCPT_ACTION) {
     if ((data & M3D_SYNCPT_INCREMENT) && mem->syncpoint_increment) mem->syncpoint_increment(mem->user, M3D_SYNCPT_ID(data));
@@ -301,6 +511,8 @@ void gpu_channel_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t subchan
     return;
   }
   if (ch->subchannel_class[subchannel] == GPU_CLASS_3D && method < GPU_3D_REGISTER_WORDS) {
+    /* Any method that is not this call's data ends the call. */
+    if (ch->mme_pending && method != M3D_MACRO_FIRST + 2u * ch->mme_macro + 1u) gpu_channel_flush_macro(ch, mem);
     engine3d_method(ch, mem, method, data);
     return;
   }
@@ -356,4 +568,5 @@ void gpu_channel_submit(Gpu_Channel *ch, const Gpu_Memory *mem, const uint64_t *
       at += n;
     }
   }
+  gpu_channel_flush_macro(ch, mem);
 }

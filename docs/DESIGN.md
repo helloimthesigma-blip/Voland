@@ -2409,9 +2409,15 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.45.0*
+*Document version: 3.46.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.45 → v3.46 (summary)
+
+- **GPU (§13):** `gpu_channel` runs the Fermi macro method expander (MME): macro upload (LOAD_MME_INSTRUCTION/START_ADDRESS RAM), calls at 0xE00+2j with parameters at +1, an interpreter with branch delay slots and all eight assign/send modes; pending calls flush when another method arrives and at the end of each submission. The 3D register file is 0x1000 words. Constant-buffer loads (CB selector/offset/data 0x8E0-0x8F3) write through to guest memory. nvhost-as MAP_BUFFER_EX accepts the modify flag inside an existing mapping.
+- **Services (§12):** `ssl`/`ssl:s` - contexts can be created and configured; connections fail "not connected" (offline, §1.6, §20). `csrng` returns a deterministic splitmix64 stream (reproducible runs).
+- **Tests:** `gpu_channel_test` gains MME upload/call/branch/delay-slot cases.
 
 ### Changelog v3.44 → v3.45 (summary)
 

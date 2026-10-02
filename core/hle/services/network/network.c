@@ -173,12 +173,69 @@ static const Service_Command k_request_commands[] = {
     {19, service_cmd_ok, "SetRequirementByRevision_stub"},
 };
 
+static HLE_ServiceResult cmd_ssl_create_context(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                                IPC_Response *res) {
+  (void)c;
+  (void)req;
+  (void)ipc_response_push_object(res, &state_of(self)->ssl_context, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_ssl_create_connection(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                                   IPC_Response *res) {
+  (void)c;
+  (void)req;
+  (void)ipc_response_push_object(res, &state_of(self)->ssl_connection, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static const Service_Command k_ssl_commands[] = {
+    {0, cmd_ssl_create_context, "CreateContext"},
+    {3, service_cmd_out_u8_false, "GetCertificateBufSize"},
+    {5, service_cmd_ok, "SetInterfaceVersion"},
+    {6, service_cmd_ok, "FlushSessionCache_stub"},
+    {7, service_cmd_ok, "SetDebugOption_stub"},
+    {8, service_cmd_out_u8_false, "GetDebugOption"},
+};
+
+static const Service_Command k_ssl_context_commands[] = {
+    {0, service_cmd_ok, "SetOption_stub"},
+    {1, service_cmd_out_u8_false, "GetOption"},
+    {2, cmd_ssl_create_connection, "CreateConnection"},
+    {3, service_cmd_out_u8_false, "GetConnectionCount"},
+    {4, service_cmd_out_u64_zero, "ImportServerPki"},
+    {5, service_cmd_out_u64_zero, "ImportClientPki"},
+    {6, service_cmd_ok, "RemoveServerPki"},
+    {7, service_cmd_ok, "RemoveClientPki"},
+    {8, service_cmd_out_u64_zero, "RegisterInternalPki"},
+    {9, service_cmd_ok, "AddPolicyOid_stub"},
+    {10, service_cmd_out_u64_zero, "ImportCrl"},
+    {11, service_cmd_ok, "RemoveCrl"},
+};
+
+static const Service_Command k_ssl_connection_commands[] = {
+    {0, service_cmd_ok, "SetSocketDescriptor_stub"},
+    {1, service_cmd_ok, "SetHostName_stub"},
+    {2, service_cmd_ok, "SetVerifyOption_stub"},
+    {3, service_cmd_ok, "SetIoMode_stub"},
+    {8, cmd_not_connected, "DoHandshake"},
+    {9, cmd_not_connected, "DoHandshakeGetServerCert"},
+    {10, cmd_not_connected, "Read"},
+    {11, cmd_not_connected, "Write"},
+    {12, cmd_not_connected, "Pending"},
+    {13, cmd_not_connected, "Peek"},
+    {14, cmd_not_connected, "Poll"},
+};
+
 void network_init(Network_State *s) {
   memset(s, 0, sizeof(*s));
   s->bsd = SERVICE_INTERFACE("bsd:u", k_bsd_commands, 0, s);
   s->nifm = SERVICE_INTERFACE("nifm:u", k_nifm_commands, 0, s);
   s->general_service = SERVICE_INTERFACE("IGeneralService", k_general_service_commands, 0, s);
   s->request = SERVICE_INTERFACE("IRequest", k_request_commands, 0, s);
+  s->ssl = SERVICE_INTERFACE("ssl", k_ssl_commands, 0, s);
+  s->ssl_context = SERVICE_INTERFACE("ISslContext", k_ssl_context_commands, 0, s);
+  s->ssl_connection = SERVICE_INTERFACE("ISslConnection", k_ssl_connection_commands, 0, s);
 }
 
 Error network_register(Network_State *s, SM_Registry *registry) {
@@ -192,5 +249,7 @@ Error network_register(Network_State *s, SM_Registry *registry) {
     const Error err = sm_registry_add(registry, k_nifm[i], &s->nifm);
     if (!error_is_ok(err)) return err;
   }
-  return OK;
+  Error err = sm_registry_add(registry, "ssl", &s->ssl);
+  if (error_is_ok(err)) err = sm_registry_add(registry, "ssl:s", &s->ssl);
+  return err;
 }

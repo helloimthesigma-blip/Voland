@@ -13,6 +13,9 @@
  *        4 CreateRequest -> IRequest (state Free, result NotConnected),
  *        12/15/18 address/status queries -> NotConnected, 17/20/21/22
  *        "enabled/accepted" queries -> false, 23/24 sleep/wake.
+ *   ssl: 0 CreateContext -> ISslContext (options, PKI imports accepted;
+ *        CreateConnection -> ISslConnection whose I/O fails "not
+ *        connected"), 5 SetInterfaceVersion and the other setup calls.
  */
 #ifndef SWITCH_HLE_SERVICES_NETWORK_NETWORK_H
 #define SWITCH_HLE_SERVICES_NETWORK_NETWORK_H
@@ -31,6 +34,9 @@ typedef struct Network_State {
   Service_Interface nifm;
   Service_Interface general_service;
   Service_Interface request;
+  Service_Interface ssl;
+  Service_Interface ssl_context;
+  Service_Interface ssl_connection;
   Kernel_Event *request_event;
 } Network_State;
 

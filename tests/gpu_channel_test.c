@@ -49,6 +49,11 @@ static void inc(uint32_t sub, uint32_t method, const uint32_t *data, uint32_t n)
 }
 static void one(uint32_t sub, uint32_t method, uint32_t data) { inc(sub, method, &data, 1); }
 static void imm(uint32_t sub, uint32_t method, uint32_t data) { g_pb[g_pb_len++] = header(4, sub, method, data); }
+/* Non-incrementing: every word to the same method (upload ports). */
+static void port(uint32_t sub, uint32_t method, const uint32_t *data, uint32_t n) {
+  g_pb[g_pb_len++] = header(3, sub, method, n);
+  for (uint32_t i = 0; i < n; i++) g_pb[g_pb_len++] = data[i];
+}
 
 #define PB_VA (MEM_BASE + 0x70000u)
 static void submit(void) {
@@ -195,11 +200,96 @@ static void test_3d_sync(void) {
   CHECK(g_channel.engine3d[0x35E] == 1 && g_channel.ignored_methods > ignored);
 }
 
+/* MME instruction encoders (Fermi macro ISA field layout). */
+static uint32_t mme_alu(uint32_t assign, uint32_t dst, uint32_t a, uint32_t b, uint32_t alu, bool end) {
+  return 0u | (assign << 4) | ((uint32_t)end << 7) | (dst << 8) | (a << 11) | (b << 14) | (alu << 17);
+}
+static uint32_t mme_addi(uint32_t assign, uint32_t dst, uint32_t a, int32_t imm, bool end) {
+  return 1u | (assign << 4) | ((uint32_t)end << 7) | (dst << 8) | (a << 11) | (((uint32_t)imm & 0x3FFFFu) << 14);
+}
+static uint32_t mme_branch(uint32_t a, bool not_zero, bool no_delay, int32_t offset, bool end) {
+  return 7u | ((uint32_t)not_zero << 4) | ((uint32_t)no_delay << 5) | ((uint32_t)end << 7) | (a << 11) |
+         (((uint32_t)offset & 0x3FFFFu) << 14);
+}
+static uint32_t mme_state(uint32_t assign, uint32_t dst, uint32_t a, int32_t imm) {
+  return 5u | (assign << 4) | (dst << 8) | (a << 11) | (((uint32_t)imm & 0x3FFFFu) << 14);
+}
+
+/* A macro that sums its parameters (count in r1) into SET_MME_SHADOW_SCRATCH(0)
+ * via the method port, and one that loops emitting an incrementing method. */
+static void test_mme(void) {
+  /* macro 0 at ip 0:
+   *   0: r2 = 0                     (move)
+   *   1: r3 = fetch                 loop: next param
+   *   2: r2 = r2 + r3               (alu add, move)
+   *   3: r1 = r1 + -1               (addi, move)
+   *   4: branch r1 != 0 -> -3 (to 1), delayed
+   *   5: (delay slot) r4 = r4 + 1   counts iterations
+   *   6: set method = 0xD00 (scratch 0): r5 = 0 + 0xD00, move+set method
+   *   7: send r2 (move+send), exit
+   *   8: send r4 (exit delay slot: emits to scratch 1)                    */
+  const uint32_t macro0[] = {
+      mme_addi(1, 2, 0, 0, false),
+      mme_alu(0, 3, 0, 0, 0, false),
+      mme_alu(1, 2, 2, 3, 0, false),
+      mme_addi(1, 1, 1, -1, false),
+      mme_branch(1, true, false, -3, false),
+      mme_addi(1, 4, 4, 1, false),
+      mme_addi(2, 5, 0, 0xD00 | (1 << 12), false),
+      mme_alu(4, 0, 2, 0, 0, true),
+      mme_alu(4, 0, 4, 0, 0, false),
+  };
+  /* macro 1 at ip 16: reads register 0xD00 via STATE and writes it + 1 to 0xD02. */
+  const uint32_t macro1[] = {
+      mme_addi(2, 6, 0, 0xD02, false),
+      mme_state(1, 7, 0, 0xD00),
+      mme_addi(4, 0, 7, 1, true),
+      mme_alu(1, 0, 0, 0, 0, false),
+  };
+  one(2, 0x45, 0);                                       /* instruction RAM pointer */
+  port(2, 0x46, macro0, sizeof(macro0) / 4);
+  one(2, 0x45, 16);
+  port(2, 0x46, macro1, sizeof(macro1) / 4);
+  one(2, 0x47, 0);                                       /* start address RAM */
+  const uint32_t starts[2] = {0, 16};
+  port(2, 0x48, starts, 2);
+  /* CALL_MME_MACRO(0) with count 4, then CALL_MME_DATA(0) x4 (increment-once header). */
+  g_pb[g_pb_len++] = (5u << 29) | (5u << 16) | (2u << 13) | 0xE00;
+  const uint32_t params[5] = {4, 10, 20, 30, 40};
+  for (int i = 0; i < 5; i++) g_pb[g_pb_len++] = params[i];
+  one(2, 0xE02, 0);                                      /* CALL_MME_MACRO(1): ends macro 0's data */
+  submit();                                              /* end of submission runs macro 1 */
+  CHECK(g_channel.engine3d[0xD00] == 100 && g_channel.engine3d[0xD01] == 4);
+  CHECK(g_channel.engine3d[0xD02] == 101 && g_channel.mme_runs == 2 && g_channel.mme_faults == 0);
+
+  /* A runaway macro (branch to itself, no exit) is cut off and counted. */
+  const uint32_t spin[] = {mme_branch(0, false, true, 0, false)};
+  one(2, 0x45, 32);
+  port(2, 0x46, spin, 1);
+  one(2, 0x47, 2);
+  one(2, 0x48, 32);
+  one(2, 0xE04, 0);
+  submit();
+  CHECK(g_channel.mme_faults == 1);
+
+  /* Constant buffer upload: selector (size, address), offset, data. */
+  const uint32_t cb[4] = {0x100, 0, (uint32_t)(MEM_BASE + 0x800), 8};
+  inc(2, 0x8E0, cb, 4);
+  const uint32_t words[3] = {0x11111111, 0x22222222, 0x33333333};
+  g_pb[g_pb_len++] = header(3, 2, 0x8E4, 3); /* non-incrementing: offset advances itself */
+  for (int i = 0; i < 3; i++) g_pb[g_pb_len++] = words[i];
+  submit();
+  uint32_t got[3];
+  memcpy(got, g_mem + 0x808, sizeof(got));
+  CHECK(got[0] == 0x11111111 && got[1] == 0x22222222 && got[2] == 0x33333333 && g_channel.engine3d[0x8E3] == 20);
+}
+
 int main(void) {
   test_headers_and_host();
   test_pitch_to_block_linear();
   test_linear_and_remap();
   test_3d_sync();
+  test_mme();
   printf("[gpu_channel_test] passed\n");
   return 0;
 }
