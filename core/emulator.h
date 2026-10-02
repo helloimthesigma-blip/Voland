@@ -193,16 +193,23 @@ void emulator_set_rtc(Emulator *emulator, int64_t unix_seconds);
 /* Seeds the emulated SD card (§15): creates `path` (absolute, '/'-
  * separated; missing parent directories are created) holding `size`
  * bytes, replacing an existing file. For platform importers (the CLI's
- * --sdmc, the web shell's drop target). */
+ * --sdmc, the web shell's drop target).
+ *
+ * Host paths: these calls, the manifest and emulator_sd_card_read_file
+ * also address guest save data as "save:SS:<128 hex digits>/path" - the
+ * save's space id and its 0x40-byte SaveDataAttribute - so a platform
+ * persists and restores saves exactly like SD files. Writing creates the
+ * save; reading never does. */
 Error emulator_sd_card_write_file(Emulator *emulator, const char *path, const void *data, uint64_t size);
 Error emulator_sd_card_create_directory(Emulator *emulator, const char *path);
 /* Empties the SD card (every file and directory). */
 Error emulator_sd_card_clear(Emulator *emulator);
 
 /* Guest-write mirroring (§15): a counter that changes whenever any
- * emulated filesystem changes, and a manifest of the SD card's files -
- * one "version size path\n" line each (the loaded program's own copy is
- * left out) - so a host can persist what changed. Returns the bytes the
+ * emulated filesystem changes, and a manifest of the SD card's and every
+ * save's files - one "version size path\n" line each, saves under their
+ * "save:" host paths (the loaded program's own copy is left out) - so a
+ * host can persist what changed. Returns the bytes the
  * manifest needs; it is written only if that fits in `max`. */
 uint64_t emulator_sd_card_generation(const Emulator *emulator);
 uint64_t emulator_sd_card_manifest(const Emulator *emulator, char *out, uint64_t max);

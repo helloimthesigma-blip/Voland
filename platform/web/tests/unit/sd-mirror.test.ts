@@ -6,7 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { diffManifests, parseManifest } from "../../workers/sd-persistence.ts";
+import { diffManifests, parseManifest, savePathFromStored, storedLocation } from "../../workers/sd-persistence.ts";
 
 test("manifest lines parse, paths may contain spaces", () => {
   const m = parseManifest("3 120 /switch/app.nro\n1 5 /config/my app/settings.ini\n");
@@ -27,4 +27,18 @@ test("an unchanged manifest needs nothing", () => {
   const m = parseManifest("1 10 /a\n");
   const diff = diffManifests(m, parseManifest("1 10 /a\n"));
   assert.equal(diff.changed.length + diff.removed.length, 0);
+});
+
+test("save paths map to their own OPFS directory and back", () => {
+  const key = "a5".padEnd(128, "0");
+  const path = `save:03:${key}/progress/slot 1.dat`;
+  const location = storedLocation(path);
+  assert.deepEqual(location, { directory: "saves", parts: [`03-${key}`, "progress", "slot 1.dat"] });
+  assert.equal(savePathFromStored(location?.parts ?? []), path);
+  assert.deepEqual(storedLocation("/switch/app.nro"), { directory: "sdmc", parts: ["switch", "app.nro"] });
+  assert.equal(storedLocation("save:zz:00/x"), null);
+  assert.equal(savePathFromStored(["not-a-save", "x"]), null);
+  assert.equal(savePathFromStored([`03-${key}`]), null);
+  // Save manifest lines parse like SD ones.
+  assert.equal(parseManifest(`2 4 ${path}\n`).get(path), "2 4");
 });

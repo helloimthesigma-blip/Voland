@@ -631,20 +631,67 @@ static Error sd_result(uint32_t rc, const char *what) {
   return rc ? ERR(rc == FS_RESULT_USABLE_SPACE_NOT_ENOUGH ? RESULT_OUT_OF_MEMORY : RESULT_INVALID_ARGUMENT, what) : OK;
 }
 
-Error emulator_sd_card_create_directory(Emulator* emulator, const char* path) {
-  if (!emulator || !path || !emulator->ramfs_ready) return ERR(RESULT_INVALID_ARGUMENT, "sd card unavailable");
+/* Host paths (§15): "/..." is the SD card; "save:SS:<128 hex>/..." is
+ * the save with space SS and that SaveDataAttribute (created when
+ * `create`). `*rest` is the path inside the chosen root. */
+#define SAVE_PATH_PREFIX "save:"
+#define SAVE_PATH_PREFIX_BYTES 5u
+#define SAVE_PATH_HEADER_BYTES (SAVE_PATH_PREFIX_BYTES + 3u + 2u * FS_SAVE_ATTRIBUTE_BYTES) /* "save:SS:" + key */
+
+static int hex_digit(char c) {
+  if (c >= '0' && c <= '9') return c - '0';
+  if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+  if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+  return -1;
+}
+
+static bool parse_hex_bytes(const char* text, uint8_t* out, size_t count) {
+  for (size_t i = 0; i < count; i++) {
+    const int hi = hex_digit(text[2u * i]), lo = hex_digit(text[2u * i + 1u]);
+    if (hi < 0 || lo < 0) return false;
+    out[i] = (uint8_t)((hi << 4) | lo);
+  }
+  return true;
+}
+
+static uint32_t host_root(Emulator* emulator, const char* path, bool create, uint32_t* root, const char** rest) {
+  if (strncmp(path, SAVE_PATH_PREFIX, SAVE_PATH_PREFIX_BYTES) != 0) {
+    *root = emulator->fs.sd_root;
+    *rest = path;
+    return 0;
+  }
+  uint8_t space = 0;
+  uint8_t key[FS_SAVE_ATTRIBUTE_BYTES];
+  const char* p = path + SAVE_PATH_PREFIX_BYTES;
+  if (strlen(path) < SAVE_PATH_HEADER_BYTES || !parse_hex_bytes(p, &space, 1) || p[2] != ':' ||
+      !parse_hex_bytes(p + 3, key, sizeof(key)) || (path[SAVE_PATH_HEADER_BYTES] != '/' && path[SAVE_PATH_HEADER_BYTES]))
+    return FS_RESULT_PATH_NOT_FOUND;
+  *rest = path[SAVE_PATH_HEADER_BYTES] ? path + SAVE_PATH_HEADER_BYTES : "/";
+  return fs_save_root(&emulator->fs, space, key, create, root);
+}
+
+/* mkdir -p: every prefix ending at a '/', then the whole path. */
+static uint32_t create_directories(Emulator* emulator, uint32_t root, const char* path) {
   char partial[FS_MAX_PATH_BYTES];
   const size_t length = strlen(path);
-  if (length >= sizeof(partial)) return ERR(RESULT_INVALID_ARGUMENT, "sd card path too long");
-  /* mkdir -p: every prefix ending at a '/', then the whole path. */
+  if (length >= sizeof(partial)) return FS_RESULT_PATH_NOT_FOUND;
   for (size_t i = 1; i <= length; i++) {
     if (i < length && path[i] != '/') continue;
     memcpy(partial, path, i);
     partial[i] = '\0';
-    const uint32_t rc = ramfs_create_directory(&emulator->ramfs, emulator->fs.sd_root, partial);
-    if (rc && rc != FS_RESULT_PATH_ALREADY_EXISTS) return sd_result(rc, "sd card: create directory failed");
+    const uint32_t rc = ramfs_create_directory(&emulator->ramfs, root, partial);
+    if (rc && rc != FS_RESULT_PATH_ALREADY_EXISTS) return rc;
   }
-  return OK;
+  return 0;
+}
+
+Error emulator_sd_card_create_directory(Emulator* emulator, const char* path) {
+  if (!emulator || !path || !emulator->ramfs_ready) return ERR(RESULT_INVALID_ARGUMENT, "sd card unavailable");
+  uint32_t root = 0;
+  const char* rest = NULL;
+  uint32_t rc = host_root(emulator, path, true, &root, &rest);
+  if (!rc && strcmp(rest, "/") != 0) rc = create_directories(emulator, root, rest);
+  return rc ? sd_result(rc, "sd card: create directory failed") : OK;
 }
 
 Error emulator_sd_card_clear(Emulator* emulator) {
@@ -655,20 +702,24 @@ Error emulator_sd_card_clear(Emulator* emulator) {
 
 Error emulator_sd_card_write_file(Emulator* emulator, const char* path, const void* data, uint64_t size) {
   if (!emulator || !path || !emulator->ramfs_ready) return ERR(RESULT_INVALID_ARGUMENT, "sd card unavailable");
-  const char* slash = strrchr(path, '/');
-  if (slash && slash != path) {
+  uint32_t root = 0;
+  const char* rest = NULL;
+  uint32_t rc = host_root(emulator, path, true, &root, &rest);
+  if (rc) return sd_result(rc, "sd card: bad save path");
+  const char* slash = strrchr(rest, '/');
+  if (slash && slash != rest) {
     char parent[FS_MAX_PATH_BYTES];
-    const size_t length = (size_t)(slash - path);
+    const size_t length = (size_t)(slash - rest);
     if (length >= sizeof(parent)) return ERR(RESULT_INVALID_ARGUMENT, "sd card path too long");
-    memcpy(parent, path, length);
+    memcpy(parent, rest, length);
     parent[length] = '\0';
-    const Error err = emulator_sd_card_create_directory(emulator, parent);
-    if (!error_is_ok(err)) return err;
+    rc = create_directories(emulator, root, parent);
+    if (rc) return sd_result(rc, "sd card: create directory failed");
   }
-  (void)ramfs_delete_file(&emulator->ramfs, emulator->fs.sd_root, path);
-  uint32_t rc = ramfs_create_file(&emulator->ramfs, emulator->fs.sd_root, path, 0);
+  (void)ramfs_delete_file(&emulator->ramfs, root, rest);
+  rc = ramfs_create_file(&emulator->ramfs, root, rest, 0);
   uint32_t node = 0;
-  if (!rc) rc = ramfs_lookup(&emulator->ramfs, emulator->fs.sd_root, path, &node);
+  if (!rc) rc = ramfs_lookup(&emulator->ramfs, root, rest, &node);
   if (!rc) rc = ramfs_write(&emulator->ramfs, node, 0, data, size);
   return sd_result(rc, "sd card: write failed");
 }
@@ -691,18 +742,20 @@ uint64_t emulator_sd_card_generation(const Emulator* emulator) {
 
 #define SD_MANIFEST_DEPTH 64u
 
-uint64_t emulator_sd_card_manifest(const Emulator* emulator, char* out, uint64_t max) {
-  if (!emulator || !emulator->ramfs_ready) return 0;
-  const Ramfs_Pool* pool = &emulator->ramfs;
-  uint64_t need = 0;
-  /* Depth-first over the SD tree with an explicit stack of directories. */
+/* Appends one manifest line per file under `root`, paths prefixed with
+ * `prefix`; `skip` (a full path) is left out. */
+static uint64_t manifest_tree(const Ramfs_Pool* pool, uint32_t root, const char* prefix, const char* skip, char* out,
+                              uint64_t max, uint64_t need) {
+  /* Depth-first with an explicit stack of directories. */
   uint32_t stack[SD_MANIFEST_DEPTH];
   size_t prefix_length[SD_MANIFEST_DEPTH];
-  char path[FS_MAX_PATH_BYTES];
+  char path[FS_MAX_PATH_BYTES + SAVE_PATH_HEADER_BYTES];
+  const size_t start = strlen(prefix);
+  if (start >= sizeof(path)) return need;
+  memcpy(path, prefix, start + 1u);
   uint32_t depth = 0;
-  stack[depth] = pool->nodes[emulator->fs.sd_root].first_child;
-  prefix_length[depth] = 0;
-  path[0] = '\0';
+  stack[depth] = pool->nodes[root].first_child;
+  prefix_length[depth] = start;
   while (true) {
     const uint32_t node = stack[depth];
     if (node == RAMFS_NO_NODE) {
@@ -728,8 +781,8 @@ uint64_t emulator_sd_card_manifest(const Emulator* emulator, char* out, uint64_t
         prefix_length[depth] = base + 1u + name_length;
         continue;
       }
-    } else if (strcmp(path, emulator->program_path) != 0) {
-      char line[FS_MAX_PATH_BYTES + 48];
+    } else if (!skip || strcmp(path, skip) != 0) {
+      char line[sizeof(path) + 48];
       const int length = snprintf(line, sizeof(line), "%u %llu %s\n", n->version, (unsigned long long)n->size, path);
       if (length > 0) {
         if (out && need + (uint64_t)length <= max) memcpy(out + need, line, (size_t)length);
@@ -742,10 +795,27 @@ uint64_t emulator_sd_card_manifest(const Emulator* emulator, char* out, uint64_t
   return need;
 }
 
+uint64_t emulator_sd_card_manifest(const Emulator* emulator, char* out, uint64_t max) {
+  if (!emulator || !emulator->ramfs_ready) return 0;
+  uint64_t need = manifest_tree(&emulator->ramfs, emulator->fs.sd_root, "", emulator->program_path, out, max, 0);
+  for (uint32_t i = 0; i < FS_MAX_SAVES; i++) {
+    const Fs_Save* save = &emulator->fs.saves[i];
+    if (!save->used) continue;
+    char prefix[SAVE_PATH_HEADER_BYTES + 1u];
+    int at = snprintf(prefix, sizeof(prefix), SAVE_PATH_PREFIX "%02x:", save->space);
+    for (uint32_t b = 0; b < FS_SAVE_ATTRIBUTE_BYTES && at > 0; b++)
+      at += snprintf(prefix + at, sizeof(prefix) - (size_t)at, "%02x", save->key[b]);
+    need = manifest_tree(&emulator->ramfs, save->root, prefix, NULL, out, max, need);
+  }
+  return need;
+}
+
 int64_t emulator_sd_card_read_file(Emulator* emulator, const char* path, void* out, uint64_t max) {
   if (!emulator || !path || !emulator->ramfs_ready) return -1;
-  uint32_t node = 0;
-  if (ramfs_lookup(&emulator->ramfs, emulator->fs.sd_root, path, &node) != 0 || emulator->ramfs.nodes[node].is_dir) return -1;
+  uint32_t root = 0, node = 0;
+  const char* rest = NULL;
+  if (host_root(emulator, path, false, &root, &rest) != 0) return -1;
+  if (ramfs_lookup(&emulator->ramfs, root, rest, &node) != 0 || emulator->ramfs.nodes[node].is_dir) return -1;
   const uint64_t size = emulator->ramfs.nodes[node].size;
   uint64_t read = 0;
   if (out && max) (void)ramfs_read(&emulator->ramfs, node, 0, out, size < max ? size : max, &read);

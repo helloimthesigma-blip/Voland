@@ -496,6 +496,38 @@ static void test_sd_manifest(void) {
   char data[16] = {0};
   CHECK(emulator_sd_card_read_file(&g_emu, "/mirror/a.txt", data, sizeof(data)) == 6 && memcmp(data, "HELLO!", 6) == 0);
   CHECK(emulator_sd_card_read_file(&g_emu, "/mirror/missing", data, sizeof(data)) == -1);
+
+  /* Saves share the host file API under "save:SS:<attribute hex>/...":
+   * the manifest lists them, writes create the save, reads find it. */
+  char save_path[0x200];
+  char key_hex[2 * FS_SAVE_ATTRIBUTE_BYTES + 1];
+  memset(key_hex, '0', sizeof(key_hex) - 1u);
+  key_hex[sizeof(key_hex) - 1u] = '\0';
+  key_hex[0] = 'a';
+  key_hex[1] = '5'; /* attribute byte 0 = 0xA5 */
+  snprintf(save_path, sizeof(save_path), "save:03:%s/progress/slot1.dat", key_hex);
+  CHECK_OK(emulator_sd_card_write_file(&g_emu, save_path, "SAVE", 4));
+  uint8_t key[FS_SAVE_ATTRIBUTE_BYTES];
+  memset(key, 0, sizeof(key));
+  key[0] = 0xA5;
+  uint32_t root = 0, node = 0;
+  CHECK(fs_save_root(&g_emu.fs, 3, key, false, &root) == 0);
+  CHECK(ramfs_lookup(&g_emu.ramfs, root, "/progress/slot1.dat", &node) == 0 && g_emu.ramfs.nodes[node].size == 4);
+  const uint64_t need3 = emulator_sd_card_manifest(&g_emu, manifest, sizeof(manifest));
+  CHECK(need3 < sizeof(manifest));
+  manifest[need3] = '\0';
+  char expect[0x200];
+  snprintf(expect, sizeof(expect), " 4 %s\n", save_path);
+  CHECK(strstr(manifest, expect) != NULL);
+  memset(data, 0, sizeof(data));
+  CHECK(emulator_sd_card_read_file(&g_emu, save_path, data, sizeof(data)) == 4 && memcmp(data, "SAVE", 4) == 0);
+  /* Reads never create a save; malformed save paths are rejected. */
+  snprintf(save_path, sizeof(save_path), "save:04:%s/progress/slot1.dat", key_hex);
+  CHECK(emulator_sd_card_read_file(&g_emu, save_path, data, sizeof(data)) == -1);
+  CHECK(fs_save_root(&g_emu.fs, 4, key, false, &root) != 0);
+  CHECK(!error_is_ok(emulator_sd_card_write_file(&g_emu, "save:03:zz/x", "x", 1)));
+  snprintf(save_path, sizeof(save_path), "save:03:%sX", key_hex);
+  CHECK(!error_is_ok(emulator_sd_card_write_file(&g_emu, save_path, "x", 1)));
 }
 
 

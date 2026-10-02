@@ -6,7 +6,6 @@
 #include "common/log.h"
 #include "hle/services/service_util.h"
 
-#define FS_SAVE_ATTRIBUTE_BYTES 0x40u
 #define FS_TIMESTAMP_BYTES 0x20u
 #define FS_RANGE_INFO_BYTES 0x40u
 #define FS_ENTRY_TYPE_OFFSET 0x304u
@@ -66,6 +65,32 @@ static HLE_ServiceResult cmd_open_bis(HLE_Context *c, Service_Object *self, cons
   return HLE_RESULT_SUCCESS;
 }
 
+uint32_t fs_save_root(Fs_State *s, uint8_t space, const uint8_t key[FS_SAVE_ATTRIBUTE_BYTES], bool create,
+                      uint32_t *root) {
+  if (!s->pool) return FS_RESULT_TARGET_NOT_FOUND;
+  Fs_Save *free_slot = NULL;
+  for (uint32_t i = 0; i < FS_MAX_SAVES; i++) {
+    Fs_Save *save = &s->saves[i];
+    if (!save->used) {
+      if (!free_slot) free_slot = save;
+      continue;
+    }
+    if (save->space == space && memcmp(save->key, key, FS_SAVE_ATTRIBUTE_BYTES) == 0) {
+      *root = save->root;
+      return 0;
+    }
+  }
+  if (!create) return FS_RESULT_TARGET_NOT_FOUND;
+  if (!free_slot) return FS_RESULT_ALLOCATION_TABLE_FULL;
+  const uint32_t rc = ramfs_create_filesystem(s->pool, &free_slot->root);
+  if (rc) return rc;
+  free_slot->used = true;
+  free_slot->space = space;
+  memcpy(free_slot->key, key, FS_SAVE_ATTRIBUTE_BYTES);
+  *root = free_slot->root;
+  return 0;
+}
+
 /* {u8 space, pad[7], SaveDataAttribute attr (0x40)}: find or create. */
 static HLE_ServiceResult cmd_open_save_data(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                             IPC_Response *res) {
@@ -74,25 +99,10 @@ static HLE_ServiceResult cmd_open_save_data(HLE_Context *c, Service_Object *self
   if (!s->pool) return FS_RESULT_TARGET_NOT_FOUND;
   uint8_t in[8 + FS_SAVE_ATTRIBUTE_BYTES];
   if (!error_is_ok(ipc_request_read_bytes(req, 0, in, sizeof(in)))) return IPC_RESULT_SF_INVALID_IN_HEADER;
-  Fs_Save *free_slot = NULL;
-  for (uint32_t i = 0; i < FS_MAX_SAVES; i++) {
-    Fs_Save *save = &s->saves[i];
-    if (!save->used) {
-      if (!free_slot) free_slot = save;
-      continue;
-    }
-    if (save->space == in[0] && memcmp(save->key, in + 8, FS_SAVE_ATTRIBUTE_BYTES) == 0) {
-      (void)ipc_response_push_object(res, &s->filesystem, save->root);
-      return HLE_RESULT_SUCCESS;
-    }
-  }
-  if (!free_slot) return FS_RESULT_ALLOCATION_TABLE_FULL;
-  const uint32_t rc = ramfs_create_filesystem(s->pool, &free_slot->root);
+  uint32_t root = 0;
+  const uint32_t rc = fs_save_root(s, in[0], in + 8, true, &root);
   if (rc) return rc;
-  free_slot->used = true;
-  free_slot->space = in[0];
-  memcpy(free_slot->key, in + 8, FS_SAVE_ATTRIBUTE_BYTES);
-  (void)ipc_response_push_object(res, &s->filesystem, free_slot->root);
+  (void)ipc_response_push_object(res, &s->filesystem, root);
   return HLE_RESULT_SUCCESS;
 }
 

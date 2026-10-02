@@ -2425,9 +2425,14 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.56.0*
+*Document version: 3.57.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.56 → v3.57 (summary)
+
+- **Save data persists in the browser (§15).** The host file API (`emulator_sd_card_write_file` / `_read_file` / `_create_directory`) and the mirroring manifest also address guest saves, as `save:SS:<SaveDataAttribute hex>/path` - a name no SD path can take (SD paths start with '/'). The web worker's existing manifest diff therefore stores save writes too, under OPFS `saves/SS-<hex>/...` (no colons in OPFS names), and restores them at start-up before anything runs; writing a save path creates that save, so the title finds it with OpenSaveDataFileSystem. "Empty SD card" leaves saves alone. `fs_save_root` is the one lookup both fsp-srv and the host API use.
+- **Tests:** `services_test` (save paths through write/read/manifest, the guest-side root, reads never creating saves, malformed paths); unit `sd-mirror.test.ts` (OPFS mapping both ways).
 
 ### Changelog v3.55 → v3.56 (summary)
 

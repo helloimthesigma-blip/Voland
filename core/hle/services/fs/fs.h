@@ -62,10 +62,12 @@ typedef struct Fs_Open_Directory {
   uint32_t cursor; /* next child node to return, RAMFS_NO_NODE at the end */
 } Fs_Open_Directory;
 
+#define FS_SAVE_ATTRIBUTE_BYTES 0x40u
+
 typedef struct Fs_Save {
   bool used;
   uint8_t space;
-  uint8_t key[0x40]; /* SaveDataAttribute as sent */
+  uint8_t key[FS_SAVE_ATTRIBUTE_BYTES]; /* SaveDataAttribute as sent */
   uint32_t root;
 } Fs_Save;
 
@@ -97,5 +99,9 @@ void fs_init(Fs_State *state, Ramfs_Pool *pool);
 /* Per process: closes every open file/directory and sets the RomFS. */
 void fs_reset_process(Fs_State *state, const Byte_Source *romfs);
 Error fs_register(Fs_State *state, SM_Registry *registry);
+/* The ramfs root of the save (space, SaveDataAttribute); created when
+ * `create` and absent. 0 or an fs result (TargetNotFound, table full). */
+uint32_t fs_save_root(Fs_State *state, uint8_t space, const uint8_t key[FS_SAVE_ATTRIBUTE_BYTES], bool create,
+                      uint32_t *root);
 
 #endif /* SWITCH_HLE_SERVICES_FS_FS_H */
