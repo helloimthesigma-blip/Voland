@@ -2421,9 +2421,13 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.49.0*
+*Document version: 3.50.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.49 → v3.50 (summary)
+
+- **Storage (§15): what the guest writes to the SD card persists in the browser.** ramfs counts mutations (`generation`) and versions every file write; `emulator_sd_card_manifest` lists the SD card's files ("version size path"), `emulator_sd_card_read_file` reads one (FFI `_emulator_sd_generation_ffi` / `_manifest_ffi` / `_read_file_ffi`). The CPU worker baselines after restoring from OPFS and, every 3s when the generation moved, diffs manifests and stores or removes the changed files under OPFS `sdmc/` - homebrew settings, logs and SD saves now survive reloads. (Save-data filesystems for NCA titles are the next step of §25 Phase 6.) Tests: `services_test` (manifest, versions, reads), unit `sd-mirror.test.ts` (parse and diff).
 
 ### Changelog v3.48 → v3.49 (summary)
 

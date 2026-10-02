@@ -51,6 +51,9 @@ EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
 EXPORT void emulator_set_shared_font_ffi(uint64_t bytes, uint32_t size);
 EXPORT int emulator_sd_write_file_ffi(uint64_t path, uint64_t bytes, uint64_t size);
 EXPORT int emulator_sd_clear_ffi(void);
+EXPORT double emulator_sd_generation_ffi(void);
+EXPORT double emulator_sd_manifest_ffi(uint64_t out, double max);
+EXPORT double emulator_sd_read_file_ffi(uint64_t path, uint64_t out, double max);
 
 /* The Switch's handheld resolution. */
 #define BOOT_FRAME_WIDTH 1280u
@@ -289,6 +292,26 @@ EXPORT int emulator_sd_write_file_ffi(uint64_t path, uint64_t bytes, uint64_t si
                                                 (const void *)(uintptr_t)bytes, size);
   g_last_error_message = err.message;
   return (int)err.code;
+}
+
+/* SD change tracking for the host mirror (§15). Doubles: plain JS
+ * numbers under MEMORY64 (counts and sizes stay far below 2^53). */
+EXPORT double emulator_sd_generation_ffi(void)
+{
+  return g_initialised ? (double)emulator_sd_card_generation(&g_emulator) : 0.0;
+}
+
+EXPORT double emulator_sd_manifest_ffi(uint64_t out, double max)
+{
+  if (!g_initialised) return 0.0;
+  return (double)emulator_sd_card_manifest(&g_emulator, (char *)(uintptr_t)out, (uint64_t)max);
+}
+
+EXPORT double emulator_sd_read_file_ffi(uint64_t path, uint64_t out, double max)
+{
+  if (!g_initialised || !path) return -1.0;
+  return (double)emulator_sd_card_read_file(&g_emulator, (const char *)(uintptr_t)path, (void *)(uintptr_t)out,
+                                            (uint64_t)max);
 }
 
 /* Empties the SD card; returns a Result code. */

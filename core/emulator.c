@@ -671,6 +671,73 @@ Error emulator_sd_card_write_file(Emulator* emulator, const char* path, const vo
   return sd_result(rc, "sd card: write failed");
 }
 
+uint64_t emulator_sd_card_generation(const Emulator* emulator) {
+  return emulator && emulator->ramfs_ready ? emulator->ramfs.generation : 0;
+}
+
+#define SD_MANIFEST_DEPTH 64u
+
+uint64_t emulator_sd_card_manifest(const Emulator* emulator, char* out, uint64_t max) {
+  if (!emulator || !emulator->ramfs_ready) return 0;
+  const Ramfs_Pool* pool = &emulator->ramfs;
+  uint64_t need = 0;
+  /* Depth-first over the SD tree with an explicit stack of directories. */
+  uint32_t stack[SD_MANIFEST_DEPTH];
+  size_t prefix_length[SD_MANIFEST_DEPTH];
+  char path[FS_MAX_PATH_BYTES];
+  uint32_t depth = 0;
+  stack[depth] = pool->nodes[emulator->fs.sd_root].first_child;
+  prefix_length[depth] = 0;
+  path[0] = '\0';
+  while (true) {
+    const uint32_t node = stack[depth];
+    if (node == RAMFS_NO_NODE) {
+      if (depth == 0) break;
+      depth--;
+      path[prefix_length[depth]] = '\0';
+      stack[depth] = pool->nodes[stack[depth]].next_sibling;
+      continue;
+    }
+    const Ramfs_Node* n = &pool->nodes[node];
+    const size_t base = prefix_length[depth];
+    const size_t name_length = strlen(n->name);
+    if (base + 1u + name_length >= sizeof(path)) {
+      stack[depth] = n->next_sibling;
+      continue;
+    }
+    path[base] = '/';
+    memcpy(path + base + 1u, n->name, name_length + 1u);
+    if (n->is_dir) {
+      if (depth + 1u < SD_MANIFEST_DEPTH) {
+        depth++;
+        stack[depth] = n->first_child;
+        prefix_length[depth] = base + 1u + name_length;
+        continue;
+      }
+    } else if (strcmp(path, emulator->program_path) != 0) {
+      char line[FS_MAX_PATH_BYTES + 48];
+      const int length = snprintf(line, sizeof(line), "%u %llu %s\n", n->version, (unsigned long long)n->size, path);
+      if (length > 0) {
+        if (out && need + (uint64_t)length <= max) memcpy(out + need, line, (size_t)length);
+        need += (uint64_t)length;
+      }
+    }
+    path[base] = '\0';
+    stack[depth] = n->next_sibling;
+  }
+  return need;
+}
+
+int64_t emulator_sd_card_read_file(Emulator* emulator, const char* path, void* out, uint64_t max) {
+  if (!emulator || !path || !emulator->ramfs_ready) return -1;
+  uint32_t node = 0;
+  if (ramfs_lookup(&emulator->ramfs, emulator->fs.sd_root, path, &node) != 0 || emulator->ramfs.nodes[node].is_dir) return -1;
+  const uint64_t size = emulator->ramfs.nodes[node].size;
+  uint64_t read = 0;
+  if (out && max) (void)ramfs_read(&emulator->ramfs, node, 0, out, size < max ? size : max, &read);
+  return (int64_t)size;
+}
+
 void emulator_set_program_path(Emulator* emulator, const char* sd_path) {
   if (!emulator || !sd_path || !sd_path[0]) return;
   snprintf(emulator->program_path, sizeof(emulator->program_path), "%s%s", sd_path[0] == '/' ? "" : "/", sd_path);

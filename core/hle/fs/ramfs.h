@@ -58,6 +58,7 @@ typedef struct Ramfs_Node {
   uint32_t first_block;   /* files */
   uint64_t size;
   uint32_t open_count;    /* open IFile objects (deletion is refused while open) */
+  uint32_t version;       /* bumped on every content or size change (files) */
   char name[RAMFS_NAME_BYTES];
 } Ramfs_Node;
 
@@ -69,6 +70,7 @@ typedef struct Ramfs_Pool {
   uint32_t free_block_head;
   uint32_t free_block_count;
   Ramfs_Node *nodes; /* RAMFS_MAX_NODES, in the arena */
+  uint64_t generation; /* bumped by every mutation of any filesystem */
 } Ramfs_Pool;
 
 /* Reserves `capacity` bytes of data blocks. False if the arena fails. */

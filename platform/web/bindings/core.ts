@@ -45,6 +45,12 @@ export interface SwitchCoreExports {
   readonly _emulator_set_shared_font_ffi:  (bytes: bigint, size: number) => void;
   readonly _emulator_sd_write_file_ffi:    (path: bigint, bytes: bigint, size: bigint) => number; /* Result */
   readonly _emulator_sd_clear_ffi:         () => number; /* Result */
+  /* Guest-write mirroring (v3.50): the filesystem change counter, the SD
+   * manifest ("version size path\n" lines; returns the bytes needed) and
+   * a file read (returns the file's size, or -1). */
+  readonly _emulator_sd_generation_ffi: () => number;
+  readonly _emulator_sd_manifest_ffi:   (out: bigint, max: number) => number;
+  readonly _emulator_sd_read_file_ffi:  (path: bigint, out: bigint, max: number) => number;
   /* Emscripten's own wrappers: under MEMORY64 they exchange pointers
    * as JS numbers (unlike the uint64_t parameters above). */
   readonly _malloc: (size: number) => number;

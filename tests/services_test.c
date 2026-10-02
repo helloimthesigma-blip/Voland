@@ -468,6 +468,36 @@ static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
 static void putf(uint8_t *p, float v) { memcpy(p, &v, 4); }
 static void put64(uint8_t *p, uint64_t v) { memcpy(p, &v, 8); }
 
+
+/* Guest-write mirroring support (§15): the SD manifest lists files with a
+ * version that changes on every write, and the generation counter moves. */
+static void test_sd_manifest(void) {
+  CHECK_OK(emulator_sd_card_write_file(&g_emu, "/mirror/a.txt", "hello", 5));
+  CHECK_OK(emulator_sd_card_write_file(&g_emu, "/mirror/sub dir/b.bin", "xy", 2));
+  const uint64_t g0 = emulator_sd_card_generation(&g_emu);
+  static char manifest[0x4000];
+  const uint64_t need = emulator_sd_card_manifest(&g_emu, NULL, 0);
+  CHECK(need > 0 && need < sizeof(manifest));
+  CHECK(emulator_sd_card_manifest(&g_emu, manifest, sizeof(manifest)) == need);
+  manifest[need] = '\0';
+  CHECK(strstr(manifest, " 5 /mirror/a.txt\n") != NULL);
+  CHECK(strstr(manifest, " 2 /mirror/sub dir/b.bin\n") != NULL);
+  char before[64] = {0};
+  const char *line = strstr(manifest, "/mirror/a.txt");
+  const char *start = line;
+  while (start > manifest && start[-1] != '\n') start--;
+  memcpy(before, start, (size_t)(line - start));
+  /* Rewrite: the version (and generation) change. */
+  CHECK_OK(emulator_sd_card_write_file(&g_emu, "/mirror/a.txt", "HELLO!", 6));
+  CHECK(emulator_sd_card_generation(&g_emu) != g0);
+  const uint64_t need2 = emulator_sd_card_manifest(&g_emu, manifest, sizeof(manifest));
+  manifest[need2] = '\0';
+  CHECK(strstr(manifest, " 6 /mirror/a.txt\n") != NULL && strstr(manifest, before) == NULL);
+  char data[16] = {0};
+  CHECK(emulator_sd_card_read_file(&g_emu, "/mirror/a.txt", data, sizeof(data)) == 6 && memcmp(data, "HELLO!", 6) == 0);
+  CHECK(emulator_sd_card_read_file(&g_emu, "/mirror/missing", data, sizeof(data)) == -1);
+}
+
 static void test_audren(void) {
   const uint32_t manager = service("audren:u");
   /* AudioRendererParameter {48000, 240, mix buffers 2, submixes 0, voices 2,
@@ -699,6 +729,7 @@ int main(void) {
   test_set_apm_am();
   test_audout();
   test_audren();
+  test_sd_manifest();
   test_acc();
   emulator_destroy(&g_emu);
   printf("[services_test] passed\n");

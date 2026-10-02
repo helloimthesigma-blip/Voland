@@ -197,6 +197,16 @@ Error emulator_sd_card_create_directory(Emulator *emulator, const char *path);
 /* Empties the SD card (every file and directory). */
 Error emulator_sd_card_clear(Emulator *emulator);
 
+/* Guest-write mirroring (§15): a counter that changes whenever any
+ * emulated filesystem changes, and a manifest of the SD card's files -
+ * one "version size path\n" line each (the loaded program's own copy is
+ * left out) - so a host can persist what changed. Returns the bytes the
+ * manifest needs; it is written only if that fits in `max`. */
+uint64_t emulator_sd_card_generation(const Emulator *emulator);
+uint64_t emulator_sd_card_manifest(const Emulator *emulator, char *out, uint64_t max);
+/* Reads up to `max` bytes of an SD file; returns its size, or -1. */
+int64_t emulator_sd_card_read_file(Emulator *emulator, const char *path, void *out, uint64_t max);
+
 /* Where the next NRO loaded from the host appears on the SD card (and so
  * its argv[0], "sdmc:<path>"); default EMULATOR_DEFAULT_NRO_PATH. Platforms
  * pass "/" + the file's name. */

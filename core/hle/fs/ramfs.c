@@ -198,6 +198,7 @@ static uint32_t create_node(Ramfs_Pool *pool, uint32_t root, const char *path, b
 }
 
 uint32_t ramfs_create_file(Ramfs_Pool *pool, uint32_t root, const char *path, uint64_t size) {
+  pool->generation++;
   uint32_t node = 0;
   uint32_t rc = create_node(pool, root, path, false, &node);
   if (rc) return rc;
@@ -210,11 +211,13 @@ uint32_t ramfs_create_file(Ramfs_Pool *pool, uint32_t root, const char *path, ui
 }
 
 uint32_t ramfs_create_directory(Ramfs_Pool *pool, uint32_t root, const char *path) {
+  pool->generation++;
   uint32_t node = 0;
   return create_node(pool, root, path, true, &node);
 }
 
 uint32_t ramfs_delete_file(Ramfs_Pool *pool, uint32_t root, const char *path) {
+  pool->generation++;
   uint32_t node = 0;
   const uint32_t rc = ramfs_lookup(pool, root, path, &node);
   if (rc) return rc;
@@ -234,6 +237,7 @@ static bool subtree_has_open_files(const Ramfs_Pool *pool, uint32_t node) {
 }
 
 uint32_t ramfs_delete_directory(Ramfs_Pool *pool, uint32_t root, const char *path, bool recursive, bool clean_only) {
+  pool->generation++;
   uint32_t node = 0;
   const uint32_t rc = ramfs_lookup(pool, root, path, &node);
   if (rc) return rc;
@@ -265,6 +269,7 @@ static bool is_ancestor(const Ramfs_Pool *pool, uint32_t maybe_ancestor, uint32_
 }
 
 uint32_t ramfs_rename(Ramfs_Pool *pool, uint32_t root, const char *from, const char *to, bool directory) {
+  pool->generation++;
   uint32_t node = 0;
   uint32_t rc = ramfs_lookup(pool, root, from, &node);
   if (rc) return rc;
@@ -295,8 +300,10 @@ static uint32_t block_at(const Ramfs_Pool *pool, const Ramfs_Node *n, uint64_t o
 }
 
 uint32_t ramfs_set_size(Ramfs_Pool *pool, uint32_t node, uint64_t size) {
+  pool->generation++;
   Ramfs_Node *n = &pool->nodes[node];
   if (n->is_dir) return FS_RESULT_PATH_NOT_FOUND;
+  n->version++;
   const uint32_t have = blocks_for(n->size), want = blocks_for(size);
   if (want > have) {
     if (want - have > pool->free_block_count) return FS_RESULT_USABLE_SPACE_NOT_ENOUGH;
@@ -345,8 +352,10 @@ uint32_t ramfs_read(Ramfs_Pool *pool, uint32_t node, uint64_t offset, void *out,
 }
 
 uint32_t ramfs_write(Ramfs_Pool *pool, uint32_t node, uint64_t offset, const void *src, uint64_t size) {
+  pool->generation++;
   Ramfs_Node *n = &pool->nodes[node];
   if (n->is_dir) return FS_RESULT_PATH_NOT_FOUND;
+  n->version++;
   if (offset + size > n->size) {
     const uint32_t rc = ramfs_set_size(pool, node, offset + size);
     if (rc) return rc;

@@ -18,7 +18,7 @@ import { CPU_BACKEND_DISPLAY_NAMES } from "@bindings/core";
 import { readMemoryLayout } from "@bindings/layout";
 import { CoreResult, formatTitleId, loadFailureFromResult, readCString, runStateAfterSlice } from "@bindings/load";
 import type { CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
-import { clearSdFiles, persistSdFile, restoreSdFiles } from "./sd-persistence";
+import { clearSdFiles, diffManifests, parseManifest, persistSdFile, removeSdFile, restoreSdFiles } from "./sd-persistence";
 
 const self: DedicatedWorkerGlobalScope =
   globalThis as unknown as DedicatedWorkerGlobalScope;
@@ -217,9 +217,81 @@ async function addToSdCard(files: readonly File[]): Promise<CPUToMainMessage> {
   return { type: "sd-files-added", added, failed };
 }
 
+/* ------------------------------------------------------------------ */
+/* Guest writes -> OPFS (§15): every SD_MIRROR_MS, if any filesystem    */
+/* changed, diff the SD manifest and store / remove what changed.      */
+/* ------------------------------------------------------------------ */
+
+const SD_MIRROR_MS = 3000;
+let mirrorGeneration = -1;
+let mirrorManifest: ReadonlyMap<string, string> = new Map();
+let mirroring = false;
+
+function readSdManifest(): ReadonlyMap<string, string> | null {
+  if (!core) return null;
+  const need = core._emulator_sd_manifest_ffi(0n, 0);
+  const buffer = core._malloc(need + 1);
+  if (buffer === 0) return null;
+  try {
+    const written = core._emulator_sd_manifest_ffi(BigInt(buffer), need + 1);
+    if (!coreMemory || written > need + 1) return null;
+    const text = new TextDecoder().decode(new Uint8Array(coreMemory.buffer, buffer, written).slice());
+    return parseManifest(text);
+  } finally {
+    core._free(buffer);
+  }
+}
+
+function readSdFile(path: string): Uint8Array | null {
+  if (!core || !coreMemory) return null;
+  const sdCore = core;
+  let bytes: Uint8Array | null = null;
+  withCString(path, (pathPointer) => {
+    const size = sdCore._emulator_sd_read_file_ffi(pathPointer, 0n, 0);
+    if (size < 0 || size > SD_MAX_FILE_BYTES) return;
+    const buffer = sdCore._malloc(size || 1);
+    if (buffer === 0 || !coreMemory) return;
+    const read = sdCore._emulator_sd_read_file_ffi(pathPointer, BigInt(buffer), size);
+    if (read === size) bytes = new Uint8Array(coreMemory.buffer, buffer, size).slice();
+    sdCore._free(buffer);
+  });
+  return bytes;
+}
+
+/** Records the current SD contents as already stored (after a restore). */
+function baselineSdMirror(): void {
+  if (!core) return;
+  mirrorManifest = readSdManifest() ?? new Map();
+  mirrorGeneration = core._emulator_sd_generation_ffi();
+}
+
+async function mirrorSdChanges(): Promise<void> {
+  if (!core || mirroring || mirrorGeneration < 0) return;
+  const generation = core._emulator_sd_generation_ffi();
+  if (generation === mirrorGeneration) return;
+  mirroring = true;
+  try {
+    const after = readSdManifest();
+    if (!after) return;
+    const { changed, removed } = diffManifests(mirrorManifest, after);
+    for (const path of changed) {
+      const bytes = readSdFile(path);
+      if (bytes) await persistSdFile(path, bytes);
+    }
+    for (const path of removed) await removeSdFile(path);
+    mirrorManifest = after;
+    mirrorGeneration = generation;
+  } catch (e) {
+    log("warn", `SD card: could not store guest changes: ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    mirroring = false;
+  }
+}
+
 async function clearSdCard(): Promise<CPUToMainMessage> {
   if (core && core._emulator_sd_clear_ffi() !== CoreResult.Ok) log("warn", "SD card: a file is in use; reload to clear it");
   await clearSdFiles();
+  baselineSdMirror();
   return { type: "sd-files-added", added: [], failed: [] };
 }
 
@@ -283,6 +355,8 @@ async function init(memory: WebAssembly.Memory): Promise<void> {
   } catch (e) {
     log("warn", `SD card: could not restore stored files: ${e instanceof Error ? e.message : String(e)}`);
   }
+  baselineSdMirror();
+  setInterval(() => void mirrorSdChanges(), SD_MIRROR_MS);
 
   const layoutPtr = core._layout_get_ffi();
   const layout = readMemoryLayout(memory, layoutPtr);
