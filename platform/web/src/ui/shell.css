@@ -226,3 +226,18 @@
   background: #000;
   border: 1px solid #1f1f2b;
 }
+
+.voland-player-bar { display: flex; gap: 8px; margin: 4px 0 10px; }
+.voland-player-bar button {
+  background: #23263a; color: #e6e6ea; border: 1px solid #3a3f5c; border-radius: 6px;
+  padding: 4px 12px; font: inherit; font-size: 13px; cursor: pointer;
+}
+.voland-player-bar button:hover { background: #2d3150; }
+.voland-controls { margin: 8px 0 12px; font-size: 13px; color: #c9cbd6; }
+.voland-controls summary { cursor: pointer; }
+.voland-controls dl { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 16px; margin: 8px 0 0; }
+.voland-controls dl div { display: flex; justify-content: space-between; gap: 8px; }
+.voland-controls dt { color: #9da3c0; }
+.voland-controls dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+[data-voland-screen]:fullscreen { background: #000; display: flex; align-items: center; justify-content: center; }
+[data-voland-screen]:fullscreen canvas { width: 100vw; height: 100vh; object-fit: contain; }

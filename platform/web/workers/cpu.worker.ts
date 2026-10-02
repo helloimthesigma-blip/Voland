@@ -415,12 +415,14 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   }
 
   if (msg.type === "pause") {
+    if (running && !paused) postRunState("paused", "");
     paused = true;
     return;
   }
   if (msg.type === "resume") {
     if (paused && running) {
       paused = false;
+      postRunState("running", "");
       setTimeout(runBurst, 0);
     }
     paused = false;

@@ -32,6 +32,12 @@ const KEYBOARD_STICK_MAP: readonly (readonly [string, number, 1 | -1])[] = [
   ["KeyI", 3, 1], ["KeyK", 3, -1], ["KeyJ", 2, -1], ["KeyL", 2, 1],
 ];
 
+/** The stick keys in up, down, left, right order (for the controls legend). */
+export const KEYBOARD_STICK_KEYS = {
+  left: ["KeyW", "KeyS", "KeyA", "KeyD"],
+  right: ["KeyI", "KeyK", "KeyJ", "KeyL"],
+} as const;
+
 export function isMappedKey(code: string): boolean {
   return code in KEYBOARD_BUTTON_MAP || KEYBOARD_STICK_MAP.some(([key]) => key === code);
 }

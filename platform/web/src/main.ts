@@ -131,6 +131,7 @@ interface BootResult {
   readonly loadGame:     (file: File) => Promise<GameLoadOutcome>;
   readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard:  () => Promise<SdImportOutcome>;
+  readonly setPaused:    (paused: boolean) => void;
 }
 
 async function boot(): Promise<BootResult | null> {
@@ -353,6 +354,10 @@ async function boot(): Promise<BootResult | null> {
     });
   }
 
+  function setPaused(paused: boolean): void {
+    cpuWorker.postMessage((paused ? { type: "pause" } : { type: "resume" }) satisfies MainToCPUMessage);
+  }
+
   function clearSdCard(): Promise<SdImportOutcome> {
     if (cpuSlot !== "ready") return Promise.resolve<SdImportOutcome>({ added: [], failed: [] });
     return new Promise<SdImportOutcome>((resolve) => {
@@ -368,6 +373,7 @@ async function boot(): Promise<BootResult | null> {
     loadGame,
     addToSdCard,
     clearSdCard,
+    setPaused,
   };
 }
 

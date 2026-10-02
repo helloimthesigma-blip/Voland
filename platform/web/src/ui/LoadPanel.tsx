@@ -14,6 +14,7 @@ interface LoadPanelProps {
   readonly loadGame: (file: File) => Promise<GameLoadOutcome>;
   readonly addToSdCard: (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard: () => Promise<SdImportOutcome>;
+  readonly setPaused: (paused: boolean) => void;
 }
 
 type LoadState =
@@ -50,6 +51,11 @@ function LoadPanel(props: LoadPanelProps) {
     const off = subscribeGuestConsole(setGuest);
     onCleanup(off);
   });
+
+  function enterFullscreen(): void {
+    const screen = document.querySelector<HTMLElement>("[data-voland-screen]");
+    void screen?.requestFullscreen?.().catch(() => undefined);
+  }
 
   async function load(file: File): Promise<void> {
     setState({ kind: "loading", fileName: file.name });
@@ -151,6 +157,20 @@ function LoadPanel(props: LoadPanelProps) {
                   <span class="voland-run-state" data-testid="fps">{guest().fps} fps</span>
                 </Show>
               </h3>
+              <div class="voland-player-bar">
+                <Show when={guest().runState === "running" || guest().runState === "paused"}>
+                  <button
+                    type="button"
+                    data-testid="pause"
+                    onClick={() => props.setPaused(guest().runState === "running")}
+                  >
+                    {guest().runState === "paused" ? "Resume" : "Pause"}
+                  </button>
+                </Show>
+                <button type="button" data-testid="fullscreen" onClick={enterFullscreen}>
+                  Fullscreen
+                </button>
+              </div>
               <p>
                 Title <code>{loaded().titleId}</code>, entry point{" "}
                 <code>0x{loaded().entryPoint.toString(16)}</code>.
