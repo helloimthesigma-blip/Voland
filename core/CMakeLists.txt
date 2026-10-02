@@ -42,6 +42,7 @@ set(SWITCH_CORE_SOURCES
   hle/services/pl/pl.c
   hle/services/misc/misc.c
   hle/services/audio/audout.c
+  hle/services/audio/audren.c
   hle/services/acc/acc.c
   hle/services/acc/acc_icon.c
   audio/audio_ring.c

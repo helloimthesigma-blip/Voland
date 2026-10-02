@@ -461,6 +461,129 @@ static void test_set_apm_am(void) {
   CHECK(regs->x[0] == 0 && live == 0);
 }
 
+
+/* audren:u with libnx's REV4 update layout: one mono PCM16 voice into the
+ * final mix (left x1.0, right x0.5) and a stereo device sink. */
+static void put32(uint8_t *p, uint32_t v) { memcpy(p, &v, 4); }
+static void putf(uint8_t *p, float v) { memcpy(p, &v, 4); }
+static void put64(uint8_t *p, uint64_t v) { memcpy(p, &v, 8); }
+
+static void test_audren(void) {
+  const uint32_t manager = service("audren:u");
+  /* AudioRendererParameter {48000, 240, mix buffers 2, submixes 0, voices 2,
+   * sinks 1, effects 0, ..., revision @0x30} + pad + work size + aruid. */
+  uint8_t param[0x48];
+  memset(param, 0, sizeof(param));
+  put32(param + 0x00, 48000);
+  put32(param + 0x04, 240);
+  put32(param + 0x08, 2);
+  put32(param + 0x10, 2);
+  put32(param + 0x14, 1);
+  put32(param + 0x30, 0x34564552u); /* REV4 */
+  Test_Ipc_Reply r = call(manager, 1, param, 0x34, NULL);
+  CHECK(test_le64(r.data) >= 0x10000u && (test_le64(r.data) & 0xFFFu) == 0);
+  const uint32_t renderer = object(manager, 0, param, sizeof(param));
+  r = call(renderer, 0, NULL, 0, NULL);
+  CHECK(test_le32(r.data) == 48000);
+  r = call(renderer, 1, NULL, 0, NULL);
+  CHECK(test_le32(r.data) == 240);
+
+  enum { MEMPOOLS = 8, VOICES = 2, FRAMES = 480 };
+  static uint8_t in[0x40 + 0x10 + MEMPOOLS * 0x20 + VOICES * 0x70 + VOICES * 0x170 + 0x930 + 0x140 + 0x10];
+  memset(in, 0, sizeof(in));
+  put32(in + 0x00, 0x34564552u);
+  put32(in + 0x04, 0x10);
+  put32(in + 0x08, MEMPOOLS * 0x20);
+  put32(in + 0x0C, VOICES * 0x170);
+  put32(in + 0x10, VOICES * 0x70);
+  put32(in + 0x18, 0x930);
+  put32(in + 0x1C, 0x140);
+  put32(in + 0x20, 0x10);
+  put32(in + 0x3C, sizeof(in));
+  uint8_t *p = in + 0x40 + 0x10;
+  put32(p + 0x10, 4); /* mempool 0: RequestAttach */
+  p += MEMPOOLS * 0x20;
+  uint8_t *channels = p;
+  put32(channels, 0);
+  putf(channels + 4, 1.0f);
+  putf(channels + 8, 0.5f);
+  channels[0x64] = 1;
+  put32(channels + 0x70, 1);
+  p += VOICES * 0x70;
+  uint8_t *voice = p;
+  put32(voice + 0x00, 0);
+  voice[0x08] = 1; /* new */
+  voice[0x09] = 1; /* used */
+  voice[0x0A] = 0; /* started */
+  voice[0x0B] = 2; /* PCM16 */
+  put32(voice + 0x0C, 48000);
+  put32(voice + 0x18, 1);
+  putf(voice + 0x1C, 1.0f);
+  putf(voice + 0x20, 1.0f);
+  put32(voice + 0x3C, 1);   /* one wave buffer at head 0 */
+  put32(voice + 0x58, 0);   /* final mix */
+  put64(voice + 0x60, SCRATCH(0x20000));
+  put64(voice + 0x68, FRAMES * 2u);
+  put32(voice + 0x70, 0);
+  put32(voice + 0x74, FRAMES);
+  put32(voice + 0x140, 0);  /* channel resource 0 */
+  put32(voice + 0x170, 1);  /* voice 1: unused */
+  p += VOICES * 0x170;
+  putf(p + 0x00, 1.0f);
+  put32(p + 0x04, 48000);
+  put32(p + 0x08, 2);
+  p[0x0C] = 1;
+  put32(p + 0x10, 0);
+  put32(p + 0x924, 0x7FFFFFFFu);
+  p += 0x930;
+  p[0] = 1; /* device sink */
+  p[1] = 1;
+  memcpy(p + 0x20, "MainAudioOut", 12);
+  put32(p + 0x120, 2);
+  p[0x124] = 0;
+  p[0x125] = 1;
+  int16_t pcm[FRAMES];
+  for (int i = 0; i < FRAMES; i++) pcm[i] = (int16_t)(i * 50);
+  CHECK_OK(vmm_write_block(g_emu.vmm, SCRATCH(0x20000), pcm, sizeof(pcm)));
+  CHECK_OK(vmm_write_block(g_emu.vmm, SCRATCH(0x10000), in, sizeof(in)));
+  Test_Ipc_Message m;
+  memset(&m, 0, sizeof(m));
+  m.receives[0] = (Test_Ipc_Buffer){SCRATCH(0x18000), 0x1000, 0};
+  m.receives[1] = (Test_Ipc_Buffer){SCRATCH(0x19000), 0, 0};
+  m.receive_count = 2;
+  m.sends[0] = (Test_Ipc_Buffer){SCRATCH(0x10000), sizeof(in), 0};
+  m.send_count = 1;
+  (void)call(renderer, 4, NULL, 0, &m);
+  uint8_t out[0x200];
+  CHECK_OK(vmm_read_block(g_emu.vmm, SCRATCH(0x18000), out, sizeof(out)));
+  CHECK(test_le32(out + 0x08) == MEMPOOLS * 0x10 && test_le32(out + 0x0C) == VOICES * 0x10);
+  CHECK(test_le32(out + 0x40) == 5); /* mempool 0 attached */
+
+  r = call(renderer, 7, NULL, 0, NULL);
+  Kernel_Event *event = handle_table_get(&g_emu.process.handles, r.copy_handles[0], KERNEL_OBJECT_EVENT_READABLE);
+  CHECK(event && !event->signaled);
+  audio_ring_reset();
+  (void)call(renderer, 5, NULL, 0, NULL); /* Start */
+  const uint64_t t0 = g_emu.scheduler.ticks;
+  audren_update(g_emu.audren, &g_emu.hle, t0 + 2u * AUDREN_TICKS_PER_FRAME);
+  CHECK(event->signaled && g_emu.audren->frames_rendered == 2);
+  static float ring[FRAMES * 2];
+  CHECK(audio_ring_drain(ring, FRAMES) == FRAMES);
+  CHECK(ring[2 * 100] == 5000.0f / 32768.0f && ring[2 * 100 + 1] == 2500.0f / 32768.0f);
+
+  /* The next update reports the buffer consumed and 480 samples played. */
+  voice[0x08] = 0;
+  CHECK_OK(vmm_write_block(g_emu.vmm, SCRATCH(0x10000), in, sizeof(in)));
+  (void)call(renderer, 4, NULL, 0, &m);
+  CHECK_OK(vmm_read_block(g_emu.vmm, SCRATCH(0x18000), out, sizeof(out)));
+  const uint32_t voice_out = 0x40 + MEMPOOLS * 0x10;
+  CHECK(test_le64(out + voice_out) == FRAMES && test_le32(out + voice_out + 8) == 1);
+  r = call(renderer, 3, NULL, 0, NULL);
+  CHECK(test_le32(r.data) == 0); /* started */
+  (void)call(renderer, 6, NULL, 0, NULL);
+  CHECK(audren_next_wake(g_emu.audren) == UINT64_MAX);
+}
+
 static void test_audout(void) {
   const uint32_t manager = service("audout:u");
   const uint32_t open_in[4] = {48000, 0x00020000, 0, 0};
@@ -575,6 +698,7 @@ int main(void) {
   test_time();
   test_set_apm_am();
   test_audout();
+  test_audren();
   test_acc();
   emulator_destroy(&g_emu);
   printf("[services_test] passed\n");

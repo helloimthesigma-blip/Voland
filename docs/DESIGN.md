@@ -2421,9 +2421,13 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.48.0*
+*Document version: 3.49.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.48 → v3.49 (summary)
+
+- **Audio (§14): the audio renderer.** `hle/services/audio/audren` implements `audren:u` (IAudioRendererManager, IAudioRenderer, IAudioDevice): RequestUpdate parses the renderer update buffer (header-sized sections, so revisions with the same record prefixes parse; splitters are skipped by size), memory pools attach/detach, voices play PCM8/16/32/float and DSP-ADPCM wave buffers (looping, ADPCM context, the client's wave-buffer ring with cumulative consumed counts), with resampling (rate x pitch), channel mix volumes, sub-mix matrices and the final mix; device sinks feed the §14 ring (5.1 downmixed to stereo), circular-buffer sinks write PCM16 to guest memory. Frames are 5ms of virtual time; the frame event wakes the scheduler (device wake = earliest of vsync and the next audio frame). Effects and biquad filters are accepted, not applied. Tests: `services_test` drives a libnx REV4 update over IPC and checks the mixed ring output and wave-buffer accounting.
 
 ### Changelog v3.47 → v3.48 (summary)
 

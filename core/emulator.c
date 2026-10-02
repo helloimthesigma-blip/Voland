@@ -255,6 +255,7 @@ static void reset_process_services(Emulator* emulator) {
   network_init(&emulator->network);
   misc_init(&emulator->misc);
   audout_init(&emulator->audout);
+  if (emulator->audren) audren_init(emulator->audren);
   acc_init(&emulator->acc);
   pl_init(&emulator->pl, &emulator->shared_memory, emulator->shared_font, emulator->shared_font_size);
 }
@@ -272,6 +273,7 @@ static Error register_services(Emulator* emulator) {
   if (error_is_ok(err)) err = pl_register(&emulator->pl, &emulator->sm);
   if (error_is_ok(err)) err = misc_register(&emulator->misc, &emulator->sm);
   if (error_is_ok(err)) err = audout_register(&emulator->audout, &emulator->sm);
+  if (error_is_ok(err) && emulator->audren) err = audren_register(emulator->audren, &emulator->sm);
   if (error_is_ok(err)) err = acc_register(&emulator->acc, &emulator->sm);
   return err;
 }
@@ -341,6 +343,7 @@ Error emulator_create_with_backend(Emulator* out, const CPU_Backend* backend) {
     out->am_storage_pool = ARENA_ALLOC_ARRAY(&out->service_arena, uint8_t, (size_t)AM_STORAGE_POOL_BYTES);
     out->vi_scratch = ARENA_ALLOC_ARRAY(&out->service_arena, uint8_t, (size_t)VI_SCRATCH_BYTES);
     out->gpu_channels = ARENA_ALLOC_ARRAY(&out->service_arena, Gpu_Channel, NVDRV_MAX_CHANNELS);
+    out->audren = ARENA_ALLOC(&out->service_arena, Audren_State);
   }
   if (arena_create(&out->renderer_arena, raster3d_storage_bytes() + 64u)) {
     uint8_t *storage = (uint8_t *)arena_allocate(&out->renderer_arena, raster3d_storage_bytes(), 64u);
@@ -594,9 +597,15 @@ Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
              emulator->scheduler.ticks);
   /* Display (§13): vsync composites queued buffers into the §6 slots. */
   vi_update(&emulator->vi, &emulator->hle, emulator->scheduler.ticks);
-  emulator->scheduler.device_wake_at = vi_next_wake(&emulator->vi);
-  /* Audio (§14): queued PCM into the ring at 48kHz of virtual time. */
+  /* Audio (§14): queued PCM / rendered frames into the ring at 48kHz of
+   * virtual time. */
   audout_update(&emulator->audout, &emulator->hle, emulator->scheduler.ticks);
+  if (emulator->audren) audren_update(emulator->audren, &emulator->hle, emulator->scheduler.ticks);
+  {
+    const uint64_t vsync = vi_next_wake(&emulator->vi);
+    const uint64_t audio = emulator->audren ? audren_next_wake(emulator->audren) : UINT64_MAX;
+    emulator->scheduler.device_wake_at = audio < vsync ? audio : vsync;
+  }
   switch (scheduler_tick(&emulator->scheduler, emulator->cpu_backend, cycle_budget, &reason)) {
   case SCHEDULER_RAN: return EMULATOR_RUNNING;
   case SCHEDULER_IDLE: return EMULATOR_IDLE;

@@ -24,6 +24,7 @@
 #include "hle/services/acc/acc.h"
 #include "hle/services/apm/apm.h"
 #include "hle/services/audio/audout.h"
+#include "hle/services/audio/audren.h"
 #include "hle/services/fs/fs.h"
 #include "hle/services/hid/hid.h"
 #include "hle/services/network/network.h"
@@ -42,7 +43,7 @@
  * emulator_load_program() only, then freed. */
 #define EMULATOR_LOADER_ARENA_BYTES ((size_t)96 * 1024 * 1024)
 #define EMULATOR_RAMFS_BYTES ((uint64_t)128 * 1024 * 1024) /* SD card + saves */
-#define EMULATOR_SERVICE_ARENA_BYTES ((size_t)16 * 1024 * 1024)
+#define EMULATOR_SERVICE_ARENA_BYTES ((size_t)20 * 1024 * 1024)
 #define EMULATOR_ARGV_BYTES 0x800u
 #define EMULATOR_DEFAULT_NRO_PATH "/switch/homebrew.nro"
 
@@ -87,6 +88,7 @@ typedef struct Emulator
   Pl_State pl;           /* shared font */
   Misc_State misc;       /* psm, ts */
   Audout_State audout;   /* PCM audio out (§14) */
+  Audren_State *audren;  /* the audio renderer (§14); service arena */
   Acc_State acc;         /* one local user */
   const uint8_t *shared_font;
   uint32_t shared_font_size;
