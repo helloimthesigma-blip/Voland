@@ -281,6 +281,48 @@ static void test_vi(void) {
   CHECK(memcmp(pixels, linear, sizeof(linear)) == 0);
   CHECK(!release->signaled); /* the only buffer is on screen */
 
+  /* QueueBufferInput's crop picks the shown rectangle and FLIP_V flips
+   * it: slot 1 over the same memory, cropped to x 2..10, y 1..5. */
+  memset(&p, 0, sizeof(p));
+  p_token(&p);
+  p_i32(&p, 1);
+  p_i32(&p, 1);
+  p_i32(&p, (int32_t)sizeof(gbfr));
+  p_i32(&p, 0);
+  p_bytes(&p, gbfr, sizeof(gbfr));
+  out = transact(relay, binder, 14, &p, &n);
+  CHECK(status_of(out, n) == 0);
+  memset(&p, 0, sizeof(p));
+  p_token(&p);
+  for (int i = 0; i < 5; i++) p_i32(&p, dq[i]);
+  out = transact(relay, binder, 3, &p, &n);
+  memcpy(v, out, sizeof(v));
+  CHECK(v[0] == 1 && status_of(out, n) == 0);
+  memset(&p, 0, sizeof(p));
+  p_token(&p);
+  p_i32(&p, 1);
+  const int32_t crop[4] = {2, 1, 10, 5};
+  const uint32_t flip_v = 2;
+  memset(input, 0, sizeof(input));
+  memcpy(input + 12, crop, sizeof(crop));
+  memcpy(input + 32, &flip_v, 4);
+  p_i32(&p, (int32_t)sizeof(input));
+  p_i32(&p, 0);
+  p_bytes(&p, input, sizeof(input));
+  out = transact(relay, binder, 7, &p, &n);
+  CHECK(status_of(out, n) == 0);
+  vi_update(&g_emu.vi, &g_emu.hle, g_emu.vi.next_vsync_ticks);
+  CHECK(framebuffer_published() == 2); /* frame 2 lands in slot 1 */
+  memcpy(meta, region + FRAMEBUFFER_OFFSET_METADATA + FRAMEBUFFER_METADATA_BYTES, sizeof(meta));
+  CHECK(meta[0] == 8 && meta[1] == 4 && meta[2] == 8u * 4u);
+  const uint8_t *cropped = pixels + LAYOUT_FRAMEBUFFER_SLOT_BYTES;
+  for (uint32_t y = 0; y < 4; y++)
+    for (uint32_t x = 0; x < 8; x++) {
+      const uint8_t *got = cropped + (y * 8u + x) * 4u;
+      const uint8_t *want = linear + ((4u - y) * SURFACE_W + (x + 2u)) * 4u; /* rows 4..1 */
+      CHECK(memcmp(got, want, 4) == 0);
+    }
+
   /* Vsync event; the scheduler is told when the next one is. */
   r = call(display, 5202, &policy, sizeof(policy), NULL);
   CHECK(r.copy_count == 1);

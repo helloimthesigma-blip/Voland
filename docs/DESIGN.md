@@ -2432,7 +2432,7 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 ### Changelog v3.57 → v3.58 (summary)
 
 - **Stencil (§13 reference renderer).** SET_STENCIL_TEST / OP_FAIL / OP_ZFAIL / OP_ZPASS / FUNC / FUNC_REF / FUNC_MASK / MASK, two-sided stencil (SET_TWO_SIDED_STENCIL_TEST, the BACK_STENCIL_* methods), OGL and D3D enums, on Z24S8, S8Z24, ZF32_X24S8 and S8 surfaces; stencil test, then depth, each outcome's op applied through the write mask; early depth rejection and span fills stand aside while stencil is on. CLEAR_SURFACE's stencil bit clears through the front write mask. Colour-masked stencil passes are no longer skipped - NanoVG's stencil-then-cover fills (borealis: SimpleModManager) now draw only where coverage is non-zero. Test: `raster3d_test` NanoVG-style vector (two-sided INCR/DECR_WRAP count, NOTEQUAL cover zeroing it; mutation-checked).
-- **Compositor crop and flips (§13).** QueueBuffer's QueueBufferInput is read: the crop rectangle selects the shown part of the buffer (borealis queues a 1920x1080 buffer cropped to its 1280x720 view) and NATIVE_WINDOW_TRANSFORM_FLIP_H/V are applied.
+- **Compositor crop and flips (§13).** QueueBuffer's QueueBufferInput is read: the crop rectangle selects the shown part of the buffer (borealis queues a 1920x1080 buffer cropped to its 1280x720 view) and NATIVE_WINDOW_TRANSFORM_FLIP_H/V are applied. Test: `services_test` queues a second slot cropped and flipped and checks the published 8x4 frame.
 
 ### Changelog v3.56 → v3.57 (summary)
 
