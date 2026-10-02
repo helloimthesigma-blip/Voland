@@ -159,6 +159,10 @@ typedef enum Sm_Tex_Kind {
   SM_TEX_QUERY_LOD,
 } Sm_Tex_Kind;
 
+/* Lanes of one SIMT invocation (Sm_Thread below): a bit per lane. */
+#define SM_LANES 16u
+typedef uint16_t Sm_Mask;
+
 typedef struct Sm_Tex_Request {
   Sm_Tex_Kind kind;
   uint32_t handle;      /* bits 0-19 texture header index, 20-31 sampler index */
@@ -187,6 +191,11 @@ typedef struct Sm_Env {
   void *user;
   /* Writes four results (floats, or raw integers for integer formats). */
   void (*texture)(void *user, const Sm_Tex_Request *request, uint32_t out[4]);
+  /* Optional, preferred when set: every lane of one texture instruction at
+   * once - requests[l] -> out[l] for each lane set in `lanes` (out is
+   * pre-filled with 0, 0, 0, 1). Must give the per-lane results of
+   * `texture`; it exists to resolve a handle once per instruction. */
+  void (*texture_batch)(void *user, const Sm_Tex_Request *requests, Sm_Mask lanes, uint32_t (*out)[4]);
   bool (*global_read)(void *user, uint64_t gpu_va, void *out, uint32_t size);
   bool (*global_write)(void *user, uint64_t gpu_va, const void *src, uint32_t size);
 } Sm_Env;
@@ -197,8 +206,6 @@ typedef struct Sm_Env {
  * masks. Lanes whose branches disagree split into separate warps that
  * each keep their own reconvergence stack, so every lane observes exactly
  * the scalar semantics. */
-#define SM_LANES 16u
-typedef uint16_t Sm_Mask;
 #define SM_ALL_LANES ((Sm_Mask)0xFFFFu)
 
 typedef struct Sm_Thread {

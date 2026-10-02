@@ -938,16 +938,14 @@ static bool resolve_texture(Tex_Resolver *res, uint32_t handle, Raster3d_Texture
   return t != NULL;
 }
 
-static void env_texture(void *user, const Sm_Tex_Request *req, uint32_t out[4]) {
-  Tex_Resolver *res = (Tex_Resolver *)user;
-  Raster3d_Texture *t = NULL;
-  Tex_Sampler sampler;
-  if (!resolve_texture(res, req->handle, &t, &sampler)) {
+/* One texture request against a resolved texture (NULL: unresolved). */
+static void texture_request(const Raster3d_Texture *t, const Tex_Sampler *s, const Sm_Tex_Request *req,
+                            uint32_t out[4]) {
+  if (!t) {
     out[0] = out[1] = out[2] = 0;
     out[3] = u32f(1.0f);
     return;
   }
-  const Tex_Sampler *s = &sampler;
   const Tex_Image *img = &t->image;
   switch (req->kind) {
   case SM_TEX_FETCH:
@@ -969,6 +967,33 @@ static void env_texture(void *user, const Sm_Tex_Request *req, uint32_t out[4]) 
   default:
     tex_sample(img, s, req->coords, req->layer, req->dref, req->shadow, req->has_offset ? req->offset : NULL, out);
     break;
+  }
+}
+
+static void env_texture(void *user, const Sm_Tex_Request *req, uint32_t out[4]) {
+  Raster3d_Texture *t = NULL;
+  Tex_Sampler sampler;
+  const bool ok = resolve_texture((Tex_Resolver *)user, req->handle, &t, &sampler);
+  texture_request(ok ? t : NULL, &sampler, req, out);
+}
+
+/* A texture instruction's lanes: the handle is resolved once per run of
+ * equal handles (usually the whole instruction). */
+static void env_texture_batch(void *user, const Sm_Tex_Request *requests, Sm_Mask lanes, uint32_t (*out)[4]) {
+  Tex_Resolver *res = (Tex_Resolver *)user;
+  bool have = false, ok = false;
+  uint32_t handle = 0;
+  Raster3d_Texture *t = NULL;
+  Tex_Sampler sampler;
+  for (uint32_t l = 0; l < SM_LANES; l++) {
+    if (!((lanes >> l) & 1u)) continue;
+    const Sm_Tex_Request *req = &requests[l];
+    if (!have || req->handle != handle) {
+      handle = req->handle;
+      ok = resolve_texture(res, handle, &t, &sampler);
+      have = true;
+    }
+    texture_request(ok ? t : NULL, &sampler, req, out[l]);
   }
 }
 
@@ -997,6 +1022,7 @@ static void env_setup(Draw_Context *ctx, uint32_t stage, const Sm_Program *progr
   memset(env, 0, sizeof(*env));
   env->user = &ctx->resolver;
   env->texture = env_texture;
+  env->texture_batch = env_texture_batch;
   env->global_read = env_global_read;
   env->global_write = env_global_write;
   env->texture_cbuf_slot = ctx->regs[REG_BINDLESS_TEXTURE] & 0x1fu;

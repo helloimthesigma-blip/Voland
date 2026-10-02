@@ -927,10 +927,21 @@ static uint32_t scalar_components(uint32_t code, bool dual, uint32_t out[4]) {
   return dual_count[code];
 }
 
-static void tex_call(const Sm_Env *env, Sm_Tex_Request *req, uint32_t out[4]) {
-  out[0] = out[1] = out[2] = 0;
-  out[3] = u32f(1.0f);
-  if (env->texture) env->texture(env->user, req, out);
+/* Samples every lane in `m` (requests[l] -> out[l]): the batch hook when
+ * the environment has one, else one call per lane. Unanswered lanes read
+ * (0, 0, 0, 1). Lanes are independent, so callers build every request
+ * first and write every result after. */
+static void tex_lanes(const Sm_Env *env, const Sm_Tex_Request *requests, Sm_Mask m, uint32_t (*out)[4]) {
+  FOR_LANES(m) {
+    out[l][0] = out[l][1] = out[l][2] = 0;
+    out[l][3] = u32f(1.0f);
+  }
+  if (env->texture_batch) {
+    env->texture_batch(env->user, requests, m, out);
+    return;
+  }
+  if (!env->texture) return;
+  FOR_LANES(m) env->texture(env->user, &requests[l], out[l]);
 }
 
 static void exec_texs(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask m) {
@@ -939,6 +950,8 @@ static void exec_texs(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mas
   const uint32_t handle = texture_handle(env, BITS(w, 36, 13));
   uint32_t comps[4];
   const uint32_t n = scalar_components(BITS(w, 50, 3), BITS(w, 28, 8) != SM_RZ, comps);
+  Sm_Tex_Request reqs[SM_LANES];
+  uint32_t texels[SM_LANES][4];
   FOR_LANES(m) {
     Sm_Tex_Request req;
     memset(&req, 0, sizeof(req));
@@ -965,10 +978,12 @@ static void exec_texs(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mas
     req.coords[0] = x;
     req.coords[1] = y;
     req.coords[2] = z;
-    uint32_t texel[4];
-    tex_call(env, &req, texel);
+    reqs[l] = req;
+  }
+  tex_lanes(env, reqs, m, texels);
+  FOR_LANES(m) {
     uint32_t values[4];
-    for (uint32_t i = 0; i < n; i++) values[i] = texel[comps[i]];
+    for (uint32_t i = 0; i < n; i++) values[i] = texels[l][comps[i]];
     write_scalar_results(t, w, values, n, l);
   }
 }
@@ -979,6 +994,8 @@ static void exec_tlds(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mas
   const uint32_t handle = texture_handle(env, BITS(w, 36, 13));
   uint32_t comps[4];
   const uint32_t n = scalar_components(BITS(w, 50, 3), BITS(w, 28, 8) != SM_RZ, comps);
+  Sm_Tex_Request reqs[SM_LANES];
+  uint32_t texels[SM_LANES][4];
   FOR_LANES(m) {
     Sm_Tex_Request req;
     memset(&req, 0, sizeof(req));
@@ -999,10 +1016,12 @@ static void exec_tlds(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mas
       req.offset[0] = (int32_t)(args[3] << 28) >> 28; req.offset[1] = (int32_t)(args[3] << 24) >> 28; break;
     default: req.dims = 2; break;
     }
-    uint32_t texel[4];
-    tex_call(env, &req, texel);
+    reqs[l] = req;
+  }
+  tex_lanes(env, reqs, m, texels);
+  FOR_LANES(m) {
     uint32_t values[4];
-    for (uint32_t i = 0; i < n; i++) values[i] = texel[comps[i]];
+    for (uint32_t i = 0; i < n; i++) values[i] = texels[l][comps[i]];
     write_scalar_results(t, w, values, n, l);
   }
 }
@@ -1010,6 +1029,8 @@ static void exec_tlds(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mas
 static void exec_tld4s(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask m) {
   const uint64_t w = in->raw;
   const uint32_t handle = texture_handle(env, BITS(w, 36, 13));
+  Sm_Tex_Request reqs[SM_LANES];
+  uint32_t texels[SM_LANES][4];
   FOR_LANES(m) {
     Sm_Tex_Request req;
     memset(&req, 0, sizeof(req));
@@ -1031,10 +1052,10 @@ static void exec_tld4s(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Ma
       k++;
     }
     if (req.shadow) req.dref = f32(args[k]);
-    uint32_t texel[4];
-    tex_call(env, &req, texel);
-    write_scalar_results(t, w, texel, 4, l);
+    reqs[l] = req;
   }
+  tex_lanes(env, reqs, m, texels);
+  FOR_LANES(m) write_scalar_results(t, w, texels[l], 4, l);
 }
 
 /* TEX / TLD / TLD4 / TXD / TXQ / TMML (vector forms). */
@@ -1042,6 +1063,9 @@ static void exec_tex_vector(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, 
   const uint64_t w = in->raw;
   const uint32_t handle = texture_handle(env, BITS(w, 36, 13));
   const uint32_t mask = BITS(w, 31, 4);
+  Sm_Tex_Request reqs[SM_LANES];
+  uint32_t texels[SM_LANES][4];
+  Sm_Mask sampled = 0; /* lanes whose result comes from the texture unit */
   FOR_LANES(m) {
     Sm_Tex_Request req;
     memset(&req, 0, sizeof(req));
@@ -1101,14 +1125,11 @@ static void exec_tex_vector(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, 
       req.kind = SM_TEX_QUERY_LOD;
       break;
     }
-    uint32_t out[4];
     if (req.kind == SM_TEX_QUERY_DIMS) {
-      const uint32_t query = BITS(w, 22, 6);
       req.ilod = (int32_t)t->r[REG_A(w)][l];
-      tex_call(env, &req, out);
-      if (query != 1u) out[0] = out[1] = out[2] = out[3] = 0;
+      if (BITS(w, 22, 6) == 1u) sampled |= (Sm_Mask)(1u << l); /* other queries read 0 */
     } else if (req.kind == SM_TEX_QUERY_LOD) {
-      out[0] = out[1] = out[2] = out[3] = 0;
+      /* reads 0 */
     } else {
       n += (lod || bias) ? 1u : 0u;
       n += offset ? 1u : 0u;
@@ -1139,8 +1160,15 @@ static void exec_tex_vector(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, 
         req.shadow = true;
         req.dref = f32(args[k]);
       }
-      tex_call(env, &req, out);
+      sampled |= (Sm_Mask)(1u << l);
     }
+    reqs[l] = req;
+  }
+  tex_lanes(env, reqs, sampled, texels);
+  FOR_LANES(m) {
+    const uint32_t *out = texels[l];
+    static const uint32_t zero[4] = {0, 0, 0, 0};
+    if (!LANE(sampled, l)) out = zero;
     uint32_t d = REG_D(w);
     for (uint32_t c = 0; c < 4; c++) {
       if (!(mask & (1u << c))) continue;
