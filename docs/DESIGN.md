@@ -2425,9 +2425,14 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.59.0*
+*Document version: 3.60.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.59 → v3.60 (summary)
+
+- **Screen-space derivatives (§13 reference renderer).** SHFL implements PTX shfl (IDX / UP / DOWN / BFLY, segment mask and clamp, out-of-range lanes keep their own value and clear the predicate) across the 16-lane warp; FSWZADD applies, per quad lane q, the op in mask bits 2q..2q+1 (ADD a+b, SUBR b-a, SUB a-b, MOV2 b) - nouveau's dFdx/dFdy lowering (SHFL.BFLY + QUADOP(SUB,SUBR,SUB,SUBR) / (SUB,SUB,SUBR,SUBR)). Pixel programs containing either (`Sm_Program.uses_quads`) are rasterized in 2x2 quads (lanes 4q..4q+3 = TL, TR, BL, BR) with helper lanes for uncovered or depth-rejected quad members, shaded but never written; their flat triangles shade a full quad of one pixel so derivatives are exactly zero. Other programs keep scanline batches. Implicit texture LOD still samples the base level. Visible effect: derivative-antialiased edges (Checkpoint's rounded buttons).
+- **Tests:** `maxwell_shader_test` derivative vector (dFdx, dFdy, quad broadcast); `raster3d_test` derivatives through the rasterizer, edge quads included, and the flat case (both mutation-checked).
 
 ### Changelog v3.58 → v3.59 (summary)
 

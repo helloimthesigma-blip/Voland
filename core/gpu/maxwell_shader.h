@@ -13,7 +13,7 @@
  * Execution model: one invocation at a time, scalar. Warp-level
  * behaviour collapses accordingly: SSY/SYNC, PBK/BRK and PCNT/CONT are
  * single-entry reconvergence stacks; VOTE and SHFL see one active lane;
- * screen-space derivatives (FSWZADD, implicit texture LOD) are zero, so
+ * implicit texture LOD is the base level, so
  * implicit-LOD sampling reads the base level.
  *
  * Encodings were reconstructed from NVIDIA's open-gpu-doc and from the
@@ -141,6 +141,10 @@ typedef struct Sm_Program {
    * generic varyings (lets the rasterizer shade flat triangles once). */
   bool reads_fragcoord_xy;        /* IPA a[0x70]/a[0x74], or an indexed IPA */
   bool reads_fragcoord_z;         /* IPA a[0x78] */
+  /* Uses lanes' neighbours (FSWZADD, SHFL): pixel programs then run in
+   * 2x2 quads, lanes 4q..4q+3 = top-left, top-right, bottom-left,
+   * bottom-right, with helper lanes for uncovered quad members. */
+  bool uses_quads;
   Sm_Insn insns[SM_MAX_WORDS];
 } Sm_Program;
 

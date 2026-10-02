@@ -33,6 +33,7 @@ static int g_failures;
 #define VS_OFFSET 0x0u
 #define PS_OFFSET 0x800u
 #define PS_TEX_OFFSET 0x1000u
+#define PS_DERIV_OFFSET 0x1800u
 #define VERTICES (GPU_BASE + 0x4000u)
 #define CBUF (GPU_BASE + 0x6000u)
 #define TIC_POOL (GPU_BASE + 0x7000u)
@@ -81,6 +82,17 @@ static uint64_t TEXS_RGBA(uint32_t d0, uint32_t d1, uint32_t a, uint32_t b) {
          ((uint64_t)a << 8) | d0;
 }
 static uint64_t EXIT(void) { return (0xe300ull << 48) | GUARD | 0xfull; }
+static uint64_t MOV32I(uint32_t d, uint32_t imm) { return (0x0100ull << 48) | GUARD | ((uint64_t)imm << 20) | (0xfull << 12) | d; }
+/* SHFL.BFLY within a quad (segment mask 0x1c, clamp 3), and FSWZADD. */
+static uint64_t SHFL_BFLY(uint32_t d, uint32_t a, uint32_t lane) {
+  return (0xef10ull << 48) | (7ull << 48) | GUARD | (3ull << 30) | (3ull << 28) | (0x1c03ull << 34) |
+         ((uint64_t)lane << 20) | ((uint64_t)a << 8) | d;
+}
+static uint64_t FSWZADD(uint32_t d, uint32_t a, uint32_t b, uint32_t mask) {
+  return (0x50f8ull << 48) | GUARD | ((uint64_t)mask << 28) | ((uint64_t)b << 20) | ((uint64_t)a << 8) | d;
+}
+#define QUAD_DFDX 0x99u /* nouveau's QUADOP(SUB, SUBR, SUB, SUBR) */
+#define QUAD_DFDY 0xA5u /* QUADOP(SUB, SUB, SUBR, SUBR) */
 
 static void write_program(uint32_t offset, const uint8_t sph[SM_SPH_BYTES], const uint64_t *code, uint32_t count) {
   uint8_t *p = g_gpu + (PROGRAM_REGION - GPU_BASE) + offset;
@@ -123,6 +135,12 @@ static void build_programs(void) {
   ps_sph[0x18] = 0x0f; /* generic 0: xy screen-linear */
   const uint64_t pst[] = {IPA(0, 0x80, 3), IPA(1, 0x84, 3), TEXS_RGBA(0, 2, 0, 1), EXIT()};
   write_program(PS_TEX_OFFSET, ps_sph, pst, 4);
+  /* PS: colour = (dFdx(u), dFdy(u), dFdy(v), 1) of generic0.xy. */
+  const uint32_t one = 0x3f800000u;
+  const uint64_t psd[] = {IPA(4, 0x80, 3), IPA(5, 0x84, 3), SHFL_BFLY(6, 4, 1), FSWZADD(0, 4, 6, QUAD_DFDX),
+                          SHFL_BFLY(7, 4, 2), FSWZADD(1, 4, 7, QUAD_DFDY), SHFL_BFLY(8, 5, 2),
+                          FSWZADD(2, 5, 8, QUAD_DFDY), MOV32I(3, one), EXIT()};
+  write_program(PS_DERIV_OFFSET, ps_sph, psd, 10);
 }
 
 /* ---- register state ----------------------------------------------- */
@@ -416,6 +434,38 @@ static void test_stencil(Raster3d *r) {
   g_regs[0x54e] = 0;
 }
 
+/* Derivatives through the rasterizer's quads: u = x and v = y in pixels,
+ * so dFdx(u) = dFdy(v) = 1 and dFdy(u) = 0 at every covered pixel -
+ * including along the diagonal edge, whose quads need helper lanes. A
+ * flat triangle's derivatives are exactly zero. */
+static void test_derivatives(Raster3d *r) {
+  base_state(RT, false, PS_DERIV_OFFSET);
+  raster3d_begin_submission(r);
+  clear_to(r, 0, 1, 0, 1);
+  vertex(0, -1.0f, -1.0f, 0.0f, 0.0f, 0, 1);
+  vertex(1, 1.0f, -1.0f, 64.0f, 0.0f, 0, 1);
+  vertex(2, -1.0f, 1.0f, 0.0f, 64.0f, 0, 1);
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  uint32_t covered = 0, wrong = 0;
+  for (uint32_t y = 0; y < RT_SIZE; y++)
+    for (uint32_t x = 0; x < RT_SIZE; x++) {
+      const uint8_t *p = pixel(RT, false, x, y);
+      if (rgba_is(p, 0, 255, 0, 255)) continue; /* the clear colour: not covered */
+      covered++;
+      if (!rgba_is(p, 255, 0, 255, 255)) wrong++;
+    }
+  CHECK(covered == 64u * 63u / 2u && wrong == 0, "derivatives: %u covered, %u wrong", covered, wrong);
+  /* Flat: every input constant -> derivatives 0 -> (0, 0, 0, 1). */
+  raster3d_begin_submission(r);
+  vertex(0, -1.0f, -1.0f, -5.0f, -7.0f, 0, 1); /* negative: a stale neighbour shows as a positive slope */
+  vertex(1, 1.0f, -1.0f, -5.0f, -7.0f, 0, 1);
+  vertex(2, -1.0f, 1.0f, -5.0f, -7.0f, 0, 1);
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  CHECK(rgba_is(pixel(RT, false, 10, 10), 0, 0, 0, 255), "flat triangle: zero derivatives %08x", *(const uint32_t *)(const void *)pixel(RT, false, 10, 10));
+}
+
 int main(void) {
   const size_t bytes = raster3d_storage_bytes();
   uint8_t *storage = (uint8_t *)malloc(bytes + 64u);
@@ -432,6 +482,7 @@ int main(void) {
   test_texture(&r);
   test_render_to_texture(&r);
   test_stencil(&r);
+  test_derivatives(&r);
   CHECK(r.stats.shader_faults == 0, "no shader faults");
   free(storage);
   if (g_failures) {

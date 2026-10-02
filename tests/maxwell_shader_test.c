@@ -401,6 +401,44 @@ static void test_divergence(void) {
   }
 }
 
+/* Screen-space derivatives the way nouveau builds them: SHFL.BFLY to the
+ * quad neighbour, then FSWZADD with QUADOP(SUB, SUBR, SUB, SUBR) for
+ * dFdx and QUADOP(SUB, SUB, SUBR, SUBR) for dFdy; SHFL.IDX broadcasts a
+ * quad's first lane. Lanes 4q..4q+3 hold f(x, y) = 3x + 5y + 100q. */
+#define SHFL_QUAD 0x1c03u /* segment mask 0x1c, clamp 3 */
+static uint64_t SHFL_I(uint32_t d, uint32_t a, uint32_t mode, uint32_t lane) {
+  return op_top(0xef10) | (PT << 48) | GUARD | ((uint64_t)mode << 30) | (1ull << 29) | (1ull << 28) |
+         ((uint64_t)SHFL_QUAD << 34) | ((uint64_t)lane << 20) | ra(a) | rd(d);
+}
+static uint64_t FSWZADD(uint32_t d, uint32_t a, uint32_t b, uint32_t mask) {
+  return op_top(0x50f8) | GUARD | ((uint64_t)mask << 28) | rb(b) | ra(a) | rd(d);
+}
+
+static void test_derivatives(void) {
+  Builder b;
+  begin(&b, SM_STAGE_PIXEL);
+  emit(&b, ALD(0, SM_ATTR_GENERIC, 1));
+  emit(&b, SHFL_I(1, 0, 3, 1)); /* BFLY ^1: horizontal neighbour */
+  emit(&b, FSWZADD(2, 0, 1, 0x99));
+  emit(&b, SHFL_I(3, 0, 3, 2)); /* BFLY ^2: vertical neighbour */
+  emit(&b, FSWZADD(4, 0, 3, 0xA5));
+  emit(&b, SHFL_I(5, 0, 0, 0)); /* IDX 0 within the quad */
+  emit(&b, EXIT());
+  load(&b);
+  CHECK(g_prog.uses_quads, "SHFL/FSWZADD mark the program as quad-based");
+  sm_thread_reset(&g_thread, SM_LANES);
+  for (uint32_t l = 0; l < SM_LANES; l++) {
+    const uint32_t q = l >> 2, x = l & 1u, y = (l >> 1) & 1u;
+    g_thread.attr_in[SM_ATTR_GENERIC / 4u][l] = (uint32_t)f_bits(3.0f * (float)x + 5.0f * (float)y + 100.0f * (float)q);
+  }
+  CHECK(run(), "derivative program runs");
+  for (uint32_t l = 0; l < SM_LANES; l++) {
+    CHECK(as_f(g_thread.r[2][l]) == 3.0f, "lane %u dFdx %f", l, (double)as_f(g_thread.r[2][l]));
+    CHECK(as_f(g_thread.r[4][l]) == 5.0f, "lane %u dFdy %f", l, (double)as_f(g_thread.r[4][l]));
+    CHECK(as_f(g_thread.r[5][l]) == 100.0f * (float)(l >> 2), "lane %u quad broadcast %f", l, (double)as_f(g_thread.r[5][l]));
+  }
+}
+
 int main(void) {
   test_float_arith();
   test_integer_arith();
@@ -411,6 +449,7 @@ int main(void) {
   test_kill_and_header();
   test_extent();
   test_divergence();
+  test_derivatives();
   if (g_failures) {
     fprintf(stderr, "maxwell_shader_test: %d failure(s)\n", g_failures);
     return 1;

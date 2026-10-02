@@ -302,6 +302,7 @@ void sm_program_decode(const uint8_t *bytes, uint32_t size, uint64_t address, Sm
   out->unknown_ops = 0;
   out->reads_fragcoord_xy = false;
   out->reads_fragcoord_z = false;
+  out->uses_quads = false;
   memset(out->cbuf_extent, 0, sizeof(out->cbuf_extent));
   uint32_t sph[SM_SPH_WORDS];
   memset(sph, 0, sizeof(sph));
@@ -323,6 +324,7 @@ void sm_program_decode(const uint8_t *bytes, uint32_t size, uint64_t address, Sm
     if (in->op == SM_OP_INVALID) out->unknown_ops++;
     if (in->form == SM_FORM_CBUF || in->form == SM_FORM_REG_CBUF) note_cbuf(out, in->cbuf, in->imm + 4u);
     if (in->op == SM_OP_LDC) note_cbuf(out, BITS(w, 36, 5), 0x10000u);
+    if (in->op == SM_OP_FSWZADD || in->op == SM_OP_SHFL) out->uses_quads = true;
     if (in->op == SM_OP_IPA) {
       const uint32_t addr = BITS(w, 28, 10);
       if (BIT(w, 38) || addr == SM_ATTR_POSITION || addr == SM_ATTR_POSITION + 4u) out->reads_fragcoord_xy = true;
@@ -1161,8 +1163,14 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     return;
   }
   case SM_OP_FSWZADD: {
+    /* Per quad lane q, mask bits 2q..2q+1 pick ADD (a + b), SUBR (b - a),
+     * SUB (a - b) or MOV2 (b) - with a SHFL of the neighbour, the
+     * screen-space derivative compilers build dFdx/dFdy from. */
+    static const float k_a[4] = {1.0f, -1.0f, 1.0f, 0.0f}, k_b[4] = {1.0f, 1.0f, -1.0f, 1.0f};
+    const uint32_t *a = t->r[REG_A(w)], *b = t->r[REG_B(w)];
     uint32_t *d = dst_row(t, REG_D(w));
-    FOR_LANES(m) d[l] = 0; /* derivatives across lanes are not modelled */
+    const uint32_t mask = BITS(w, 28, 8);
+    LANES_ASSIGN(m, d, u32f(f32(a[l]) * k_a[(mask >> (2u * (l & 3u))) & 3u] + f32(b[l]) * k_b[(mask >> (2u * (l & 3u))) & 3u]));
     return;
   }
   case SM_OP_F2F: {
@@ -1627,10 +1635,36 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     return;
   }
   case SM_OP_SHFL: {
+    /* Lane j's Ra to lane i (PTX shfl): mode IDX / UP / DOWN / BFLY, b the
+     * lane operand, c = {segment mask @8, clamp @0}; an out-of-range j
+     * reads the lane's own value and clears the predicate. Lanes are this
+     * warp's 16 (a quad is lanes 4q..4q+3, as the rasterizer packs them). */
     const uint32_t *a = t->r[REG_A(w)];
     uint32_t *d = dst_row(t, REG_D(w));
-    LANES_ASSIGN(m, d, a[l]);
-    set_pred(t, BITS(w, 48, 3), m, SM_ALL_LANES);
+    const uint32_t mode = BITS(w, 30, 2);
+    const uint32_t *b_reg = t->r[REG_B(w)], *c_reg = t->r[BITS(w, 39, 8)];
+    const bool b_imm = BIT(w, 28) != 0, c_imm = BIT(w, 29) != 0;
+    uint32_t res[SM_LANES];
+    Sm_Mask valid = 0;
+    FOR_ALL_LANES {
+      const uint32_t bv = (b_imm ? BITS(w, 20, 5) : b_reg[l]) & 0x1fu;
+      const uint32_t cv = c_imm ? BITS(w, 34, 13) : c_reg[l];
+      const uint32_t segmask = (cv >> 8) & 0x1fu, clamp = cv & 0x1fu;
+      const uint32_t max_lane = (l & segmask) | (clamp & ~segmask), min_lane = l & segmask;
+      int32_t j;
+      bool ok;
+      switch (mode) {
+      case 0: j = (int32_t)(min_lane | (bv & ~segmask)); ok = (uint32_t)j <= max_lane; break;
+      case 1: j = (int32_t)l - (int32_t)bv; ok = j >= (int32_t)max_lane; break;
+      case 2: j = (int32_t)(l + bv); ok = (uint32_t)j <= max_lane; break;
+      default: j = (int32_t)(l ^ bv); ok = (uint32_t)j <= max_lane; break;
+      }
+      if (!ok || j < 0 || j >= (int32_t)SM_LANES) j = (int32_t)l;
+      else valid |= (Sm_Mask)(1u << l);
+      res[l] = a[j];
+    }
+    store_masked(d, res, m);
+    set_pred(t, BITS(w, 48, 3), m, valid);
     return;
   }
 

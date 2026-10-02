@@ -1476,9 +1476,14 @@ static void shade_shared(Raster_State *rs, int32_t px, int32_t py, float depth, 
                          float x0, float y0, bool front, const Screen_Vertex *provoking, Frag_Result *shared) {
   Raster3d *r = rs->ctx->r;
   Sm_Thread *t = r->thread;
-  sm_thread_reset_light(t, 1);
+  /* A program that reads its quad neighbours gets a whole quad of the
+   * same pixel: its derivatives are then exactly zero, as they are on a
+   * triangle whose inputs do not vary. */
+  const uint32_t lanes = rs->ctx->ps->uses_quads ? 4u : 1u;
+  sm_thread_reset_light(t, lanes);
   t->front_facing = front ? SM_ALL_LANES : 0;
-  setup_lane(rs, t, 0, px, py, depth < 0.0f ? 0.0f : (depth > 1.0f ? 1.0f : depth), planes, inv_w, x0, y0, provoking);
+  for (uint32_t l = 0; l < lanes; l++)
+    setup_lane(rs, t, l, px, py, depth < 0.0f ? 0.0f : (depth > 1.0f ? 1.0f : depth), planes, inv_w, x0, y0, provoking);
   const bool ok = sm_run(rs->ctx->ps, &rs->ctx->env[1], t);
   if (!ok) r->stats.shader_faults++;
   shared->killed = !ok || (t->killed & 1u);
@@ -1497,6 +1502,7 @@ static void shade_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, c
 /* Pixels waiting to be shaded together. */
 typedef struct Pixel_Batch {
   uint32_t count;
+  uint32_t live;                 /* lanes that are covered pixels (others: quad helpers) */
   int32_t x[SM_LANES], y[SM_LANES];
   float z[SM_LANES];
 } Pixel_Batch;
@@ -1512,12 +1518,13 @@ static void shade_batch(Raster_State *rs, Pixel_Batch *b, const Plane *planes, c
   const bool ok = sm_run(rs->ctx->ps, &rs->ctx->env[1], t);
   if (!ok) r->stats.shader_faults++;
   for (uint32_t l = 0; ok && l < b->count; l++) {
-    if ((t->killed >> l) & 1u) continue;
+    if ((t->killed >> l) & 1u || !((b->live >> l) & 1u)) continue;
     uint32_t regs[MAX_TARGETS * 4u + 1u];
     for (uint32_t i = 0; i < rs->out_regs; i++) regs[i] = t->r[i][l];
     output_pixel(rs, b->x[l], b->y[l], b->z[l], regs);
   }
   b->count = 0;
+  b->live = 0;
 }
 
 static bool target_is_plain_rgba8(const Target *tg) {
@@ -1829,6 +1836,39 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
     }
     return;
   }
+  batch.live = 0;
+  if (!uniform && rs->ctx->ps->uses_quads) {
+    /* 2x2 quads: every quad with a live pixel shades all four lanes. */
+    const int64_t e_base[3] = {e_row[0], e_row[1], e_row[2]};
+    for (int64_t by = y0 & ~(int64_t)1; by <= y1; by += 2) {
+      for (int64_t bx = x0 & ~(int64_t)1; bx <= x1; bx += 2) {
+        uint32_t live = 0;
+        float zq[4];
+        for (uint32_t q = 0; q < 4u; q++) {
+          const int64_t px = bx + (int64_t)(q & 1u), py = by + (int64_t)(q >> 1);
+          const float dx = (float)px + 0.5f - sv[0].x, dy = (float)py + 0.5f - sv[0].y;
+          float z = plane_at(&zp, dx, dy);
+          zq[q] = z < 0.0f ? 0.0f : (z > 1.0f ? 1.0f : z);
+          if (px < x0 || px > x1 || py < y0 || py > y1) continue;
+          const int64_t e0 = e_base[0] + (px - x0) * ex[0] + (py - y0) * ey[0];
+          const int64_t e1 = e_base[1] + (px - x0) * ex[1] + (py - y0) * ey[1];
+          const int64_t e2 = e_base[2] + (px - x0) * ex[2] + (py - y0) * ey[2];
+          if ((e0 | e1 | e2) >= 0 && !early_depth_reject(rs, (int32_t)px, (int32_t)py, zq[q])) live |= 1u << q;
+        }
+        if (!live) continue;
+        for (uint32_t q = 0; q < 4u; q++) {
+          batch.x[batch.count] = (int32_t)(bx + (int64_t)(q & 1u));
+          batch.y[batch.count] = (int32_t)(by + (int64_t)(q >> 1));
+          batch.z[batch.count] = zq[q];
+          if ((live >> q) & 1u) batch.live |= 1u << batch.count;
+          batch.count++;
+        }
+        if (batch.count == SM_LANES) shade_batch(rs, &batch, planes, &wp, sv[0].x, sv[0].y, front, &prov);
+      }
+    }
+    shade_batch(rs, &batch, planes, &wp, sv[0].x, sv[0].y, front, &prov);
+    return;
+  }
   for (int64_t y = y0; y <= y1; y++) {
     int64_t e0 = e_row[0], e1 = e_row[1], e2 = e_row[2];
     for (int64_t x = x0; x <= x1; x++) {
@@ -1842,6 +1882,7 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
           batch.x[batch.count] = (int32_t)x;
           batch.y[batch.count] = (int32_t)y;
           batch.z[batch.count] = z;
+          batch.live |= 1u << batch.count;
           if (++batch.count == SM_LANES) shade_batch(rs, &batch, planes, &wp, sv[0].x, sv[0].y, front, &prov);
         }
       }
