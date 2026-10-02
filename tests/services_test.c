@@ -525,6 +525,30 @@ static void test_system_queries(void) {
   const uint32_t reader = object(fs, 61, &space, sizeof(space));
   r = call(reader, 0, NULL, 0, &m);
   CHECK(test_le64(r.data) == 0);
+  /* BIS: an empty, writable partition. */
+  const uint32_t user_partition = 30;
+  Test_Ipc_Message x = with_x(SCRATCH(0x9200), 0x300);
+  CHECK_OK(vmm_write_block(g_emu.vmm, SCRATCH(0x9200), "\0", 1));
+  const Test_Ipc_Reply bis = call(fs, 11, &user_partition, sizeof(user_partition), &x);
+  CHECK(bis.move_count == 1);
+  /* ncm: storages open and are empty. */
+  const uint32_t ncm = service("ncm");
+  const uint8_t storage_id = 4; /* SdCard */
+  const uint32_t storage = object(ncm, 4, &storage_id, sizeof(storage_id));
+  r = call(storage, 12, NULL, 0, NULL);
+  CHECK(test_le32(r.data) == 0);
+  const uint32_t database = object(ncm, 5, &storage_id, sizeof(storage_id));
+  r = call(database, 7, NULL, 0, &m);
+  CHECK(test_le32(r.data) == 0 && test_le32(r.data + 4) == 0);
+  /* es: no tickets. */
+  const uint32_t es = service("es");
+  r = call(es, 9, NULL, 0, NULL);
+  CHECK(test_le32(r.data) == 0);
+  /* usb:ds (11.0.0+ layout): detached. */
+  const uint32_t usb = service("usb:ds");
+  const uint32_t ds = object(usb, 0, NULL, 0);
+  r = call(ds, 3, NULL, 0, NULL);
+  CHECK(test_le32(r.data) == 0);
 }
 
 static void test_audren(void) {

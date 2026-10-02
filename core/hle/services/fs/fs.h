@@ -69,6 +69,13 @@ typedef struct Fs_Save {
   uint32_t root;
 } Fs_Save;
 
+#define FS_MAX_BIS_PARTITIONS 8u
+
+typedef struct Fs_Bis {
+  uint32_t partition; /* BisPartitionId (0 = unused slot) */
+  uint32_t root;
+} Fs_Bis;
+
 typedef struct Fs_State {
   Service_Interface proxy;
   Service_Interface filesystem;  /* object state: ramfs root node */
@@ -78,6 +85,7 @@ typedef struct Fs_State {
   Ramfs_Pool *pool;              /* the Emulator's; outlives processes */
   uint32_t sd_root;
   Fs_Save saves[FS_MAX_SAVES];   /* survive reloads with the pool */
+  Fs_Bis bis[FS_MAX_BIS_PARTITIONS]; /* empty NAND partitions (§1.6: no NAND image) */
   const Byte_Source *romfs;      /* the program's RomFS bytes, or NULL */
   Fs_Open_File files[FS_MAX_OPEN_FILES];
   Fs_Open_Directory directories[FS_MAX_OPEN_DIRECTORIES];

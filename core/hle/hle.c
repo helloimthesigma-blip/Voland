@@ -191,6 +191,10 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
     regs->x[0] = HLE_RESULT_NOT_IMPLEMENTED;
     break;
   }
+  /* A bad handle is almost always an emulation gap (a kernel object or a
+   * pseudo-handle not understood): say which call saw it. */
+  if ((uint32_t)regs->x[0] == HLE_RESULT_INVALID_HANDLE)
+    log_debug("[hle] SVC 0x%02x (%s) -> InvalidHandle at PC 0x%016llx", swi, svc_name(swi), (unsigned long long)regs->pc);
 }
 
 void hle_on_undefined(CPU_State *cpu_state, uint32_t instruction, void *userdata)

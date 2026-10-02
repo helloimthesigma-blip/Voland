@@ -39,6 +39,33 @@ static HLE_ServiceResult cmd_open_sd_card(HLE_Context *c, Service_Object *self, 
   return HLE_RESULT_SUCCESS;
 }
 
+/* {u32 partition} + path: an empty, writable ramfs per BIS partition, so
+ * tools that browse NAND (file managers, installers) start; Voland has no
+ * NAND image to show (§1.6). */
+static HLE_ServiceResult cmd_open_bis(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                      IPC_Response *res) {
+  (void)c;
+  Fs_State *s = state_of(self);
+  uint32_t partition = 0;
+  (void)ipc_request_read_u32(req, 0, &partition);
+  if (!s->pool || partition == 0) return FS_RESULT_TARGET_NOT_FOUND;
+  Fs_Bis *slot = NULL;
+  for (uint32_t i = 0; i < FS_MAX_BIS_PARTITIONS; i++) {
+    if (s->bis[i].partition == partition) {
+      slot = &s->bis[i];
+      break;
+    }
+    if (!slot && s->bis[i].partition == 0) slot = &s->bis[i];
+  }
+  if (!slot) return FS_RESULT_TARGET_NOT_FOUND;
+  if (slot->partition != partition) {
+    if (ramfs_create_filesystem(s->pool, &slot->root) != 0) return FS_RESULT_ALLOCATION_TABLE_FULL;
+    slot->partition = partition;
+  }
+  (void)ipc_response_push_object(res, &s->filesystem, slot->root);
+  return HLE_RESULT_SUCCESS;
+}
+
 /* {u8 space, pad[7], SaveDataAttribute attr (0x40)}: find or create. */
 static HLE_ServiceResult cmd_open_save_data(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                             IPC_Response *res) {
@@ -505,6 +532,7 @@ static HLE_ServiceResult cmd_open_save_info_reader(HLE_Context *c, Service_Objec
 
 static const Service_Command k_proxy_commands[] = {
     {1, service_cmd_ok, "SetCurrentProcess"},
+    {11, cmd_open_bis, "OpenBisFileSystem"},
     {18, cmd_open_sd_card, "OpenSdCardFileSystem"},
     {22, service_cmd_ok, "CreateSaveDataFileSystem"},
     {23, service_cmd_ok, "CreateSaveDataFileSystemBySystemSaveDataId"},

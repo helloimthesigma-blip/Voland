@@ -19,6 +19,14 @@
  *     Count, 1701 GetApplicationView (and inert maintenance commands).
  *   IReadOnlyApplicationControlDataInterface: 0 GetApplicationControlData.
  *   IReadOnlyApplicationRecordInterface: 0 HasApplicationRecord.
+ *
+ * ncm - the content manager, same story: every storage (built-in system /
+ * user, SD card, game card) opens and is empty. IContentManager 0-13;
+ * IContentStorage counts/lists nothing, has nothing, reports free space;
+ * IContentMetaDatabase lists nothing and finds nothing.
+ *
+ * es - the ticket service: there are no tickets (Voland handles no keys or
+ * rights data, §1.6); counts are zero, lists empty, lookups fail.
  */
 #ifndef SWITCH_HLE_SERVICES_NS_NS_H
 #define SWITCH_HLE_SERVICES_NS_NS_H
@@ -37,7 +45,17 @@
 #define NS_RECORD_BYTES 0x18u
 #define NS_PORT_COUNT 6u
 
+#define NCM_MODULE 5u
+#define NCM_RESULT_CONTENT_NOT_FOUND ((7u << 9) | NCM_MODULE)
+#define NCM_RESULT_CONTENT_META_NOT_FOUND ((8u << 9) | NCM_MODULE)
+
+#define ES_MODULE 5u /* reported through ncm's module, as "not found" */
+
 typedef struct Ns_State {
+  Service_Interface es;
+  Service_Interface ncm;
+  Service_Interface ncm_storage;
+  Service_Interface ncm_database;
   Service_Interface getters[NS_PORT_COUNT];
   Service_Interface application_manager;
   Service_Interface control_data;

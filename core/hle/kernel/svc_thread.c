@@ -487,6 +487,10 @@ void hle_svc_break(HLE_Context *c, CPU_State *s) {
   const uint32_t reason = (uint32_t)r->x[0];
   log_error("[hle] svcBreak reason=0x%x info=0x%llx size=0x%llx at pc=0x%010llx", reason,
             (unsigned long long)r->x[1], (unsigned long long)r->x[2], (unsigned long long)r->pc);
+  /* libnx's fatal paths pass the failing Result as a 4-byte info block. */
+  uint32_t result = 0;
+  if (r->x[2] == sizeof(result) && error_is_ok(vmm_read_block(c->vmm, r->x[1], &result, sizeof(result))))
+    log_error("[hle] svcBreak info: result 0x%x (module %u, description %u)", result, result & 0x1FFu, result >> 9);
   r->x[0] = HLE_RESULT_SUCCESS;
   if (reason & HLE_BREAK_NOTIFICATION_ONLY) return;
   c->scheduler->process_crashed = true;

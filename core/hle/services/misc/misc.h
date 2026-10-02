@@ -14,6 +14,10 @@
  *   pm:shell / pm:info - the process manager as a shell sees it: no other
  *        application process exists (GetApplicationProcessIdForShell fails
  *        ProcessNotFound), boot is finished, events never fire.
+ *   usb:ds USB device mode (the 11.0.0+ layout, matching the firmware
+ *        version set: reports): 0 OpenDsService -> IDsService; descriptors,
+ *        interfaces and endpoints are accepted, the state is always
+ *        Detached (no cable), events never fire, transfers never complete.
  *   pdm:qry play-history queries: Voland records no play history, so every
  *        query reports nothing (zero counts, zeroed statistics) and the
  *        update event never fires.
@@ -46,6 +50,11 @@ typedef struct Misc_State {
   Service_Interface pm_shell;
   Service_Interface pm_info;
   Kernel_Event *pm_event;
+  Service_Interface usb_ds;
+  Service_Interface usb_service;
+  Service_Interface usb_interface;
+  Service_Interface usb_endpoint;
+  Kernel_Event *usb_event;
 } Misc_State;
 
 void misc_init(Misc_State *state);

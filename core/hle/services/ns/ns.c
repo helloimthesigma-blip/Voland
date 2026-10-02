@@ -182,6 +182,157 @@ static const Service_Command k_inert_commands[] = {
     {0, service_cmd_ok, "Unspecified_stub"},
 };
 
+/* ---- ncm ------------------------------------------------------------ */
+
+static HLE_ServiceResult cmd_open_storage(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                          IPC_Response *res) {
+  (void)c;
+  (void)req;
+  (void)ipc_response_push_object(res, &state_of(self)->ncm_storage, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_open_database(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                           IPC_Response *res) {
+  (void)c;
+  (void)req;
+  (void)ipc_response_push_object(res, &state_of(self)->ncm_database, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_two_zero_counts(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                             IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)ipc_response_push_u32(res, 0);
+  (void)ipc_response_push_u32(res, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_content_not_found(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                               IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)res;
+  return NCM_RESULT_CONTENT_NOT_FOUND;
+}
+
+static HLE_ServiceResult cmd_meta_not_found(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                            IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)res;
+  return NCM_RESULT_CONTENT_META_NOT_FOUND;
+}
+
+#define NCM_REPORTED_SPACE (32ull * 1024u * 1024u * 1024u)
+
+static HLE_ServiceResult cmd_space(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                   IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)ipc_response_push_u64(res, NCM_REPORTED_SPACE);
+  return HLE_RESULT_SUCCESS;
+}
+
+static const Service_Command k_ncm_commands[] = {
+    {0, service_cmd_ok, "CreateContentStorage"},
+    {1, service_cmd_ok, "CreateContentMetaDatabase"},
+    {2, service_cmd_ok, "VerifyContentStorage"},
+    {3, service_cmd_ok, "VerifyContentMetaDatabase"},
+    {4, cmd_open_storage, "OpenContentStorage"},
+    {5, cmd_open_database, "OpenContentMetaDatabase"},
+    {6, service_cmd_ok, "CloseContentStorageForcibly"},
+    {7, service_cmd_ok, "CloseContentMetaDatabaseForcibly"},
+    {8, service_cmd_ok, "CleanupContentMetaDatabase"},
+    {9, service_cmd_ok, "ActivateContentStorage"},
+    {10, service_cmd_ok, "InactivateContentStorage"},
+    {11, service_cmd_ok, "ActivateContentMetaDatabase"},
+    {12, service_cmd_ok, "InactivateContentMetaDatabase"},
+    {13, service_cmd_ok, "InvalidateRightsIdCache"},
+};
+
+static const Service_Command k_ncm_storage_commands[] = {
+    {0, service_cmd_out_zero128, "GeneratePlaceHolderId"},
+    {1, service_cmd_ok, "CreatePlaceHolder"},
+    {2, service_cmd_ok, "DeletePlaceHolder"},
+    {3, service_cmd_out_u8_false, "HasPlaceHolder"},
+    {4, service_cmd_ok, "WritePlaceHolder"},
+    {5, service_cmd_ok, "Register"},
+    {6, cmd_content_not_found, "Delete"},
+    {7, service_cmd_out_u8_false, "Has"},
+    {8, cmd_content_not_found, "GetPath"},
+    {9, cmd_content_not_found, "GetPlaceHolderPath"},
+    {10, service_cmd_ok, "CleanupAllPlaceHolder"},
+    {11, service_cmd_out_u8_false, "ListPlaceHolder"},
+    {12, service_cmd_out_u8_false, "GetContentCount"},
+    {13, service_cmd_out_u8_false, "ListContentId"},
+    {14, cmd_content_not_found, "GetSizeFromContentId"},
+    {15, service_cmd_ok, "DisableForcibly"},
+    {16, service_cmd_ok, "RevertToPlaceHolder"},
+    {17, service_cmd_ok, "SetPlaceHolderSize"},
+    {18, cmd_content_not_found, "ReadContentIdFile"},
+    {19, cmd_content_not_found, "GetRightsIdFromPlaceHolderId"},
+    {20, cmd_content_not_found, "GetRightsIdFromContentId"},
+    {21, service_cmd_ok, "WriteContentForDebug"},
+    {22, cmd_space, "GetFreeSpaceSize"},
+    {23, cmd_space, "GetTotalSpaceSize"},
+    {24, service_cmd_ok, "FlushPlaceHolder"},
+};
+
+static const Service_Command k_ncm_database_commands[] = {
+    {0, service_cmd_ok, "Set"},
+    {1, cmd_meta_not_found, "Get"},
+    {2, cmd_meta_not_found, "Remove"},
+    {3, cmd_meta_not_found, "GetContentIdByType"},
+    {4, service_cmd_out_u8_false, "ListContentInfo"},
+    {5, cmd_two_zero_counts, "List"},
+    {6, cmd_meta_not_found, "GetLatestContentMetaKey"},
+    {7, cmd_two_zero_counts, "ListApplication"},
+    {8, service_cmd_out_u8_false, "Has"},
+    {9, service_cmd_out_u8_false, "HasAll"},
+    {10, cmd_meta_not_found, "GetSize"},
+    {11, cmd_meta_not_found, "GetRequiredSystemVersion"},
+    {12, cmd_meta_not_found, "GetPatchId"},
+    {13, service_cmd_ok, "DisableForcibly"},
+    {14, service_cmd_ok, "LookupOrphanContent"},
+    {15, service_cmd_ok, "Commit"},
+    {16, service_cmd_out_u8_false, "HasContent"},
+    {17, service_cmd_out_u8_false, "ListContentMetaInfo"},
+    {18, cmd_meta_not_found, "GetAttributes"},
+    {19, cmd_meta_not_found, "GetRequiredApplicationVersion"},
+    {20, cmd_meta_not_found, "GetContentIdByTypeAndIdOffset"},
+};
+
+static const Service_Command k_es_commands[] = {
+    {1, service_cmd_ok, "ImportTicket"},
+    {2, service_cmd_ok, "ImportTicketCertificateSet"},
+    {3, service_cmd_ok, "DeleteTicket"},
+    {4, service_cmd_ok, "DeletePersonalizedTicket"},
+    {5, service_cmd_ok, "DeleteAllCommonTicket"},
+    {6, service_cmd_ok, "DeleteAllPersonalizedTicket"},
+    {7, service_cmd_ok, "DeleteAllPersonalizedTicketEx"},
+    {8, cmd_content_not_found, "GetTitleKey"},
+    {9, service_cmd_out_u8_false, "CountCommonTicket"},
+    {10, service_cmd_out_u8_false, "CountPersonalizedTicket"},
+    {11, service_cmd_out_u8_false, "ListCommonTicket"},
+    {12, service_cmd_out_u8_false, "ListPersonalizedTicket"},
+    {13, service_cmd_out_u8_false, "ListMissingPersonalizedTicket"},
+    {14, cmd_content_not_found, "GetCommonTicketSize"},
+    {15, cmd_content_not_found, "GetPersonalizedTicketSize"},
+    {16, cmd_content_not_found, "GetCommonTicketData"},
+    {17, cmd_content_not_found, "GetPersonalizedTicketData"},
+    {18, service_cmd_ok, "OwnTicket"},
+    {19, cmd_content_not_found, "GetTicketInfo"},
+    {20, service_cmd_out_u8_false, "ListLightTicketInfo"},
+    {23, service_cmd_out_u8_false, "GetCommonTicketAndCertificateSize"},
+    {25, service_cmd_out_u8_false, "ListOwnedTicketRightsIds"},
+};
+
 void ns_init(Ns_State *s) {
   const bool has_title = s->has_title;
   const uint64_t title_id = s->title_id;
@@ -193,6 +344,10 @@ void ns_init(Ns_State *s) {
   s->control_data = SERVICE_INTERFACE("IReadOnlyApplicationControlDataInterface", k_control_commands, 0, s);
   s->record = SERVICE_INTERFACE("IReadOnlyApplicationRecordInterface", k_record_commands, 0, s);
   s->inert = SERVICE_INTERFACE("INsInterface", k_inert_commands, 0, s);
+  s->ncm = SERVICE_INTERFACE("ncm", k_ncm_commands, 0, s);
+  s->es = SERVICE_INTERFACE("es", k_es_commands, 0, s);
+  s->ncm_storage = SERVICE_INTERFACE("IContentStorage", k_ncm_storage_commands, 0, s);
+  s->ncm_database = SERVICE_INTERFACE("IContentMetaDatabase", k_ncm_database_commands, 0, s);
   /* The loaded title survives a process reset (it is set at load). */
   s->has_title = has_title;
   s->title_id = title_id;
@@ -202,6 +357,10 @@ void ns_init(Ns_State *s) {
 }
 
 Error ns_register(Ns_State *s, SM_Registry *registry) {
+  const Error ncm = sm_registry_add(registry, "ncm", &s->ncm);
+  if (!error_is_ok(ncm)) return ncm;
+  const Error es = sm_registry_add(registry, "es", &s->es);
+  if (!error_is_ok(es)) return es;
   for (uint32_t i = 0; i < NS_PORT_COUNT; i++) {
     const Error err = sm_registry_add(registry, k_ports[i], &s->getters[i]);
     if (!error_is_ok(err)) return err;

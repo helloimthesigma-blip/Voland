@@ -134,6 +134,94 @@ static const Service_Command k_pm_info_commands[] = {
     {65000, cmd_pm_not_found, "AtmosphereGetProcessId"},
 };
 
+/* usb:ds (§12 stub tier): never attached. */
+#define USB_STATE_DETACHED 0u
+
+static HLE_ServiceResult cmd_usb_event(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                       IPC_Response *res) {
+  (void)req;
+  Misc_State *s = (Misc_State *)self->interface->service_state;
+  return service_push_event(c, res, &s->usb_event);
+}
+
+static HLE_ServiceResult cmd_usb_state(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                       IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)ipc_response_push_u32(res, USB_STATE_DETACHED);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_usb_interface(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                           IPC_Response *res) {
+  (void)c;
+  (void)req;
+  Misc_State *s = (Misc_State *)self->interface->service_state;
+  (void)ipc_response_push_object(res, &s->usb_interface, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_usb_endpoint(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                          IPC_Response *res) {
+  (void)c;
+  (void)req;
+  Misc_State *s = (Misc_State *)self->interface->service_state;
+  (void)ipc_response_push_object(res, &s->usb_endpoint, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_usb_service(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                         IPC_Response *res) {
+  (void)c;
+  (void)req;
+  Misc_State *s = (Misc_State *)self->interface->service_state;
+  (void)ipc_response_push_object(res, &s->usb_service, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static const Service_Command k_usb_ds_commands[] = {
+    {0, cmd_usb_service, "OpenDsService"},
+};
+
+static const Service_Command k_usb_service_commands[] = {
+    {0, service_cmd_ok, "BindDevice"},
+    {1, cmd_usb_interface, "RegisterInterface"},
+    {2, cmd_usb_event, "GetStateChangeEvent"},
+    {3, cmd_usb_state, "GetState"},
+    {4, service_cmd_ok, "ClearDeviceData"},
+    {5, service_cmd_out_u8_false, "AddUsbStringDescriptor"},
+    {6, service_cmd_ok, "DeleteUsbStringDescriptor"},
+    {7, service_cmd_ok, "SetUsbDeviceDescriptor"},
+    {8, service_cmd_ok, "SetBinaryObjectStore"},
+    {9, service_cmd_ok, "Enable"},
+    {10, service_cmd_ok, "Disable"},
+    {11, service_cmd_out_u8_false, "GetSpeed"},
+};
+
+static const Service_Command k_usb_interface_commands[] = {
+    {0, cmd_usb_endpoint, "RegisterEndpoint"},
+    {1, cmd_usb_event, "GetSetupEvent"},
+    {2, service_cmd_out_zero128, "GetSetupPacket"},
+    {3, service_cmd_out_u8_false, "CtrlInPostBufferAsync"},
+    {4, service_cmd_out_u8_false, "CtrlOutPostBufferAsync"},
+    {5, cmd_usb_event, "GetCtrlInCompletionEvent"},
+    {6, service_cmd_out_zero128, "GetCtrlInReportData"},
+    {7, cmd_usb_event, "GetCtrlOutCompletionEvent"},
+    {8, service_cmd_out_zero128, "GetCtrlOutReportData"},
+    {9, service_cmd_ok, "StallCtrl"},
+    {10, service_cmd_out_u8_false, "AppendConfigurationData"},
+};
+
+static const Service_Command k_usb_endpoint_commands[] = {
+    {0, service_cmd_out_u8_false, "PostBufferAsync"},
+    {1, service_cmd_ok, "Cancel"},
+    {2, cmd_usb_event, "GetCompletionEvent"},
+    {3, service_cmd_out_zero128, "GetReportData"},
+    {4, service_cmd_ok, "Stall"},
+    {5, service_cmd_ok, "SetZlt"},
+};
+
 static const Service_Command k_csrng_commands[] = {
     {0, cmd_random_bytes, "GetRandomBytes"},
 };
@@ -175,6 +263,10 @@ void misc_init(Misc_State *s) {
   s->pdm_query = SERVICE_INTERFACE("pdm:qry", k_pdm_commands, 0, s);
   s->pm_shell = SERVICE_INTERFACE("pm:shell", k_pm_shell_commands, 0, s);
   s->pm_info = SERVICE_INTERFACE("pm:info", k_pm_info_commands, 0, s);
+  s->usb_ds = SERVICE_INTERFACE("usb:ds", k_usb_ds_commands, 0, s);
+  s->usb_service = SERVICE_INTERFACE("IDsService", k_usb_service_commands, 0, s);
+  s->usb_interface = SERVICE_INTERFACE("IDsInterface", k_usb_interface_commands, 0, s);
+  s->usb_endpoint = SERVICE_INTERFACE("IDsEndpoint", k_usb_endpoint_commands, 0, s);
 }
 
 Error misc_register(Misc_State *s, SM_Registry *registry) {
@@ -184,5 +276,6 @@ Error misc_register(Misc_State *s, SM_Registry *registry) {
   if (error_is_ok(err)) err = sm_registry_add(registry, "pdm:qry", &s->pdm_query);
   if (error_is_ok(err)) err = sm_registry_add(registry, "pm:shell", &s->pm_shell);
   if (error_is_ok(err)) err = sm_registry_add(registry, "pm:info", &s->pm_info);
+  if (error_is_ok(err)) err = sm_registry_add(registry, "usb:ds", &s->usb_ds);
   return err;
 }

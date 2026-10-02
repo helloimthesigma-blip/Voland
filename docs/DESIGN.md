@@ -2421,9 +2421,14 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.51.0*
+*Document version: 3.52.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.51 → v3.52 (summary)
+
+- **Services (§12 stub tier):** `ncm` (content storages and meta databases open and are empty - nothing is installed), `es` (no tickets: counts zero, lookups fail; no keys are handled, §1.6), `usb:ds` in the 11.0.0+ layout (OpenDsService -> IDsService/IDsInterface/IDsEndpoint; always Detached), fsp-srv OpenBisFileSystem (an empty in-memory filesystem per BIS partition - Voland has no NAND image). svcBreak now logs the Result a libnx fatal path passes, and any SVC answering InvalidHandle is logged at debug level.
+- **Compatibility probe (local):** Goldleaf now initialises fs/ncm/es/usb and stops at `ams:su` - an Atmosphère (custom firmware) extension service, out of scope.
 
 ### Changelog v3.50 → v3.51 (summary)
 
