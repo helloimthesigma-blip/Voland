@@ -353,8 +353,15 @@ static uint32_t u32f(float f) {
  * so they vectorize (NEON natively, WASM SIMD on the web). */
 #define FOR_ALL_LANES for (uint32_t l = 0; l < SM_LANES; l++)
 
-static void store_masked(uint32_t *d, const uint32_t *res, Sm_Mask m) {
-  for (uint32_t l = 0; l < SM_LANES; l++) d[l] = LANE(m, l) ? res[l] : d[l];
+static inline void store_masked(uint32_t *restrict d, const uint32_t *restrict res, Sm_Mask m) {
+  if (m == SM_ALL_LANES) {
+    memcpy(d, res, sizeof(uint32_t) * SM_LANES);
+    return;
+  }
+  for (uint32_t l = 0; l < SM_LANES; l++) {
+    const uint32_t keep = 0u - (uint32_t)LANE(m, l);
+    d[l] = (res[l] & keep) | (d[l] & ~keep);
+  }
 }
 
 /* d[l] = expr for the active lanes, where expr is pure in `l`. */
@@ -1662,6 +1669,19 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     const uint32_t *idx = t->r[REG_A(w)], *mul = t->r[REG_B(w)];
     const uint32_t addr0 = BITS(w, 28, 10);
     const bool indexed = BIT(w, 38) != 0, multiply = BITS(w, 54, 2) == 1u, sat = BIT(w, 51) != 0;
+    if (!indexed && addr0 != SM_ATTR_FRONT_FACING) {
+      /* The common form: one attribute row for every lane. */
+      const uint32_t *row = t->attr_in[(addr0 / 4u) % SM_ATTRIBUTE_WORDS];
+      uint32_t res[SM_LANES];
+      FOR_ALL_LANES {
+        float f = f32(row[l]);
+        if (multiply) f *= f32(mul[l]);
+        if (sat) f = saturate(f);
+        res[l] = u32f(f);
+      }
+      store_masked(d, res, m);
+      return;
+    }
     FOR_LANES(m) {
       const uint32_t addr = indexed ? addr0 + idx[l] : addr0;
       if (addr == SM_ATTR_FRONT_FACING) {
