@@ -471,6 +471,94 @@ static void test_conditional_exit(void) {
   CHECK(run() && g_thread.r[0][0] == 1u, "EXIT (T) ends the program");
 }
 
+/* Half-precision pairs: each vector runs `insn` with R0 = a, R1 = b,
+ * R2 = c, R3 = d (the destination, or HFMA2.32I's addend), c[2][0x10] =
+ * cb, then checks R3 and, for HSETP2, P0/P1. Halves are written
+ * (high << 16) | low. */
+#define H2(hi, lo) (((uint32_t)(hi) << 16) | (uint32_t)(lo))
+#define HF_0 0x0000u
+#define HF_QUARTER 0x3400u
+#define HF_HALF 0x3800u
+#define HF_ONE 0x3c00u
+#define HF_ONE_HALF 0x3e00u
+#define HF_TWO 0x4000u
+#define HF_TWO_QUARTER 0x4080u
+#define HF_THREE 0x4200u
+#define HF_FOUR 0x4400u
+#define HF_FOUR_QUARTER 0x4440u
+#define HF_FIVE 0x4500u
+#define HF_INF 0x7c00u
+#define NO_PRED 0xffu
+
+typedef struct Half_Vector {
+  const char *name;
+  uint64_t insn;
+  uint32_t a, b, c, d, cb;
+  uint32_t expect_d;
+  uint8_t expect_p0, expect_p1; /* NO_PRED: not checked */
+} Half_Vector;
+
+/* 9-bit halves of a paired immediate: the top bits of an f16. */
+static uint64_t h_imm(uint32_t hi, uint32_t lo) {
+  return ((uint64_t)((lo >> 6) & 0x1ffu) << 20) | ((uint64_t)((hi >> 6) & 0x1ffu) << 30);
+}
+
+static void test_half_precision(void) {
+  const uint64_t base = GUARD | ra(0) | rd(3);
+  const Half_Vector vectors[] = {
+      {"HADD2 reg", op_top(0x5d10) | base | rb(1), H2(HF_TWO, HF_ONE), H2(HF_ONE, HF_HALF), 0, 0, 0,
+       H2(HF_THREE, HF_ONE_HALF), NO_PRED, NO_PRED},
+      {"HADD2 reg -b.H1_H1", op_top(0x5d10) | base | rb(1) | (1ull << 31) | (3ull << 28), H2(HF_TWO, HF_ONE),
+       H2(HF_ONE, HF_HALF), 0, 0, 0, H2(HF_ONE, HF_0), NO_PRED, NO_PRED},
+      {"HADD2 reg MRG_H1", op_top(0x5d10) | base | rb(1) | (3ull << 49), H2(HF_TWO, HF_ONE), H2(HF_ONE, HF_HALF), 0,
+       0x1234abcdu, 0, H2(HF_THREE, 0xabcdu), NO_PRED, NO_PRED},
+      {"HADD2 reg F32 merge", op_top(0x5d10) | base | rb(1) | (1ull << 49), H2(HF_TWO, HF_ONE), H2(HF_ONE, HF_HALF),
+       0, 0, 0, (uint32_t)f_bits(1.5f), NO_PRED, NO_PRED},
+      {"HMUL2 cbuf (f32 b)", op_top(0x7880) | base | cbuf(2, 0x10), H2(HF_TWO, HF_ONE), 0, 0, 0,
+       (uint32_t)f_bits(2.0f), H2(HF_FOUR, HF_TWO), NO_PRED, NO_PRED},
+      {"HMUL2 imm", op_top(0x7800) | base | h_imm(HF_TWO, HF_HALF), H2(HF_TWO, HF_ONE), 0, 0, 0, 0,
+       H2(HF_FOUR, HF_HALF), NO_PRED, NO_PRED},
+      {"HMUL2 reg FMZ (0 * inf = 0)", op_top(0x5d08) | base | rb(1) | (2ull << 39), H2(HF_INF, HF_0),
+       H2(HF_0, HF_INF), 0, 0, 0, H2(HF_0, HF_0), NO_PRED, NO_PRED},
+      {"HFMA2 reg", op_top(0x5d00) | base | rb(1) | rc(2), H2(HF_TWO, HF_ONE), H2(HF_ONE, HF_HALF),
+       H2(HF_ONE, HF_ONE), 0, 0, H2(HF_THREE, HF_ONE_HALF), NO_PRED, NO_PRED},
+      {"HFMA2 rc (b = Rc, c = f32 cbuf)", op_top(0x6080) | base | rc(2) | cbuf(2, 0x10), H2(HF_TWO, HF_ONE), 0,
+       H2(HF_TWO, HF_TWO), 0, (uint32_t)f_bits(1.0f), H2(HF_FIVE, HF_THREE), NO_PRED, NO_PRED},
+      {"HFMA2.32I (c = Rd)", op_top(0x2800) | base | ((uint64_t)H2(HF_TWO, HF_TWO) << 20), H2(HF_TWO, HF_ONE), 0, 0,
+       H2(HF_QUARTER, HF_QUARTER), 0, H2(HF_FOUR_QUARTER, HF_TWO_QUARTER), NO_PRED, NO_PRED},
+      {"HSET2 reg GT", op_top(0x5d18) | base | rb(1) | (PT << 39) | (4ull << 35), H2(HF_TWO, HF_ONE),
+       H2(HF_ONE_HALF, HF_ONE_HALF), 0, 0, 0, H2(0xffffu, 0), NO_PRED, NO_PRED},
+      {"HSET2 reg GT.BF", op_top(0x5d18) | base | rb(1) | (PT << 39) | (4ull << 35) | (1ull << 49),
+       H2(HF_TWO, HF_ONE), H2(HF_ONE_HALF, HF_ONE_HALF), 0, 0, 0, H2(HF_ONE, 0), NO_PRED, NO_PRED},
+      {"HSETP2 reg GT", op_top(0x5d20) | GUARD | ra(0) | rb(1) | (PT << 39) | (4ull << 35) | (0ull << 3) | 1ull,
+       H2(HF_TWO, HF_ONE), H2(HF_ONE_HALF, HF_ONE_HALF), 0, 0, 0, 0, 0, 1},
+      {"HSETP2 reg GT.H_AND", op_top(0x5d20) | GUARD | ra(0) | rb(1) | (PT << 39) | (4ull << 35) | (1ull << 49) | 1ull,
+       H2(HF_TWO, HF_ONE), H2(HF_HALF, HF_HALF), 0, 0, 0, 0, 1, 0}, /* both true: P0 = and, P1 = !and */
+  };
+  for (uint32_t i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
+    const Half_Vector *v = &vectors[i];
+    Builder b;
+    begin(&b, SM_STAGE_VERTEX);
+    emit(&b, MOV32I(0, v->a));
+    emit(&b, MOV32I(1, v->b));
+    emit(&b, MOV32I(2, v->c));
+    emit(&b, MOV32I(3, v->d));
+    emit(&b, v->insn);
+    emit(&b, EXIT());
+    load(&b);
+    CHECK(g_prog.unknown_ops == 0, "%s decodes", v->name);
+    put_cb(1, 0x10, v->cb);
+    sm_thread_reset(&g_thread, 1);
+    CHECK(run(), "%s runs", v->name);
+    if (v->expect_p0 == NO_PRED) {
+      CHECK(g_thread.r[3][0] == v->expect_d, "%s: R3 %08x, want %08x", v->name, g_thread.r[3][0], v->expect_d);
+    } else {
+      CHECK((g_thread.p[0] & 1u) == v->expect_p0 && (g_thread.p[1] & 1u) == v->expect_p1, "%s: P0 %u P1 %u", v->name,
+            (unsigned)(g_thread.p[0] & 1u), (unsigned)(g_thread.p[1] & 1u));
+    }
+  }
+}
+
 int main(void) {
   test_float_arith();
   test_integer_arith();
@@ -483,6 +571,7 @@ int main(void) {
   test_divergence();
   test_derivatives();
   test_conditional_exit();
+  test_half_precision();
   if (g_failures) {
     fprintf(stderr, "maxwell_shader_test: %d failure(s)\n", g_failures);
     return 1;

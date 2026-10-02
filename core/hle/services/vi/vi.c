@@ -425,8 +425,9 @@ static int32_t transact(Vi_State *s, HLE_Context *c, Vi_Layer *layer, uint32_t c
       const uint8_t *gbfr = parcel_flattened(r, &size);
       if (!gbfr) return BQ_BAD_VALUE;
       parse_graphic_buffer(slot, gbfr, size);
-      log_debug("[vi] preallocated slot %d: nvmap %u offset 0x%x %ux%u size 0x%llx gbfr %u bytes", index, slot->nvmap_id,
-                slot->offset, slot->width, slot->height, (unsigned long long)slot->size, size);
+      log_debug("[vi] preallocated slot %d: nvmap %u offset 0x%x %ux%u pitch %u format %u layout %u bh %u size 0x%llx",
+                index, slot->nvmap_id, slot->offset, slot->width, slot->height, slot->pitch, slot->format, slot->layout,
+                slot->block_height_log2, (unsigned long long)slot->size);
     }
     update_release_event(c, layer);
     return BQ_OK;

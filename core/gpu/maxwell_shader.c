@@ -60,6 +60,15 @@ static const Op_Pattern k_patterns[] = {
     {0xfff8, 0x5cb0, SM_OP_F2I, R, 1}, {0xfff8, 0x4cb0, SM_OP_F2I, C, 1}, {0xfef8, 0x38b0, SM_OP_F2I, I, 1},
     {0xfff8, 0x5cb8, SM_OP_I2F, R, 0}, {0xfff8, 0x4cb8, SM_OP_I2F, C, 0}, {0xfef8, 0x38b8, SM_OP_I2F, I, 0},
     {0xfff8, 0x5ce0, SM_OP_I2I, R, 0}, {0xfff8, 0x4ce0, SM_OP_I2I, C, 0}, {0xfef8, 0x38e0, SM_OP_I2I, I, 0},
+    /* half precision; the 0x6/0x7 cbuf/imm forms share prefixes, HFMA2's are narrower */
+    {0xfff8, 0x5d10, SM_OP_HADD2, R, 0}, {0xfe80, 0x7a80, SM_OP_HADD2, C, 0}, {0xfe80, 0x7a00, SM_OP_HADD2, I, 0},
+    {0xfe00, 0x2c00, SM_OP_HADD2, L, 0},
+    {0xfff8, 0x5d08, SM_OP_HMUL2, R, 0}, {0xfe80, 0x7880, SM_OP_HMUL2, C, 0}, {0xfe80, 0x7800, SM_OP_HMUL2, I, 0},
+    {0xfe00, 0x2a00, SM_OP_HMUL2, L, 0},
+    {0xfff8, 0x5d00, SM_OP_HFMA2, R, 0}, {0xf880, 0x6080, SM_OP_HFMA2, X, 0}, {0xf880, 0x7080, SM_OP_HFMA2, C, 0},
+    {0xf880, 0x7000, SM_OP_HFMA2, I, 0}, {0xfe00, 0x2800, SM_OP_HFMA2, L, 0},
+    {0xfff8, 0x5d18, SM_OP_HSET2, R, 0}, {0xfe80, 0x7c80, SM_OP_HSET2, C, 0}, {0xfe80, 0x7c00, SM_OP_HSET2, I, 0},
+    {0xfff8, 0x5d20, SM_OP_HSETP2, R, 0}, {0xfe80, 0x7e80, SM_OP_HSETP2, C, 0}, {0xfe80, 0x7e00, SM_OP_HSETP2, I, 0},
     /* integer */
     {0xfff8, 0x5c10, SM_OP_IADD, R, 0}, {0xfff8, 0x4c10, SM_OP_IADD, C, 0}, {0xfef8, 0x3810, SM_OP_IADD, I, 0},
     {0xfe00, 0x1c00, SM_OP_IADD32I, L, 0},
@@ -112,7 +121,7 @@ static const Op_Pattern k_patterns[] = {
     {0xffc0, 0xdf00, SM_OP_TLD4S, R, 0},
     {0xfe00, 0xd800, SM_OP_TEXS, R, 0}, {0xfe00, 0xda00, SM_OP_TLDS, R, 0},
     {0xff78, 0xdc38, SM_OP_TLD, R, 0}, {0xfff8, 0xde38, SM_OP_TXD, R, 0},
-    {0xfc38, 0xc838, SM_OP_TLD4, R, 0}, {0xfe38, 0xc038, SM_OP_TEX, R, 0},
+    {0xfc38, 0xc838, SM_OP_TLD4, R, 0}, {0xfe38, 0xc038, SM_OP_TEX, R, 0}, {0xfff8, 0xdeb8, SM_OP_TEX_B, R, 0},
     /* control */
     {0xfff0, 0xe240, SM_OP_BRA, R, 0}, {0xfff0, 0xe290, SM_OP_SSY, R, 0}, {0xfff0, 0xe2a0, SM_OP_PBK, R, 0},
     {0xfff0, 0xe2b0, SM_OP_PCNT, R, 0}, {0xfff0, 0xe260, SM_OP_CAL, R, 0},
@@ -131,7 +140,8 @@ static const char *const k_names[SM_OP_COUNT] = {
     [SM_OP_FADD32I] = "FADD32I", [SM_OP_FMUL] = "FMUL", [SM_OP_FMUL32I] = "FMUL32I", [SM_OP_FFMA] = "FFMA",
     [SM_OP_FFMA32I] = "FFMA32I", [SM_OP_FMNMX] = "FMNMX", [SM_OP_FSET] = "FSET", [SM_OP_FSETP] = "FSETP",
     [SM_OP_FCMP] = "FCMP", [SM_OP_MUFU] = "MUFU", [SM_OP_RRO] = "RRO", [SM_OP_FSWZADD] = "FSWZADD",
-    [SM_OP_F2F] = "F2F", [SM_OP_F2I] = "F2I", [SM_OP_I2F] = "I2F", [SM_OP_I2I] = "I2I", [SM_OP_IADD] = "IADD",
+    [SM_OP_F2F] = "F2F", [SM_OP_HADD2] = "HADD2", [SM_OP_HMUL2] = "HMUL2", [SM_OP_HFMA2] = "HFMA2",
+    [SM_OP_HSET2] = "HSET2", [SM_OP_HSETP2] = "HSETP2", [SM_OP_F2I] = "F2I", [SM_OP_I2F] = "I2F", [SM_OP_I2I] = "I2I", [SM_OP_IADD] = "IADD",
     [SM_OP_IADD32I] = "IADD32I", [SM_OP_IADD3] = "IADD3", [SM_OP_ISCADD] = "ISCADD", [SM_OP_ISCADD32I] = "ISCADD32I",
     [SM_OP_IMNMX] = "IMNMX", [SM_OP_ISET] = "ISET", [SM_OP_ISETP] = "ISETP", [SM_OP_ICMP] = "ICMP",
     [SM_OP_IMUL] = "IMUL", [SM_OP_IMUL32I] = "IMUL32I", [SM_OP_IMAD] = "IMAD", [SM_OP_XMAD] = "XMAD",
@@ -141,7 +151,7 @@ static const char *const k_names[SM_OP_COUNT] = {
     [SM_OP_P2R] = "P2R", [SM_OP_R2P] = "R2P", [SM_OP_CSETP] = "CSETP", [SM_OP_S2R] = "S2R", [SM_OP_CS2R] = "CS2R",
     [SM_OP_VOTE] = "VOTE", [SM_OP_SHFL] = "SHFL", [SM_OP_BARRIER] = "BAR", [SM_OP_ALD] = "ALD", [SM_OP_AST] = "AST",
     [SM_OP_IPA] = "IPA", [SM_OP_LDC] = "LDC", [SM_OP_LD] = "LD", [SM_OP_ST] = "ST", [SM_OP_LDG] = "LDG",
-    [SM_OP_STG] = "STG", [SM_OP_LDL] = "LDL", [SM_OP_STL] = "STL", [SM_OP_OUT] = "OUT", [SM_OP_TEX] = "TEX",
+    [SM_OP_STG] = "STG", [SM_OP_LDL] = "LDL", [SM_OP_STL] = "STL", [SM_OP_OUT] = "OUT", [SM_OP_TEX] = "TEX", [SM_OP_TEX_B] = "TEX.B",
     [SM_OP_TEXS] = "TEXS", [SM_OP_TLD] = "TLD", [SM_OP_TLDS] = "TLDS", [SM_OP_TLD4] = "TLD4", [SM_OP_TLD4S] = "TLD4S",
     [SM_OP_TXQ] = "TXQ", [SM_OP_TMML] = "TMML", [SM_OP_TXD] = "TXD", [SM_OP_BRA] = "BRA", [SM_OP_SSY] = "SSY",
     [SM_OP_SYNC] = "SYNC", [SM_OP_PBK] = "PBK", [SM_OP_BRK] = "BRK", [SM_OP_PCNT] = "PCNT", [SM_OP_CONT] = "CONT",
@@ -208,6 +218,17 @@ static Sm_Insn decode_word(uint64_t w, uint32_t index) {
     break;
   case SM_OP_LOP3:
     if (insn.form == SM_FORM_IMM) insn.imm = BITS(w, 20, 32);
+    break;
+  case SM_OP_HADD2:
+  case SM_OP_HMUL2:
+  case SM_OP_HFMA2:
+  case SM_OP_HSET2:
+  case SM_OP_HSETP2:
+    /* A pair of f16 with 9-bit exponent+top-mantissa fields: low at 20
+     * (sign 29), high at 30 (sign 56); the low 6 mantissa bits are 0. */
+    if (insn.form == SM_FORM_IMM) {
+      insn.imm = (BITS(w, 20, 9) << 6) | (BIT(w, 29) << 15) | (BITS(w, 30, 9) << 22) | (BIT(w, 56) << 31);
+    }
     break;
   default:
     break;
@@ -556,6 +577,156 @@ static uint16_t float_to_half(float f) {
   return (uint16_t)h;
 }
 
+/* ---- half precision ---------------------------------------------- */
+
+/* Operand swizzles: which f16 of a register feed the low and high lanes
+ * of a paired op (F32 reads the register as one f32 for both). */
+#define HALF_SWZ_H1_H0 0u
+#define HALF_SWZ_F32 1u
+#define HALF_SWZ_H0_H0 2u
+#define HALF_SWZ_H1_H1 3u
+/* Result merges: both halves, the low result as an f32, or one half
+ * inserted into the destination's existing value. */
+#define HALF_MERGE_H1_H0 0u
+#define HALF_MERGE_F32 1u
+#define HALF_MERGE_MRG_H0 2u
+#define HALF_MERGE_MRG_H1 3u
+#define HALF_PRECISION_FMZ 2u /* D3D9 rule: anything * 0 = 0 */
+#define HALF_ONE 0x3c00u
+#define HALF_TRUE 0xffffu
+#define HALF_LOW_MASK 0xffffu
+#define HALF_HIGH_SHIFT 16u
+
+typedef struct Half_Pair {
+  float lo, hi;
+} Half_Pair;
+
+static Half_Pair half_extract(uint32_t v, uint32_t swizzle, uint32_t abs_bit, uint32_t neg_bit) {
+  const float h0 = half_to_float((uint16_t)(v & HALF_LOW_MASK)), h1 = half_to_float((uint16_t)(v >> HALF_HIGH_SHIFT));
+  Half_Pair p;
+  switch (swizzle) {
+  case HALF_SWZ_F32: p.lo = p.hi = f32(v); break;
+  case HALF_SWZ_H0_H0: p.lo = p.hi = h0; break;
+  case HALF_SWZ_H1_H1: p.lo = p.hi = h1; break;
+  default: p.lo = h0; p.hi = h1; break;
+  }
+  p.lo = fmod_abs_neg(p.lo, abs_bit, neg_bit);
+  p.hi = fmod_abs_neg(p.hi, abs_bit, neg_bit);
+  return p;
+}
+
+static uint32_t half_merge(uint32_t old, Half_Pair r, uint32_t merge) {
+  switch (merge) {
+  case HALF_MERGE_F32: return u32f(r.lo);
+  case HALF_MERGE_MRG_H0: return (old & ~HALF_LOW_MASK) | float_to_half(r.lo);
+  case HALF_MERGE_MRG_H1: return (old & HALF_LOW_MASK) | ((uint32_t)float_to_half(r.hi) << HALF_HIGH_SHIFT);
+  default: return float_to_half(r.lo) | ((uint32_t)float_to_half(r.hi) << HALF_HIGH_SHIFT);
+  }
+}
+
+/* The modifier fields of HADD2/HMUL2/HFMA2/HSET2/HSETP2, which move per
+ * op and form (layouts per the public Maxwell ISA descriptions). */
+typedef struct Half_Fields {
+  uint32_t swz_a, swz_b, swz_c;
+  uint32_t abs_a, neg_a, abs_b, neg_b, neg_c;
+  uint32_t sat, merge, precision;
+  uint32_t cond, flag; /* HSET2: BF (1.0 not all-ones); HSETP2: H_AND */
+} Half_Fields;
+
+static Half_Fields half_fields(const Sm_Insn *in) {
+  const uint64_t w = in->raw;
+  Half_Fields f;
+  memset(&f, 0, sizeof(f));
+  f.swz_a = BITS(w, 47, 2);
+  f.merge = BITS(w, 49, 2);
+  f.swz_b = in->form == SM_FORM_CBUF ? HALF_SWZ_F32 : HALF_SWZ_H1_H0;
+  f.swz_c = HALF_SWZ_H1_H0;
+  const bool reg = in->form == SM_FORM_REG, imm32 = in->form == SM_FORM_IMM32;
+  switch ((Sm_Op)in->op) {
+  case SM_OP_HADD2:
+  case SM_OP_HMUL2:
+    if (imm32) {
+      f.swz_a = BITS(w, 53, 2);
+      f.merge = HALF_MERGE_H1_H0;
+      f.sat = BIT(w, 52);
+      if (in->op == SM_OP_HADD2) f.neg_a = BIT(w, 56);
+      else f.precision = BITS(w, 55, 2);
+      break;
+    }
+    f.abs_a = BIT(w, 44);
+    f.neg_a = (in->op == SM_OP_HMUL2 && reg) ? 0u : BIT(w, 43);
+    if (in->op == SM_OP_HMUL2) f.precision = BITS(w, 39, 2);
+    if (reg) {
+      f.sat = BIT(w, 32);
+      f.neg_b = BIT(w, 31);
+      f.abs_b = BIT(w, 30);
+      f.swz_b = BITS(w, 28, 2);
+    } else {
+      f.sat = BIT(w, 52);
+      if (in->form == SM_FORM_CBUF) {
+        f.abs_b = BIT(w, 54);
+        if (in->op == SM_OP_HADD2) f.neg_b = BIT(w, 56);
+      }
+    }
+    break;
+  case SM_OP_HFMA2:
+    switch (in->form) {
+    case SM_FORM_REG:
+      f.swz_b = BITS(w, 28, 2);
+      f.sat = BIT(w, 32);
+      f.neg_b = BIT(w, 31);
+      f.neg_c = BIT(w, 30);
+      f.swz_c = BITS(w, 35, 2);
+      f.precision = BITS(w, 37, 2);
+      break;
+    case SM_FORM_IMM32:
+      f.swz_a = BITS(w, 53, 2);
+      f.merge = HALF_MERGE_H1_H0;
+      f.neg_c = BIT(w, 52);
+      f.precision = BITS(w, 55, 2);
+      break;
+    default: /* b = Rc, c = cbuf (REG_CBUF); b = cbuf or imm, c = Rc */
+      f.neg_c = BIT(w, 51);
+      f.sat = BIT(w, 52);
+      f.precision = BITS(w, 57, 2);
+      if (in->form == SM_FORM_REG_CBUF) {
+        f.swz_b = BITS(w, 53, 2);
+        f.swz_c = HALF_SWZ_F32;
+      } else {
+        f.swz_c = BITS(w, 53, 2);
+      }
+      if (in->form != SM_FORM_IMM) f.neg_b = BIT(w, 56);
+      break;
+    }
+    break;
+  default: /* HSET2, HSETP2 */
+    f.neg_a = BIT(w, 43);
+    f.abs_a = BIT(w, 44);
+    if (reg) {
+      f.abs_b = BIT(w, 30);
+      f.neg_b = BIT(w, 31);
+      f.swz_b = BITS(w, 28, 2);
+      f.cond = BITS(w, 35, 4);
+      f.flag = BIT(w, 49);
+    } else {
+      f.cond = BITS(w, 49, 4);
+      f.flag = BIT(w, 53);
+      if (in->form == SM_FORM_CBUF) {
+        f.neg_b = BIT(w, 56);
+        if (in->op == SM_OP_HSETP2) f.abs_b = BIT(w, 54);
+      }
+    }
+    break;
+  }
+  return f;
+}
+
+/* One lane of a product with the FMZ rule applied. */
+static float half_mul(float a, float b, uint32_t precision) {
+  if (precision == HALF_PRECISION_FMZ && (a == 0.0f || b == 0.0f)) return 0.0f;
+  return a * b;
+}
+
 static float round_mode(float v, uint32_t mode) {
   switch (mode & 3u) {
   case 0: return rintf(v);
@@ -711,13 +882,16 @@ static void tex_args(const Sm_Thread *t, uint64_t w, uint32_t n, uint32_t args[8
   for (uint32_t i = 0; i < in_b; i++) args[in_a + i] = b == SM_RZ ? 0u : t->r[(b + i) & 0xffu][l];
 }
 
-/* TEX/TLD/TLD4 vector packing: up to four arguments in Ra.., the rest
- * in Rb... */
-static void tex_args_vec(const Sm_Thread *t, uint64_t w, uint32_t n, uint32_t args[8], uint32_t l) {
+/* TEX/TLD/TLD4 vector packing: the array index and coordinates (the
+ * first `in_a` arguments) in Ra.., everything after them - LOD/bias,
+ * offsets, multisample index, depth reference - in Rb.., after `b_skip`
+ * registers (TEX.B's handle). */
+static void tex_args_vec(const Sm_Thread *t, uint64_t w, uint32_t n, uint32_t in_a, uint32_t args[8], uint32_t l,
+                         uint32_t b_skip) {
   const uint32_t a = REG_A(w), b = REG_B(w);
   for (uint32_t i = 0; i < n && i < 8u; i++) {
-    const uint32_t base = i < 4u ? a : b;
-    const uint32_t k = i < 4u ? i : i - 4u;
+    const uint32_t base = i < in_a ? a : b;
+    const uint32_t k = i < in_a ? i : i - in_a + b_skip;
     args[i] = base == SM_RZ ? 0u : t->r[(base + k) & 0xffu][l];
   }
 }
@@ -871,7 +1045,10 @@ static void exec_tex_vector(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, 
   FOR_LANES(m) {
     Sm_Tex_Request req;
     memset(&req, 0, sizeof(req));
-    req.handle = handle;
+    /* TEX.B (bindless): the handle is Rb's first register, in the same
+     * {TIC index, TSC index << 20} encoding the constant buffer holds;
+     * Rb's other arguments follow it. */
+    req.handle = in->op == SM_OP_TEX_B ? (REG_B(w) == SM_RZ ? 0u : t->r[REG_B(w)][l]) : handle;
     const uint32_t dim = BITS(w, 29, 2);
     req.dims = (uint8_t)(dim == 3u ? 3u : dim + 1u);
     req.cube = dim == 3u;
@@ -888,6 +1065,16 @@ static void exec_tex_vector(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, 
       bias = lodm == 2u;
       req.has_lod = lodm == 1u || lodm == 3u;
       offset = BIT(w, 54) != 0;
+      dc = BIT(w, 50) != 0;
+      break;
+    }
+    case SM_OP_TEX_B: { /* the TEX fields, lodm and offset moved down (36-38) */
+      const uint32_t lodm = BITS(w, 37, 2);
+      req.kind = SM_TEX_SAMPLE;
+      lod = lodm == 3u;
+      bias = lodm == 2u;
+      req.has_lod = lodm == 1u || lodm == 3u;
+      offset = BIT(w, 36) != 0;
       dc = BIT(w, 50) != 0;
       break;
     }
@@ -927,7 +1114,7 @@ static void exec_tex_vector(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, 
       n += offset ? 1u : 0u;
       n += ms ? 1u : 0u;
       n += dc ? 1u : 0u;
-      tex_args_vec(t, w, n, args, l);
+      tex_args_vec(t, w, n, (req.array ? 1u : 0u) + coord_count, args, l, in->op == SM_OP_TEX_B ? 1u : 0u);
       uint32_t k = 0;
       if (req.array) req.layer = (float)(args[k++] & 0xffffu);
       for (uint32_t c = 0; c < coord_count; c++) {
@@ -1172,6 +1359,71 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     }
     set_pred(t, BITS(w, 3, 3), m, p0);
     set_pred(t, BITS(w, 0, 3), m, p1);
+    return;
+  }
+  case SM_OP_HADD2:
+  case SM_OP_HMUL2:
+  case SM_OP_HFMA2: {
+    const Half_Fields f = half_fields(in);
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    /* HFMA2.32I accumulates into its destination. */
+    const uint32_t *c = in->op != SM_OP_HFMA2 ? NULL
+                        : in->form == SM_FORM_IMM32 ? t->r[REG_D(w)]
+                                                    : op_c(in, env, t, tc);
+    uint32_t *d = dst_row(t, REG_D(w));
+    uint32_t res[SM_LANES];
+    FOR_ALL_LANES {
+      const Half_Pair x = half_extract(a[l], f.swz_a, f.abs_a, f.neg_a);
+      const Half_Pair y = half_extract(b[l], f.swz_b, f.abs_b, f.neg_b);
+      Half_Pair r;
+      if (in->op == SM_OP_HADD2) {
+        r.lo = x.lo + y.lo;
+        r.hi = x.hi + y.hi;
+      } else {
+        r.lo = half_mul(x.lo, y.lo, f.precision);
+        r.hi = half_mul(x.hi, y.hi, f.precision);
+        if (c) {
+          const Half_Pair z = half_extract(c[l], f.swz_c, 0, f.neg_c);
+          r.lo += z.lo;
+          r.hi += z.hi;
+        }
+      }
+      if (f.sat) {
+        r.lo = saturate(r.lo);
+        r.hi = saturate(r.hi);
+      }
+      res[l] = half_merge(d[l], r, f.merge);
+    }
+    store_masked(d, res, m);
+    return;
+  }
+  case SM_OP_HSET2:
+  case SM_OP_HSETP2: {
+    const Half_Fields f = half_fields(in);
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    const Sm_Mask pc = pred_mask(t, BITS(w, 39, 3), BIT(w, 42));
+    const uint32_t bop = BITS(w, 45, 2);
+    const uint32_t yes = f.flag ? HALF_ONE : HALF_TRUE;
+    uint32_t *d = dst_row(t, REG_D(w));
+    Sm_Mask p0 = 0, p1 = 0;
+    FOR_LANES(m) {
+      const Half_Pair x = half_extract(a[l], f.swz_a, f.abs_a, f.neg_a);
+      const Half_Pair y = half_extract(b[l], f.swz_b, f.abs_b, f.neg_b);
+      const bool c = LANE(pc, l) != 0;
+      const bool lo = bool_op(bop, fcompare(f.cond, x.lo, y.lo), c);
+      const bool hi = bool_op(bop, fcompare(f.cond, x.hi, y.hi), c);
+      if (in->op == SM_OP_HSET2) {
+        d[l] = (lo ? yes : 0u) | (hi ? yes << HALF_HIGH_SHIFT : 0u);
+        continue;
+      }
+      const bool first = f.flag ? (lo && hi) : lo, second = f.flag ? !(lo && hi) : hi;
+      if (first) p0 |= (Sm_Mask)(1u << l);
+      if (second) p1 |= (Sm_Mask)(1u << l);
+    }
+    if (in->op == SM_OP_HSETP2) {
+      set_pred(t, BITS(w, 3, 3), m, p0);
+      set_pred(t, BITS(w, 0, 3), m, p1);
+    }
     return;
   }
   case SM_OP_FCMP: {
@@ -1847,6 +2099,7 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
   case SM_OP_TLDS: exec_tlds(in, env, t, m); return;
   case SM_OP_TLD4S: exec_tld4s(in, env, t, m); return;
   case SM_OP_TEX:
+  case SM_OP_TEX_B:
   case SM_OP_TLD:
   case SM_OP_TLD4:
   case SM_OP_TXD:
