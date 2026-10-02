@@ -9,11 +9,13 @@ export interface GuestConsoleState {
   readonly lines: readonly string[];
   readonly runState: RunState | "idle";
   readonly detail: string;
+  /** Guest frames presented in the last second (vi -> framebuffer slots). */
+  readonly fps: number;
 }
 
 const MAX_LINES = 1000;
 
-let state: GuestConsoleState = { lines: [], runState: "idle", detail: "" };
+let state: GuestConsoleState = { lines: [], runState: "idle", detail: "", fps: 0 };
 const subscribers = new Set<(next: GuestConsoleState) => void>();
 
 function publish(next: GuestConsoleState): void {
@@ -26,7 +28,7 @@ export function getGuestConsole(): GuestConsoleState {
 }
 
 export function resetGuestConsole(): void {
-  publish({ lines: [], runState: "idle", detail: "" });
+  publish({ lines: [], runState: "idle", detail: "", fps: 0 });
 }
 
 export function appendGuestOutput(text: string): void {
@@ -36,6 +38,10 @@ export function appendGuestOutput(text: string): void {
 
 export function setGuestRunState(runState: RunState, detail: string): void {
   publish({ ...state, runState, detail });
+}
+
+export function setGuestFps(fps: number): void {
+  if (fps !== state.fps) publish({ ...state, fps });
 }
 
 export function subscribeGuestConsole(fn: (next: GuestConsoleState) => void): () => void {

@@ -147,6 +147,9 @@ function LoadPanel(props: LoadPanelProps) {
                 <span class="voland-run-state" data-testid="run-state" data-state={guest().runState}>
                   {RUN_STATE_LABELS[guest().runState]}
                 </span>
+                <Show when={guest().runState === "running" && guest().fps > 0}>
+                  <span class="voland-run-state" data-testid="fps">{guest().fps} fps</span>
+                </Show>
               </h3>
               <p>
                 Title <code>{loaded().titleId}</code>, entry point{" "}

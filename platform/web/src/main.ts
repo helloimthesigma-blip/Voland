@@ -16,7 +16,8 @@ import { AUDIO_RING_CAPACITY_FRAMES, type MemoryLayout, toByteOffset } from "@bi
 import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
-import { appendGuestOutput, resetGuestConsole, setGuestRunState } from "./guest-console";
+import { PUBLISH_INDEX } from "@bindings/framebuffer";
+import { appendGuestOutput, resetGuestConsole, setGuestFps, setGuestRunState } from "./guest-console";
 import { startAudioOutput } from "./audio/audio-output";
 import { startInputLoop } from "./input/input-loop";
 import { appendLogLine, setStatus } from "./log";
@@ -304,6 +305,20 @@ async function boot(): Promise<BootResult | null> {
   // closures (the "layout" case above), so it treats `layout` as still
   // `null` here; the cast reasserts the declared type.
   const finalLayout = layout as MemoryLayout | null;
+
+  /* Frame-rate meter: the framebuffer slots' publish counter, sampled once
+   * a second straight from shared memory (no per-frame messages, §6). */
+  let lastPublished = -1;
+  setInterval(() => {
+    const current = layout as MemoryLayout | null;
+    if (!current) return;
+    const counters = new Int32Array(memory.buffer, toByteOffset(current.framebufferSlotBase), 2);
+    const published = Atomics.load(counters, PUBLISH_INDEX);
+    const fps = lastPublished < 0 ? 0 : (published - lastPublished) | 0;
+    lastPublished = published;
+    setGuestFps(fps);
+    window.__VOLAND_STATS__ = { fps };
+  }, 1000);
 
   function loadGame(file: File): Promise<GameLoadOutcome> {
     if (pendingLoad) {

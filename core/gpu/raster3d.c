@@ -155,9 +155,12 @@ void raster3d_init(Raster3d *r, uint8_t *storage, size_t bytes) {
 void raster3d_begin_submission(Raster3d *r) {
   if (!r->ready) return;
   r->submission++;
-  /* The CPU may have rewritten textures between submissions. */
-  r->texture_count = 0;
-  r->texture_pool_used = 0;
+  /* Decoded textures survive submissions (each is re-hashed against guest
+   * memory on first use in a submission); start over when space runs low. */
+  if (r->texture_count >= RASTER_TEXTURES * 3u / 4u || r->texture_pool_used >= RASTER_TEXTURE_POOL_BYTES / 2u) {
+    r->texture_count = 0;
+    r->texture_pool_used = 0;
+  }
 }
 
 /* ---- colour formats ----------------------------------------------- */
@@ -731,19 +734,37 @@ typedef struct Draw_Context {
   uint8_t window[RASTER_STREAMS][RASTER_STREAM_WINDOW];
 } Draw_Context;
 
-static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const Gpu_Memory *mem) {
-  for (uint32_t i = 0; i < r->texture_count; i++)
-    if (r->textures[i].valid && memcmp(r->textures[i].tic, tic, sizeof(r->textures[i].tic)) == 0) return &r->textures[i];
-  if (r->texture_count >= RASTER_TEXTURES) {
-    r->stats.texture_misses++;
-    return NULL;
+static uint64_t content_hash(const uint8_t *p, uint64_t n) {
+  uint64_t h = 0x9E3779B97F4A7C15ull ^ n;
+  uint64_t i = 0;
+  for (; i + 8u <= n; i += 8u) {
+    uint64_t v;
+    memcpy(&v, p + i, 8);
+    h = (h ^ v) * 0xFF51AFD7ED558CCDull;
+    h ^= h >> 32;
   }
+  for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
+  return h;
+}
+
+static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const Gpu_Memory *mem) {
+  Raster3d_Texture *t = NULL;
+  for (uint32_t i = 0; i < r->texture_count; i++) {
+    if (r->textures[i].valid && memcmp(r->textures[i].tic, tic, sizeof(r->textures[i].tic)) == 0) {
+      t = &r->textures[i];
+      break;
+    }
+  }
+  if (t && t->validated == r->submission) return t;
   Tex_Header h;
   tex_header_parse(tic, &h);
   const uint64_t raw_bytes = tex_read_bytes(&h);
   const uint64_t decoded = tex_decoded_bytes(&h);
-  const size_t need = (size_t)((decoded + 63u) & ~63ull) + (size_t)raw_bytes;
-  if (!raw_bytes || !decoded || r->texture_pool_used + need > RASTER_TEXTURE_POOL_BYTES) {
+  const size_t decoded_aligned = (size_t)((decoded + 63u) & ~63ull);
+  /* Raw bytes are staged past the pool's high-water mark. */
+  const size_t need = (t ? 0u : decoded_aligned) + (size_t)raw_bytes;
+  if (!raw_bytes || !decoded || (!t && r->texture_count >= RASTER_TEXTURES) ||
+      r->texture_pool_used + need > RASTER_TEXTURE_POOL_BYTES) {
     if (!r->stats.texture_misses)
       log_warn("[gpu] texture %ux%u format 0x%02x layout %u type %u: %s", h.width, h.height, h.format, h.layout, h.type,
                (!raw_bytes || !decoded) ? "unsupported format" : "texture pool full");
@@ -756,8 +777,8 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     if (s->in_use && s->dirty && s->address < h.address + raw_bytes && h.address < s->address + s->guest_bytes)
       surface_write_back(r, s, mem);
   }
-  uint8_t *dst = r->texture_pool + r->texture_pool_used;
-  uint8_t *raw = dst + ((decoded + 63u) & ~63ull);
+  uint8_t *dst = t ? (uint8_t *)(uintptr_t)t->image.texels : r->texture_pool + r->texture_pool_used;
+  uint8_t *raw = r->texture_pool + r->texture_pool_used + (t ? 0u : decoded_aligned);
   if (!mem->read(mem->user, h.address, raw, raw_bytes)) {
     if (!r->stats.texture_misses)
       log_warn("[gpu] texture %ux%u format 0x%02x at %llx: unreadable (%llu bytes)", h.width, h.height, h.format,
@@ -765,17 +786,25 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     r->stats.texture_misses++;
     return NULL;
   }
-  Raster3d_Texture *t = &r->textures[r->texture_count];
-  if (!tex_decode(&h, raw, dst, &t->image)) {
+  const uint64_t hash = content_hash(raw, raw_bytes);
+  if (t && t->raw_hash == hash) {
+    t->validated = r->submission;
+    return t;
+  }
+  Raster3d_Texture *slot = t ? t : &r->textures[r->texture_count];
+  if (!tex_decode(&h, raw, dst, &slot->image)) {
     r->stats.texture_misses++;
     return NULL;
   }
-  memcpy(t->tic, tic, sizeof(t->tic));
-  t->valid = true;
-  r->texture_count++;
-  /* Keep the decoded image; the raw staging after it is reusable. */
-  r->texture_pool_used += (size_t)((decoded + 63u) & ~63ull);
-  return t;
+  memcpy(slot->tic, tic, sizeof(slot->tic));
+  slot->raw_hash = hash;
+  slot->validated = r->submission;
+  slot->valid = true;
+  if (!t) {
+    r->texture_count++;
+    r->texture_pool_used += decoded_aligned; /* the raw staging after it is reusable */
+  }
+  return slot;
 }
 
 static bool resolve_texture(Draw_Context *ctx, uint32_t handle, Raster3d_Texture **tex, Tex_Sampler **sampler) {

@@ -54,6 +54,16 @@ test("a real homebrew NRO boots and presents frames", async ({ page }) => {
     if (!(corner[0] > 200 && corner[1] > 200 && corner[2] > 200) && distinct > 1) break;
   }
   expect(distinct, "the guest presented a non-uniform frame").toBeGreaterThan(1);
+  /* Optional: report the frame rate after it settles (VOLAND_HOMEBREW_FPS_MS). */
+  const fpsMs = Number(process.env["VOLAND_HOMEBREW_FPS_MS"] ?? "0");
+  if (fpsMs > 0) {
+    const samples: number[] = [];
+    for (let waited = 0; waited < fpsMs; waited += 1000) {
+      await page.waitForTimeout(1000);
+      samples.push(await page.evaluate(() => window.__VOLAND_STATS__?.fps ?? 0));
+    }
+    console.log(`guest fps samples: ${samples.join(" ")}`);
+  }
 });
 
 /* The homebrew-menu loop (opt-in, VOLAND_HOMEBREW_MENU=1 with a menu NRO

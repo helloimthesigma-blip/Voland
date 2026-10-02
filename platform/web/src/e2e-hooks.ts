@@ -20,9 +20,15 @@ export interface VolandAudioReport {
   readonly ratio: number;
 }
 
+/** Once-a-second performance sample (main.ts frame-rate meter). */
+export interface VolandStats {
+  readonly fps: number;
+}
+
 declare global {
   interface Window {
     __VOLAND_E2E__?: VolandE2EBootMilestone;
+    __VOLAND_STATS__?: VolandStats;
     __VOLAND_AUDIO__?: VolandAudioReport;
   }
 }
