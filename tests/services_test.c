@@ -520,6 +520,53 @@ static void test_audout(void) {
   CHECK(test_le64(r.data) == 480);
 }
 
+static void test_acc(void) {
+  const uint32_t acc = service("acc:u0");
+  Test_Ipc_Reply r = call(acc, 0, NULL, 0, NULL);
+  CHECK(test_le32(r.data) == 1);
+  r = call(acc, 4, NULL, 0, NULL);
+  uint8_t uid[16];
+  memcpy(uid, r.data, sizeof(uid));
+  uint8_t ours[16];
+  acc_user_uid(ours);
+  CHECK(memcmp(uid, ours, 16) == 0);
+  const uint32_t profile = object(acc, 5, uid, sizeof(uid));
+  r = call(profile, 1, NULL, 0, NULL);
+  CHECK(memcmp(r.data, ours, 16) == 0 && strcmp((const char *)r.data + 24, "Player") == 0);
+  r = call(profile, 10, NULL, 0, NULL);
+  const uint32_t size = test_le32(r.data);
+  CHECK(size == k_acc_profile_icon_size);
+  Test_Ipc_Message b;
+  memset(&b, 0, sizeof(b));
+  b.receives[0] = (Test_Ipc_Buffer){SCRATCH(0xD000), 0x2000, 0};
+  b.receive_count = 1;
+  r = call(profile, 11, NULL, 0, &b);
+  CHECK(test_le32(r.data) == size && rd32(SCRATCH(0xD000)) == 0xE0FFD8FFu); /* JPEG SOI + APP0 */
+  uint8_t other[16] = {1};
+  (void)call_ex(acc, 5, other, sizeof(other), NULL, (100u << 9) | 124u);
+
+  /* The preselected user, once, as the launch parameter libnx parses. */
+  const uint32_t oe = service("appletOE");
+  const uint64_t reserved = 0;
+  const uint32_t proxy = object(oe, 0, &reserved, sizeof(reserved));
+  const uint32_t functions = object(proxy, 20, NULL, 0);
+  const uint32_t kind = 2;
+  r = call(functions, 1, &kind, sizeof(kind), NULL);
+  CHECK(r.move_count == 1);
+  const uint32_t accessor = object(r.move_handles[0], 0, NULL, 0);
+  Test_Ipc_Message rb;
+  memset(&rb, 0, sizeof(rb));
+  rb.receives[0] = (Test_Ipc_Buffer){SCRATCH(0xF000), 0x88, 0};
+  rb.receive_count = 1;
+  const uint64_t zero = 0;
+  (void)call(accessor, 11, &zero, sizeof(zero), &rb);
+  CHECK(rd32(SCRATCH(0xF000)) == 0xC79497CAu && (rd32(SCRATCH(0xF004)) & 0xFF) == 1);
+  uint8_t stored[16];
+  CHECK_OK(vmm_read_block(g_emu.vmm, SCRATCH(0xF008), stored, 16));
+  CHECK(memcmp(stored, ours, 16) == 0);
+  (void)call_ex(functions, 1, &kind, sizeof(kind), NULL, AM_RESULT_NO_DATA_IN_CHANNEL);
+}
+
 int main(void) {
   ipc_fixture_boot(&g_emu);
   g_scratch = g_emu.process.main_thread_stack.base + 0x10000;
@@ -528,6 +575,7 @@ int main(void) {
   test_time();
   test_set_apm_am();
   test_audout();
+  test_acc();
   emulator_destroy(&g_emu);
   printf("[services_test] passed\n");
   return 0;

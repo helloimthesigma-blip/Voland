@@ -254,6 +254,7 @@ static void reset_process_services(Emulator* emulator) {
   network_init(&emulator->network);
   misc_init(&emulator->misc);
   audout_init(&emulator->audout);
+  acc_init(&emulator->acc);
   pl_init(&emulator->pl, &emulator->shared_memory, emulator->shared_font, emulator->shared_font_size);
 }
 
@@ -270,6 +271,7 @@ static Error register_services(Emulator* emulator) {
   if (error_is_ok(err)) err = pl_register(&emulator->pl, &emulator->sm);
   if (error_is_ok(err)) err = misc_register(&emulator->misc, &emulator->sm);
   if (error_is_ok(err)) err = audout_register(&emulator->audout, &emulator->sm);
+  if (error_is_ok(err)) err = acc_register(&emulator->acc, &emulator->sm);
   return err;
 }
 

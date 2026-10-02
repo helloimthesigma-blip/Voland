@@ -97,6 +97,7 @@ typedef struct Am_State {
   uint64_t next_layer_id;
   bool exit_locked;
   bool launched; /* the first proxy open queued FocusStateChanged */
+  bool preselected_user_popped; /* PopLaunchParameter(PreselectedUser) is one-shot */
 
   Am_Storage storages[AM_STORAGE_CAPACITY];
   Am_Applet applets[AM_APPLET_CAPACITY];

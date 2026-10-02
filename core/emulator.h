@@ -21,6 +21,7 @@
 #include "hle/kernel/shared_memory.h"
 #include "hle/kernel/transfer_memory.h"
 #include "hle/services/am/am.h"
+#include "hle/services/acc/acc.h"
 #include "hle/services/apm/apm.h"
 #include "hle/services/audio/audout.h"
 #include "hle/services/fs/fs.h"
@@ -86,6 +87,7 @@ typedef struct Emulator
   Pl_State pl;           /* shared font */
   Misc_State misc;       /* psm, ts */
   Audout_State audout;   /* PCM audio out (§14) */
+  Acc_State acc;         /* one local user */
   const uint8_t *shared_font;
   uint32_t shared_font_size;
   Vi_State vi;       /* display + BufferQueue (§13); reset with the process */

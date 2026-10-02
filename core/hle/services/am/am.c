@@ -7,6 +7,7 @@
 #include "common/log.h"
 #include "hle/kernel/scheduler.h"
 #include "hle/services/service_util.h"
+#include "hle/services/acc/acc.h"
 #include "hle/services/set/set.h"
 
 #define AM_DISPLAY_VERSION_BYTES 0x10u
@@ -204,13 +205,32 @@ static HLE_ServiceResult cmd_create_separable_layer(HLE_Context *c, Service_Obje
 /* IApplicationFunctions.                                              */
 /* ------------------------------------------------------------------ */
 
+/* The storages section defines storage_alloc; declared here for it. */
+static uint64_t storage_alloc(Am_State *s, uint64_t size);
+
+#define AM_LAUNCH_PARAMETER_PRESELECTED_USER 2u
+#define AM_PRESELECTED_USER_MAGIC 0xC79497CAu
+#define AM_PRESELECTED_USER_BYTES 0x88u
+
+/* PopLaunchParameter: the preselected user once (the account the title
+ * was launched for - acc's only user); nothing else is ever queued. */
 static HLE_ServiceResult cmd_pop_launch_parameter(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                                   IPC_Response *res) {
   (void)c;
-  (void)self;
-  (void)req;
-  (void)res;
-  return AM_RESULT_NO_DATA_IN_CHANNEL;
+  Am_State *s = state_of(self);
+  uint32_t kind = 0;
+  (void)ipc_request_read_u32(req, 0, &kind);
+  if (kind != AM_LAUNCH_PARAMETER_PRESELECTED_USER || s->preselected_user_popped) return AM_RESULT_NO_DATA_IN_CHANNEL;
+  const uint64_t index = storage_alloc(s, AM_PRESELECTED_USER_BYTES);
+  if (index == AM_NO_STORAGE) return HLE_RESULT_OUT_OF_MEMORY;
+  uint8_t *data = s->storages[index].data;
+  const uint32_t magic = AM_PRESELECTED_USER_MAGIC;
+  memcpy(data, &magic, sizeof(magic));
+  data[4] = 1; /* is_account_selected */
+  acc_user_uid(data + 8);
+  s->preselected_user_popped = true;
+  (void)ipc_response_push_object(res, &s->storage, index);
+  return HLE_RESULT_SUCCESS;
 }
 
 static HLE_ServiceResult cmd_get_display_version(HLE_Context *c, Service_Object *self, const IPC_Request *req,

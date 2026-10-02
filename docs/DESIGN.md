@@ -2409,9 +2409,15 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.44.0*
+*Document version: 3.45.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.44 → v3.45 (summary)
+
+- **Accounts (§12):** `hle/services/acc/` - acc:u0/u1/su/aa with one local user ("Player", a generated teal-disc profile icon, no network service account: the network-account calls fail "not connected", §1.6). User count/existence/lists/last opened/select, IProfile Get/GetBase/GetImageSize/LoadImage, IManagerForApplication CheckAvailability/GetAccountId, application-info and thumbnail calls. am's `PopLaunchParameter(PreselectedUser)` now hands that user out once, in the {0xC79497CA, selected, uid} storage libnx and nn::account parse - the account most titles require at boot.
+- **Compatibility probes (local, not shipped):** ftpd-classic v3.2.1 runs (offline: "Waiting on WiFi", live clock); JKSV now passes accounts and stops at `ns:am2` (installed-title management, out of scope for homebrew-first); Goldleaf asks for BIS (system NAND) filesystems.
+- **Tests:** `services_test` gains acc (count, uid, profile base/nickname, JPEG icon, unknown user) and the one-shot preselected-user launch parameter read back through IStorageAccessor.
 
 ### Changelog v3.43 → v3.44 (summary)
 
