@@ -43,6 +43,20 @@ void hle_svc_exit_process(HLE_Context *c, CPU_State *s) {
   c->scheduler->process_exited = true;
 }
 
+/* Frees the slots (CPU state, TLS) of threads whose handle is closed and
+ * that can never run again: exited, or created and never started. Titles
+ * that create and join short-lived workers would otherwise exhaust the
+ * thread table. */
+static void reclaim_threads(HLE_Context *c, const Thread_Env *env, const CPU_State *running) {
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    Sched_Thread *t = &c->scheduler->threads[i];
+    if (!t->handle_closed || !t->owns_cpu_state || t->thread.cpu_state == running) continue;
+    if (t->state != THREAD_STATE_DEAD && t->state != THREAD_STATE_CREATED) continue;
+    thread_destroy(env, &t->thread);
+    scheduler_free_thread(c->scheduler, t);
+  }
+}
+
 void hle_svc_create_thread(HLE_Context *c, CPU_State *s) {
   CPU_Register_File *r = regs(c, s);
   const uint32_t priority = (uint32_t)r->x[4];
@@ -51,9 +65,10 @@ void hle_svc_create_thread(HLE_Context *c, CPU_State *s) {
   if (core == CORE_USE_PROCESS_DEFAULT) core = c->process->npdm.main_thread_core_number;
   if (core < 0 || (uint32_t)core >= THREAD_CORE_COUNT) { r->x[0] = HLE_RESULT_INVALID_CORE_ID; return; }
 
+  const Thread_Env env = {c->cpu_backend, c->vmm, &c->process->tls, c};
+  reclaim_threads(c, &env, s);
   Sched_Thread *t = scheduler_new_thread(c->scheduler);
   if (!t) { r->x[0] = HLE_RESULT_RESOURCE_EXHAUSTED; return; }
-  const Thread_Env env = {c->cpu_backend, c->vmm, &c->process->tls, c};
   const Thread_Create_Params params = {r->x[1], r->x[2], r->x[3] & ~(uint64_t)(THREAD_STACK_ALIGN - 1u), priority,
                                        (uint32_t)core};
   if (!error_is_ok(thread_create(&env, &params, &t->thread))) {

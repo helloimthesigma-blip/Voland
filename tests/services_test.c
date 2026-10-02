@@ -652,6 +652,49 @@ static void test_thread_activity(void) {
   CHECK((uint32_t)regs->x[0] == HLE_RESULT_INVALID_HANDLE);
 }
 
+/* Threads whose handle is closed are reclaimed once they can never run:
+ * creating and joining short-lived workers far past the thread table's
+ * size keeps working (a Unity title does this every few frames), while a
+ * live thread with a closed handle keeps its slot. */
+static uint32_t create_thread(void) {
+  CPU_Register_File *regs = g_emu.cpu_backend->get_register_file(g_emu.cpu_state);
+  regs->x[1] = g_emu.process.address_space.code.base + 0x40u;
+  regs->x[2] = 0;
+  regs->x[3] = g_emu.process.main_thread_stack.base + g_emu.process.main_thread_stack.size - 0x1000u;
+  regs->x[4] = 44;
+  regs->x[5] = 0;
+  hle_on_svc(g_emu.cpu_state, 0x08, &g_emu.hle);
+  CHECK((uint32_t)regs->x[0] == 0);
+  return (uint32_t)regs->x[1];
+}
+
+static void close_handle(uint32_t handle) {
+  CPU_Register_File *regs = g_emu.cpu_backend->get_register_file(g_emu.cpu_state);
+  regs->x[0] = handle;
+  hle_on_svc(g_emu.cpu_state, 0x16, &g_emu.hle);
+  CHECK((uint32_t)regs->x[0] == 0);
+}
+
+static void test_thread_reclaim(void) {
+  const uint32_t live = create_thread();
+  Sched_Thread *keeper = (Sched_Thread *)handle_table_get(&g_emu.process.handles, live, KERNEL_OBJECT_THREAD);
+  CHECK(keeper != NULL);
+  keeper->state = THREAD_STATE_WAITING; /* blocked forever: never runs in this test */
+  keeper->wait = WAIT_SLEEP;
+  const uint64_t keeper_id = keeper->thread_id;
+  close_handle(live);
+  for (uint32_t i = 0; i < 3u * SCHEDULER_MAX_THREADS; i++) {
+    const uint32_t h = create_thread();
+    Sched_Thread *t = (Sched_Thread *)handle_table_get(&g_emu.process.handles, h, KERNEL_OBJECT_THREAD);
+    CHECK(t != NULL);
+    if (!t) return;
+    if (i % 2u) scheduler_exit_thread(&g_emu.scheduler, t, g_emu.cpu_backend); /* else: never started */
+    close_handle(h);
+  }
+  CHECK(keeper->state == THREAD_STATE_WAITING && keeper->thread_id == keeper_id && keeper->handle_closed);
+  scheduler_exit_thread(&g_emu.scheduler, keeper, g_emu.cpu_backend);
+}
+
 /* Small services the Nintendo SDK opens at start-up: lm, ectx:aw, ldr:ro,
  * aoc:u and the vi:s / vi:m ports all answer. */
 /* IAudioOut Stop releases every queued buffer and signals the buffer
@@ -1162,6 +1205,7 @@ int main(void) {
   test_system_queries();
   test_pctl();
   test_thread_activity();
+  test_thread_reclaim();
   test_sdk_startup_services();
   test_sdk_behaviours();
   test_software_keyboard();

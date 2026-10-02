@@ -56,6 +56,7 @@ typedef struct Sched_Thread {
   uint32_t handle;          /* its own handle (the mutex owner tag) */
   uint64_t thread_id;
   bool owns_cpu_state;      /* false for the main thread (Emulator owns it) */
+  bool handle_closed;       /* CloseHandle dropped its handle: reclaimed once dead */
 
   Wait_Kind wait;
   uint64_t wake_at;         /* virtual ticks; SCHEDULER_WAIT_FOREVER = no timeout */

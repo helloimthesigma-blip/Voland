@@ -8,6 +8,7 @@
 #include "hle/kernel/event.h"
 #include "hle/kernel/handle_table.h"
 #include "hle/kernel/ipc.h"
+#include "hle/kernel/scheduler.h"
 #include "hle/kernel/shared_memory.h"
 #include "hle/kernel/svc_memory.h"
 
@@ -127,6 +128,8 @@ void hle_svc_close_handle(HLE_Context *context, CPU_State *cpu_state) {
   if (type == KERNEL_OBJECT_SHARED_MEMORY) {
     shared_memory_release(context->shared_memory, (Kernel_Shared_Memory *)object);
   }
-  /* A thread handle only drops the table entry; the thread outlives it. */
+  /* A thread outlives its handle; CreateThread reclaims it once it is
+   * dead (it cannot be freed here: it may be the one running). */
+  if (type == KERNEL_OBJECT_THREAD) ((Sched_Thread *)object)->handle_closed = true;
   regs->x[0] = HLE_RESULT_SUCCESS;
 }
