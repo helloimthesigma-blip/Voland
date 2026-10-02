@@ -54,13 +54,6 @@ void hle_svc_connect_to_named_port(HLE_Context *context, CPU_State *cpu_state) {
   if (result == HLE_RESULT_SUCCESS) regs->x[SVC_OUT_HANDLE] = handle;
 }
 
-static void close_session_handle(HLE_Context *context, uint32_t handle) {
-  void *object = NULL;
-  if (error_is_ok(handle_table_remove(&context->process->handles, handle, NULL, &object))) {
-    ipc_session_pool_close(context->sessions, (IPC_Session *)object);
-  }
-}
-
 void hle_svc_send_sync_request(HLE_Context *context, CPU_State *cpu_state) {
   CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
   const uint32_t handle = (uint32_t)regs->x[SVC_ARG_HANDLE];
@@ -68,6 +61,10 @@ void hle_svc_send_sync_request(HLE_Context *context, CPU_State *cpu_state) {
                                                          KERNEL_OBJECT_SESSION);
   if (!session) {
     regs->x[0] = HLE_RESULT_INVALID_HANDLE;
+    return;
+  }
+  if (session->server_closed) {
+    regs->x[0] = HLE_RESULT_CONNECTION_CLOSED;
     return;
   }
 
@@ -89,9 +86,9 @@ void hle_svc_send_sync_request(HLE_Context *context, CPU_State *cpu_state) {
   const bool was_domain = session->is_domain;
   const uint32_t kernel_result = ipc_dispatch(context, session, &request, &response);
   if (kernel_result == HLE_RESULT_CONNECTION_CLOSED) {
-    /* A Close message: the server end goes away. libnx closes the handle
-     * itself afterwards; that second close fails harmlessly. */
-    close_session_handle(context, handle);
+    /* A Close message: the server end goes away; the client handle stays
+     * valid until CloseHandle, which the Nintendo SDK requires to succeed. */
+    ipc_session_close_server(session);
     regs->x[0] = HLE_RESULT_SUCCESS;
     return;
   }

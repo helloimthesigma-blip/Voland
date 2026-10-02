@@ -166,6 +166,12 @@ static Error parse_section(const uint8_t *header_bytes, uint32_t index,
       !bytes_all_zero(fs_header + NCA_FS_OFFSET_SPARSE_INFO, NCA_FS_SPARSE_INFO_SIZE);
   out->has_compression_info = !bytes_all_zero(
       fs_header + NCA_FS_OFFSET_COMPRESSION_INFO, NCA_FS_COMPRESSION_INFO_SIZE);
+  if (out->has_compression_info) {
+    const uint8_t *ci = fs_header + NCA_FS_OFFSET_COMPRESSION_INFO;
+    out->compression_table_offset = byte_source_le64(ci);
+    out->compression_table_size = byte_source_le64(ci + 8);
+    memcpy(out->compression_bucket_header, ci + 16, sizeof(out->compression_bucket_header));
+  }
 
   uint64_t relative_offset = 0;
   uint64_t data_size = 0;
@@ -248,6 +254,7 @@ Error nca_open(const Byte_Source *source, NCA_File *out) {
         section->size > out->header.content_size - section->offset) {
       return ERR(RESULT_INVALID_ARGUMENT, "nca: section extends past content size");
     }
+    if (section->has_compression_info) continue; /* read through nca_compressed.h */
     err = byte_source_slice(source, section->data_offset, section->data_size,
                             &out->section_sources[i]);
     if (!error_is_ok(err)) return err;
@@ -269,6 +276,14 @@ const Byte_Source *nca_section_source(const NCA_File *nca, uint32_t index) {
   if (!nca || index >= NCA_SECTION_COUNT) return NULL;
   if (!section_is_readable(&nca->header.sections[index])) return NULL;
   return &nca->section_sources[index].source;
+}
+
+Error nca_section_raw(const NCA_File *nca, uint32_t index, Byte_Source_Slice *out) {
+  if (!nca || index >= NCA_SECTION_COUNT || !nca->header.sections[index].present) {
+    return ERR(RESULT_INVALID_ARGUMENT, "nca_section_raw: bad or absent section");
+  }
+  const NCA_Section_Info *section = &nca->header.sections[index];
+  return byte_source_slice(nca->source, section->data_offset, section->data_size, out);
 }
 
 Error nca_probe_section(const NCA_File *nca, uint32_t index) {

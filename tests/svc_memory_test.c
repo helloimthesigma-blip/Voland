@@ -304,10 +304,18 @@ int main(void) {
     }
   }
 
-  /* Unknown query address entirely outside the address space. */
-  set_svc_args3(regs, process->main_thread_tls_gva, 0, VMM_ADDRESS_SPACE_SIZE);
+  /* Past the address space: one inaccessible region reaching 2^64, as
+   * the kernel answers (rtld walks memory until base + size wraps to 0
+   * and halts if a query fails). */
+  set_svc_args3(regs, process->main_thread_tls_gva, 0, VMM_ADDRESS_SPACE_SIZE + 0x123000u);
   hle_on_svc(emu.cpu_state, 0x06, &emu.hle);
-  CHECK(regs->x[0] == HLE_RESULT_INVALID_MEMORY_RANGE);
+  CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+  {
+    HLE_Memory_Info info;
+    CHECK_OK(vmm_read_block(emu.vmm, process->main_thread_tls_gva, &info, sizeof(info)));
+    CHECK(info.addr == VMM_ADDRESS_SPACE_SIZE && info.addr + info.size == 0);
+    CHECK(info.type == HLE_MEMTYPE_INACCESSIBLE && info.perm == VMM_PERM_NONE);
+  }
 
   /* --- page_allocator's freelist actually gets used, not just cursor
    * retraction (page_allocator.h: a shrink only hits cursor retraction
@@ -342,6 +350,70 @@ int main(void) {
     CHECK(emu.pages.free_run_count == 0);
 
     CHECK_OK(page_allocator_free(&emu.pages, unrelated_pa, 1));
+  }
+
+  /* svcMapPhysicalMemory / svcUnmapPhysicalMemory (0x2C / 0x2D): RW
+   * memory in the alias region; already-mapped pages are left alone. */
+  {
+    const Address_Region *alias = &process->address_space.alias;
+    const uint64_t base = alias->base + 0x100000u;
+    const uint64_t out = process->main_thread_tls_gva;
+    set_svc_args3(regs, base, 4 * PAGE, 0);
+    hle_on_svc(emu.cpu_state, 0x2c, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    CHECK_OK(vmm_write32(emu.vmm, base + PAGE, 0xC0FFEEu));
+    set_svc_args3(regs, out, 0, base);
+    hle_on_svc(emu.cpu_state, 0x06, &emu.hle);
+    HLE_Memory_Info info;
+    CHECK_OK(vmm_read_block(emu.vmm, out, &info, sizeof(info)));
+    CHECK(info.type == HLE_MEMTYPE_NORMAL && info.perm == VMM_PERM_RW);
+    /* Overlapping re-map: the existing pages keep their contents. */
+    set_svc_args3(regs, base, 6 * PAGE, 0);
+    hle_on_svc(emu.cpu_state, 0x2c, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    uint32_t kept = 0;
+    CHECK_OK(vmm_read32(emu.vmm, base + PAGE, &kept));
+    CHECK(kept == 0xC0FFEEu);
+    set_svc_args3(regs, base + 1, PAGE, 0);
+    hle_on_svc(emu.cpu_state, 0x2c, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_INVALID_SIZE);
+    set_svc_args3(regs, process->address_space.heap.base, PAGE, 0);
+    hle_on_svc(emu.cpu_state, 0x2c, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_INVALID_MEMORY_RANGE);
+    const uint64_t used = emu.pages.used_bytes;
+    set_svc_args3(regs, base, 6 * PAGE, 0);
+    hle_on_svc(emu.cpu_state, 0x2d, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    CHECK(emu.pages.used_bytes == used - 6 * PAGE);
+    set_svc_args3(regs, out, 0, base);
+    hle_on_svc(emu.cpu_state, 0x06, &emu.hle);
+    CHECK_OK(vmm_read_block(emu.vmm, out, &info, sizeof(info)));
+    CHECK(info.perm == VMM_PERM_NONE);
+  }
+
+  /* A module's writable pages are CodeMutable (nn::ro's module walk
+   * requires it), and MapMemory may alias them (the Nintendo SDK maps
+   * thread stacks out of its .bss). */
+  {
+    const uint64_t page = process->address_space.code.base;
+    const uint64_t out = process->main_thread_tls_gva;
+    CHECK_OK(vmm_reprotect(emu.vmm, page, PAGE, VMM_PERM_RW));
+    set_svc_args3(regs, out, 0, page);
+    hle_on_svc(emu.cpu_state, 0x06, &emu.hle);
+    HLE_Memory_Info info;
+    CHECK_OK(vmm_read_block(emu.vmm, out, &info, sizeof(info)));
+    CHECK(info.type == HLE_MEMTYPE_CODE_MUTABLE);
+    set_svc_args3(regs, dst, page, PAGE); /* the free stack-region page used above */
+    hle_on_svc(emu.cpu_state, 0x04, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    set_svc_args3(regs, dst, page, PAGE);
+    hle_on_svc(emu.cpu_state, 0x05, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    CHECK_OK(vmm_reprotect(emu.vmm, page, PAGE, VMM_PERM_RX));
+    set_svc_args3(regs, out, 0, page);
+    hle_on_svc(emu.cpu_state, 0x06, &emu.hle);
+    CHECK_OK(vmm_read_block(emu.vmm, out, &info, sizeof(info)));
+    CHECK(info.type == HLE_MEMTYPE_CODE_STATIC);
   }
 
   /* Bootstrapped directly (bypassing emulator_load_program), so

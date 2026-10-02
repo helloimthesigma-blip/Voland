@@ -28,8 +28,18 @@
 #define NRO_ASSET_HEADER_BYTES 0x38u
 #define NRO_ASSET_ROMFS_OFFSET 0x28u
 
+static void open_compressed_romfs(Emulator* emulator, uint32_t index);
+
+static void release_content_arena(Emulator* emulator) {
+  if (!emulator->content_arena_live) return;
+  arena_destroy(&emulator->content_arena);
+  emulator->content_arena_live = false;
+  memset(&emulator->romfs_compressed, 0, sizeof(emulator->romfs_compressed));
+}
+
 static void locate_romfs(Emulator* emulator, bool is_nro) {
   emulator->romfs = NULL;
+  release_content_arena(emulator);
   const Byte_Source* content = &emulator->content;
   if (is_nro) {
     uint8_t word[4];
@@ -49,8 +59,52 @@ static void locate_romfs(Emulator* emulator, bool is_nro) {
   }
   if (!error_is_ok(nca_open(content, &emulator->content_nca))) return;
   const int index = nca_find_section(&emulator->content_nca, NCA_FS_ROMFS);
-  if (index < 0 || !error_is_ok(nca_probe_section(&emulator->content_nca, (uint32_t)index))) return;
+  if (index < 0) {
+    log_info("[emulator] the program NCA has no RomFS section");
+    return;
+  }
+  if (emulator->content_nca.header.sections[index].has_compression_info) {
+    open_compressed_romfs(emulator, (uint32_t)index);
+    return;
+  }
+  const Error probe = nca_probe_section(&emulator->content_nca, (uint32_t)index);
+  if (!error_is_ok(probe)) {
+    log_warn("[emulator] RomFS section %d unusable: %s", index, probe.message ? probe.message : "?");
+    return;
+  }
   emulator->romfs = nca_section_source(&emulator->content_nca, (uint32_t)index);
+  log_info("[emulator] RomFS: section %d, %llu bytes", index,
+           emulator->romfs ? (unsigned long long)emulator->romfs->size : 0ull);
+}
+
+/* A compressed RomFS section: the decompressing view, its data region
+ * sliced out. Leaves emulator->romfs NULL on any failure (logged). */
+static void open_compressed_romfs(Emulator* emulator, uint32_t index) {
+  const NCA_Section_Info* section = &emulator->content_nca.header.sections[index];
+  Error err = nca_section_raw(&emulator->content_nca, index, &emulator->romfs_raw);
+  uint32_t entries = 0, max_block = 0;
+  if (error_is_ok(err))
+    err = nca_compressed_measure(&emulator->romfs_raw.source, section->compression_table_offset,
+                                 section->compression_table_size, section->compression_bucket_header, &entries,
+                                 &max_block);
+  if (error_is_ok(err) && !arena_create(&emulator->content_arena, nca_compressed_arena_bytes(entries, max_block)))
+    err = ERR(RESULT_OUT_OF_MEMORY, "no memory for the compression table");
+  if (error_is_ok(err)) {
+    emulator->content_arena_live = true;
+    err = nca_compressed_open(&emulator->romfs_compressed, &emulator->romfs_raw.source,
+                              section->compression_table_offset, section->compression_table_size,
+                              section->compression_bucket_header, &emulator->content_arena);
+  }
+  if (error_is_ok(err))
+    err = byte_source_slice(&emulator->romfs_compressed.source, 0, emulator->romfs_compressed.virtual_size,
+                            &emulator->romfs_slice);
+  if (!error_is_ok(err)) {
+    log_warn("[emulator] compressed RomFS section %u unusable: %s", index, err.message ? err.message : "?");
+    return;
+  }
+  emulator->romfs = &emulator->romfs_slice.source;
+  log_info("[emulator] RomFS: compressed section %u, %u blocks (largest %u bytes), %llu bytes", index, entries,
+           max_block, (unsigned long long)emulator->romfs_compressed.virtual_size);
 }
 
 /* ------------------------------------------------------------------ */
@@ -581,6 +635,7 @@ void emulator_unload_program(Emulator* emulator) {
   reset_process_services(emulator); /* shared-memory pages went with the reset */
   ipc_session_pool_init(&emulator->sessions); /* every session belonged to the process */
   emulator->romfs = NULL;
+  release_content_arena(emulator);
   memset(&emulator->content, 0, sizeof(emulator->content));
   emulator->content_node = RAMFS_NO_NODE;
   emulator->is_homebrew = false;

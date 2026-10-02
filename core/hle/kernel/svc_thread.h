@@ -71,6 +71,13 @@ void hle_svc_wait_process_wide_key_atomic(HLE_Context *context, CPU_State *cpu_s
 void hle_svc_signal_process_wide_key(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_get_system_tick(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_get_process_id(HLE_Context *context, CPU_State *cpu_state);
+/* svcSetThreadActivity(handle X0, activity X1: 0 runnable, 1 paused): a
+ * paused thread keeps its state but is never scheduled until resumed. */
+void hle_svc_set_thread_activity(HLE_Context *context, CPU_State *cpu_state);
+/* svcGetThreadContext3(ThreadContext *out X0, handle X1): the 0x320-byte
+ * ThreadContext {x0-x28, fp, lr, sp, pc, u32 psr, pad, v0-v31, u32 fpcr,
+ * u32 fpsr, u64 tpidr} of another (normally paused) thread. */
+void hle_svc_get_thread_context3(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_get_thread_id(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_break(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_output_debug_string(HLE_Context *context, CPU_State *cpu_state);

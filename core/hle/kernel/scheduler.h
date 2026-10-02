@@ -67,6 +67,7 @@ typedef struct Sched_Thread {
   bool cancel_pending;      /* CancelSynchronization before the wait */
   uint64_t wait_sequence;   /* FIFO order among waiters of equal priority */
   uint64_t core_mask;       /* affinity mask (recorded; §7 runs one worker) */
+  bool paused;              /* svcSetThreadActivity(Paused): never picked until resumed */
   uint64_t last_run;        /* round-robin stamp */
 } Sched_Thread;
 

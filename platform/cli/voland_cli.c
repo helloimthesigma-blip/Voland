@@ -395,6 +395,67 @@ static int run(int argc, char **argv) {
           k_status[status], (unsigned long long)slices, (unsigned long long)emu.scheduler.ticks,
           (unsigned long long)emu.hle.svc_call_count);
   if (width) fprintf(stderr, "voland-cli: frame %ux%u fnv1a64=%016llx\n", width, height, (unsigned long long)frame_hash);
+  /* Where every live guest thread is: module + offset, for stalls. */
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS && emu.program_loaded; i++) {
+    const Sched_Thread *th = &emu.scheduler.threads[i];
+    if (th->state == THREAD_STATE_FREE || th->state == THREAD_STATE_DEAD || !th->thread.cpu_state) continue;
+    const uint64_t pc = emu.cpu_backend->get_pc(th->thread.cpu_state);
+    const char *module = "?";
+    uint64_t offset = pc;
+    for (uint32_t m = 0; m < emu.process.module_count; m++) {
+      const Process_Module *mod = &emu.process.modules[m];
+      if (pc >= mod->base_gva && pc < mod->base_gva + mod->image_size) {
+        module = mod->name;
+        offset = pc - mod->base_gva;
+      }
+    }
+    static const char *const k_state[] = {"free", "created", "runnable", "waiting", "dead"};
+    fprintf(stderr, "voland-cli: thread %llu %s pc=%016llx (%s+0x%llx)\n", (unsigned long long)th->thread_id,
+            k_state[th->state], (unsigned long long)pc, module, (unsigned long long)offset);
+    if (getenv("VOLAND_BACKTRACE")) {
+      /* AArch64 frame records: x29 -> {previous x29, return address}. */
+      const CPU_Register_File *rf = emu.cpu_backend->get_register_file(th->thread.cpu_state);
+      uint64_t fp = rf->x[29], lr = rf->x[30];
+      for (uint32_t depth = 0; depth < 24u; depth++) {
+        const char *m = "?";
+        uint64_t off = lr;
+        for (uint32_t k = 0; k < emu.process.module_count; k++) {
+          const Process_Module *mod = &emu.process.modules[k];
+          if (lr >= mod->base_gva && lr < mod->base_gva + mod->image_size) {
+            m = mod->name;
+            off = lr - mod->base_gva;
+          }
+        }
+        fprintf(stderr, "    #%u %s+0x%llx\n", depth, m, (unsigned long long)off);
+        uint64_t next_fp = 0, next_lr = 0;
+        if (!fp || !error_is_ok(vmm_read64(emu.vmm, fp, &next_fp)) || !error_is_ok(vmm_read64(emu.vmm, fp + 8u, &next_lr)))
+          break;
+        fp = next_fp;
+        lr = next_lr;
+      }
+    }
+    if (getenv("VOLAND_DUMP_MODULE") && emu.process.module_count) {
+      /* A module's whole image (VOLAND_DUMP_MODULE_INDEX, default 0), for
+       * offline disassembly and symbolization. */
+      FILE *f = fopen(getenv("VOLAND_DUMP_MODULE"), "wb");
+      const char *which = getenv("VOLAND_DUMP_MODULE_INDEX");
+      const uint32_t mi = which ? (uint32_t)atoi(which) : 0u;
+      const Process_Module *mod = &emu.process.modules[mi < emu.process.module_count ? mi : 0u];
+      for (uint64_t a = mod->base_gva; f && a < mod->base_gva + mod->image_size; a += 4) {
+        uint32_t insn = 0;
+        (void)vmm_read32(emu.vmm, a, &insn);
+        fwrite(&insn, 4, 1, f);
+      }
+      if (f) fclose(f);
+    }
+    if (getenv("VOLAND_DUMP_PC")) {
+      for (int64_t k = -12; k <= 4; k++) {
+        uint32_t insn = 0;
+        if (error_is_ok(vmm_read32(emu.vmm, pc + (uint64_t)(k * 4), &insn)))
+          fprintf(stderr, "  %016llx: %08x\n", (unsigned long long)(pc + (uint64_t)(k * 4)), insn);
+      }
+    }
+  }
   {
     const Raster3d_Stats *g = &emu.renderer.stats;
     if (g->draws || g->clears)

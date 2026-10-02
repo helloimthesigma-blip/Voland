@@ -167,6 +167,13 @@ typedef struct NCA_Section_Info {
   bool has_patch_info;
   bool has_sparse_info;
   bool has_compression_info;
+  /* CompressionInfo (nca_compressed.h): the table, from the start of
+   * the data region (data_offset), and its bucket-tree header. The data
+   * region then holds the compressed stream; its decompressed view is the
+   * filesystem payload. */
+  uint64_t compression_table_offset;
+  uint64_t compression_table_size;
+  uint8_t compression_bucket_header[16];
 } NCA_Section_Info;
 
 typedef struct NCA_Header_Info {
@@ -217,10 +224,16 @@ Error nca_parse_header(const uint8_t *header_bytes, NCA_Header_Info *out);
 Error nca_open(const Byte_Source *source, NCA_File *out);
 
 /* The filesystem payload of section `index` as a bounded source, or NULL
- * if index >= NCA_SECTION_COUNT, the section is absent, or it uses an
- * unsupported (patch/sparse/compressed) layout. Valid while `nca` and its
+ * if index >= NCA_SECTION_COUNT, the section is absent, or it uses a
+ * patch/sparse/compressed layout (a compressed section is read through
+ * nca_compressed.h over nca_section_raw instead). Valid while `nca` and its
  * underlying source live. */
 const Byte_Source *nca_section_source(const NCA_File *nca, uint32_t index);
+
+/* The raw bytes of present section `index`'s data region (data_offset,
+ * data_size) as a slice written into `out`: a compressed section's
+ * stream, read through nca_compressed.h. */
+Error nca_section_raw(const NCA_File *nca, uint32_t index, Byte_Source_Slice *out);
 
 /* Confirms the section's payload has the structure magic its fs_type
  * implies - "PFS0" at offset 0 for NCA_FS_PARTITION_FS, a RomFS header

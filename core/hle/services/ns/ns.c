@@ -359,6 +359,74 @@ static const Service_Command k_ncm_database_commands[] = {
     {20, cmd_meta_not_found, "GetContentIdByTypeAndIdOffset"},
 };
 
+/* ---- aoc:u (add-on content) --------------------------------------- */
+
+/* No add-on content is installed: counts and lists are empty; the base
+ * id is the application's (id & ~0xfff) + 0x1000, as the system derives it. */
+static HLE_ServiceResult cmd_aoc_base_id(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                         IPC_Response *res) {
+  (void)c;
+  (void)req;
+  const Ns_State *s = state_of(self);
+  (void)ipc_response_push_u64(res, (s->title_id & ~NS_AOC_ID_MASK) + NS_AOC_BASE_OFFSET);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_aoc_event(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                       IPC_Response *res) {
+  (void)req;
+  return service_push_event(c, res, &state_of(self)->aoc_event);
+}
+
+static HLE_ServiceResult cmd_aoc_purchase_manager(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                                  IPC_Response *res) {
+  (void)c;
+  (void)req;
+  (void)ipc_response_push_object(res, &state_of(self)->aoc_purchase, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_aoc_none(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                      IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)ipc_response_push_u32(res, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_aoc_no_purchase(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                             IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)res;
+  return NS_RESULT_AOC_NO_PURCHASED_PRODUCT;
+}
+
+static const Service_Command k_aoc_commands[] = {
+    {2, cmd_aoc_none, "CountAddOnContent"},
+    {3, cmd_aoc_none, "ListAddOnContent"},
+    {5, cmd_aoc_base_id, "GetAddOnContentBaseId"},
+    {7, service_cmd_ok, "PrepareAddOnContent"},
+    {8, cmd_aoc_event, "GetAddOnContentListChangedEvent"},
+    {9, service_cmd_ok, "GetAddOnContentLostErrorCode"},
+    {10, cmd_aoc_event, "GetAddOnContentListChangedEventWithProcessId"},
+    {11, service_cmd_ok, "NotifyMountAddOnContent"},
+    {12, service_cmd_ok, "NotifyUnmountAddOnContent"},
+    {50, service_cmd_ok, "CheckAddOnContentMountStatus"},
+    {100, cmd_aoc_purchase_manager, "CreateEcPurchasedEventManager"},
+    {101, cmd_aoc_purchase_manager, "CreatePermanentEcPurchasedEventManager"},
+};
+
+static const Service_Command k_aoc_purchase_commands[] = {
+    {0, service_cmd_ok, "SetDefaultDeliveryTarget"},
+    {1, service_cmd_ok, "SetDeliveryTarget"},
+    {2, cmd_aoc_event, "GetPurchasedEventReadableHandle"},
+    {3, cmd_aoc_no_purchase, "PopPurchasedProductInfo"},
+    {4, cmd_aoc_no_purchase, "PopPurchasedProductInfoWithUid"},
+};
+
 static const Service_Command k_es_commands[] = {
     {1, service_cmd_ok, "ImportTicket"},
     {2, service_cmd_ok, "ImportTicketCertificateSet"},
@@ -399,6 +467,8 @@ void ns_init(Ns_State *s) {
       SERVICE_INTERFACE("IContentManagementInterface", k_content_management_commands, 0, s);
   s->ncm = SERVICE_INTERFACE("ncm", k_ncm_commands, 0, s);
   s->es = SERVICE_INTERFACE("es", k_es_commands, 0, s);
+  s->aoc = SERVICE_INTERFACE("aoc:u", k_aoc_commands, 0, s);
+  s->aoc_purchase = SERVICE_INTERFACE("IPurchaseEventManager", k_aoc_purchase_commands, 0, s);
   s->ncm_storage = SERVICE_INTERFACE("IContentStorage", k_ncm_storage_commands, 0, s);
   s->ncm_database = SERVICE_INTERFACE("IContentMetaDatabase", k_ncm_database_commands, 0, s);
   /* The loaded title survives a process reset (it is set at load). */
@@ -414,6 +484,8 @@ Error ns_register(Ns_State *s, SM_Registry *registry) {
   if (!error_is_ok(ncm)) return ncm;
   const Error es = sm_registry_add(registry, "es", &s->es);
   if (!error_is_ok(es)) return es;
+  const Error aoc = sm_registry_add(registry, "aoc:u", &s->aoc);
+  if (!error_is_ok(aoc)) return aoc;
   for (uint32_t i = 0; i < NS_PORT_COUNT; i++) {
     const Error err = sm_registry_add(registry, k_ports[i], &s->getters[i]);
     if (!error_is_ok(err)) return err;

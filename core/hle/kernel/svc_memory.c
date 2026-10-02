@@ -53,14 +53,21 @@ static bool borrow_overlaps_src(const Process *process, uint64_t base, uint64_t 
  * "mapped" if perms were VMM_PERM_NONE for some other reason (they are
  * not, today, but the borrow table is the honest source of truth rather
  * than perms as a proxy for it). */
-static uint32_t classify_type(const Process *process, uint64_t gva, bool is_mapped) {
+static uint32_t classify_type(const Process *process, uint64_t gva, bool is_mapped, uint32_t perms) {
   if (!is_mapped) return HLE_MEMTYPE_UNMAPPED;
   for (uint32_t i = 0; i < process->shared_mapping_count; i++) {
     const Address_Region view = {process->shared_mappings[i].base, process->shared_mappings[i].size};
     if (address_region_contains(&view, gva, 1)) return HLE_MEMTYPE_SHARED;
   }
   const Address_Space *as = &process->address_space;
-  if (address_region_contains(&as->code, gva, 1)) return HLE_MEMTYPE_CODE_STATIC;
+  /* Modules: .text/.rodata CodeStatic, writable .data/.bss CodeMutable
+   * (nn::ro's module walk checks exactly this pairing). A page borrowed
+   * out by MapMemory (perm none) stays CodeMutable. */
+  if (address_region_contains(&as->code, gva, 1)) {
+    if ((perms & VMM_PERM_W) || (perms == VMM_PERM_NONE && borrow_overlaps_src(process, gva, 1)))
+      return HLE_MEMTYPE_CODE_MUTABLE;
+    return HLE_MEMTYPE_CODE_STATIC;
+  }
   if (address_region_contains(&as->heap, gva, 1)) {
     return borrow_overlaps_src(process, gva, 1) ? HLE_MEMTYPE_WEIRD_MAPPED_MEM : HLE_MEMTYPE_HEAP;
   }
@@ -68,8 +75,8 @@ static uint32_t classify_type(const Process *process, uint64_t gva, bool is_mapp
     return find_borrow_by_dst(process, gva) ? HLE_MEMTYPE_MAPPED_MEMORY : HLE_MEMTYPE_NORMAL;
   }
   if (address_region_contains(&as->tls_io, gva, 1)) return HLE_MEMTYPE_THREAD_LOCAL;
-  /* Falls through for the alias region (nothing maps it until
-   * svcMapPhysicalMemory exists) and anything outside every region. */
+  /* svcMapPhysicalMemory backing (KMemoryState Normal). */
+  if (address_region_contains(&as->alias, gva, 1)) return HLE_MEMTYPE_NORMAL;
   return HLE_MEMTYPE_UNMAPPED;
 }
 
@@ -183,6 +190,92 @@ void hle_svc_set_heap_size(HLE_Context *context, CPU_State *cpu_state) {
   regs->x[1] = heap->base; /* fixed by address_space_init at bootstrap - no per-call ASLR to do */
 }
 
+/* Maps fresh zeroed pages over [gva, gva + size): one contiguous run when
+ * the allocator has it, else page by page. */
+static uint32_t map_fresh_pages(HLE_Context *context, uint64_t gva, uint64_t size) {
+  uint64_t pa = 0;
+  if (error_is_ok(page_allocator_allocate(context->pages, size >> VMM_PAGE_BITS, &pa))) {
+    if (error_is_ok(vmm_map(context->vmm, gva, pa, size, VMM_PERM_RW))) return HLE_RESULT_SUCCESS;
+    (void)page_allocator_free(context->pages, pa, size >> VMM_PAGE_BITS);
+    return HLE_RESULT_OUT_OF_MEMORY;
+  }
+  for (uint64_t offset = 0; offset < size; offset += VMM_PAGE_SIZE) {
+    if (!error_is_ok(page_allocator_allocate(context->pages, 1, &pa))) return HLE_RESULT_OUT_OF_MEMORY;
+    if (!error_is_ok(vmm_map(context->vmm, gva + offset, pa, VMM_PAGE_SIZE, VMM_PERM_RW))) {
+      (void)page_allocator_free(context->pages, pa, 1);
+      return HLE_RESULT_OUT_OF_MEMORY;
+    }
+  }
+  return HLE_RESULT_SUCCESS;
+}
+
+/* svcMapPhysicalMemory(addr X0, size X1): backs every unmapped page of
+ * the range (inside the alias region) with new RW memory; pages already
+ * mapped stay as they are. */
+void hle_svc_map_physical_memory(HLE_Context *context, CPU_State *cpu_state) {
+  CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
+  const uint64_t base = regs->x[0], size = regs->x[1];
+  if (size == 0 || (size & VMM_PAGE_OFFSET_MASK) != 0 || (base & VMM_PAGE_OFFSET_MASK) != 0 || base + size < base) {
+    regs->x[0] = HLE_RESULT_INVALID_SIZE;
+    return;
+  }
+  if (!address_region_contains(&context->process->address_space.alias, base, size)) {
+    regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
+    return;
+  }
+  for (uint64_t at = base; at < base + size;) {
+    VMM_Region_Info info;
+    if (!error_is_ok(vmm_query(context->vmm, at, &info))) {
+      regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
+      return;
+    }
+    const uint64_t end = info.base_gva + info.size < base + size ? info.base_gva + info.size : base + size;
+    if (!info.is_mapped) {
+      const uint32_t rc = map_fresh_pages(context, at, end - at);
+      if (rc != HLE_RESULT_SUCCESS) {
+        regs->x[0] = rc;
+        return;
+      }
+    }
+    at = end;
+  }
+  regs->x[0] = HLE_RESULT_SUCCESS;
+}
+
+/* svcUnmapPhysicalMemory(addr X0, size X1): releases what MapPhysical-
+ * Memory mapped there. */
+void hle_svc_unmap_physical_memory(HLE_Context *context, CPU_State *cpu_state) {
+  CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
+  const uint64_t base = regs->x[0], size = regs->x[1];
+  if (size == 0 || (size & VMM_PAGE_OFFSET_MASK) != 0 || (base & VMM_PAGE_OFFSET_MASK) != 0 || base + size < base) {
+    regs->x[0] = HLE_RESULT_INVALID_SIZE;
+    return;
+  }
+  if (!address_region_contains(&context->process->address_space.alias, base, size)) {
+    regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
+    return;
+  }
+  for (uint64_t offset = 0; offset < size; offset += VMM_PAGE_SIZE) {
+    VMM_Region_Info info;
+    if (!error_is_ok(vmm_query(context->vmm, base + offset, &info)) || !info.is_mapped || !(info.perms & VMM_PERM_R))
+      continue;
+    free_one_page(context->vmm, context->pages, base + offset);
+    (void)vmm_unmap(context->vmm, base + offset, VMM_PAGE_SIZE);
+  }
+  regs->x[0] = HLE_RESULT_SUCCESS;
+}
+
+/* Every page of [gva, gva + size) mapped read-write. */
+static bool range_is_rw(VMM_Context *vmm, uint64_t gva, uint64_t size) {
+  for (uint64_t at = gva; at < gva + size;) {
+    VMM_Region_Info info;
+    if (!error_is_ok(vmm_query(vmm, at, &info)) || !info.is_mapped || (info.perms & VMM_PERM_RW) != VMM_PERM_RW)
+      return false;
+    at = info.base_gva + info.size;
+  }
+  return true;
+}
+
 void hle_svc_map_memory(HLE_Context *context, CPU_State *cpu_state) {
   CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
   Process *process = context->process;
@@ -197,8 +290,14 @@ void hle_svc_map_memory(HLE_Context *context, CPU_State *cpu_state) {
     regs->x[0] = HLE_RESULT_INVALID_SIZE;
     return;
   }
-  if (!address_region_contains(&process->address_space.stack, dst, size) ||
-      !address_region_contains(&process->address_space.heap, src, size)) {
+  /* The source may be anything the kernel lets alias: heap, physical
+   * memory (alias region), or a module's writable data (the Nintendo SDK
+   * maps pages of its .bss as thread stacks). */
+  const Address_Space *as = &process->address_space;
+  const bool src_ok = address_region_contains(&as->heap, src, size) ||
+                      address_region_contains(&as->alias, src, size) ||
+                      (address_region_contains(&as->code, src, size) && range_is_rw(vmm, src, size));
+  if (!address_region_contains(&as->stack, dst, size) || !src_ok) {
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
     return;
   }
@@ -296,17 +395,29 @@ void hle_svc_query_memory(HLE_Context *context, CPU_State *cpu_state) {
   const uint64_t out_gva = regs->x[0];
   const uint64_t query_addr = regs->x[2];
 
+  /* Past the end of the address space the kernel answers with one
+   * inaccessible region reaching 2^64, never an error: rtld walks memory
+   * with QueryMemory until base + size wraps to 0, and halts on a failure. */
   VMM_Region_Info info;
-  const Error err = vmm_query(vmm, query_addr, &info);
-  if (!error_is_ok(err)) {
-    regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
-    return;
+  uint32_t type = HLE_MEMTYPE_INACCESSIBLE;
+  if (query_addr >= VMM_ADDRESS_SPACE_SIZE) {
+    info.base_gva = VMM_ADDRESS_SPACE_SIZE;
+    info.size = 0u - VMM_ADDRESS_SPACE_SIZE;
+    info.is_mapped = false;
+    info.perms = VMM_PERM_NONE;
+  } else {
+    const Error err = vmm_query(vmm, query_addr, &info);
+    if (!error_is_ok(err)) {
+      regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
+      return;
+    }
+    type = classify_type(process, query_addr, info.is_mapped, info.perms);
   }
 
   const HLE_Memory_Info out = {
       .addr = info.base_gva,
       .size = info.size,
-      .type = classify_type(process, query_addr, info.is_mapped),
+      .type = type,
       .attr = 0, /* MemAttr_IsBorrowed not modeled - see the note above classify_type() */
       .perm = info.perms,
       .ipc_refcount = 0,
@@ -489,8 +600,12 @@ void hle_svc_create_transfer_memory(HLE_Context *context, CPU_State *cpu_state) 
     regs->x[0] = HLE_RESULT_INVALID_NEW_MEMORY_PERMISSION;
     return;
   }
+  /* Heap, or physical memory the process mapped (alias region). */
   const Address_Region heap = {process->address_space.heap.base, process->heap_size};
-  if (!address_region_contains(&heap, addr, size) || borrow_overlaps_src(process, addr, size)) {
+  const bool in_heap = address_region_contains(&heap, addr, size);
+  const bool in_alias = address_region_contains(&process->address_space.alias, addr, size) &&
+                        range_is_rw(context->vmm, addr, size);
+  if ((!in_heap && !in_alias) || borrow_overlaps_src(process, addr, size)) {
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_STATE;
     return;
   }

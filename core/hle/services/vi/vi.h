@@ -93,6 +93,8 @@ typedef struct Vi_Layer {
 
 typedef struct Vi_State {
   Service_Interface root;
+  Service_Interface root_system;  /* vi:s - same display service */
+  Service_Interface root_manager; /* vi:m */
   Service_Interface application_display;
   Service_Interface relay;
   Service_Interface system_display;

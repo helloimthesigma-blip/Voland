@@ -1,5 +1,7 @@
 #include "hle/services/misc/misc.h"
 
+#include "common/log.h"
+
 #include "hle/services/service_util.h"
 
 #define MILLI 1000u
@@ -290,6 +292,129 @@ static const Service_Command k_usb_hs_commands[] = {
     {7, cmd_usb_hs_acquire, "AcquireUsbIf"},
 };
 
+/* lm: a title's log sink. */
+static HLE_ServiceResult cmd_open_logger(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                         IPC_Response *res) {
+  (void)c;
+  (void)req;
+  Misc_State *s = (Misc_State *)self->interface->service_state;
+  (void)ipc_response_push_object(res, &s->logger, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static const Service_Command k_lm_commands[] = {
+    {0, cmd_open_logger, "OpenLogger"},
+};
+
+static const Service_Command k_logger_commands[] = {
+    {0, service_cmd_ok, "Log"},
+    {1, service_cmd_ok, "SetDestination"},
+};
+
+static HLE_ServiceResult cmd_create_registrar(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                             IPC_Response *res) {
+  (void)c;
+  (void)req;
+  Misc_State *s = (Misc_State *)self->interface->service_state;
+  (void)ipc_response_push_object(res, &s->ectx_registrar, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_ro_load_module(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                            IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)res;
+  log_warn("[ro] LoadModule: runtime NRO loading is not implemented");
+  return RO_RESULT_NOT_SUPPORTED;
+}
+
+static const Service_Command k_ldr_ro_commands[] = {
+    {0, cmd_ro_load_module, "MapManualLoadModuleMemory"},
+    {1, service_cmd_ok, "UnmapManualLoadModuleMemory"},
+    {2, service_cmd_ok, "RegisterModuleInfo"},
+    {3, service_cmd_ok, "UnregisterModuleInfo"},
+    {4, service_cmd_ok, "RegisterProcessHandle"},
+    {10, service_cmd_ok, "RegisterProcessModuleInfo"},
+};
+
+static const Service_Command k_ectx_commands[] = {
+    {0, cmd_create_registrar, "CreateContextRegistrar"},
+};
+
+static const Service_Command k_ectx_registrar_commands[] = {
+    {0, service_cmd_ok, "Complete"},
+};
+
+/* Parental controls: nothing is restricted. */
+static HLE_ServiceResult cmd_pctl_create(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                         IPC_Response *res) {
+  (void)c;
+  (void)req;
+  Misc_State *s = (Misc_State *)self->interface->service_state;
+  (void)ipc_response_push_object(res, &s->pctl_service, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_pctl_event(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                        IPC_Response *res) {
+  (void)req;
+  Misc_State *s = (Misc_State *)self->interface->service_state;
+  return service_push_event(c, res, &s->pctl_event);
+}
+
+static HLE_ServiceResult cmd_pctl_zero_u32(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                           IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)ipc_response_push_u32(res, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static const Service_Command k_pctl_commands[] = {
+    {0, cmd_pctl_create, "CreateService"},
+    {1, cmd_pctl_create, "CreateServiceWithoutInitialize"},
+};
+
+static const Service_Command k_pctl_service_commands[] = {
+    {1, service_cmd_ok, "Initialize"},
+    {1001, service_cmd_ok, "CheckFreeCommunicationPermission"},
+    {1002, service_cmd_ok, "ConfirmLaunchApplicationPermission"},
+    {1003, service_cmd_ok, "ConfirmResumeApplicationPermission"},
+    {1004, service_cmd_ok, "ConfirmSnsPostPermission"},
+    {1006, service_cmd_out_u8_false, "IsRestrictionTemporaryUnlocked"},
+    {1007, service_cmd_ok, "RevertRestrictionTemporaryUnlocked"},
+    {1008, service_cmd_ok, "EnterRestrictedSystemSettings"},
+    {1009, service_cmd_ok, "LeaveRestrictedSystemSettings"},
+    {1010, service_cmd_out_u8_false, "IsRestrictedSystemSettingsEntered"},
+    {1011, service_cmd_ok, "RevertRestrictedSystemSettingsEntered"},
+    {1012, cmd_pctl_zero_u32, "GetRestrictedFeatures"},
+    {1013, service_cmd_ok, "ConfirmStereoVisionPermission"},
+    {1017, service_cmd_ok, "EndFreeCommunication"},
+    {1018, service_cmd_out_u8_true, "IsFreeCommunicationAvailable"},
+    {1031, service_cmd_out_u8_false, "IsRestrictionEnabled"},
+    {1032, cmd_pctl_zero_u32, "GetSafetyLevel"},
+    {1035, cmd_pctl_zero_u32, "GetCurrentSettings"},
+    {1037, cmd_pctl_zero_u32, "GetFreeCommunicationApplicationListCount"},
+    {1039, cmd_pctl_zero_u32, "GetFreeCommunicationApplicationListCount2"},
+    {1061, service_cmd_ok, "ConfirmStereoVisionRestrictionConfigurable"},
+    {1062, service_cmd_out_u8_false, "GetStereoVisionRestriction"},
+    {1063, service_cmd_ok, "SetStereoVisionRestriction"},
+    {1064, service_cmd_ok, "ResetConfirmedStereoVisionPermission"},
+    {1065, service_cmd_out_u8_true, "IsStereoVisionPermitted"},
+    {1403, service_cmd_out_u8_false, "IsPairingActive"},
+    {1451, service_cmd_ok, "StartPlayTimer"},
+    {1452, service_cmd_ok, "StopPlayTimer"},
+    {1453, service_cmd_out_u8_false, "IsPlayTimerEnabled"},
+    {1454, service_cmd_out_u64_zero, "GetPlayTimerRemainingTime"},
+    {1455, service_cmd_out_u8_false, "IsRestrictedByPlayTimer"},
+    {1456, service_cmd_out_zero128, "GetPlayTimerSettings"},
+    {1457, cmd_pctl_event, "GetPlayTimerEventToRequestSuspension"},
+    {1458, service_cmd_out_u8_false, "IsPlayTimerAlarmDisabled"},
+};
+
 void misc_init(Misc_State *s) {
   memset(s, 0, sizeof(*s));
   s->psm = SERVICE_INTERFACE("psm", k_psm_commands, 0, s);
@@ -305,6 +430,14 @@ void misc_init(Misc_State *s) {
   s->usb_interface = SERVICE_INTERFACE("IDsInterface", k_usb_interface_commands, 0, s);
   s->usb_endpoint = SERVICE_INTERFACE("IDsEndpoint", k_usb_endpoint_commands, 0, s);
   s->usb_hs = SERVICE_INTERFACE("usb:hs", k_usb_hs_commands, 0, s);
+  s->lm = SERVICE_INTERFACE("lm", k_lm_commands, 0, s);
+  s->ectx = SERVICE_INTERFACE("ectx:aw", k_ectx_commands, 0, s);
+  s->ldr_ro = SERVICE_INTERFACE("ldr:ro", k_ldr_ro_commands, 0, s);
+  static const char *const k_pctl_ports[4] = {"pctl", "pctl:a", "pctl:r", "pctl:s"};
+  for (uint32_t i = 0; i < 4u; i++) s->pctl[i] = SERVICE_INTERFACE(k_pctl_ports[i], k_pctl_commands, 0, s);
+  s->pctl_service = SERVICE_INTERFACE("IParentalControlService", k_pctl_service_commands, 0, s);
+  s->ectx_registrar = SERVICE_INTERFACE("IContextRegistrar", k_ectx_registrar_commands, 0, s);
+  s->logger = SERVICE_INTERFACE("ILogger", k_logger_commands, 0, s);
 }
 
 Error misc_register(Misc_State *s, SM_Registry *registry) {
@@ -316,5 +449,9 @@ Error misc_register(Misc_State *s, SM_Registry *registry) {
   if (error_is_ok(err)) err = sm_registry_add(registry, "pm:info", &s->pm_info);
   if (error_is_ok(err)) err = sm_registry_add(registry, "usb:ds", &s->usb_ds);
   if (error_is_ok(err)) err = sm_registry_add(registry, "usb:hs", &s->usb_hs);
+  if (error_is_ok(err)) err = sm_registry_add(registry, "lm", &s->lm);
+  if (error_is_ok(err)) err = sm_registry_add(registry, "ectx:aw", &s->ectx);
+  if (error_is_ok(err)) err = sm_registry_add(registry, "ldr:ro", &s->ldr_ro);
+  for (uint32_t i = 0; i < 4u && error_is_ok(err); i++) err = sm_registry_add(registry, s->pctl[i].name, &s->pctl[i]);
   return err;
 }

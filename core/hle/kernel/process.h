@@ -87,13 +87,9 @@
  * 0x200000"), reused here rather than re-deriving a magic number. */
 #define PROCESS_HEAP_SIZE_GRANULE ((uint64_t)0x200000)
 
-/* Outstanding svcMapMemory aliases (hle/kernel/svc_memory.h): a heap range
- * reprotected to no access plus the stack-region mirror that now backs it.
- * Small and fixed because Phase 1 has exactly one thread (bootstrap's
- * main thread; CreateThread is Phase 2) and this SVC exists mainly for a
- * thread's own stack-guard-page trick - revisit the cap once multiple
- * threads actually exercise it. */
-#define PROCESS_MAX_HEAP_BORROWS 8u
+/* Live svcMapMemory aliases: thread stacks (the Nintendo SDK maps one
+ * per thread, and titles create dozens of threads). */
+#define PROCESS_MAX_HEAP_BORROWS 256u
 #define PROCESS_MAX_SHARED_MAPPINGS 32u
 
 /* An svcMapSharedMemory mapping (shared_memory.h). */

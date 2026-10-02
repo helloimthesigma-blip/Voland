@@ -394,6 +394,19 @@ static void free_teardown_heap(VMM_Context *vmm, Page_Allocator *pages, Process 
   }
 }
 
+/* svcMapPhysicalMemory's pages: every mapped run in the alias region
+ * (their physical pages go back with the allocator's reset). */
+static void unmap_alias_region(VMM_Context *vmm, const Address_Region *alias) {
+  for (uint64_t at = alias->base; alias->size && at < alias->base + alias->size;) {
+    VMM_Region_Info info;
+    if (!error_is_ok(vmm_query(vmm, at, &info)) || info.size == 0) break;
+    const uint64_t end = info.base_gva + info.size < alias->base + alias->size ? info.base_gva + info.size
+                                                                               : alias->base + alias->size;
+    if (info.is_mapped) (void)vmm_unmap(vmm, at, end - at);
+    at = end;
+  }
+}
+
 void process_teardown(Process *process, VMM_Context *vmm, Page_Allocator *pages) {
   if (!process || !vmm || !pages) return;
   Mapping_List mapped;
@@ -406,12 +419,16 @@ void process_teardown(Process *process, VMM_Context *vmm, Page_Allocator *pages)
   if (process->main_thread_stack.size > 0) {
     mapped.ranges[mapped.count++] = process->main_thread_stack;
   }
+  /* Borrows first: their sources may be module pages (thread stacks
+   * from .bss), which unmap_all is about to remove. */
+  unwind_heap_borrows(vmm, process);
+  process->heap_borrow_count = 0;
+  unmap_alias_region(vmm, &process->address_space.alias);
   unmap_all(vmm, &mapped);
   if (process->loader_env.size) (void)vmm_unmap(vmm, process->loader_env.base, process->loader_env.size);
   for (uint32_t i = 0; i < process->shared_mapping_count; i++) {
     (void)vmm_unmap(vmm, process->shared_mappings[i].base, process->shared_mappings[i].size);
   }
-  unwind_heap_borrows(vmm, process);
   if (process->heap_size > 0) {
     free_teardown_heap(vmm, pages, process);
   }

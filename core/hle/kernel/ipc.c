@@ -462,6 +462,14 @@ void ipc_session_pool_close(IPC_Session_Pool *pool, IPC_Session *session) {
   pool->live_count--;
 }
 
+void ipc_session_close_server(IPC_Session *session) {
+  if (!session || !session->in_use) return;
+  for (uint32_t i = 0; i < IPC_DOMAIN_MAX_OBJECTS; i++) {
+    if (session->objects[i].interface) close_object(&session->objects[i]);
+  }
+  session->server_closed = true;
+}
+
 uint32_t ipc_open_session_handle(HLE_Context *context, const Service_Interface *interface,
                                  uint64_t state, uint32_t *out_handle) {
   IPC_Session *session = ipc_session_pool_open(context->sessions, interface, state);
@@ -583,7 +591,12 @@ static void dispatch_control(HLE_Context *context, IPC_Session *session,
     (void)ipc_response_push_u32(response, 1u);
     return;
   case IPC_CONTROL_QUERY_POINTER_BUFFER_SIZE: {
-    const uint16_t size = session->objects[0].interface->pointer_buffer_size;
+    /* The Nintendo SDK sends pointer (X/C) buffers only when the server
+     * has a pointer buffer large enough; a 0 answer makes its fixed-X
+     * commands fail client-side (hid's SetSupportedNpadIdType). Handlers
+     * accept pointer and mapped buffers alike (service_util.h). */
+    const uint16_t declared = session->objects[0].interface->pointer_buffer_size;
+    const uint16_t size = declared ? declared : IPC_DEFAULT_POINTER_BUFFER_SIZE;
     const uint8_t bytes[2] = {(uint8_t)size, (uint8_t)(size >> 8)};
     (void)ipc_response_push_bytes(response, bytes, sizeof(bytes));
     return;

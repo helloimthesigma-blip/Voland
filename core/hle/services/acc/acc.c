@@ -189,6 +189,7 @@ static const Service_Command k_acc_commands[] = {
     {140, service_cmd_ok, "InitializeApplicationInfo"},
     {141, cmd_list_users, "ListQualifiedUsers"},
     {150, service_cmd_out_u8_false, "IsUserAccountSwitchLocked"},
+    {160, service_cmd_ok, "InitializeApplicationInfoV2"},
 };
 
 static const Service_Command k_profile_commands[] = {

@@ -186,6 +186,32 @@ int main(void) {
   CHECK(ioctl(ctrl_gpu, IOWR(0x47u, 0x05u, 0xB0), d) == 0);
   CHECK(rd32(d + 16) == 0x120 && rd32(d + 16 + 0x5C) == 0xB197 && rd64(d + 16 + 0x90) == 0x6230326D67ull);
 
+  /* Ioctl3 (the Nintendo SDK's NvRm): the characteristics land in the
+   * second output buffer. */
+  {
+    memset(d, 0, sizeof(d));
+    wr64(d, 0xA0);
+    CHECK_OK(vmm_write_block(g_emu.vmm, g_in_gva, d, 0xB0));
+    const uint64_t extra_gva = g_out_gva + 0x800u;
+    CHECK_OK(vmm_write_block(g_emu.vmm, extra_gva, d, 0xA0)); /* zeros */
+    const uint32_t in3[2] = {ctrl_gpu, IOWR(0x47u, 0x05u, 0xB0)};
+    Test_Ipc_Message m3;
+    memset(&m3, 0, sizeof(m3));
+    m3.sends[0] = (Test_Ipc_Buffer){g_in_gva, 0xB0, 0};
+    m3.send_count = 1;
+    m3.receives[0] = (Test_Ipc_Buffer){g_out_gva, 0xB0, 0};
+    m3.receives[1] = (Test_Ipc_Buffer){extra_gva, 0xA0, 0};
+    m3.receive_count = 2;
+    const Test_Ipc_Reply r3 = call(12, in3, sizeof(in3), &m3);
+    CHECK(rd32(r3.data) == 0);
+    uint8_t chars[0xA0];
+    CHECK_OK(vmm_read_block(g_emu.vmm, extra_gva, chars, sizeof(chars)));
+    CHECK(rd32(chars) == 0x120 && rd32(chars + 0x5C) == 0xB197);
+  }
+  /* NUM_VSMS: two SMs. */
+  memset(d, 0, sizeof(d));
+  CHECK(ioctl(ctrl_gpu, IOWR(0x47u, 0x13u, 8), d) == 0 && rd32(d) == 2);
+
   /* EVENT_WAIT_ASYNC: event from QueryEvent, signalled by a completion
    * posted to the GPU completion ring and drained by nvdrv. */
   const uint32_t query_in[2] = {ctrl, 3};

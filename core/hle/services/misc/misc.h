@@ -23,6 +23,19 @@
  *        Create/DestroyInterfaceAvailableEvent, 6 GetInterfaceStateChange-
  *        Event; nothing is ever plugged in, so the events never fire and
  *        7 AcquireUsbIf fails.
+ *   ectx:aw error-context recording: 0 CreateContextRegistrar ->
+ *        IContextRegistrar {0 Complete} - contexts accepted and dropped.
+ *   pctl, pctl:a, pctl:r, pctl:s parental controls, never restricted:
+ *        0/1 CreateService(WithoutInitialize) -> IParentalControlService
+ *        (permission checks pass, restriction off, safety level 0, the
+ *        play timer off and its suspension event never fires).
+ *   ldr:ro runtime module loading (nn::ro): 4 RegisterProcessHandle, 2/3
+ *        (Un)RegisterModuleInfo (NRR) and 10 RegisterProcessModuleInfo are
+ *        accepted; 0 MapManualLoadModuleMemory (loading an NRO) is not
+ *        implemented yet and fails, so a title that needs it stops there.
+ *   lm     the system log: 0 OpenLogger -> ILogger {0 Log (packets
+ *        accepted and dropped - titles' own logging, not Voland's), 1 Set-
+ *        Destination}.
  *   pdm:qry play-history queries: Voland records no play history, so every
  *        query reports nothing (zero counts, zeroed statistics) and the
  *        update event never fires.
@@ -42,6 +55,8 @@
 #define PDM_ZERO_WORDS 12u
 #define PM_MODULE 15u
 #define USB_MODULE 140u
+#define RO_MODULE 22u
+#define RO_RESULT_NOT_SUPPORTED ((1u << 9) | RO_MODULE) /* reported as a generic ro failure */
 #define USB_RESULT_NOT_FOUND ((2u << 9) | USB_MODULE) /* no such interface */
 #define PM_RESULT_PROCESS_NOT_FOUND ((1u << 9) | PM_MODULE) /* the largest fixed pdm:qry reply (PlayStatistics, 0x28 bytes) */
 
@@ -63,6 +78,14 @@ typedef struct Misc_State {
   Service_Interface usb_endpoint;
   Kernel_Event *usb_event;
   Service_Interface usb_hs;
+  Service_Interface lm;
+  Service_Interface ectx;
+  Service_Interface ldr_ro;
+  Service_Interface pctl[4];
+  Service_Interface pctl_service;
+  Kernel_Event *pctl_event;
+  Service_Interface ectx_registrar;
+  Service_Interface logger;
   Kernel_Event *usb_hs_event;
 } Misc_State;
 

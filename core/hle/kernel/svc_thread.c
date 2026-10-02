@@ -474,6 +474,58 @@ void hle_svc_get_process_id(HLE_Context *c, CPU_State *s) {
   r->x[1] = HLE_PROCESS_ID;
 }
 
+#define THREAD_ACTIVITY_RUNNABLE 0u
+#define THREAD_ACTIVITY_PAUSED 1u
+#define THREAD_CONTEXT_BYTES 0x320u
+#define THREAD_CONTEXT_GPRS 29u
+#define THREAD_CONTEXT_PSR 0x108u
+#define THREAD_CONTEXT_VECTORS 0x110u
+#define THREAD_CONTEXT_FPCR 0x310u
+#define THREAD_CONTEXT_TPIDR 0x318u
+
+void hle_svc_set_thread_activity(HLE_Context *c, CPU_State *s) {
+  CPU_Register_File *r = regs(c, s);
+  Sched_Thread *t = thread_from_handle(c, s, (uint32_t)r->x[0]);
+  if (!t) { r->x[0] = HLE_RESULT_INVALID_HANDLE; return; }
+  const uint64_t activity = r->x[1];
+  if (activity != THREAD_ACTIVITY_RUNNABLE && activity != THREAD_ACTIVITY_PAUSED) {
+    r->x[0] = HLE_RESULT_INVALID_ENUM_VALUE;
+    return;
+  }
+  t->paused = activity == THREAD_ACTIVITY_PAUSED;
+  r->x[0] = HLE_RESULT_SUCCESS;
+}
+
+static void put_u64(uint8_t *p, uint64_t v) { memcpy(p, &v, sizeof(v)); }
+static void put_u32(uint8_t *p, uint32_t v) { memcpy(p, &v, sizeof(v)); }
+
+void hle_svc_get_thread_context3(HLE_Context *c, CPU_State *s) {
+  CPU_Register_File *r = regs(c, s);
+  const uint64_t out = r->x[0];
+  Sched_Thread *t = thread_from_handle(c, s, (uint32_t)r->x[1]);
+  if (!t || !t->thread.cpu_state) { r->x[0] = HLE_RESULT_INVALID_HANDLE; return; }
+  CPU_State *target = t->thread.cpu_state;
+  const CPU_Register_File *tr = c->cpu_backend->get_register_file(target);
+  uint8_t context[THREAD_CONTEXT_BYTES];
+  memset(context, 0, sizeof(context));
+  for (uint32_t i = 0; i < THREAD_CONTEXT_GPRS; i++) put_u64(context + 8u * i, tr->x[i]);
+  put_u64(context + 8u * 29u, tr->x[29]); /* fp */
+  put_u64(context + 8u * 30u, tr->x[30]); /* lr */
+  put_u64(context + 8u * 31u, tr->sp);
+  put_u64(context + 8u * 32u, tr->pc);
+  put_u32(context + THREAD_CONTEXT_PSR, tr->pstate);
+  for (uint8_t v = 0; v < 32u; v++) {
+    const CPU_Vector_Register reg = c->cpu_backend->get_vector_reg(target, v);
+    put_u64(context + THREAD_CONTEXT_VECTORS + 16u * v, reg.lo);
+    put_u64(context + THREAD_CONTEXT_VECTORS + 16u * v + 8u, reg.hi);
+  }
+  put_u32(context + THREAD_CONTEXT_FPCR, (uint32_t)c->cpu_backend->get_sys_reg(target, CPU_SYSREG_FPCR));
+  put_u32(context + THREAD_CONTEXT_FPCR + 4u, (uint32_t)c->cpu_backend->get_sys_reg(target, CPU_SYSREG_FPSR));
+  put_u64(context + THREAD_CONTEXT_TPIDR, c->cpu_backend->get_sys_reg(target, CPU_SYSREG_TPIDR_EL0));
+  r->x[0] = error_is_ok(vmm_write_block(c->vmm, out, context, sizeof(context))) ? HLE_RESULT_SUCCESS
+                                                                                 : HLE_RESULT_INVALID_POINTER;
+}
+
 void hle_svc_get_thread_id(HLE_Context *c, CPU_State *s) {
   CPU_Register_File *r = regs(c, s);
   Sched_Thread *t = thread_from_handle(c, s, (uint32_t)r->x[1]);

@@ -29,6 +29,9 @@
  * IContentStorage counts/lists nothing, has nothing, reports free space;
  * IContentMetaDatabase lists nothing and finds nothing.
  *
+ * aoc:u - add-on content: none installed (count 0, empty lists, the
+ * derived base id, an event that never fires, no purchases).
+ *
  * es - the ticket service: there are no tickets (Voland handles no keys or
  * rights data, §1.6); counts are zero, lists empty, lookups fail.
  */
@@ -49,6 +52,9 @@
 #define NS_RECORD_BYTES 0x18u
 #define NS_PORT_COUNT 6u
 #define NS_OCCUPIED_SIZE_BYTES 0x80u
+#define NS_AOC_ID_MASK 0xfffull
+#define NS_AOC_BASE_OFFSET 0x1000ull
+#define NS_RESULT_AOC_NO_PURCHASED_PRODUCT ((900u << 9) | 166u) /* nim: NoPurchasedProductInfoAvailable */
 
 #define NCM_MODULE 5u
 #define NCM_RESULT_CONTENT_NOT_FOUND ((7u << 9) | NCM_MODULE)
@@ -67,6 +73,9 @@ typedef struct Ns_State {
   Service_Interface record;
   Service_Interface inert;
   Service_Interface content_management;
+  Service_Interface aoc;
+  Service_Interface aoc_purchase;
+  Kernel_Event *aoc_event;
   Kernel_Event *record_event;
   Kernel_Event *sd_event;  /* SD card mount status: never changes */
   /* The title loaded from an NCA, if any. */

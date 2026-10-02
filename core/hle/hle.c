@@ -110,6 +110,7 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
 
   context->svc_call_count++;
   if (swi < HLE_SVC_COUNT) context->svc_counts[swi]++;
+  const uint64_t arg0 = regs->x[0], arg1 = regs->x[1]; /* for the failure log below */
 
   /* Handlers below that call vmm_guest_to_host bracket each individual
    * call in its own vmm_borrow_scope_begin/end, right where it happens
@@ -134,6 +135,12 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
     break;
   case 0x04:
     hle_svc_map_memory(context, cpu_state);
+    break;
+  case 0x2c:
+    hle_svc_map_physical_memory(context, cpu_state);
+    break;
+  case 0x2d:
+    hle_svc_unmap_physical_memory(context, cpu_state);
     break;
   case 0x05:
     hle_svc_unmap_memory(context, cpu_state);
@@ -165,6 +172,8 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
   case 0x26: hle_svc_break(context, cpu_state); break;
   case 0x27: hle_svc_output_debug_string(context, cpu_state); break;
   case 0x29: hle_svc_get_info(context, cpu_state); break;
+  case 0x32: hle_svc_set_thread_activity(context, cpu_state); break;
+  case 0x33: hle_svc_get_thread_context3(context, cpu_state); break;
   case 0x34: hle_svc_wait_for_address(context, cpu_state); break;
   case 0x11: hle_svc_signal_event(context, cpu_state); break;
   case 0x13: hle_svc_map_shared_memory(context, cpu_state); break;
@@ -194,7 +203,11 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
   /* A bad handle is almost always an emulation gap (a kernel object or a
    * pseudo-handle not understood): say which call saw it. */
   if ((uint32_t)regs->x[0] == HLE_RESULT_INVALID_HANDLE)
-    log_debug("[hle] SVC 0x%02x (%s) -> InvalidHandle at PC 0x%016llx", swi, svc_name(swi), (unsigned long long)regs->pc);
+    log_debug("[hle] SVC 0x%02x (%s) -> InvalidHandle at PC 0x%016llx (x0 %llx, x1 %llx)", swi, svc_name(swi),
+              (unsigned long long)regs->pc, (unsigned long long)arg0, (unsigned long long)arg1);
+  else if ((uint32_t)regs->x[0] != HLE_RESULT_SUCCESS && (uint32_t)regs->x[0] != HLE_RESULT_TIMED_OUT)
+    log_debug("[hle] SVC 0x%02x (%s) -> 0x%x at PC 0x%016llx (x0 %llx, x1 %llx)", swi, svc_name(swi),
+              (uint32_t)regs->x[0], (unsigned long long)regs->pc, (unsigned long long)arg0, (unsigned long long)arg1);
 }
 
 void hle_on_undefined(CPU_State *cpu_state, uint32_t instruction, void *userdata)

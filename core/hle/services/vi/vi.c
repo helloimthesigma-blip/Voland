@@ -45,6 +45,7 @@ enum {
 #define PARCEL_HEADER_BYTES 0x10u
 #define NV_MULTI_FENCE_BYTES 0x24u
 #define BQ_OUTPUT_BYTES 0x10u
+#define NATIVE_WINDOW_OBJECTS_BYTES 4u /* one u32 binder offset */
 #define NATIVE_WINDOW_PARCEL_BYTES 0x28u
 #define VI_DISPLAY_NAME_BYTES 0x40u
 #define VI_NATIVE_WINDOW_BYTES 0x100u
@@ -618,13 +619,19 @@ static HLE_ServiceResult cmd_get_logical_resolution(HLE_Context *c, Service_Obje
 static uint64_t write_native_window(HLE_Context *c, const IPC_Request *req, int32_t binder) {
   uint8_t window[VI_NATIVE_WINDOW_BYTES];
   memset(window, 0, sizeof(window));
-  const uint32_t header[4] = {NATIVE_WINDOW_PARCEL_BYTES, PARCEL_HEADER_BYTES, 0,
+  /* Parcel: header, the flattened binder {type 2, pid, binder id, ...,
+   * "dispdrv"}, then the objects table - one 32-bit data offset naming
+   * that binder. The Nintendo SDK's Parcel::readStrongBinder only finds
+   * a binder listed there (libnx reads the id directly). */
+  const uint32_t header[4] = {NATIVE_WINDOW_PARCEL_BYTES, PARCEL_HEADER_BYTES, NATIVE_WINDOW_OBJECTS_BYTES,
                               PARCEL_HEADER_BYTES + NATIVE_WINDOW_PARCEL_BYTES};
   memcpy(window, header, sizeof(header));
   const uint32_t payload[3] = {2u /* type */, 1u /* pid */, (uint32_t)binder};
   memcpy(window + PARCEL_HEADER_BYTES, payload, sizeof(payload));
   memcpy(window + PARCEL_HEADER_BYTES + 0x18, "dispdrv", sizeof("dispdrv"));
-  const uint64_t size = PARCEL_HEADER_BYTES + NATIVE_WINDOW_PARCEL_BYTES;
+  const uint32_t object_offset = 0; /* the binder starts the data */
+  memcpy(window + PARCEL_HEADER_BYTES + NATIVE_WINDOW_PARCEL_BYTES, &object_offset, sizeof(object_offset));
+  const uint64_t size = PARCEL_HEADER_BYTES + NATIVE_WINDOW_PARCEL_BYTES + NATIVE_WINDOW_OBJECTS_BYTES;
   return service_write_out(c, req, 0, window, sizeof(window)) ? size : 0;
 }
 
@@ -768,10 +775,19 @@ void vi_init(Vi_State *s, Nvdrv_State *nvdrv, uint8_t *scratch) {
   s->scratch = scratch;
   s->next_stray_layer_id = VI_STRAY_LAYER_BASE;
   s->root = SERVICE_INTERFACE("vi:u", k_root_commands, 0, s);
+  s->root_system = SERVICE_INTERFACE("vi:s", k_root_commands, 0, s);
+  s->root_manager = SERVICE_INTERFACE("vi:m", k_root_commands, 0, s);
   s->application_display = SERVICE_INTERFACE("IApplicationDisplayService", k_application_display_commands, 0, s);
   s->relay = SERVICE_INTERFACE("IHOSBinderDriver", k_relay_commands, 0, s);
   s->system_display = SERVICE_INTERFACE("ISystemDisplayService", k_system_display_commands, 0, s);
   s->manager_display = SERVICE_INTERFACE("IManagerDisplayService", k_manager_display_commands, 0, s);
 }
 
-Error vi_register(Vi_State *s, SM_Registry *registry) { return sm_registry_add(registry, "vi:u", &s->root); }
+Error vi_register(Vi_State *s, SM_Registry *registry) {
+  /* Every port serves the same IApplicationDisplayService (the Nintendo
+   * SDK may try vi:m and vi:s before, or instead of, vi:u). */
+  Error err = sm_registry_add(registry, "vi:u", &s->root);
+  if (error_is_ok(err)) err = sm_registry_add(registry, "vi:s", &s->root_system);
+  if (error_is_ok(err)) err = sm_registry_add(registry, "vi:m", &s->root_manager);
+  return err;
+}

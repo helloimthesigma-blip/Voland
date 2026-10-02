@@ -51,6 +51,8 @@
 #define GM20B_L2_BYTES 0x40000u
 #define GM20B_ZCULL_CTX_BYTES 0x16000u
 #define CHARACTERISTICS_BYTES 0xA0u
+#define GM20B_TPC_MASK 0x3u /* both TPCs of the single GPC */
+#define GM20B_SM_COUNT 2u   /* one SM per TPC */
 
 /* ------------------------------------------------------------------ */
 /* Small helpers.                                                      */
@@ -259,7 +261,10 @@ static void fill_characteristics(uint8_t *c) {
   wr64(c + 0x98, 0);                   /* gr_compbit_store_base_hw */
 }
 
-static uint32_t ctrl_gpu_ioctl(uint32_t nr, uint8_t *d, uint32_t size) {
+/* `extra`: Ioctl3's second output buffer, or NULL. The Nintendo SDK's
+ * NvRm passes GET_CHARACTERISTICS / GET_TPC_MASKS through Ioctl3 and
+ * reads the result from that buffer, not from the struct's address. */
+static uint32_t ctrl_gpu_ioctl(uint32_t nr, uint8_t *d, uint32_t size, uint8_t *extra) {
   switch (nr) {
   case 0x01: wr32(d, GM20B_ZCULL_CTX_BYTES); return NV_SUCCESS; /* ZCULL_GET_CTX_SIZE */
   case 0x02: memset(d, 0, size); wr32(d, 0x20); wr32(d + 4, 0x20); return NV_SUCCESS; /* ZCULL_GET_INFO */
@@ -267,10 +272,13 @@ static uint32_t ctrl_gpu_ioctl(uint32_t nr, uint8_t *d, uint32_t size) {
   case 0x05:                                                    /* GET_CHARACTERISTICS {u64 size, u64 addr, chars} */
     wr64(d, CHARACTERISTICS_BYTES);
     if (size >= 16u + CHARACTERISTICS_BYTES) fill_characteristics(d + 16);
+    if (extra) fill_characteristics(extra);
     return NV_SUCCESS;
   case 0x06: /* GET_TPC_MASKS {u32 buf_size; pad; u64 addr; u32 mask...} */
-    if (size >= 0x18) wr32(d + 0x10, 0x3);
+    if (size >= 0x18) wr32(d + 0x10, GM20B_TPC_MASK);
+    if (extra) wr32(extra, GM20B_TPC_MASK);
     return NV_SUCCESS;
+  case 0x13: wr32(d, GM20B_SM_COUNT); return NV_SUCCESS;          /* NUM_VSMS {u32 count, reserved} */
   case 0x14: wr32(d, 0x07); wr32(d + 4, 0x01); return NV_SUCCESS; /* GET_ACTIVE_SLOT_MASK */
   case 0x1C: if (size >= 8) memset(d, 0, size); return NV_SUCCESS;  /* GET_GPU_TIME */
   default: return NV_NOT_IMPLEMENTED;
@@ -465,6 +473,7 @@ static uint32_t gpu_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint8_t *d) {
   }
   case 0x09: wr64(d + 8, rd32(d)); return NV_SUCCESS; /* ALLOC_OBJ_CTX {class, flags, u64 obj_id out} */
   case 0x16: case 0x17: return NV_SUCCESS;            /* GET_ERROR_INFO / NOTIFICATION: none */
+  case 0x1D: return NV_SUCCESS;                        /* SET_TIMESLICE: one channel runs at a time anyway */
   case 0x1A: { /* ALLOC_GPFIFO_EX2 {num, flags, unk0, fence out{id,value}, unk1..3} */
     const uint32_t id = ensure_syncpoint(s, f);
     if (!id) return NV_INSUFFICIENT_MEMORY;
@@ -541,7 +550,7 @@ static uint32_t dispatch_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t request, uint8
   case NV_DEVICE_CTRL:
     return type == NV_TYPE_CTRL ? ctrl_ioctl(s, nr, data) : NV_NOT_IMPLEMENTED;
   case NV_DEVICE_CTRL_GPU:
-    return type == NV_TYPE_CTRL_GPU ? ctrl_gpu_ioctl(nr, data, size) : NV_NOT_IMPLEMENTED;
+    return type == NV_TYPE_CTRL_GPU ? ctrl_gpu_ioctl(nr, data, size, s->extra_out ? s->extra_buffer : NULL) : NV_NOT_IMPLEMENTED;
   case NV_DEVICE_AS_GPU:
     return type == NV_TYPE_AS_GPU ? as_gpu_ioctl(s, nr, data) : NV_NOT_IMPLEMENTED;
   case NV_DEVICE_GPU:
@@ -581,7 +590,10 @@ static uint32_t run_ioctl(HLE_Context *c, Nvdrv_State *s, const IPC_Request *req
   }
   (void)total;
   s->hle = c;
+  memset(s->extra_buffer, 0, sizeof(s->extra_buffer));
+  s->extra_out = extra_out != 0;
   const uint32_t error = dispatch_ioctl(s, f, request, s->ioctl_buffer);
+  log_debug("[nvdrv] ioctl 0x%08x on device %d -> %u", request, (int)f->device, error);
   if (dir & NV_IOC_READ) {
     const IPC_Buffer *out = out_buffer(req, 0);
     if (!out || out->size < size || !error_is_ok(vmm_write_block(c->vmm, out->gva, s->ioctl_buffer, size))) {
@@ -591,7 +603,6 @@ static uint32_t run_ioctl(HLE_Context *c, Nvdrv_State *s, const IPC_Request *req
   if (extra_out) {
     const IPC_Buffer *out = out_buffer(req, extra_out);
     if (out && out->size) {
-      memset(s->extra_buffer, 0, out->size < sizeof(s->extra_buffer) ? out->size : sizeof(s->extra_buffer));
       (void)vmm_write_block(c->vmm, out->gva, s->extra_buffer, out->size < sizeof(s->extra_buffer) ? out->size : sizeof(s->extra_buffer));
     }
   }
@@ -628,6 +639,7 @@ static HLE_ServiceResult cmd_open(HLE_Context *c, Service_Object *self, const IP
     break;
   }
   if (error == NV_FILE_OPERATION_FAILED) log_warn("[nvdrv] Open(\"%s\"): no such device", path);
+  else log_debug("[nvdrv] Open(\"%s\") -> fd %u", path, fd);
   (void)ipc_response_push_u32(res, fd);
   (void)ipc_response_push_u32(res, error);
   return HLE_RESULT_SUCCESS;

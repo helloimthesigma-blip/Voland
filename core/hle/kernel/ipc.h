@@ -91,6 +91,7 @@ typedef struct HLE_Context HLE_Context;
 #define IPC_MAX_OUT_OBJECTS 8u          /* objects a handler may return */
 #define IPC_DOMAIN_MAX_OBJECTS 64u      /* per session, including id 1 */
 #define IPC_MAX_SESSIONS 256u           /* emulator-wide session pool */
+#define IPC_DEFAULT_POINTER_BUFFER_SIZE 0x1000u /* QueryPointerBufferSize when an interface declares none */
 
 /* ------------------------------------------------------------------ */
 /* Wire constants (libnx sf/hipc.h, sf/cmif.h, sf/tipc.h).             */
@@ -335,6 +336,7 @@ struct Service_Object {
 typedef struct IPC_Session {
   bool in_use;
   bool is_domain;
+  bool server_closed; /* a Close message ended the server side; the client handle lives until CloseHandle */
   /* Non-domain: objects[0] is the session's object. Domain: objects[id-1]
    * for domain object id `id` in [1, IPC_DOMAIN_MAX_OBJECTS]. */
   Service_Object objects[IPC_DOMAIN_MAX_OBJECTS];
@@ -360,6 +362,11 @@ IPC_Session *ipc_session_pool_open(IPC_Session_Pool *pool, const Service_Interfa
 
 /* Frees the session and every object in it. */
 void ipc_session_pool_close(IPC_Session_Pool *pool, IPC_Session *session);
+
+/* A Close message: closes every object (the server side) but keeps the
+ * session allocated for its client handle; requests on it then fail with
+ * ConnectionClosed and CloseHandle frees it. */
+void ipc_session_close_server(IPC_Session *session);
 
 /* Opens a session on `interface` and adds it to the current process's
  * handle table. Returns a KERNEL result: HLE_RESULT_SUCCESS,

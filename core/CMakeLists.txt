@@ -59,6 +59,7 @@ set(SWITCH_CORE_SOURCES
   hle/services/nvdrv/nvdrv.c
   hle/loader/byte_source.c
   hle/loader/nca_parse.c
+  hle/loader/nca_compressed.c
   hle/loader/exefs.c
   hle/loader/romfs.c
   hle/loader/npdm.c
@@ -115,6 +116,7 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   common/input_region.h
   hle/loader/byte_source.h
   hle/loader/nca_parse.h
+  hle/loader/nca_compressed.h
   hle/loader/exefs.h
   hle/loader/romfs.h
   hle/loader/npdm.h

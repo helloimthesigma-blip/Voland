@@ -107,7 +107,7 @@ static int32_t pick(Scheduler *sched) {
   int32_t best = -1;
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     const Sched_Thread *t = &sched->threads[i];
-    if (t->state != THREAD_STATE_RUNNABLE) continue;
+    if (t->state != THREAD_STATE_RUNNABLE || t->paused) continue;
     if (best < 0) { best = (int32_t)i; continue; }
     const Sched_Thread *b = &sched->threads[best];
     if (t->thread.priority < b->thread.priority ||

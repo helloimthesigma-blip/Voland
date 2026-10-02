@@ -152,6 +152,7 @@ AM_EVENT_COMMAND(cmd_gpu_error_event, gpu_error_event, false)
 AM_EVENT_COMMAND(cmd_friend_invitation_event, friend_invitation_event, false)
 AM_EVENT_COMMAND(cmd_notification_event, notification_event, false)
 AM_EVENT_COMMAND(cmd_health_warning_event, health_warning_event, false)
+AM_EVENT_COMMAND(cmd_event_210, event_210, false)
 AM_EVENT_COMMAND(cmd_sleep_lock_event, sleep_lock_event, true)
 
 /* ------------------------------------------------------------------ */
@@ -828,6 +829,7 @@ static const Service_Command k_common_state_getter_commands[] = {
     {400, service_cmd_ok, "ActivateMigrationService_stub"},
     {401, service_cmd_ok, "DeactivateMigrationService_stub"},
     {502, service_cmd_out_u8_true, "IsSleepEnabled"},
+    {900, service_cmd_ok, "SetRequestExitToLibraryAppletAtExecuteNextProgramEnabled"},
 };
 
 static const Service_Command k_self_controller_commands[] = {
@@ -942,6 +944,7 @@ static const Service_Command k_application_functions_commands[] = {
     {151, cmd_no_data, "TryPopFromNotificationStorageChannel"},
     {160, cmd_health_warning_event, "GetHealthWarningDisappearedSystemEvent"},
     {170, service_cmd_ok, "SetHdcpAuthenticationActivated_stub"},
+    {210, cmd_event_210, "GetEvent210"},
 };
 
 static const Service_Command k_debug_functions_commands[] = {

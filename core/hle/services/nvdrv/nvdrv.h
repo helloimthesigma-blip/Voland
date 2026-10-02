@@ -125,6 +125,7 @@ typedef struct Nvdrv_State {
   Nv_Event_Slot events[NVDRV_MAX_EVENTS];
   uint8_t ioctl_buffer[NVDRV_IOCTL_MAX_BYTES];
   uint8_t extra_buffer[NVDRV_IOCTL_MAX_BYTES];
+  bool extra_out;          /* the current ioctl has Ioctl3's second output buffer */
   uint64_t ioctl_count;
   /* GPU command processing (gpu/gpu_channel.h): channel state lives in
    * caller-owned memory (NVDRV_MAX_CHANNELS of them); `hle` is the

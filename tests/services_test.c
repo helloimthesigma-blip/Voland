@@ -179,6 +179,13 @@ static void test_vi(void) {
   const uint32_t payload_off = rd32(SCRATCH(0x3000) + 4);
   const int32_t binder = (int32_t)rd32(SCRATCH(0x3000) + payload_off + 8);
   CHECK(binder >= 1);
+  /* The objects table lists the binder (offset 0): the Nintendo SDK's
+   * Parcel::readStrongBinder needs it, and OpenParcel checks that data +
+   * objects fit the returned size. */
+  const uint32_t data_size = rd32(SCRATCH(0x3000)), objects_size = rd32(SCRATCH(0x3000) + 8);
+  const uint32_t objects_off = rd32(SCRATCH(0x3000) + 12);
+  CHECK(objects_size == 4 && rd32(SCRATCH(0x3000) + objects_off) == 0);
+  CHECK(test_le64(r.data) >= 0x10u + data_size + objects_size);
 
   uint32_t n = 0;
   Parcel p;
@@ -580,6 +587,92 @@ static void test_sd_manifest(void) {
 
 /* ns:am2 (no installed titles), pdm:qry (no history), pm:shell (no other
  * application), fsp-srv save-data info readers (empty). */
+/* svcSetThreadActivity / svcGetThreadContext3: a created thread can be
+ * paused (never picked) and resumed, and its context read back - what
+ * Unity's garbage collector does to every thread. */
+static void test_thread_activity(void) {
+  CPU_Register_File *regs = g_emu.cpu_backend->get_register_file(g_emu.cpu_state);
+  const uint64_t entry = g_emu.process.address_space.code.base + 0x40u;
+  const uint64_t stack_top = g_emu.process.main_thread_stack.base + g_emu.process.main_thread_stack.size;
+  regs->x[1] = entry;
+  regs->x[2] = 0x1234;
+  regs->x[3] = stack_top - 0x1000u;
+  regs->x[4] = 44;
+  regs->x[5] = 0;
+  hle_on_svc(g_emu.cpu_state, 0x08, &g_emu.hle);
+  CHECK((uint32_t)regs->x[0] == 0);
+  const uint32_t thread = (uint32_t)regs->x[1];
+  Sched_Thread *t = (Sched_Thread *)handle_table_get(&g_emu.process.handles, thread, KERNEL_OBJECT_THREAD);
+  CHECK(t != NULL);
+  regs->x[0] = thread;
+  regs->x[1] = 1; /* paused */
+  hle_on_svc(g_emu.cpu_state, 0x32, &g_emu.hle);
+  CHECK((uint32_t)regs->x[0] == 0 && t->paused);
+  regs->x[0] = thread;
+  regs->x[1] = 7; /* not an activity */
+  hle_on_svc(g_emu.cpu_state, 0x32, &g_emu.hle);
+  CHECK((uint32_t)regs->x[0] == HLE_RESULT_INVALID_ENUM_VALUE);
+  /* ThreadContext: x0 = the argument, pc = the entry, sp = the stack top. */
+  regs->x[0] = SCRATCH(0xB000);
+  regs->x[1] = thread;
+  hle_on_svc(g_emu.cpu_state, 0x33, &g_emu.hle);
+  CHECK((uint32_t)regs->x[0] == 0);
+  uint64_t ctx_x0 = 0, ctx_sp = 0, ctx_pc = 0;
+  CHECK_OK(vmm_read64(g_emu.vmm, SCRATCH(0xB000), &ctx_x0));
+  CHECK_OK(vmm_read64(g_emu.vmm, SCRATCH(0xB000) + 8u * 31u, &ctx_sp));
+  CHECK_OK(vmm_read64(g_emu.vmm, SCRATCH(0xB000) + 8u * 32u, &ctx_pc));
+  CHECK(ctx_x0 == 0x1234 && ctx_pc == entry && ctx_sp == stack_top - 0x1000u);
+  regs->x[0] = thread;
+  regs->x[1] = 0; /* runnable */
+  hle_on_svc(g_emu.cpu_state, 0x32, &g_emu.hle);
+  CHECK((uint32_t)regs->x[0] == 0 && !t->paused);
+  regs->x[0] = 0xdead;
+  regs->x[1] = 1;
+  hle_on_svc(g_emu.cpu_state, 0x32, &g_emu.hle);
+  CHECK((uint32_t)regs->x[0] == HLE_RESULT_INVALID_HANDLE);
+}
+
+/* Small services the Nintendo SDK opens at start-up: lm, ectx:aw, ldr:ro,
+ * aoc:u and the vi:s / vi:m ports all answer. */
+static void test_sdk_startup_services(void) {
+  const uint32_t lm = service("lm");
+  const uint32_t logger = object(lm, 0, NULL, 0);
+  CHECK(call(logger, 0, NULL, 0, NULL).result == 0);
+  const uint32_t ectx = service("ectx:aw");
+  const uint32_t registrar = object(ectx, 0, NULL, 0);
+  CHECK(call(registrar, 0, NULL, 0, NULL).result == 0);
+  const uint32_t ro = service("ldr:ro");
+  CHECK(call(ro, 4, NULL, 0, NULL).result == 0);
+  (void)call_ex(ro, 0, NULL, 0, NULL, RO_RESULT_NOT_SUPPORTED);
+  const uint32_t aoc = service("aoc:u");
+  Test_Ipc_Reply r = call(aoc, 2, NULL, 0, NULL);
+  CHECK(test_le32(r.data) == 0);
+  r = call(aoc, 8, NULL, 0, NULL);
+  CHECK(r.copy_count == 1);
+  const uint32_t policy = 0;
+  CHECK(object(service("vi:s"), 1, &policy, sizeof(policy)) != 0);
+  CHECK(object(service("vi:m"), 2, &policy, sizeof(policy)) != 0);
+}
+
+/* pctl: the SDK opens pctl and pctl:s, creates the service on each and
+ * closes the port sessions - every handle must close. */
+static void test_pctl(void) {
+  CPU_Register_File *regs = g_emu.cpu_backend->get_register_file(g_emu.cpu_state);
+  const char *const ports[] = {"pctl", "pctl:s"};
+  for (uint32_t i = 0; i < 2u; i++) {
+    const uint32_t port = service(ports[i]);
+    const uint32_t pc = object(port, 1, NULL, 0);
+    Test_Ipc_Reply r = call(pc, 1031, NULL, 0, NULL);
+    CHECK(r.data[0] == 0); /* not restricted */
+    regs->x[0] = port;
+    hle_on_svc(g_emu.cpu_state, 0x16, &g_emu.hle);
+    CHECK((uint32_t)regs->x[0] == 0);
+    regs->x[0] = pc;
+    hle_on_svc(g_emu.cpu_state, 0x16, &g_emu.hle);
+    CHECK((uint32_t)regs->x[0] == 0);
+  }
+}
+
 static void test_system_queries(void) {
   const uint32_t ns = service("ns:am2");
   const uint32_t manager = object(ns, 7996, NULL, 0);
@@ -999,6 +1092,9 @@ int main(void) {
   test_audren();
   test_sd_manifest();
   test_system_queries();
+  test_pctl();
+  test_thread_activity();
+  test_sdk_startup_services();
   test_software_keyboard();
   test_acc();
   emulator_destroy(&g_emu);

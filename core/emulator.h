@@ -37,6 +37,7 @@
 #include "hle/services/ns/ns.h"
 #include "hle/loader/byte_source.h"
 #include "hle/loader/nca_parse.h"
+#include "hle/loader/nca_compressed.h"
 
 /* Scratch for one bootstrap: the ExeFS directory plus the largest
  * compressed NSO segment staged for LZ4. A shipping title's biggest
@@ -111,6 +112,13 @@ typedef struct Emulator
   NCA_File content_nca;
   Byte_Source_Slice romfs_slice;
   const Byte_Source *romfs; /* NULL: the program has no RomFS */
+  /* A compressed RomFS section (nca_compressed.h): its raw bytes, the
+   * decompressing view, and the arena holding its table and block cache
+   * (created at load, destroyed at unload). */
+  Byte_Source_Slice romfs_raw;
+  NCA_Compressed romfs_compressed;
+  Arena content_arena;
+  bool content_arena_live;
 
   /* Homebrew (hbloader ABI, v3.39). An NRO runs as "sdmc:<program_path>"
    * (copied onto the SD card at load, since libnx reads its own RomFS

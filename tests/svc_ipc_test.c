@@ -260,6 +260,13 @@ static void test_control_and_domains(uint32_t test) {
   control.command_id = IPC_CONTROL_QUERY_POINTER_BUFFER_SIZE;
   Test_Ipc_Reply reply = send_cmif(test, &control, 2);
   CHECK(reply.result == 0 && (reply.data[0] | (reply.data[1] << 8)) == TEST_POINTER_BUFFER_SIZE);
+  /* An interface that declares none (sm:) reports the default: the
+   * Nintendo SDK will not send pointer buffers to a 0-byte one. */
+  uint32_t sm = 0;
+  CHECK(ipc_fixture_connect(&g_emu, "sm:", &sm) == 0);
+  reply = send_cmif(sm, &control, 2);
+  CHECK(reply.result == 0 && (reply.data[0] | (reply.data[1] << 8)) == IPC_DEFAULT_POINTER_BUFFER_SIZE);
+  CHECK(close_handle(sm) == 0);
 
   /* Non-domain sub-object: a move handle to a new session. */
   const Test_Ipc_Message open = cmif(CMD_OPEN_SUBOBJECT, NULL, 0);
@@ -370,13 +377,21 @@ static void test_failures_do_not_leak(uint32_t test) {
 }
 
 static void test_close(uint32_t test) {
-  /* Close message: the session goes away; libnx's follow-up CloseHandle
-   * then fails harmlessly. */
+  /* Close message: the server end goes away, but the client handle stays
+   * valid - requests on it fail with ConnectionClosed, and the follow-up
+   * CloseHandle succeeds (the Nintendo SDK aborts if it does not) and
+   * frees the session. */
   Test_Ipc_Message close_message;
   memset(&close_message, 0, sizeof(close_message));
   close_message.framing = TEST_IPC_CMIF_CLOSE;
   const uint32_t before = g_emu.sessions.live_count;
   CHECK(ipc_fixture_send(&g_emu, test, &close_message, g_reply) == 0);
+  CHECK(g_emu.sessions.live_count == before);
+  Test_Ipc_Message again;
+  memset(&again, 0, sizeof(again));
+  again.framing = TEST_IPC_CMIF;
+  CHECK(ipc_fixture_send(&g_emu, test, &again, g_reply) == HLE_RESULT_CONNECTION_CLOSED);
+  CHECK(close_handle(test) == 0);
   CHECK(g_emu.sessions.live_count == before - 1u);
   CHECK(close_handle(test) == HLE_RESULT_INVALID_HANDLE);
   CHECK(close_handle(HANDLE_PSEUDO_CURRENT_PROCESS) == 0);

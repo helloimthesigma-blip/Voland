@@ -103,13 +103,15 @@
  * yet distinguish. */
 typedef enum HLE_Memory_Type {
   HLE_MEMTYPE_UNMAPPED = 0x00,       /* address_space.h: outside every region, or unmapped within one */
-  HLE_MEMTYPE_CODE_STATIC = 0x03,    /* address_space.code */
+  HLE_MEMTYPE_CODE_STATIC = 0x03,    /* address_space.code: a module's .text / .rodata */
+  HLE_MEMTYPE_CODE_MUTABLE = 0x04,   /* address_space.code: a module's .data / .bss (writable) */
   HLE_MEMTYPE_SHARED = 0x06,         /* an svcMapSharedMemory view */
   HLE_MEMTYPE_HEAP = 0x05,           /* address_space.heap, not currently borrowed out */
   HLE_MEMTYPE_WEIRD_MAPPED_MEM = 0x07, /* address_space.heap, borrowed out via MapMemory (Perm_None) */
   HLE_MEMTYPE_MAPPED_MEMORY = 0x0B, /* address_space.stack, a live MapMemory alias */
   HLE_MEMTYPE_THREAD_LOCAL = 0x0C,  /* address_space.tls_io */
   HLE_MEMTYPE_NORMAL = 0x02,        /* address_space.stack, not a MapMemory alias (plain stack) */
+  HLE_MEMTYPE_INACCESSIBLE = 0x10,  /* beyond the address space: one region to 2^64 */
 } HLE_Memory_Type;
 
 /* Byte-for-byte Horizon's MemoryInfo (libnx svc.h): QueryMemory writes
@@ -138,6 +140,11 @@ typedef struct HLE_Memory_Info {
  * to be the caller's loaded process (§12: only reachable once
  * emulator_load_program() has run). */
 void hle_svc_set_heap_size(HLE_Context *context, CPU_State *cpu_state);
+/* svcMapPhysicalMemory / svcUnmapPhysicalMemory (0x2C / 0x2D): RW memory
+ * in the alias region, page by page - unmapped pages are backed, mapped
+ * ones left alone; unmapping frees them. */
+void hle_svc_map_physical_memory(HLE_Context *context, CPU_State *cpu_state);
+void hle_svc_unmap_physical_memory(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_map_memory(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_unmap_memory(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_query_memory(HLE_Context *context, CPU_State *cpu_state);

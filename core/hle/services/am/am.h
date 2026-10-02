@@ -129,6 +129,7 @@ typedef struct Am_State {
   Kernel_Event *friend_invitation_event;
   Kernel_Event *notification_event;
   Kernel_Event *health_warning_event;
+  Kernel_Event *event_210; /* IApplicationFunctions 210 (unnamed; never fires) */
   Kernel_Event *sleep_lock_event;
   float master_volume;
   uint32_t idle_time_extension;

@@ -2425,9 +2425,22 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.61.0*
+*Document version: 3.62.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.61 → v3.62 (summary)
+
+First commercial title (a Unity/IL2CPP game built on the Nintendo SDK and NVN, loaded from a user-decrypted Program NCA) driven from rtld to NVN rendering setup. Every fix is a real-kernel/real-service behaviour the SDK depends on and libnx homebrew never exercised:
+
+- **Kernel (§12):** QueryMemory past the address space answers one Inaccessible region to 2^64 (rtld walks memory until base + size wraps and *hangs* on an error); module pages report CodeStatic / CodeMutable by writability (nn::ro's module walk checks the pairing); svcMapPhysicalMemory / svcUnmapPhysicalMemory (0x2C/0x2D) over the alias region; svcMapMemory may alias heap, physical memory or writable module data (the SDK maps thread stacks from its .bss) and the live-alias cap is 256; CreateTransferMemory accepts physical memory; svcSetThreadActivity (0x32, paused threads are never picked) and svcGetThreadContext3 (0x33, the 0x320-byte ThreadContext) - Unity's GC pauses and inspects threads. Teardown restores borrows before unmapping modules and unmaps the alias region.
+- **IPC (§12):** a Close message ends the server side but the client handle stays valid until CloseHandle (the SDK aborts if CloseHandle fails); QueryPointerBufferSize reports 0x1000 for interfaces that declare none (the SDK will not send fixed pointer buffers to a 0-byte server - hid SetSupportedNpadIdType). Failing SVCs are logged with their result and first arguments.
+- **Services:** lm (logging), ectx:aw, pctl / pctl:a/r/s (never restricted), aoc:u (no add-on content), ldr:ro (registration accepted; loading an NRO not yet), vi:s / vi:m (same display service), acc 160, ICommonStateGetter 900, IApplicationFunctions 210 (an event). The native-window parcel now carries its objects table (one binder offset) - Parcel::readStrongBinder needs it.
+- **nvdrv (§13):** Ioctl3's second output buffer is filled for GET_CHARACTERISTICS / GET_TPC_MASKS (NvRm reads the GPU description from it), NUM_VSMS (2), channel SET_TIMESLICE.
+- **Loader (§12): compressed NCA sections** (`hle/loader/nca_compressed.{h,c}`): the data region holds raw / zero / LZ4 blocks mapped by a bucket-tree table (offsets from the data region's start - confirmed against the real title); the decompressed view is the RomFS (here 88,561 blocks, 6.6 GB). Not a cipher: input stays user-decrypted (§1.6).
+- **CLI diagnostics:** live threads' PCs as module+offset at exit; `VOLAND_BACKTRACE=1` frame-pointer backtraces; `VOLAND_DUMP_MODULE` / `_INDEX` dump a module image for offline symbolization.
+- **Where it stops:** a NULL dereference inside NVN shortly after the first GPFIFO submissions (an NVN-internal object table left empty by some driver answer still missing). Commercial titles remain unplayable; this is the next frontier.
+- **Tests:** `nca_compressed_test` (raw/zero/LZ4 blocks, straddling reads, cache, rejections), `svc_memory_test` (physical memory, CodeMutable, MapMemory from module data, QueryMemory past the end), `services_test` (thread activity + context, SDK start-up services, pctl handles, parcel objects table), `svc_ipc_test` (Close semantics, default pointer buffer), `nvdrv_test` (Ioctl3 characteristics, NUM_VSMS).
 
 ### Changelog v3.60 → v3.61 (summary)
 
