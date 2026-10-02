@@ -98,7 +98,7 @@ static const Op_Pattern k_patterns[] = {
     {0xfff8, 0xf0c8, SM_OP_S2R, R, 0}, {0xfff8, 0x50c8, SM_OP_CS2R, R, 0},
     {0xfff8, 0x50d8, SM_OP_VOTE, R, 0}, {0xfff8, 0xef10, SM_OP_SHFL, R, 0},
     {0xfff8, 0xf0f0, SM_OP_BARRIER, R, 0}, {0xfff8, 0xf0a8, SM_OP_BARRIER, R, 0}, {0xfff8, 0xef98, SM_OP_BARRIER, R, 0},
-    {0xfff8, 0x50b0, SM_OP_NOP, R, 0},
+    {0xfff8, 0x50b0, SM_OP_NOP, R, 0}, {0xfff8, 0x50e0, SM_OP_NOP, R, 0}, /* VOTE.VTG: a VTG-culling hint, no effect here */
     /* memory */
     {0xfff8, 0xefd8, SM_OP_ALD, R, 0}, {0xfff8, 0xeff0, SM_OP_AST, R, 0}, {0xff00, 0xe000, SM_OP_IPA, R, 0},
     {0xfff8, 0xef90, SM_OP_LDC, R, 0},
@@ -334,6 +334,54 @@ void sm_program_decode(const uint8_t *bytes, uint32_t size, uint64_t address, Sm
 }
 
 /* ---- execution helpers -------------------------------------------- */
+
+/* Control flow's condition-code test (bits 4:0; 15 = always). The
+ * comparisons read the flags; the overflow/carry/sign-only tests read one
+ * flag; the special CSM / FCSM / RLE / RGT conditions belong to fixed-
+ * function hardware (e.g. VTG culling - NVN's vertex prologues EXIT on
+ * FCSM_TR when a primitive is culled) that is not modelled: never true,
+ * so execution falls through to the real work. */
+#define SM_CC_TEST_MASK 0x1fu
+static Sm_Mask cc_test(const Sm_Thread *t, uint32_t cond) {
+  const Sm_Mask n = t->cc_sign, z = t->cc_zero, c = t->cc_carry, v = t->cc_overflow, all = SM_ALL_LANES;
+  const Sm_Mask lt = (Sm_Mask)(n ^ v);
+  switch (cond) {
+  case 0: return 0;                                  /* F */
+  case 1: return lt;                                 /* LT */
+  case 2: return z;                                  /* EQ */
+  case 3: return (Sm_Mask)(z | lt);                  /* LE */
+  case 4: return (Sm_Mask)(all & ~z & ~lt);          /* GT */
+  case 5: return (Sm_Mask)(all & ~z);                /* NE */
+  case 6: return (Sm_Mask)(all & ~lt);               /* GE */
+  case 7: return (Sm_Mask)(all & ~v);                /* NUM */
+  case 8: return v;                                  /* NAN */
+  case 9: return (Sm_Mask)(lt | v);                  /* LTU */
+  case 10: return (Sm_Mask)(z | v);                  /* EQU */
+  case 11: return (Sm_Mask)(z | lt | v);             /* LEU */
+  case 12: return (Sm_Mask)((all & ~z & ~lt) | v);   /* GTU */
+  case 13: return (Sm_Mask)(all & ~z);               /* NEU */
+  case 14: return (Sm_Mask)((all & ~lt) | v);        /* GEU */
+  case 15: return all;                               /* T */
+  case 16: return (Sm_Mask)(all & ~v);               /* OFF */
+  case 17: return (Sm_Mask)(all & ~c);               /* LO */
+  case 18: return (Sm_Mask)(all & ~n);               /* SFF */
+  case 19: return (Sm_Mask)((all & ~c) | z);         /* LS */
+  case 20: return (Sm_Mask)(c & ~z);                 /* HI */
+  case 21: return n;                                 /* SFT */
+  case 22: return c;                                 /* HS */
+  case 23: return v;                                 /* OFT */
+  default: return 0;                                 /* CSM_*, FCSM_*, RLE, RGT */
+  }
+}
+
+static bool is_cc_tested_control(uint8_t op) {
+  switch ((Sm_Op)op) {
+  case SM_OP_BRA: case SM_OP_EXIT: case SM_OP_KIL: case SM_OP_BRK: case SM_OP_CONT: case SM_OP_RET:
+    return true;
+  default:
+    return false;
+  }
+}
 
 static float f32(uint32_t v) {
   float f;
@@ -1847,7 +1895,8 @@ bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
         continue;
       }
       const Sm_Insn *in = &program->insns[w->pc];
-      const Sm_Mask guard = pred_mask(t, in->pred & 7u, in->pred & 8u) & w->mask;
+      Sm_Mask guard = pred_mask(t, in->pred & 7u, in->pred & 8u) & w->mask;
+      if (is_cc_tested_control(in->op)) guard &= cc_test(t, (uint32_t)(in->raw & SM_CC_TEST_MASK));
       switch ((Sm_Op)in->op) {
       case SM_OP_BRA:
         if (!guard) {

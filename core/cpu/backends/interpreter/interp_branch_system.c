@@ -25,7 +25,10 @@ static Interp_Status branch_to(Interp_State *s, uint64_t target) {
 
 static Interp_Status unconditional_immediate(Interp_State *s, uint32_t insn) {
   const uint64_t offset = (uint64_t)sign_extend((uint64_t)bits(insn, 25, 0) << 2, 28);
-  if (bit(insn, 31)) s->regs.x[30] = s->regs.pc + 4u; /* BL */
+  if (bit(insn, 31)) { /* BL */
+    interp_maybe_trace_call(s, s->regs.pc + offset);
+    s->regs.x[30] = s->regs.pc + 4u;
+  }
   return branch_to(s, s->regs.pc + offset);
 }
 
@@ -127,9 +130,12 @@ static Interp_Status branch_register(Interp_State *s, uint32_t insn) {
   switch (opc) {
   case 0: return branch_to(s, target);  /* BR */
   case 1:                               /* BLR: read target before writing LR */
+    interp_maybe_trace_call(s, target);
     s->regs.x[30] = s->regs.pc + 4u;
     return branch_to(s, target);
-  case 2: return branch_to(s, target);  /* RET */
+  case 2:                               /* RET */
+    interp_maybe_trace_return(s, target);
+    return branch_to(s, target);
   default: return INTERP_UNDEFINED;     /* ERET, DRPS: not at EL0 */
   }
 }

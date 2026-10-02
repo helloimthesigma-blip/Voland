@@ -342,6 +342,46 @@ static void test_control_and_domains(uint32_t test) {
   CHECK(close_handle(clone) == 0);
 }
 
+/* Clones of a domain share its object table (the Nintendo SDK pools
+ * clones and uses objects through any of them): an object opened through
+ * one is reachable through the other, survives the original's close, and
+ * goes when the last session closes. */
+static void test_domain_clone_sharing(uint32_t test) {
+  const uint32_t sessions_before = g_emu.sessions.live_count;
+  Test_Ipc_Message control;
+  memset(&control, 0, sizeof(control));
+  control.framing = TEST_IPC_CONTROL;
+  control.command_id = IPC_CONTROL_CLONE_CURRENT_OBJECT;
+  Test_Ipc_Reply reply = send_cmif(test, &control, 0);
+  const uint32_t domain = reply.move_handles[0];
+  control.command_id = IPC_CONTROL_CONVERT_CURRENT_OBJECT_TO_DOMAIN;
+  CHECK(send_cmif(domain, &control, 4).result == 0);
+  control.command_id = IPC_CONTROL_CLONE_CURRENT_OBJECT_EX;
+  reply = send_cmif(domain, &control, 0);
+  CHECK(reply.result == 0 && reply.move_count == 1);
+  const uint32_t pooled = reply.move_handles[0];
+
+  Test_Ipc_Message open = cmif(CMD_OPEN_SUBOBJECT, NULL, 0);
+  open.domain = true;
+  open.domain_type = 1;
+  open.object_id = 1;
+  reply = send_cmif(domain, &open, 0); /* opened through the original */
+  CHECK(reply.result == 0 && reply.object_count == 1);
+  const uint32_t id = reply.object_ids[0];
+  uint32_t value = 10;
+  Test_Ipc_Message use = cmif(CMD_ECHO, &value, sizeof(value));
+  use.domain = true;
+  use.domain_type = 1;
+  use.object_id = id;
+  reply = send_cmif(pooled, &use, 4); /* used through the clone */
+  CHECK(reply.result == 0 && test_le32(reply.data) == 111);
+  CHECK(close_handle(domain) == 0);
+  reply = send_cmif(pooled, &use, 4);
+  CHECK(reply.result == 0 && test_le32(reply.data) == 111);
+  CHECK(close_handle(pooled) == 0);
+  CHECK(g_emu.sessions.live_count == sessions_before);
+}
+
 static void test_failures_do_not_leak(uint32_t test) {
   const uint32_t sessions_before = g_emu.sessions.live_count;
   const uint32_t handles_before = handles()->count;
@@ -414,6 +454,7 @@ int main(void) {
   test_send_rejections(sm);
   uint32_t test = 0;
   test_sm(sm, &test);
+  test_domain_clone_sharing(test);
   test_control_and_domains(test);
   test_failures_do_not_leak(test);
   test_close(test);

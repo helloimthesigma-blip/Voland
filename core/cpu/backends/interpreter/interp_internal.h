@@ -194,4 +194,16 @@ static inline Interp_Status advance(Interp_State *s) {
   return INTERP_CONTINUE;
 }
 
+/* Call tracing (interpreter.h): the targets, and the hook check. */
+extern uint64_t g_interp_trace_targets[];
+extern uint32_t g_interp_trace_count;
+void interp_trace_call(Interp_State *s, uint64_t target);
+void interp_trace_return(Interp_State *s, uint64_t target);
+static inline void interp_maybe_trace_call(Interp_State *s, uint64_t target) {
+  if (g_interp_trace_count) interp_trace_call(s, target);
+}
+static inline void interp_maybe_trace_return(Interp_State *s, uint64_t target) {
+  if (g_interp_trace_count) interp_trace_return(s, target);
+}
+
 #endif /* SWITCH_CPU_BACKENDS_INTERPRETER_INTERP_INTERNAL_H */

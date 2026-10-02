@@ -149,11 +149,19 @@
  * -> 1, tessellation -> 2, geometry -> 3, pixel -> 4). Drivers that bind
  * constant buffers per stage (nouveau's) never write these. */
 #define M3D_PIPELINE_BINDING(j) (0x804u + 16u * (j))
+#define M3D_PIPELINE_SHADER(j) (0x800u + 16u * (j))
+#define M3D_PIPELINE_TYPE_SHIFT 4u
+#define M3D_PIPELINE_VERTEX 1u
 static const uint8_t k_default_binding_group[6] = {0, 0, 1, 2, 3, 4};
 
 void gpu_channel_init(Gpu_Channel *channel) {
   memset(channel, 0, sizeof(*channel));
   for (uint32_t j = 0; j < 6u; j++) channel->engine3d[M3D_PIPELINE_BINDING(j)] = k_default_binding_group[j];
+  /* SET_PIPELINE_SHADER(j) power-on values: each slot's own stage type
+   * (bits 7:4), with only the vertex stage (slot 1) enabled. NVN writes
+   * the other slots but never slot 1's control word - it relies on this. */
+  for (uint32_t j = 0; j < 6u; j++)
+    channel->engine3d[M3D_PIPELINE_SHADER(j)] = (j << M3D_PIPELINE_TYPE_SHIFT) | (j == M3D_PIPELINE_VERTEX ? 1u : 0u);
 }
 
 static uint64_t addr40(uint32_t upper, uint32_t lower) { return ((uint64_t)(upper & 0xFFu) << 32) | lower; }

@@ -2113,6 +2113,13 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     }
   }
   if (!ctx->vs || !ctx->ps) {
+    if (!r->stats.skipped_draws) {
+      for (uint32_t j = 0; j < PIPELINE_STAGES; j++) {
+        const uint32_t *p = regs + REG_PIPELINE + j * REG_PIPELINE_STRIDE;
+        log_warn("[gpu] draw skipped (no %s program): pipeline %u ctl 0x%x offset 0x%x group %u region %llx",
+                 ctx->vs ? "pixel" : "vertex", j, p[0], p[1], p[4] & 7u, (unsigned long long)region);
+      }
+    }
     r->stats.skipped_draws++;
     return;
   }
@@ -2120,6 +2127,14 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
   env_setup(ctx, 1, ctx->ps, bindings, ps_group);
   static Raster_State rs;
   if (!setup_state(ctx, &rs)) {
+    if (!r->stats.skipped_draws) {
+      Surface_Desc d;
+      const bool has_rt = color_target_desc(regs, 0, &d);
+      log_warn("[gpu] draw skipped: RT0 %s (fmt 0x%02x %ux%u @%llx), CT_SELECT 0x%x, CT_WRITE 0x%x, zeta %s, clip %d,%d-%d,%d",
+               has_rt ? "ok" : "unusable", regs[REG_RT + 4], regs[REG_RT + 2], regs[REG_RT + 3],
+               (unsigned long long)(((uint64_t)regs[REG_RT] << 32) | regs[REG_RT + 1]), regs[REG_CT_SELECT],
+               regs[REG_CT_WRITE], (regs[REG_ZT_SELECT] & 1u) ? "on" : "off", rs.clip.x0, rs.clip.y0, rs.clip.x1, rs.clip.y1);
+    }
     r->stats.skipped_draws++;
     return;
   }

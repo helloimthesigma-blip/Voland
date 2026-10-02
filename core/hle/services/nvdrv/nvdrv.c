@@ -33,7 +33,11 @@
 #define NVMAP_MIN_ALIGN 0x1000u
 
 #define GPU_VA_BASE 0x04000000ull        /* the small-page VA region start */
-#define GPU_BIG_PAGE_SIZE 0x20000u
+/* GM20B: 64KB big pages, 128KB compression pages. NVN rounds image
+ * storage sizes up to the big page size; reporting 128KB made a Unity
+ * title's 1080p swapchain overrun the memory pool it sized for 64KB. */
+#define GPU_BIG_PAGE_SIZE 0x10000u
+#define GPU_COMPRESSION_PAGE_SIZE 0x20000u
 #define GPU_SMALL_PAGE_SIZE 0x1000u
 #define SUBMIT_FLAG_FENCE_GET (1u << 1)
 #define MAP_FLAG_MODIFY (1u << 8)
@@ -156,6 +160,7 @@ static uint32_t nvmap_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
     default: return NV_BAD_VALUE;
     }
     wr32(d + 8, value);
+    log_debug("[nvmap] PARAM handle %u param %u -> 0x%x", rd32(d), rd32(d + 4), value);
     return NV_SUCCESS;
   }
   case 0x0E: { /* GET_ID {u32 id out; u32 handle} */
@@ -234,7 +239,7 @@ static void fill_characteristics(uint8_t *c) {
   wr32(c + 0x20, 2);                   /* num_tpc_per_gpc */
   wr32(c + 0x24, 0x20);                /* bus_type: AXI */
   wr32(c + 0x28, GPU_BIG_PAGE_SIZE);   /* big_page_size */
-  wr32(c + 0x2C, GPU_BIG_PAGE_SIZE);   /* compression_page_size */
+  wr32(c + 0x2C, GPU_COMPRESSION_PAGE_SIZE); /* compression_page_size */
   wr32(c + 0x30, 0x1B);                /* pde_coverage_bit_count */
   wr32(c + 0x34, 0x30000);             /* available_big_page_sizes */
   wr32(c + 0x38, 1);                   /* gpc_mask */
@@ -267,7 +272,21 @@ static void fill_characteristics(uint8_t *c) {
 static uint32_t ctrl_gpu_ioctl(uint32_t nr, uint8_t *d, uint32_t size, uint8_t *extra) {
   switch (nr) {
   case 0x01: wr32(d, GM20B_ZCULL_CTX_BYTES); return NV_SUCCESS; /* ZCULL_GET_CTX_SIZE */
-  case 0x02: memset(d, 0, size); wr32(d, 0x20); wr32(d + 4, 0x20); return NV_SUCCESS; /* ZCULL_GET_INFO */
+  case 0x02: /* ZCULL_GET_INFO: GM20B's zcull geometry. NVN sizes depth
+             * buffers' zcull storage from it - all zeros made that size 0,
+             * and a Unity title's video-memory pool came up 64KB short. */
+    memset(d, 0, size);
+    wr32(d + 0x00, 0x20);   /* width_align_pixels */
+    wr32(d + 0x04, 0x20);   /* height_align_pixels */
+    wr32(d + 0x08, 0x400);  /* pixel_squares_by_aliquots */
+    wr32(d + 0x0C, 0x800);  /* aliquot_total */
+    wr32(d + 0x10, 0x20);   /* region_byte_multiplier */
+    wr32(d + 0x14, 0x20);   /* region_header_size */
+    wr32(d + 0x18, 0xC0);   /* subregion_header_size */
+    wr32(d + 0x1C, 0x20);   /* subregion_width_align_pixels */
+    wr32(d + 0x20, 0x40);   /* subregion_height_align_pixels */
+    wr32(d + 0x24, 0x10);   /* subregion_count */
+    return NV_SUCCESS;
   case 0x03: case 0x04: return NV_SUCCESS;                      /* ZBC_SET/QUERY_TABLE */
   case 0x05:                                                    /* GET_CHARACTERISTICS {u64 size, u64 addr, chars} */
     wr64(d, CHARACTERISTICS_BYTES);
@@ -345,6 +364,9 @@ static uint32_t as_gpu_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
       Gpu_Mapping *m = &s->mappings[i];
       if (m->in_use) continue;
       *m = (Gpu_Mapping){true, gpu_va, size, handle, rd64(d + 16)};
+      log_debug("[as] MAP_BUFFER_EX flags 0x%x kind 0x%x handle %u page 0x%x buf_off 0x%llx size 0x%llx -> va 0x%llx",
+                flags, rd32(d + 4), handle, page_size, (unsigned long long)rd64(d + 16), (unsigned long long)size,
+                (unsigned long long)gpu_va);
       wr32(d + 12, page_size);
       wr64(d + 32, gpu_va);
       return NV_SUCCESS;

@@ -189,7 +189,8 @@ static void update_release_event(HLE_Context *c, Vi_Layer *layer) {
   if (!layer->release_event) return;
   bool any_free = false;
   for (uint32_t i = 0; i < VI_MAX_SLOTS && !any_free; i++) {
-    any_free = layer->slots[i].preallocated && layer->slots[i].state == VI_SLOT_FREE;
+    any_free = layer->slots[i].preallocated && layer->slots[i].state == VI_SLOT_FREE &&
+               (!layer->buffer_count || i < layer->buffer_count);
   }
   if (any_free) hle_signal_event(c, layer->release_event);
   else layer->release_event->signaled = false;
@@ -200,6 +201,7 @@ static int32_t oldest_slot(const Vi_Layer *layer, Vi_Slot_State state) {
   for (uint32_t i = 0; i < VI_MAX_SLOTS; i++) {
     const Vi_Slot *slot = &layer->slots[i];
     if (!slot->preallocated || slot->state != state) continue;
+    if (state == VI_SLOT_FREE && layer->buffer_count && i >= layer->buffer_count) continue;
     if (best < 0 || slot->queue_order < layer->slots[best].queue_order) best = (int32_t)i;
   }
   return best;
@@ -423,6 +425,8 @@ static int32_t transact(Vi_State *s, HLE_Context *c, Vi_Layer *layer, uint32_t c
       const uint8_t *gbfr = parcel_flattened(r, &size);
       if (!gbfr) return BQ_BAD_VALUE;
       parse_graphic_buffer(slot, gbfr, size);
+      log_debug("[vi] preallocated slot %d: nvmap %u offset 0x%x %ux%u size 0x%llx gbfr %u bytes", index, slot->nvmap_id,
+                slot->offset, slot->width, slot->height, (unsigned long long)slot->size, size);
     }
     update_release_event(c, layer);
     return BQ_OK;
@@ -450,6 +454,7 @@ static int32_t transact(Vi_State *s, HLE_Context *c, Vi_Layer *layer, uint32_t c
       return BQ_WOULD_BLOCK;
     }
     layer->slots[index].state = VI_SLOT_DEQUEUED;
+    log_debug("[vi] dequeue -> slot %d (async %d)", index, async);
     update_release_event(c, layer);
     uint8_t fence[NV_MULTI_FENCE_BYTES];
     memset(fence, 0, sizeof(fence)); /* num_fences 0: already signalled */
@@ -505,7 +510,14 @@ static int32_t transact(Vi_State *s, HLE_Context *c, Vi_Layer *layer, uint32_t c
     update_release_event(c, layer);
     return BQ_OK;
   }
-  case BQ_SET_BUFFER_COUNT:
+  case BQ_SET_BUFFER_COUNT: {
+    const int32_t count = parcel_i32(r);
+    if (count < 0 || (uint32_t)count > VI_MAX_SLOTS) return BQ_BAD_VALUE;
+    layer->buffer_count = (uint32_t)count;
+    log_debug("[vi] buffer count %d", count);
+    update_release_event(c, layer);
+    return BQ_OK;
+  }
   case BQ_SET_SIDEBAND_STREAM:
   case BQ_ALLOCATE_BUFFERS:
     return BQ_OK;
@@ -535,6 +547,7 @@ static HLE_ServiceResult cmd_transact_parcel(HLE_Context *c, Service_Object *sel
   memset(s->parcel_out, 0, PARCEL_HEADER_BYTES);
   Parcel_Writer w = {s->parcel_out, 0};
   const int32_t status = layer ? transact(s, c, layer, code, &r, &w) : BQ_NO_INIT;
+  log_debug("[vi] binder %u transaction %u -> %d", binder, code, status);
   parcel_put_i32(&w, status);
   const uint32_t out_size = parcel_finish(&w);
   (void)service_write_out(c, req, 0, s->parcel_out, out_size);

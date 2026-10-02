@@ -62,6 +62,12 @@
 #define HID_LIFO_ENTRIES 17u
 #define HID_TICKS_PER_SAMPLE 96000u  /* 19.2MHz / 200Hz */
 #define HID_TOUCH_SECTION_OFFSET 0x400u
+/* The Nintendo SDK's NpadCondition block (its hid client reads it from
+ * shared memory, not over IPC): u32 joy hold type @+8, u8 initialized
+ * @+0xC. Written at activation and on every SetNpadJoyHoldType. */
+#define HID_NPAD_CONDITION_OFFSET 0x3E200u
+#define HID_NPAD_CONDITION_HOLD_TYPE 0x8u
+#define HID_NPAD_CONDITION_INITIALIZED 0xCu
 #define HID_TOUCH_STORAGE_BYTES 0x298u
 #define HID_TOUCH_STATE_BYTES 0x290u
 #define HID_TOUCH_POINT_BYTES 0x28u

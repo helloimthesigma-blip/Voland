@@ -337,6 +337,15 @@ typedef struct IPC_Session {
   bool in_use;
   bool is_domain;
   bool server_closed; /* a Close message ended the server side; the client handle lives until CloseHandle */
+  /* Clones (CloneCurrentObject) share one object table, as on hardware:
+   * a clone's `owner` is the session whose `objects` it uses. The owner
+   * counts the sessions on its table (itself included) and frees the
+   * table - and its own slot, if its handle is already closed - when the
+   * last one goes. The Nintendo SDK clones its domain sessions into
+   * pools and uses objects through any of them. */
+  struct IPC_Session *owner;
+  uint32_t table_refs;
+  bool client_closed;
   /* Non-domain: objects[0] is the session's object. Domain: objects[id-1]
    * for domain object id `id` in [1, IPC_DOMAIN_MAX_OBJECTS]. */
   Service_Object objects[IPC_DOMAIN_MAX_OBJECTS];
@@ -360,8 +369,11 @@ void ipc_session_pool_init(IPC_Session_Pool *pool);
 IPC_Session *ipc_session_pool_open(IPC_Session_Pool *pool, const Service_Interface *interface,
                                    uint64_t state);
 
-/* Frees the session and every object in it. */
+/* Closes the session; its objects go when no other session shares them. */
 void ipc_session_pool_close(IPC_Session_Pool *pool, IPC_Session *session);
+
+/* The object table `session` uses (its own, or its owner's). */
+Service_Object *ipc_session_objects(IPC_Session *session);
 
 /* A Close message: closes every object (the server side) but keeps the
  * session allocated for its client handle; requests on it then fail with

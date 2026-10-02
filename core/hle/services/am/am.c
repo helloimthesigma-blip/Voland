@@ -903,6 +903,9 @@ static const Service_Command k_display_controller_commands[] = {
 
 static const Service_Command k_library_applet_creator_commands[] = {
     {0, cmd_create_library_applet, "CreateLibraryApplet"},
+    {1, service_cmd_ok, "TerminateAllLibraryApplets"},
+    {2, service_cmd_out_u8_false, "AreAnyLibraryAppletsLeft"},
+    {3, cmd_create_library_applet, "CreateLibraryAppletEx"}, /* newer SDKs' CreateLibraryApplet: {applet id, mode, ...} */
     {10, cmd_create_storage, "CreateStorage"},
     {11, cmd_create_tmem_storage, "CreateTransferMemoryStorage"},
     {12, cmd_create_handle_storage, "CreateHandleStorage"},
@@ -970,6 +973,7 @@ static const Service_Command k_library_applet_accessor_commands[] = {
     {30, cmd_applet_get_result, "GetResult"},
     {50, service_cmd_ok, "SetOutOfFocusApplicationSuspendingEnabled_stub"},
     {60, service_cmd_ok, "PresetLibraryAppletGpuTimeSliceZero_stub"},
+    {90, service_cmd_ok, "Unnamed90_stub"},
     {100, cmd_applet_push, "PushInData"},
     {101, cmd_applet_pop_out, "PopOutData"},
     {102, cmd_applet_push, "PushExtraStorage"},

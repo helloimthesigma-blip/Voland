@@ -439,6 +439,7 @@ IPC_Session *ipc_session_pool_open(IPC_Session_Pool *pool, const Service_Interfa
     if (session->in_use) continue;
     memset(session, 0, sizeof(*session));
     session->in_use = true;
+    session->table_refs = 1;
     session->objects[0].interface = interface;
     session->objects[0].state = state;
     pool->live_count++;
@@ -447,25 +448,50 @@ IPC_Session *ipc_session_pool_open(IPC_Session_Pool *pool, const Service_Interfa
   return NULL;
 }
 
+Service_Object *ipc_session_objects(IPC_Session *session) {
+  return session->owner ? session->owner->objects : session->objects;
+}
+
 static void close_object(Service_Object *object) {
   const Service_Interface *interface = object->interface;
   if (interface && interface->on_close) interface->on_close(interface->service_state, object->state);
   memset(object, 0, sizeof(*object));
 }
 
-void ipc_session_pool_close(IPC_Session_Pool *pool, IPC_Session *session) {
-  if (!pool || !session || !session->in_use) return;
+/* Drops one session's hold on `owner`'s table; the last one closes every
+ * object and frees the owner's slot if its own handle is gone. */
+static void release_table(IPC_Session_Pool *pool, IPC_Session *owner) {
+  if (owner->table_refs && --owner->table_refs) return;
   for (uint32_t i = 0; i < IPC_DOMAIN_MAX_OBJECTS; i++) {
-    if (session->objects[i].interface) close_object(&session->objects[i]);
+    if (owner->objects[i].interface) close_object(&owner->objects[i]);
   }
-  memset(session, 0, sizeof(*session));
-  pool->live_count--;
+  if (owner->client_closed) {
+    memset(owner, 0, sizeof(*owner));
+    pool->live_count--;
+  }
+}
+
+void ipc_session_pool_close(IPC_Session_Pool *pool, IPC_Session *session) {
+  if (!pool || !session || !session->in_use || session->client_closed) return;
+  if (session->owner) {
+    IPC_Session *owner = session->owner;
+    memset(session, 0, sizeof(*session));
+    pool->live_count--;
+    release_table(pool, owner);
+    return;
+  }
+  session->client_closed = true;
+  release_table(pool, session);
 }
 
 void ipc_session_close_server(IPC_Session *session) {
   if (!session || !session->in_use) return;
-  for (uint32_t i = 0; i < IPC_DOMAIN_MAX_OBJECTS; i++) {
-    if (session->objects[i].interface) close_object(&session->objects[i]);
+  /* A shared table outlives one session's server end. */
+  const IPC_Session *owner = session->owner ? session->owner : session;
+  if (owner->table_refs <= 1u) {
+    for (uint32_t i = 0; i < IPC_DOMAIN_MAX_OBJECTS; i++) {
+      if (session->objects[i].interface) close_object(&session->objects[i]);
+    }
   }
   session->server_closed = true;
 }
@@ -537,17 +563,20 @@ static void materialize_objects(HLE_Context *context, IPC_Session *session, bool
   if (count == 0) return;
 
   if (domain) {
+    Service_Object *table = ipc_session_objects(session);
     uint32_t assigned = 0;
     for (uint32_t slot = 1; slot < IPC_DOMAIN_MAX_OBJECTS && assigned < count; slot++) {
-      if (session->objects[slot].interface) continue;
-      session->objects[slot].interface = response->out_objects[assigned].interface;
-      session->objects[slot].state = response->out_objects[assigned].state;
+      if (table[slot].interface) continue;
+      table[slot].interface = response->out_objects[assigned].interface;
+      table[slot].state = response->out_objects[assigned].state;
       response->out_object_ids[assigned] = slot + 1u;
+      log_debug("[ipc] domain %p: new object %u (%s)", (void *)session, slot + 1u,
+                response->out_objects[assigned].interface ? response->out_objects[assigned].interface->name : "?");
       assigned++;
     }
     if (assigned < count) {
       for (uint32_t i = 0; i < assigned; i++) {
-        close_object(&session->objects[response->out_object_ids[i] - 1u]);
+        close_object(&table[response->out_object_ids[i] - 1u]);
       }
       drop_unplaced_objects(response, assigned);
       clear_outputs(response);
@@ -595,7 +624,7 @@ static void dispatch_control(HLE_Context *context, IPC_Session *session,
      * has a pointer buffer large enough; a 0 answer makes its fixed-X
      * commands fail client-side (hid's SetSupportedNpadIdType). Handlers
      * accept pointer and mapped buffers alike (service_util.h). */
-    const uint16_t declared = session->objects[0].interface->pointer_buffer_size;
+    const uint16_t declared = ipc_session_objects(session)[0].interface->pointer_buffer_size;
     const uint16_t size = declared ? declared : IPC_DEFAULT_POINTER_BUFFER_SIZE;
     const uint8_t bytes[2] = {(uint8_t)size, (uint8_t)(size >> 8)};
     (void)ipc_response_push_bytes(response, bytes, sizeof(bytes));
@@ -603,25 +632,29 @@ static void dispatch_control(HLE_Context *context, IPC_Session *session,
   }
   case IPC_CONTROL_CLONE_CURRENT_OBJECT:
   case IPC_CONTROL_CLONE_CURRENT_OBJECT_EX: {
+    /* A domain's clone shares its object table (the owner's), as the
+     * Nintendo SDK's session pools rely on. */
+    IPC_Session *owner = session->owner ? session->owner : session;
     uint32_t handle = HANDLE_INVALID;
-    const uint32_t result = ipc_open_session_handle(context, session->objects[0].interface,
-                                                    session->objects[0].state, &handle);
+    const uint32_t result = ipc_open_session_handle(context, owner->objects[0].interface, owner->objects[0].state,
+                                                    &handle);
     if (result != HLE_RESULT_SUCCESS) {
       response->result = result;
       return;
     }
-    /* A clone of a domain session shares the domain on hardware; here
-     * the clone starts as a copy of the object table. Nothing in Phase 1
-     * clones a domain session. */
     IPC_Session *clone = (IPC_Session *)handle_table_get(&context->process->handles, handle,
                                                          KERNEL_OBJECT_SESSION);
-    clone->is_domain = session->is_domain;
-    memcpy(clone->objects, session->objects, sizeof(clone->objects));
+    if (session->is_domain) {
+      memset(clone->objects, 0, sizeof(clone->objects)); /* unused: the owner's table serves */
+      clone->owner = owner;
+      clone->is_domain = true;
+      owner->table_refs++;
+    } /* a plain session's clone is an independent session on the same object */
     (void)ipc_response_push_move_handle(response, handle);
     return;
   }
   default:
-    log_warn("[ipc] %s: unimplemented control command %u", session->objects[0].interface->name,
+    log_warn("[ipc] %s: unimplemented control command %u", ipc_session_objects(session)[0].interface->name,
              (unsigned)request->command_id);
     response->result = IPC_RESULT_SF_UNKNOWN_COMMAND;
     return;
@@ -645,15 +678,20 @@ uint32_t ipc_dispatch(HLE_Context *context, IPC_Session *session, const IPC_Requ
     return HLE_RESULT_SUCCESS;
   }
 
-  Service_Object *target = &session->objects[0];
+  Service_Object *table = ipc_session_objects(session);
+  Service_Object *target = &table[0];
   if (request->is_domain_message) {
     const uint32_t id = request->domain_object_id;
-    if (id == 0 || id > IPC_DOMAIN_MAX_OBJECTS || !session->objects[id - 1u].interface) {
+    if (id == 0 || id > IPC_DOMAIN_MAX_OBJECTS || !table[id - 1u].interface) {
+      log_debug("[ipc] domain %p: object %u not found (session of %s, command %u)", (void *)session, id,
+                table[0].interface ? table[0].interface->name : "?", request->command_id);
       response->result = IPC_RESULT_SF_TARGET_NOT_FOUND;
       return HLE_RESULT_SUCCESS;
     }
-    target = &session->objects[id - 1u];
+    target = &table[id - 1u];
     if (request->domain_request_type == IPC_DOMAIN_CLOSE) {
+      log_debug("[ipc] domain %p: close object %u (%s)", (void *)session, id,
+                target->interface ? target->interface->name : "?");
       close_object(target);
       return HLE_RESULT_SUCCESS;
     }

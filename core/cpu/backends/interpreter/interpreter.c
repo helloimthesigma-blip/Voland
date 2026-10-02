@@ -154,6 +154,43 @@ static CPU_State *interp_create(VMM_Context *vmm, void *userdata) {
 
 static void interp_destroy(CPU_State *state) { free(state); }
 
+uint64_t g_interp_trace_targets[INTERP_TRACE_MAX];
+uint32_t g_interp_trace_count;
+static Interp_Call_Hook g_interp_trace_hook;
+
+void interp_set_call_trace(const uint64_t *targets, uint32_t count, Interp_Call_Hook hook) {
+  g_interp_trace_count = 0;
+  for (uint32_t i = 0; targets && hook && i < count && i < INTERP_TRACE_MAX; i++)
+    g_interp_trace_targets[g_interp_trace_count++] = targets[i];
+  g_interp_trace_hook = hook;
+}
+
+/* Pending returns of traced calls: (return address, target). */
+#define INTERP_TRACE_PENDING 64u
+static uint64_t g_pending_return[INTERP_TRACE_PENDING], g_pending_target[INTERP_TRACE_PENDING];
+static uint32_t g_pending_count;
+
+void interp_trace_call(Interp_State *s, uint64_t target) {
+  for (uint32_t i = 0; i < g_interp_trace_count; i++) {
+    if (g_interp_trace_targets[i] != target) continue;
+    g_interp_trace_hook((CPU_State *)s, target, s->regs.pc + 4u, false);
+    if (g_pending_count < INTERP_TRACE_PENDING) {
+      g_pending_return[g_pending_count] = s->regs.pc + 4u;
+      g_pending_target[g_pending_count++] = target;
+    }
+  }
+}
+
+void interp_trace_return(Interp_State *s, uint64_t target) {
+  for (uint32_t i = g_pending_count; i-- > 0;) {
+    if (g_pending_return[i] != target) continue;
+    g_interp_trace_hook((CPU_State *)s, g_pending_target[i], target, true);
+    g_pending_return[i] = g_pending_return[--g_pending_count];
+    g_pending_target[i] = g_pending_target[g_pending_count];
+    return;
+  }
+}
+
 /* Accounts one executed instruction and maps its status to an exit
  * reason. Returns true to keep going. Shared with the predecoded path. */
 bool interp_retire(Interp_State *s, Interp_Status status, uint64_t pc, uint32_t insn, CPU_ExitReason *exit_reason) {

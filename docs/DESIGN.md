@@ -2425,9 +2425,22 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.62.0*
+*Document version: 3.63.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.62 → v3.63 (summary)
+
+The Unity title now runs past NVN start-up, loads, opens its controller applet and draws (1,238 draws, 121k triangles in the first run). Each fix was traced to a concrete behaviour (diagnostics below):
+
+- **NVN swapchain:** ZCULL_GET_INFO reports GM20B's geometry (all zeros made NVN size depth zcull storage 0, and the zero-size allocation's alignment pushed Unity's third colour buffer past its pool - an invalid texture offset, AcquireTexture failing, then a NULL dereference presenting index -1). GM20B big pages are 64KB (compression pages stay 128KB). vi honours SET_BUFFER_COUNT.
+- **3D power-on state:** SET_PIPELINE_SHADER(j) starts with each slot's type and slot 1 (vertex) enabled - NVN writes every other slot's control word but never slot 1's.
+- **Shaders:** control flow honours its condition-code test (EXIT / KIL / BRA / BRK / CONT / RET); the CSM / FCSM / RLE / RGT conditions are fixed-function (VTG culling) and never true here, so NVN's culling prologues (`EXIT.FCSM_TR`) fall through to the vertex body. VOTE.VTG decodes as a no-op.
+- **IPC:** clones of a domain session share its object table (the SDK pools cloned fsp-srv sessions and opens objects through one, uses them through another); reference-counted, freed with the last session.
+- **Services:** IAudioOut Stop releases queued buffers and signals the buffer event (the title joins its audio thread right after Stop - it deadlocked); hid writes the SDK's NpadCondition block in shared memory (+0x3E200: hold type, initialized - nn::hid reads it locally, never over IPC); ILibraryAppletCreator 1/2/3 (3 is the newer SDK's CreateLibraryApplet); ILibraryAppletAccessor 90.
+- **Diagnostics:** `VOLAND_TRACE_CALLS="module+0xoff,..."` logs calls and returns of guest functions (interpreter BL/BLR/RET hook, one compare per call when unused); `VOLAND_TRACE_DUMP_X1`, `VOLAND_DUMP_REGS`; waiting threads show their wait object; nvdrv logs opens, ioctls, nvmap PARAM and MAP_BUFFER_EX; vi logs transactions, dequeued slots and preallocated buffers; IPC logs domain object creation/close/misses.
+- **Open:** colours/layout of the presented frame are wrong (render target format or layout vs the compositor), TEX.B (bindless texture) is not decoded yet, and a later InvalidHandle abort.
+- **Tests:** `maxwell_shader_test` (conditional EXIT, VOTE.VTG), `gpu_channel_test` (pipeline power-on), `nvdrv_test` (ZCULL info), `svc_ipc_test` (domain clone sharing), `services_test` (buffer count, audout Stop, NpadCondition).
 
 ### Changelog v3.61 → v3.62 (summary)
 

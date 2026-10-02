@@ -245,7 +245,10 @@ static Interp_Status op_adr(Interp_State *s, const Op *op) {
 }
 
 static Interp_Status op_branch(Interp_State *s, const Op *op) {
-  if (op->flags & F_LINK) s->regs.x[30] = s->regs.pc + 4u;
+  if (op->flags & F_LINK) {
+    interp_maybe_trace_call(s, op->imm);
+    s->regs.x[30] = s->regs.pc + 4u;
+  }
   s->regs.pc = op->imm;
   return INTERP_CONTINUE;
 }
@@ -281,7 +284,12 @@ static Interp_Status op_test_branch(Interp_State *s, const Op *op) {
 /* BR/BLR/RET. */
 static Interp_Status op_branch_register(Interp_State *s, const Op *op) {
   const uint64_t target = xreg(s, op->rn);
-  if (op->flags & F_LINK) s->regs.x[30] = s->regs.pc + 4u;
+  if (op->flags & F_LINK) {
+    interp_maybe_trace_call(s, target);
+    s->regs.x[30] = s->regs.pc + 4u;
+  } else {
+    interp_maybe_trace_return(s, target); /* RET or BR: either may leave a traced call */
+  }
   s->regs.pc = target;
   return INTERP_CONTINUE;
 }

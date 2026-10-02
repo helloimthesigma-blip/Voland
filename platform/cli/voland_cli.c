@@ -41,6 +41,8 @@
 #include "common/input_region.h"
 #include "common/layout.h"
 #include "emulator.h"
+#include "hle/kernel/handle_table.h"
+#include "cpu/backends/interpreter/interpreter.h"
 #include "gpu/framebuffer.h"
 #include "hle/loader/nca_parse.h"
 #include "hle/loader/nro.h"
@@ -260,6 +262,8 @@ static int import_sdmc(Emulator *emu, const char *host, const char *guest) {
   return imported;
 }
 
+static void setup_call_trace(Emulator *emu);
+
 static int run(int argc, char **argv) {
   if (argc < 1) return EXIT_USAGE;
   const char *path = argv[0];
@@ -362,6 +366,7 @@ static int run(int argc, char **argv) {
     return EXIT_LOAD_FAILED;
   }
 
+  setup_call_trace(&emu);
   Emulator_Status status = EMULATOR_RUNNING;
   uint64_t slices = 0, audio_frames = 0;
   FILE *wav = NULL;
@@ -410,8 +415,20 @@ static int run(int argc, char **argv) {
       }
     }
     static const char *const k_state[] = {"free", "created", "runnable", "waiting", "dead"};
-    fprintf(stderr, "voland-cli: thread %llu %s pc=%016llx (%s+0x%llx)\n", (unsigned long long)th->thread_id,
+    fprintf(stderr, "voland-cli: thread %llu (handle 0x%x) %s pc=%016llx (%s+0x%llx)\n", (unsigned long long)th->thread_id,
+            th->handle,
             k_state[th->state], (unsigned long long)pc, module, (unsigned long long)offset);
+    if (th->state == THREAD_STATE_WAITING) {
+      uint32_t word = 0;
+      (void)vmm_read32(emu.vmm, th->wait_address, &word);
+      fprintf(stderr, "    wait kind %d, wake_at %llu, address 0x%llx (= 0x%x), handles", (int)th->wait,
+              (unsigned long long)th->wake_at, (unsigned long long)th->wait_address, word);
+      for (uint32_t h = 0; h < th->wait_handle_count && h < 4u; h++) {
+        const Kernel_Object_Type type = handle_table_type_of(&emu.process.handles, th->wait_handles[h]);
+        fprintf(stderr, " 0x%x(type %d)", th->wait_handles[h], (int)type);
+      }
+      fprintf(stderr, "\n");
+    }
     if (getenv("VOLAND_BACKTRACE")) {
       /* AArch64 frame records: x29 -> {previous x29, return address}. */
       const CPU_Register_File *rf = emu.cpu_backend->get_register_file(th->thread.cpu_state);
@@ -447,6 +464,12 @@ static int run(int argc, char **argv) {
         fwrite(&insn, 4, 1, f);
       }
       if (f) fclose(f);
+    }
+    if (getenv("VOLAND_DUMP_REGS")) {
+      const CPU_Register_File *rr = emu.cpu_backend->get_register_file(th->thread.cpu_state);
+      for (uint32_t k = 0; k < 31u; k++)
+        fprintf(stderr, "    x%-2u %016llx%s", k, (unsigned long long)rr->x[k], k % 4u == 3u ? "\n" : "");
+      fprintf(stderr, "    sp  %016llx\n", (unsigned long long)rr->sp);
     }
     if (getenv("VOLAND_DUMP_PC")) {
       for (int64_t k = -12; k <= 4; k++) {
@@ -564,6 +587,56 @@ static void usage(void) {
           "                      [--max-slices N] [--test-card] [--expect-output TEXT]\n"
           "                      [--expect-frame-hash HEX]\n"
           "       voland-cli verify-dump <file>\n");
+}
+
+
+/* VOLAND_TRACE_CALLS="module+0xoff,...": log calls to those addresses
+ * (x0-x3, the caller) - diagnostics for titles without symbols. */
+static Emulator *g_trace_emu;
+static void trace_hook(CPU_State *state, uint64_t target, uint64_t return_address, bool returning) {
+  const CPU_Register_File *r = g_trace_emu->cpu_backend->get_register_file(state);
+  if (returning) {
+    fprintf(stderr, "[trace] return 0x%llx to 0x%llx: x0 %llx\n", (unsigned long long)target,
+            (unsigned long long)return_address, (unsigned long long)r->x[0]);
+    return;
+  }
+  fprintf(stderr, "[trace] call 0x%llx from 0x%llx: x0 %llx x1 %llx x2 %llx x3 %llx\n", (unsigned long long)target,
+          (unsigned long long)return_address, (unsigned long long)r->x[0], (unsigned long long)r->x[1],
+          (unsigned long long)r->x[2], (unsigned long long)r->x[3]);
+  const char *dump = getenv("VOLAND_TRACE_DUMP_X1");
+  if (dump) {
+    uint8_t bytes[0x80];
+    if (error_is_ok(vmm_read_block(g_trace_emu->vmm, r->x[1], bytes, sizeof(bytes)))) {
+      for (uint32_t i = 0; i < sizeof(bytes); i += 16) {
+        fprintf(stderr, "    +%02x", i);
+        for (uint32_t j = 0; j < 16; j += 4) {
+          uint32_t w;
+          memcpy(&w, bytes + i + j, 4);
+          fprintf(stderr, " %08x", w);
+        }
+        fprintf(stderr, "\n");
+      }
+    }
+  }
+}
+
+static void setup_call_trace(Emulator *emu) {
+  const char *spec = getenv("VOLAND_TRACE_CALLS");
+  if (!spec || !emu->program_loaded) return;
+  uint64_t targets[INTERP_TRACE_MAX];
+  uint32_t count = 0;
+  char buf[512];
+  snprintf(buf, sizeof(buf), "%s", spec);
+  for (char *tok = strtok(buf, ","); tok && count < INTERP_TRACE_MAX; tok = strtok(NULL, ",")) {
+    char *plus = strchr(tok, '+');
+    if (!plus) continue;
+    *plus = '\0';
+    const uint64_t off = strtoull(plus + 1, NULL, 0);
+    for (uint32_t m = 0; m < emu->process.module_count; m++)
+      if (strcmp(emu->process.modules[m].name, tok) == 0) targets[count++] = emu->process.modules[m].base_gva + off;
+  }
+  g_trace_emu = emu;
+  interp_set_call_trace(targets, count, trace_hook);
 }
 
 int main(int argc, char **argv) {

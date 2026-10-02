@@ -129,11 +129,16 @@ static HLE_ServiceResult cmd_start(HLE_Context *c, Service_Object *self, const I
   return HLE_RESULT_SUCCESS;
 }
 
+/* Stop releases every queued buffer and signals the buffer event, as
+ * the system does: an audio thread waiting on that event wakes, sees the
+ * stop, and exits (a Unity title joins it right after Stop). */
 static HLE_ServiceResult cmd_stop(HLE_Context *c, Service_Object *self, const IPC_Request *req, IPC_Response *res) {
-  (void)c;
   (void)req;
   (void)res;
-  state_of(self)->started = false;
+  Audout_State *s = state_of(self);
+  s->started = false;
+  while (s->queue_count > 0) release_head(s, c);
+  if (s->buffer_event) hle_signal_event(c, s->buffer_event);
   return HLE_RESULT_SUCCESS;
 }
 

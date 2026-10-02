@@ -382,11 +382,29 @@ static HLE_ServiceResult cmd_get_player_led_pattern(HLE_Context *c, Service_Obje
 }
 
 /* Joy hold type and friends: {u64 aruid, u64 value}. */
+static void write_npad_condition(HLE_Context *c, const Hid_State *s) {
+  if (!s->shared_memory) return;
+  const uint64_t base = s->shared_memory->guest_pa + HID_NPAD_CONDITION_OFFSET;
+  const uint32_t hold = (uint32_t)s->joy_hold_type;
+  const uint8_t initialized = 1;
+  (void)vmm_write_physical(c->vmm, base + HID_NPAD_CONDITION_HOLD_TYPE, &hold, sizeof(hold));
+  (void)vmm_write_physical(c->vmm, base + HID_NPAD_CONDITION_INITIALIZED, &initialized, sizeof(initialized));
+}
+
 static HLE_ServiceResult cmd_set_joy_hold_type(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                                IPC_Response *res) {
-  (void)c;
   (void)res;
-  (void)ipc_request_read_u64(req, 8, &state_of(self)->joy_hold_type);
+  Hid_State *s = state_of(self);
+  (void)ipc_request_read_u64(req, 8, &s->joy_hold_type);
+  write_npad_condition(c, s);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_activate_npad(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                           IPC_Response *res) {
+  (void)req;
+  (void)res;
+  write_npad_condition(c, state_of(self));
   return HLE_RESULT_SUCCESS;
 }
 
@@ -487,12 +505,12 @@ static const Service_Command k_hid_commands[] = {
     {100, cmd_set_supported_style_set, "SetSupportedNpadStyleSet"},
     {101, cmd_get_supported_style_set, "GetSupportedNpadStyleSet"},
     {102, cmd_set_supported_npad_id_type, "SetSupportedNpadIdType"},
-    {103, service_cmd_ok, "ActivateNpad"},
+    {103, cmd_activate_npad, "ActivateNpad"},
     {104, service_cmd_ok, "DeactivateNpad"},
     {106, cmd_acquire_style_event, "AcquireNpadStyleSetUpdateEventHandle"},
     {107, service_cmd_ok, "DisconnectNpad_stub"},
     {108, cmd_get_player_led_pattern, "GetPlayerLedPattern"},
-    {109, service_cmd_ok, "ActivateNpadWithRevision"},
+    {109, cmd_activate_npad, "ActivateNpadWithRevision"},
     {120, cmd_set_joy_hold_type, "SetNpadJoyHoldType"},
     {121, cmd_get_joy_hold_type, "GetNpadJoyHoldType"},
     {122, service_cmd_ok, "SetNpadJoyAssignmentModeSingleByDefault_stub"},

@@ -88,6 +88,10 @@ typedef struct Vi_Layer {
   bool connected;
   uint64_t queue_counter;
   Kernel_Event *release_event;
+  /* SET_BUFFER_COUNT: only slots below it are dequeued (0 = no limit).
+   * NVN preallocates more buffers than it activates and maps a dequeued
+   * slot back to one of its active textures. */
+  uint32_t buffer_count;
   Vi_Slot slots[VI_MAX_SLOTS];
 } Vi_Layer;
 

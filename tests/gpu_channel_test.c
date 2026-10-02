@@ -317,6 +317,10 @@ static void test_mme(void) {
 static void test_inline_to_memory(void) {
   gpu_channel_init(&g_channel);
   CHECK(g_channel.engine3d[0x804 + 16u * 5u] == 4u && g_channel.engine3d[0x804 + 16u * 1u] == 0u);
+  /* SET_PIPELINE_SHADER power-on: each slot's type, only the vertex stage
+   * (slot 1) enabled - NVN never writes slot 1's control word. */
+  CHECK(g_channel.engine3d[0x800 + 16u * 1u] == 0x11u && g_channel.engine3d[0x800 + 16u * 5u] == 0x50u);
+  CHECK(g_channel.engine3d[0x800] == 0x00u);
   one(2, 0, 0xB197);
   /* Pitch: 2 lines of 6 bytes, pitch 0x40, at MEM_BASE + 0x2000. */
   const uint64_t dst = MEM_BASE + 0x2000u;

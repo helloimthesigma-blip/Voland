@@ -439,6 +439,38 @@ static void test_derivatives(void) {
   }
 }
 
+/* Control flow honours its condition-code test: EXIT.F and the VTG-
+ * culling conditions (FCSM_TR, NVN's vertex prologues) fall through, EXIT
+ * (T) ends. VOTE.VTG decodes as a no-op. */
+static uint64_t EXIT_CC(uint32_t cc) { return op_top(0xe300) | GUARD | (uint64_t)cc; }
+
+static void test_conditional_exit(void) {
+  static const uint32_t falls_through[] = {0x00 /* F */, 0x1c /* FCSM_TR */};
+  for (uint32_t i = 0; i < 2u; i++) {
+    Builder b;
+    begin(&b, SM_STAGE_VERTEX);
+    emit(&b, MOV32I(0, 1));
+    emit(&b, op_top(0x50e2) | GUARD | 0x432111170000ull); /* VOTE.VTG */
+    emit(&b, EXIT_CC(falls_through[i]));
+    emit(&b, MOV32I(0, 2));
+    emit(&b, EXIT());
+    load(&b);
+    CHECK(g_prog.unknown_ops == 0, "VOTE.VTG decodes");
+    sm_thread_reset(&g_thread, 1);
+    CHECK(run(), "conditional-exit program runs");
+    CHECK(g_thread.r[0][0] == 2u, "EXIT with cc 0x%x falls through (r0=%u)", falls_through[i], g_thread.r[0][0]);
+  }
+  Builder b;
+  begin(&b, SM_STAGE_VERTEX);
+  emit(&b, MOV32I(0, 1));
+  emit(&b, EXIT_CC(0x0f));
+  emit(&b, MOV32I(0, 2));
+  emit(&b, EXIT());
+  load(&b);
+  sm_thread_reset(&g_thread, 1);
+  CHECK(run() && g_thread.r[0][0] == 1u, "EXIT (T) ends the program");
+}
+
 int main(void) {
   test_float_arith();
   test_integer_arith();
@@ -450,6 +482,7 @@ int main(void) {
   test_extent();
   test_divergence();
   test_derivatives();
+  test_conditional_exit();
   if (g_failures) {
     fprintf(stderr, "maxwell_shader_test: %d failure(s)\n", g_failures);
     return 1;

@@ -330,6 +330,26 @@ static void test_vi(void) {
       CHECK(memcmp(got, want, 4) == 0);
     }
 
+  /* SET_BUFFER_COUNT: only slots below the count are dequeued (NVN
+   * preallocates more buffers than it activates). With the count at 1 and
+   * slot 0 on screen, the free slot 1 is not handed out. */
+  {
+    memset(&p, 0, sizeof(p));
+    p_token(&p);
+    p_i32(&p, 1);
+    out = transact(relay, binder, 2 /* SET_BUFFER_COUNT */, &p, &n);
+    CHECK(status_of(out, n) == 0 && g_emu.vi.layers[0].buffer_count == 1u);
+    for (uint32_t i = 0; i < VI_MAX_SLOTS; i++)
+      if (g_emu.vi.layers[0].slots[i].preallocated) g_emu.vi.layers[0].slots[i].state = VI_SLOT_FREE;
+    g_emu.vi.layers[0].slots[0].state = VI_SLOT_PRESENTED; /* slot 0 busy, slot 1 free but beyond the count */
+    memset(&p, 0, sizeof(p));
+    p_token(&p);
+    for (int i = 0; i < 5; i++) p_i32(&p, dq[i]);
+    out = transact(relay, binder, 3, &p, &n);
+    CHECK(status_of(out, n) == -11); /* WouldBlock: nothing below the count is free */
+    g_emu.vi.layers[0].buffer_count = 0;
+  }
+
   /* Vsync event; the scheduler is told when the next one is. */
   r = call(display, 5202, &policy, sizeof(policy), NULL);
   CHECK(r.copy_count == 1);
@@ -634,6 +654,54 @@ static void test_thread_activity(void) {
 
 /* Small services the Nintendo SDK opens at start-up: lm, ectx:aw, ldr:ro,
  * aoc:u and the vi:s / vi:m ports all answer. */
+/* IAudioOut Stop releases every queued buffer and signals the buffer
+ * event (a Unity title's audio thread wakes on it and exits). hid writes
+ * the SDK's NpadCondition block. ILibraryAppletCreator 3 creates applets. */
+static void test_sdk_behaviours(void) {
+  /* audout: open, register the event, append, stop. */
+  const uint32_t audout = service("audout:u");
+  Test_Ipc_Message m;
+  memset(&m, 0, sizeof(m));
+  m.receives[0] = (Test_Ipc_Buffer){SCRATCH(0xC000), 0x100, 0};
+  m.receive_count = 1;
+  m.sends[0] = (Test_Ipc_Buffer){SCRATCH(0xC100), 0x100, 0};
+  m.send_count = 1;
+  const uint32_t params[2] = {48000, 2};
+  Test_Ipc_Reply r = call(audout, 1, params, sizeof(params), &m);
+  CHECK(r.move_count == 1);
+  const uint32_t out = r.move_handles[0];
+  r = call(out, 4, NULL, 0, NULL);
+  CHECK(r.copy_count == 1);
+  Kernel_Event *ev = (Kernel_Event *)handle_table_get(&g_emu.process.handles, r.copy_handles[0],
+                                                      KERNEL_OBJECT_EVENT_READABLE);
+  CHECK(ev != NULL);
+  const uint64_t desc[5] = {0, SCRATCH(0xD000), 0x400, 0x400, 0};
+  CHECK_OK(vmm_write_block(g_emu.vmm, SCRATCH(0xC200), desc, sizeof(desc)));
+  Test_Ipc_Message a;
+  memset(&a, 0, sizeof(a));
+  a.sends[0] = (Test_Ipc_Buffer){SCRATCH(0xC200), sizeof(desc), 0};
+  a.send_count = 1;
+  const uint64_t tag = 0x77;
+  CHECK(call(out, 3, &tag, sizeof(tag), &a).result == 0);
+  ev->signaled = false;
+  CHECK(call(out, 2, NULL, 0, NULL).result == 0); /* Stop */
+  CHECK(ev->signaled && g_emu.audout.queue_count == 0 && g_emu.audout.released_count >= 1);
+
+  /* hid NpadCondition: hold type + initialized at 0x3E200. */
+  const uint32_t hid = service("hid");
+  const uint64_t aruid = 0;
+  const uint32_t resource = object(hid, 0, &aruid, sizeof(aruid));
+  (void)call(resource, 0, NULL, 0, NULL); /* the shared memory exists */
+  const struct { uint64_t aruid, type; } hold = {0, 1};
+  CHECK(call(hid, 120, &hold, sizeof(hold), NULL).result == 0);
+  uint32_t held = 0;
+  uint8_t initialized = 0;
+  const uint64_t base = g_emu.hid.shared_memory->guest_pa + HID_NPAD_CONDITION_OFFSET;
+  CHECK_OK(vmm_read_physical(g_emu.vmm, base + HID_NPAD_CONDITION_HOLD_TYPE, &held, sizeof(held)));
+  CHECK_OK(vmm_read_physical(g_emu.vmm, base + HID_NPAD_CONDITION_INITIALIZED, &initialized, sizeof(initialized)));
+  CHECK(held == 1 && initialized == 1);
+}
+
 static void test_sdk_startup_services(void) {
   const uint32_t lm = service("lm");
   const uint32_t logger = object(lm, 0, NULL, 0);
@@ -1095,6 +1163,7 @@ int main(void) {
   test_pctl();
   test_thread_activity();
   test_sdk_startup_services();
+  test_sdk_behaviours();
   test_software_keyboard();
   test_acc();
   emulator_destroy(&g_emu);

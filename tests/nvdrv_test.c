@@ -208,6 +208,10 @@ int main(void) {
     CHECK_OK(vmm_read_block(g_emu.vmm, extra_gva, chars, sizeof(chars)));
     CHECK(rd32(chars) == 0x120 && rd32(chars + 0x5C) == 0xB197);
   }
+  /* ZCULL_GET_INFO: GM20B's geometry (NVN sizes zcull storage from it). */
+  memset(d, 0, sizeof(d));
+  CHECK(ioctl(ctrl_gpu, IOWR(0x47u, 0x02u, 0x28), d) == 0);
+  CHECK(rd32(d) == 0x20 && rd32(d + 0x08) == 0x400 && rd32(d + 0x0C) == 0x800 && rd32(d + 0x24) == 0x10);
   /* NUM_VSMS: two SMs. */
   memset(d, 0, sizeof(d));
   CHECK(ioctl(ctrl_gpu, IOWR(0x47u, 0x13u, 8), d) == 0 && rd32(d) == 2);
