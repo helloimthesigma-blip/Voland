@@ -262,6 +262,32 @@ static void test_mme(void) {
   CHECK(g_channel.engine3d[0xD00] == 100 && g_channel.engine3d[0xD01] == 4);
   CHECK(g_channel.engine3d[0xD02] == 101 && g_channel.mme_runs == 2 && g_channel.mme_faults == 0);
 
+  /* A counted fill loop whose exit-flagged send sits in a taken branch's
+   * delay slot (deko3d's FillRegisters): every iteration must send.
+   *   0: maddr = r1; r2 = fetch      (count)
+   *   1: r3 = fetch                  (value)
+   *   2: r2 = r2 - 1                 loop:
+   *   3: branch r2 != 0 -> 2, delayed
+   *   4: send r3, exit               (delay slot)
+   *   5: nop                         (exit delay slot)          */
+  const uint32_t fill[] = {
+      mme_addi(5, 2, 1, 0, false),
+      mme_alu(0, 3, 0, 0, 0, false),
+      mme_addi(1, 2, 2, -1, false),
+      mme_branch(2, true, false, -1, false),
+      mme_alu(4, 0, 3, 0, 0, true),
+      mme_alu(1, 0, 0, 0, 0, false),
+  };
+  one(2, 0x45, 48);
+  port(2, 0x46, fill, sizeof(fill) / 4);
+  one(2, 0x47, 3);
+  one(2, 0x48, 48);
+  g_pb[g_pb_len++] = (5u << 29) | (3u << 16) | (2u << 13) | 0xE06; /* CALL_MME_MACRO(3) + 2 data words */
+  const uint32_t fill_params[3] = {0xD10u | (1u << 12), 4, 7};
+  for (int i = 0; i < 3; i++) g_pb[g_pb_len++] = fill_params[i];
+  submit();
+  CHECK(g_channel.engine3d[0xD10] == 7 && g_channel.engine3d[0xD13] == 7 && g_channel.engine3d[0xD14] == 0);
+
   /* A runaway macro (branch to itself, no exit) is cut off and counted. */
   const uint32_t spin[] = {mme_branch(0, false, true, 0, false)};
   one(2, 0x45, 32);
