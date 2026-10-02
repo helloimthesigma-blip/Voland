@@ -347,6 +347,23 @@ static uint32_t u32f(float f) {
 
 #define LANE(m, l) (((m) >> (l)) & 1u)
 #define FOR_LANES(m) for (uint32_t l = 0; l < SM_LANES; l++) if (LANE(m, l))
+/* Pure arithmetic computes every lane into a temporary (inactive lanes'
+ * registers are valid memory; their results are discarded), then
+ * store_masked keeps only the active ones: both loops are branch-free,
+ * so they vectorize (NEON natively, WASM SIMD on the web). */
+#define FOR_ALL_LANES for (uint32_t l = 0; l < SM_LANES; l++)
+
+static void store_masked(uint32_t *d, const uint32_t *res, Sm_Mask m) {
+  for (uint32_t l = 0; l < SM_LANES; l++) d[l] = LANE(m, l) ? res[l] : d[l];
+}
+
+/* d[l] = expr for the active lanes, where expr is pure in `l`. */
+#define LANES_ASSIGN(m, d, expr)                \
+  do {                                          \
+    uint32_t res_[SM_LANES];                    \
+    FOR_ALL_LANES res_[l] = (expr);             \
+    store_masked((d), res_, (m));               \
+  } while (0)
 
 /* Destination row: writes to RZ go to the discard row. */
 static uint32_t *dst_row(Sm_Thread *t, uint32_t r) { return r == SM_RZ ? t->discard : t->r[r]; }
@@ -980,11 +997,13 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
     uint32_t *d = dst_row(t, REG_D(w));
     const uint32_t aa = BIT(w, 46), na = BIT(w, 48), ab = BIT(w, 49), nb = BIT(w, 45), sat = BIT(w, 50);
-    FOR_LANES(m) {
+    uint32_t res[SM_LANES];
+    FOR_ALL_LANES {
       float r = fmod_abs_neg(f32(a[l]), aa, na) + fmod_abs_neg(f32(b[l]), ab, nb);
       if (sat) r = saturate(r);
-      d[l] = u32f(r);
+      res[l] = u32f(r);
     }
+    store_masked(d, res, m);
     return;
   }
   case SM_OP_FADD32I: {
@@ -992,7 +1011,9 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     uint32_t *d = dst_row(t, REG_D(w));
     const float b = fmod_abs_neg(f32(in->imm), BIT(w, 57), BIT(w, 53));
     const uint32_t aa = BIT(w, 54), na = BIT(w, 56);
-    FOR_LANES(m) d[l] = u32f(fmod_abs_neg(f32(a[l]), aa, na) + b);
+    uint32_t res[SM_LANES];
+    FOR_ALL_LANES res[l] = u32f(fmod_abs_neg(f32(a[l]), aa, na) + b);
+    store_masked(d, res, m);
     return;
   }
   case SM_OP_FMUL: {
@@ -1002,11 +1023,13 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     uint32_t *d = dst_row(t, REG_D(w));
     const float k = scale[BITS(w, 41, 3)] * (BIT(w, 48) ? -1.0f : 1.0f);
     const uint32_t sat = BIT(w, 50);
-    FOR_LANES(m) {
+    uint32_t res[SM_LANES];
+    FOR_ALL_LANES {
       float r = f32(a[l]) * f32(b[l]) * k;
       if (sat) r = saturate(r);
-      d[l] = u32f(r);
+      res[l] = u32f(r);
     }
+    store_masked(d, res, m);
     return;
   }
   case SM_OP_FMUL32I: {
@@ -1014,11 +1037,13 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     uint32_t *d = dst_row(t, REG_D(w));
     const float b = f32(in->imm);
     const uint32_t sat = BIT(w, 55);
-    FOR_LANES(m) {
+    uint32_t res[SM_LANES];
+    FOR_ALL_LANES {
       float r = f32(a[l]) * b;
       if (sat) r = saturate(r);
-      d[l] = u32f(r);
+      res[l] = u32f(r);
     }
+    store_masked(d, res, m);
     return;
   }
   case SM_OP_FFMA: {
@@ -1026,11 +1051,13 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     uint32_t *d = dst_row(t, REG_D(w));
     const float nab = BIT(w, 48) ? -1.0f : 1.0f, nc = BIT(w, 49) ? -1.0f : 1.0f;
     const uint32_t sat = BIT(w, 50);
-    FOR_LANES(m) {
+    uint32_t res[SM_LANES];
+    FOR_ALL_LANES {
       float r = f32(a[l]) * f32(b[l]) * nab + f32(c[l]) * nc;
       if (sat) r = saturate(r);
-      d[l] = u32f(r);
+      res[l] = u32f(r);
     }
+    store_masked(d, res, m);
     return;
   }
   case SM_OP_FFMA32I: {
@@ -1038,11 +1065,13 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     uint32_t *d = dst_row(t, REG_D(w));
     const float b = f32(in->imm) * (BIT(w, 56) ? -1.0f : 1.0f), nc = BIT(w, 57) ? -1.0f : 1.0f;
     const uint32_t sat = BIT(w, 55);
-    FOR_LANES(m) {
+    uint32_t res[SM_LANES];
+    FOR_ALL_LANES {
       float r = f32(a[l]) * b + f32(d[l]) * nc;
       if (sat) r = saturate(r);
-      d[l] = u32f(r);
+      res[l] = u32f(r);
     }
+    store_masked(d, res, m);
     return;
   }
   case SM_OP_FMNMX: {
@@ -1050,10 +1079,12 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     uint32_t *d = dst_row(t, REG_D(w));
     const Sm_Mask mins = pred_mask(t, BITS(w, 39, 3), BIT(w, 42));
     const uint32_t aa = BIT(w, 46), na = BIT(w, 48), ab = BIT(w, 49), nb = BIT(w, 45);
-    FOR_LANES(m) {
+    uint32_t res[SM_LANES];
+    FOR_ALL_LANES {
       const float x = fmod_abs_neg(f32(a[l]), aa, na), y = fmod_abs_neg(f32(b[l]), ab, nb);
-      d[l] = u32f(LANE(mins, l) ? fminf(x, y) : fmaxf(x, y));
+      res[l] = u32f(LANE(mins, l) ? fminf(x, y) : fmaxf(x, y));
     }
+    store_masked(d, res, m);
     return;
   }
   case SM_OP_FSET: {
@@ -1090,7 +1121,7 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb), *c = op_c(in, env, t, tc);
     uint32_t *d = dst_row(t, REG_D(w));
     const uint32_t cond = BITS(w, 48, 4);
-    FOR_LANES(m) d[l] = fcompare(cond, f32(c[l]), 0.0f) ? a[l] : b[l];
+    LANES_ASSIGN(m, d, fcompare(cond, f32(c[l]), 0.0f) ? a[l] : b[l]);
     return;
   }
   case SM_OP_MUFU: {
@@ -1119,7 +1150,7 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     const uint32_t *b = op_b(in, env, t, tb);
     uint32_t *d = dst_row(t, REG_D(w));
     const uint32_t ab = BIT(w, 49), nb = BIT(w, 45);
-    FOR_LANES(m) d[l] = u32f(fmod_abs_neg(f32(b[l]), ab, nb));
+    LANES_ASSIGN(m, d, u32f(fmod_abs_neg(f32(b[l]), ab, nb)));
     return;
   }
   case SM_OP_FSWZADD: {
@@ -1257,7 +1288,7 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     const uint32_t cond = BITS(w, 49, 3), bop = BITS(w, 45, 2);
     const bool is_signed = BIT(w, 48) != 0;
     const uint32_t yes = BIT(w, 44) ? u32f(1.0f) : 0xffffffffu;
-    FOR_LANES(m) d[l] = bool_op(bop, icompare(cond, a[l], b[l], is_signed), LANE(pc, l) != 0) ? yes : 0u;
+    LANES_ASSIGN(m, d, bool_op(bop, icompare(cond, a[l], b[l], is_signed), LANE(pc, l) != 0) ? yes : 0u);
     return;
   }
   case SM_OP_ISETP: {
@@ -1281,7 +1312,7 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     uint32_t *d = dst_row(t, REG_D(w));
     const uint32_t cond = BITS(w, 49, 3);
     const bool is_signed = BIT(w, 48) != 0;
-    FOR_LANES(m) d[l] = icompare(cond, c[l], 0, is_signed) ? a[l] : b[l];
+    LANES_ASSIGN(m, d, icompare(cond, c[l], 0, is_signed) ? a[l] : b[l]);
     return;
   }
   case SM_OP_IMUL:
@@ -1393,7 +1424,7 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     const uint32_t *a = t->r[REG_A(w)], *c = t->r[REG_C(w)];
     const uint32_t *b = in->form == SM_FORM_IMM ? splat(in->imm, tb) : op_b(in, env, t, tb);
     uint32_t *d = dst_row(t, REG_D(w));
-    FOR_LANES(m) d[l] = lop3(lut, a[l], b[l], c[l]);
+    LANES_ASSIGN(m, d, lop3(lut, a[l], b[l], c[l]));
     return;
   }
   case SM_OP_SHL: {
@@ -1455,7 +1486,7 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     const uint32_t *b = op_b(in, env, t, tb);
     uint32_t *d = dst_row(t, REG_D(w));
     const uint32_t inv = BIT(w, 40) ? 0xffffffffu : 0u;
-    FOR_LANES(m) d[l] = popcount(b[l] ^ inv);
+    LANES_ASSIGN(m, d, popcount(b[l] ^ inv));
     return;
   }
   case SM_OP_FLO: {
@@ -1498,14 +1529,14 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
     uint32_t *d = dst_row(t, REG_D(w));
     const Sm_Mask choose = pred_mask(t, BITS(w, 39, 3), BIT(w, 42));
-    FOR_LANES(m) d[l] = LANE(choose, l) ? a[l] : b[l];
+    LANES_ASSIGN(m, d, LANE(choose, l) ? a[l] : b[l]);
     return;
   }
   case SM_OP_MOV:
   case SM_OP_MOV32I: {
     const uint32_t *b = in->op == SM_OP_MOV32I ? splat(in->imm, tb) : op_b(in, env, t, tb);
     uint32_t *d = dst_row(t, REG_D(w));
-    FOR_LANES(m) d[l] = b[l];
+    LANES_ASSIGN(m, d, b[l]);
     return;
   }
   case SM_OP_PSETP: {
@@ -1591,7 +1622,7 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
   case SM_OP_SHFL: {
     const uint32_t *a = t->r[REG_A(w)];
     uint32_t *d = dst_row(t, REG_D(w));
-    FOR_LANES(m) d[l] = a[l];
+    LANES_ASSIGN(m, d, a[l]);
     set_pred(t, BITS(w, 48, 3), m, SM_ALL_LANES);
     return;
   }
