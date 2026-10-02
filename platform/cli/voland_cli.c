@@ -12,6 +12,8 @@
  *       --expect-frame-hash HEX      exit 5 unless the newest frame hashes to HEX
  *       --sdmc DIR                   seed the emulated SD card with DIR's contents
  *       --dump-frame FILE            write the newest frame as a binary PPM (P6)
+ *       --dump-frames-every N        with --dump-frame: also write FILE.<slice>.ppm
+ *                                    every N slices (watching a long run progress)
  *       --font FILE                  the TTF/OTF pl:u serves as the system font
  *       --svc-stats                  print per-SVC call counts at the end
  *       --dump-audio FILE            write what the guest played as a 48kHz stereo WAV
@@ -268,7 +270,7 @@ static int run(int argc, char **argv) {
   if (argc < 1) return EXIT_USAGE;
   const char *path = argv[0];
   const CPU_Backend *backend = &CPU_BACKEND_INTERPRETER;
-  uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES;
+  uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES, dump_every = 0;
   bool test_card = false, svc_stats = false, swkbd_cancel = false;
   const char *swkbd_text = NULL;
   Input_Event inputs[MAX_INPUT_EVENTS];
@@ -309,6 +311,8 @@ static int run(int argc, char **argv) {
       audio_path = argv[++i];
     } else if (!strcmp(argv[i], "--font") && has_value) {
       font_path = argv[++i];
+    } else if (!strcmp(argv[i], "--dump-frames-every") && has_value) {
+      dump_every = strtoull(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--dump-frame") && has_value) {
       frame_path = argv[++i];
     } else if (!strcmp(argv[i], "--sdmc") && has_value) {
@@ -391,6 +395,11 @@ static int run(int argc, char **argv) {
     framebuffer_consume_all(); /* the CLI "displays" every frame at once */
     audio_frames += drain_audio(wav); /* and plays (or discards) every sample */
     slices++;
+    if (frame_path && dump_every && slices % dump_every == 0) {
+      char numbered[1024];
+      snprintf(numbered, sizeof(numbered), "%s.%llu.ppm", frame_path, (unsigned long long)slices);
+      (void)dump_frame(numbered);
+    }
   }
 
   uint32_t width = 0, height = 0;
@@ -585,6 +594,7 @@ static void usage(void) {
   fprintf(stderr,
           "usage: voland-cli run <file.nca|file.nro> [--backend interpreter|noop] [--budget N]\n"
           "                      [--max-slices N] [--test-card] [--expect-output TEXT]\n"
+          "                      [--dump-frame FILE [--dump-frames-every N]]\n"
           "                      [--expect-frame-hash HEX]\n"
           "       voland-cli verify-dump <file>\n");
 }
