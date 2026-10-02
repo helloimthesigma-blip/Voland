@@ -6,6 +6,7 @@
 #include "gpu/raster3d.h"
 
 #include <math.h>
+#include <stddef.h>
 #include <string.h>
 
 #include "common/log.h"
@@ -83,6 +84,7 @@
 
 #define PIPELINE_STAGES 6u
 #define MAX_TARGETS 8u
+#define SPAN_MIN_PIXELS 1024 /* bounding box at which a blend table pays off */
 #define SUBPIXEL_BITS 8
 #define SUBPIXEL_ONE (1 << SUBPIXEL_BITS)
 #define GUARD_BAND 4096.0f          /* clip-space x/y limit, in w units */
@@ -620,27 +622,30 @@ void raster3d_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, ui
         for (uint32_t c = 0; c < 4; c++) value[c] = regs[REG_CLEAR_COLOR + c];
         uint8_t px[16];
         const uint32_t bpp = s->bytes_per_pixel, row = s->width * bpp;
-        if (comps == 0xfu) encode_color(f, value, px);
-        for (int32_t y = rect.y0; y < rect.y1; y++) {
-          uint8_t *line = s->pixels + (uint64_t)y * row;
-          if (comps == 0xfu && bpp == 4u) {
-            uint32_t v;
-            memcpy(&v, px, 4);
-            uint32_t *q = (uint32_t *)(void *)(line + (uint64_t)rect.x0 * 4u);
-            for (int32_t x = rect.x0; x < rect.x1; x++) *q++ = v;
-            continue;
+        if (comps == 0xfu) {
+          /* Whole pixels: build the first row (doubling copies), then
+           * copy it down the rectangle. */
+          encode_color(f, value, px);
+          const size_t span = (size_t)(rect.x1 - rect.x0) * bpp;
+          uint8_t *first = s->pixels + (uint64_t)rect.y0 * row + (uint64_t)rect.x0 * bpp;
+          memcpy(first, px, bpp);
+          for (size_t done = bpp; done < span;) {
+            const size_t n = done < span - done ? done : span - done;
+            memcpy(first + done, first, n);
+            done += n;
           }
-          for (int32_t x = rect.x0; x < rect.x1; x++) {
-            uint8_t *p = line + (uint64_t)x * bpp;
-            if (comps == 0xfu) {
-              for (uint32_t k = 0; k < bpp; k++) p[k] = px[k];
-              continue;
+          for (int32_t y = rect.y0 + 1; y < rect.y1; y++) memcpy(first + (uint64_t)(y - rect.y0) * row, first, span);
+        } else {
+          for (int32_t y = rect.y0; y < rect.y1; y++) {
+            uint8_t *line = s->pixels + (uint64_t)y * row;
+            for (int32_t x = rect.x0; x < rect.x1; x++) {
+              uint8_t *p = line + (uint64_t)x * bpp;
+              float cur[4];
+              decode_color(f, p, cur);
+              uint32_t merged[4];
+              for (uint32_t c = 0; c < 4; c++) merged[c] = (comps >> c) & 1u ? value[c] : u32f(cur[c]);
+              encode_color(f, merged, p);
             }
-            float cur[4];
-            decode_color(f, p, cur);
-            uint32_t merged[4];
-            for (uint32_t c = 0; c < 4; c++) merged[c] = (comps >> c) & 1u ? value[c] : u32f(cur[c]);
-            encode_color(f, merged, p);
           }
         }
         s->dirty = true;
@@ -1136,6 +1141,14 @@ typedef struct Raster_State {
   uint8_t color_reg[MAX_TARGETS][4]; /* 0xff = not written */
   uint32_t depth_reg;                /* 0xff = none */
   uint32_t out_regs;                 /* output registers R0..R(out_regs-1) */
+  /* Flat triangles over plain RGBA8 targets fill whole spans (§13
+   * reference renderer): one shader result, so every target's output
+   * byte is a function of the destination byte alone - a lookup table
+   * when blending, a constant otherwise. */
+  bool span_ok;                      /* draw state allows span fills */
+  bool span_blend[MAX_TARGETS];
+  uint32_t span_word[MAX_TARGETS];
+  uint8_t span_lut[MAX_TARGETS][4][256];
 } Raster_State;
 
 /* One pixel-program result, reused across a triangle whose inputs do not
@@ -1238,7 +1251,7 @@ static bool depth_compare(uint32_t func, float incoming, float stored) {
 static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
   Raster3d *r = ctx->r;
   const uint32_t *regs = ctx->regs;
-  memset(rs, 0, sizeof(*rs));
+  memset(rs, 0, offsetof(Raster_State, span_lut)); /* the tables are rebuilt per triangle */
   rs->ctx = ctx;
   const uint32_t select = regs[REG_CT_SELECT];
   const uint32_t count = select & 0xfu;
@@ -1389,22 +1402,26 @@ static bool early_depth_reject(const Raster_State *rs, int32_t px, int32_t py, f
 
 static void output_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, const uint32_t *out_regs);
 
+/* Runs the pixel program once for a flat triangle, into `shared`. */
+static void shade_shared(Raster_State *rs, int32_t px, int32_t py, float depth, const Plane *planes, const Plane *inv_w,
+                         float x0, float y0, bool front, const Screen_Vertex *provoking, Frag_Result *shared) {
+  Raster3d *r = rs->ctx->r;
+  Sm_Thread *t = r->thread;
+  sm_thread_reset_light(t, 1);
+  t->front_facing = front ? SM_ALL_LANES : 0;
+  setup_lane(rs, t, 0, px, py, depth < 0.0f ? 0.0f : (depth > 1.0f ? 1.0f : depth), planes, inv_w, x0, y0, provoking);
+  const bool ok = sm_run(rs->ctx->ps, &rs->ctx->env[1], t);
+  if (!ok) r->stats.shader_faults++;
+  shared->killed = !ok || (t->killed & 1u);
+  for (uint32_t i = 0; i < rs->out_regs; i++) shared->regs[i] = t->r[i][0];
+  shared->valid = true;
+}
+
 /* Shades one pixel, or reuses `shared` (a flat triangle's one result). */
 static void shade_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, const Plane *planes, const Plane *inv_w,
                         float x0, float y0, bool front, const Screen_Vertex *provoking, Frag_Result *shared) {
   if (early_depth_reject(rs, px, py, depth)) return;
-  if (!shared->valid) {
-    Raster3d *r = rs->ctx->r;
-    Sm_Thread *t = r->thread;
-    sm_thread_reset_light(t, 1);
-    t->front_facing = front ? SM_ALL_LANES : 0;
-    setup_lane(rs, t, 0, px, py, depth, planes, inv_w, x0, y0, provoking);
-    const bool ok = sm_run(rs->ctx->ps, &rs->ctx->env[1], t);
-    if (!ok) r->stats.shader_faults++;
-    shared->killed = !ok || (t->killed & 1u);
-    for (uint32_t i = 0; i < rs->out_regs; i++) shared->regs[i] = t->r[i][0];
-    shared->valid = true;
-  }
+  if (!shared->valid) shade_shared(rs, px, py, depth, planes, inv_w, x0, y0, front, provoking, shared);
   if (!shared->killed) output_pixel(rs, px, py, depth, shared->regs);
 }
 
@@ -1434,6 +1451,95 @@ static void shade_batch(Raster_State *rs, Pixel_Batch *b, const Plane *planes, c
   b->count = 0;
 }
 
+static bool target_is_plain_rgba8(const Target *tg) {
+  return tg->rgba8 && tg->write_mask == 0xfu && (!tg->blend || tg->alpha_blend);
+}
+
+/* RGBA8 colour write, unblended or alpha-blended (target_is_plain_rgba8).
+ * Each output byte depends only on the same byte of `p`: colour channels
+ * blend with their own destination value, alpha with destination alpha. */
+static void output_rgba8(const Raster_State *rs, const Target *tg, const uint32_t color[4], uint8_t *p) {
+  float src[4], dst[4];
+  for (uint32_t c = 0; c < 4; c++) src[c] = f32(color[c]);
+  if (tg->blend) {
+    for (uint32_t i2 = 0; i2 < 4u; i2++)
+      if (tg->format->channel[i2] != CH_PAD) dst[tg->format->channel[i2]] = g_unorm8[p[i2]];
+    dst[3] = tg->format->channel[3] == CH_PAD ? 1.0f : dst[3];
+    const float a = src[3], ia = 1.0f - src[3];
+    for (uint32_t c = 0; c < 3u; c++) src[c] = src[c] * a + dst[c] * ia;
+    const float sf = factor_value((Blend_Factor)tg->alpha_src, 3, src, dst, rs->blend_const);
+    const float df = factor_value((Blend_Factor)tg->alpha_dst, 3, src, dst, rs->blend_const);
+    src[3] = (tg->alpha_op == BOP_MIN || tg->alpha_op == BOP_MAX) ? apply_op(tg->alpha_op, a, dst[3])
+                                                                   : apply_op(tg->alpha_op, a * sf, dst[3] * df);
+  }
+  for (uint32_t i2 = 0; i2 < 4u; i2++)
+    p[i2] = tg->format->channel[i2] == CH_PAD ? 0xffu : to_unorm8(src[tg->format->channel[i2]]);
+}
+
+/* The colour a target receives from one shader result (output_pixel's
+ * register selection). */
+static void target_color(const Raster_State *rs, uint32_t target, const uint32_t *out_regs, uint32_t color[4]) {
+  const uint32_t src_target = rs->mrt ? target : 0u;
+  for (uint32_t c = 0; c < 4; c++) {
+    const uint8_t reg = rs->color_reg[src_target][c];
+    color[c] = reg == 0xffu ? (c == 3u ? u32f(1.0f) : 0u) : out_regs[reg];
+  }
+}
+
+/* Whether this draw's fixed-function state lets flat triangles fill spans:
+ * no depth or alpha test, no depth write, every bound target plain RGBA8. */
+static bool span_state_ok(const Raster_State *rs) {
+  if (rs->alpha_test || (rs->depth && (rs->depth_test || rs->depth_write))) return false;
+  for (uint32_t i = 0; i < rs->target_count; i++)
+    if (rs->targets[i].surface && !target_is_plain_rgba8(&rs->targets[i])) return false;
+  return true;
+}
+
+/* Builds the per-target fill for one flat triangle's shader result. */
+static void span_prepare(Raster_State *rs, const uint32_t *out_regs) {
+  for (uint32_t i = 0; i < rs->target_count; i++) {
+    const Target *tg = &rs->targets[i];
+    if (!tg->surface) continue;
+    uint32_t color[4];
+    target_color(rs, i, out_regs, color);
+    rs->span_blend[i] = tg->blend;
+    if (!tg->blend) {
+      uint8_t bytes[4] = {0, 0, 0, 0};
+      output_rgba8(rs, tg, color, bytes);
+      memcpy(&rs->span_word[i], bytes, 4);
+      continue;
+    }
+    for (uint32_t v = 0; v < 256u; v++) {
+      uint8_t bytes[4] = {(uint8_t)v, (uint8_t)v, (uint8_t)v, (uint8_t)v};
+      output_rgba8(rs, tg, color, bytes);
+      for (uint32_t b = 0; b < 4u; b++) rs->span_lut[i][b][v] = bytes[b];
+    }
+  }
+}
+
+/* Pixels [x0, x1] of row y from the prepared fill. */
+static void span_fill(Raster_State *rs, int32_t y, int32_t x0, int32_t x1) {
+  const uint32_t n = (uint32_t)(x1 - x0 + 1);
+  rs->ctx->r->stats.pixels += n;
+  for (uint32_t i = 0; i < rs->target_count; i++) {
+    Target *tg = &rs->targets[i];
+    if (!tg->surface) continue;
+    uint8_t *p = tg->surface->pixels + ((uint64_t)y * tg->surface->width + (uint64_t)x0) * 4u;
+    if (!rs->span_blend[i]) {
+      for (uint32_t k = 0; k < n; k++) memcpy(p + 4u * k, &rs->span_word[i], 4);
+    } else {
+      const uint8_t (*lut)[256] = rs->span_lut[i];
+      for (uint32_t k = 0; k < n; k++, p += 4) {
+        p[0] = lut[0][p[0]];
+        p[1] = lut[1][p[1]];
+        p[2] = lut[2][p[2]];
+        p[3] = lut[3][p[3]];
+      }
+    }
+    tg->surface->dirty = true;
+  }
+}
+
 /* Depth, alpha test, blending and the colour write for one shaded pixel. */
 static void output_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, const uint32_t *out_regs) {
   Raster3d *r = rs->ctx->r;
@@ -1458,29 +1564,11 @@ static void output_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, 
   for (uint32_t i = 0; i < rs->target_count; i++) {
     Target *tg = &rs->targets[i];
     if (!tg->surface) continue;
-    const uint32_t src_target = rs->mrt ? i : 0u;
     uint32_t color[4];
-    for (uint32_t c = 0; c < 4; c++) {
-      const uint8_t reg = rs->color_reg[src_target][c];
-      color[c] = reg == 0xffu ? (c == 3u ? u32f(1.0f) : 0u) : out_regs[reg];
-    }
+    target_color(rs, i, out_regs, color);
     uint8_t *p = tg->surface->pixels + ((uint64_t)py * tg->surface->width + (uint64_t)px) * tg->surface->bytes_per_pixel;
-    if (tg->rgba8 && tg->write_mask == 0xfu && (!tg->blend || tg->alpha_blend)) {
-      float src[4], dst[4];
-      for (uint32_t c = 0; c < 4; c++) src[c] = f32(color[c]);
-      if (tg->blend) {
-        for (uint32_t i2 = 0; i2 < 4u; i2++)
-          if (tg->format->channel[i2] != CH_PAD) dst[tg->format->channel[i2]] = g_unorm8[p[i2]];
-        dst[3] = tg->format->channel[3] == CH_PAD ? 1.0f : dst[3];
-        const float a = src[3], ia = 1.0f - src[3];
-        for (uint32_t c = 0; c < 3u; c++) src[c] = src[c] * a + dst[c] * ia;
-        const float sf = factor_value((Blend_Factor)tg->alpha_src, 3, src, dst, rs->blend_const);
-        const float df = factor_value((Blend_Factor)tg->alpha_dst, 3, src, dst, rs->blend_const);
-        src[3] = (tg->alpha_op == BOP_MIN || tg->alpha_op == BOP_MAX) ? apply_op(tg->alpha_op, a, dst[3])
-                                                                       : apply_op(tg->alpha_op, a * sf, dst[3] * df);
-      }
-      for (uint32_t i2 = 0; i2 < 4u; i2++)
-        p[i2] = tg->format->channel[i2] == CH_PAD ? 0xffu : to_unorm8(src[tg->format->channel[i2]]);
+    if (target_is_plain_rgba8(tg)) {
+      output_rgba8(rs, tg, color, p);
       tg->surface->dirty = true;
       continue;
     }
@@ -1608,6 +1696,42 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
   shared.valid = false;
   Pixel_Batch batch;
   batch.count = 0;
+  /* Flat and large enough to amortise a blend table: fill spans. */
+  const int64_t box = (x1 - x0 + 1) * (y1 - y0 + 1);
+  if (uniform && rs->span_ok && box >= SPAN_MIN_PIXELS) {
+    bool prepared = false;
+    for (int64_t y = y0; y <= y1; y++) {
+      int64_t e0 = e_row[0], e1 = e_row[1], e2 = e_row[2];
+      int64_t first = -1, last = -1;
+      for (int64_t x = x0; x <= x1; x++) {
+        if ((e0 | e1 | e2) >= 0) {
+          if (first < 0) first = x;
+          last = x;
+        } else if (first >= 0) {
+          break; /* convex: the run has ended */
+        }
+        e0 += ex[0];
+        e1 += ex[1];
+        e2 += ex[2];
+      }
+      e_row[0] += ey[0];
+      e_row[1] += ey[1];
+      e_row[2] += ey[2];
+      if (first < 0) continue;
+      if (!shared.valid) {
+        const float dx = (float)first + 0.5f - sv[0].x, dy = (float)y + 0.5f - sv[0].y;
+        shade_shared(rs, (int32_t)first, (int32_t)y, plane_at(&zp, dx, dy), planes, &wp, sv[0].x, sv[0].y, front, &prov,
+                     &shared);
+      }
+      if (shared.killed) return;
+      if (!prepared) {
+        span_prepare(rs, shared.regs);
+        prepared = true;
+      }
+      span_fill(rs, (int32_t)y, (int32_t)first, (int32_t)last);
+    }
+    return;
+  }
   for (int64_t y = y0; y <= y1; y++) {
     int64_t e0 = e_row[0], e1 = e_row[1], e2 = e_row[2];
     for (int64_t x = x0; x <= x1; x++) {
@@ -1861,6 +1985,7 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     r->stats.skipped_draws++;
     return;
   }
+  rs.span_ok = span_state_ok(&rs);
   static Vertex_Cache cache;
   memset(cache.valid, 0, sizeof(cache.valid));
   Assembler as;

@@ -586,6 +586,17 @@ static int32_t wrap_index(int32_t i, int32_t size, uint32_t mode) {
 static bool is_integer_type(uint32_t type) { return type == TEX_DATA_SINT || type == TEX_DATA_UINT; }
 
 /* One texel (unswizzled), honouring the border. */
+/* byte -> [0,1] for RGBA8 texels */
+static const float *unorm8_table(void) {
+  static float table[256];
+  static bool ready;
+  if (!ready) {
+    for (uint32_t i = 0; i < 256u; i++) table[i] = (float)i / 255.0f;
+    ready = true;
+  }
+  return table;
+}
+
 static void texel_at(const Tex_Image *img, const Tex_Sampler *s, int32_t x, int32_t y, uint32_t layer, uint32_t out[4]) {
   const int32_t wx = wrap_index(x, (int32_t)img->width, s ? s->wrap[0] : WRAP_CLAMP_TO_EDGE);
   const int32_t wy = wrap_index(y, (int32_t)img->height, s ? s->wrap[1] : WRAP_CLAMP_TO_EDGE);
@@ -597,12 +608,7 @@ static void texel_at(const Tex_Image *img, const Tex_Sampler *s, int32_t x, int3
   const uint8_t *p = img->texels + img->layer_bytes * layer + (uint64_t)wy * img->row_bytes +
                      (uint64_t)wx * img->bytes_per_texel;
   if (img->rgba8) {
-    static float table[256];
-    static bool table_ready;
-    if (!table_ready) {
-      for (uint32_t i = 0; i < 256u; i++) table[i] = (float)i / 255.0f;
-      table_ready = true;
-    }
+    const float *table = unorm8_table();
     for (uint32_t c = 0; c < 4u; c++) out[c] = u32f(table[p[c]]);
     return;
   }
@@ -710,6 +716,21 @@ void tex_sample(const Tex_Image *img, const Tex_Sampler *s, const float coords[3
   const float fx = floorf(x), fy = floorf(y);
   const float ax = x - fx, ay = y - fy;
   const int32_t x0 = (int32_t)fx + ox, y0 = (int32_t)fy + oy;
+  if (img->rgba8 && !do_compare && x0 >= 0 && y0 >= 0 && x0 + 1 < (int32_t)img->width &&
+      y0 + 1 < (int32_t)img->height && lay < img->layers) {
+    /* All four taps inside an RGBA8 image: no wrapping, direct reads
+     * (the same arithmetic as the general path below). */
+    const float *table = unorm8_table();
+    const uint8_t *p00 = img->texels + img->layer_bytes * lay + (uint64_t)y0 * img->row_bytes + (uint64_t)x0 * 4u;
+    const uint8_t *p01 = p00 + img->row_bytes;
+    for (uint32_t c = 0; c < 4; c++) {
+      const float a = table[p00[c]], b = table[p00[4u + c]], cc = table[p01[c]], d = table[p01[4u + c]];
+      const float top = a + (b - a) * ax, bottom = cc + (d - cc) * ax;
+      texel[c] = u32f(top + (bottom - top) * ay);
+    }
+    apply_swizzle(img, texel, out);
+    return;
+  }
   uint32_t t00[4], t10[4], t01[4], t11[4];
   texel_at(img, s, x0, y0, lay, t00);
   texel_at(img, s, x0 + 1, y0, lay, t10);

@@ -2434,6 +2434,7 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 - **Render-to-texture coherence (§13 reference renderer).** A decoded texture is revalidated once per submission; now any surface the renderer is about to draw into or clear also invalidates cached textures over the same guest bytes, so a texture sampled, re-rendered and sampled again within one submission (SDL_FontCache's glyph atlas) is re-read. Test: `raster3d_test` render-to-texture vector (fails without the change).
 - **usb:hs** (§12 stub tier, 2.0.0+ layout): bind, three interface queries (always none), the interface-available and state-change events (real, never signalled), AcquireUsbIf fails. libusbhsfs-based homebrew (NX-Shell) waited on a NULL event without it.
 - **Homebrew coverage:** NX-Shell (ImGui over mesa/OpenGL) reaches its file browser; Checkpoint (SDL2) its save list.
+- **Renderer speed, output bit-identical:** flat triangles over plain RGBA8 targets (no depth/alpha test) fill whole spans - a constant word unblended, a 256-entry table per byte when alpha-blending, built from the same per-pixel routine (`output_rgba8`) so results cannot differ; in-bounds RGBA8 bilinear taps read texels directly; whole-pixel clears build one row and copy it down. NX-Shell's 6000-slice run 25.1s -> 9.6s, ftpd's 19.7s -> 13.7s (frame hashes unchanged for ftpd, NX-Shell, Checkpoint, JKSV, hbmenu).
 
 ### Changelog v3.54 → v3.55 (summary)
 
