@@ -4,7 +4,7 @@ A Nintendo Switch emulator targeting the web as a primary platform, with native 
 
 Play Switch games in your browser. No installation. No setup beyond providing your own keys and games.
 
-> **Status:** Early development — **Phase 4 (First Boot)** of the plan in [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Real, unmodified libnx homebrew runs in the browser: hbmenu boots and launches NROs from the persistent emulated SD card, audio plays, and GPU homebrew built on deko3d renders through a software Maxwell 3D renderer and shader interpreter (ftpd's interface draws correctly). Next is speed (a WebGPU translation of that renderer) and more system services; commercial games need much more before they show anything.
+> **Status:** Early development — **Phase 4 (First Boot)** of the plan in [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Real, unmodified libnx homebrew runs in the browser with touch, keyboard/gamepad input, audio and persistent SD-card and save data: hbmenu, ftpd, JKSV, Checkpoint, NX-Shell, SimpleModManager and others render correctly through a software Maxwell 3D renderer (stencil, derivatives, render-to-texture) and shader interpreter. Next is speed (a WebGPU translation of that renderer, mipmapping) and more system services; commercial games need much more before they show anything.
 
 ---
 
