@@ -270,6 +270,9 @@ static void dma_launch(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t launch) 
     const Dma_Surface src = surface_of(ch, true, launch, src_elem);
     const Dma_Surface dst = surface_of(ch, false, launch, dst_elem);
     const uint64_t src_bytes = (uint64_t)length * src_elem, dst_bytes = (uint64_t)length * dst_elem;
+    log_debug("[gpu] dma: %llx (%s) -> %llx (%s) %u x %u lines%s", (unsigned long long)src.base,
+              src.pitch_linear ? "pitch" : "block", (unsigned long long)dst.base, dst.pitch_linear ? "pitch" : "block",
+              length, lines, remap ? " remap" : "");
     if (src.pitch_linear && dst.pitch_linear && !remap && lines == 1u) {
       /* 1D copies (buffer to buffer) may exceed one staging line. */
       for (uint64_t done = 0; done < src_bytes;) {
@@ -304,6 +307,155 @@ static void dma_launch(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t launch) 
     ch->dma_copies++;
   }
   dma_semaphore(ch, mem, launch);
+}
+
+/* ------------------------------------------------------------------ */
+/* 2D engine (Fermi 2D, 902D): PIXELS_FROM_MEMORY surface copies.      */
+/* Register offsets per NVIDIA's public cl902d.h (open-gpu-doc). NVN    */
+/* uploads textures from CPU-written pitch buffers into block-linear    */
+/* images with these, and Unity copies presented frames back.           */
+/* ------------------------------------------------------------------ */
+
+#define T2D_DST_FORMAT (0x200u / 4u)       /* then layout, block size, depth, layer, pitch, width, height, offset hi/lo */
+#define T2D_SRC_FORMAT (0x230u / 4u)       /* same order; 0x240 is an invalidate, pitch at 0x244 */
+#define T2D_LAYOUT_PITCH 1u
+#define T2D_OPERATION (0x2ACu / 4u)
+#define T2D_SAMPLE_MODE (0x88Cu / 4u)
+#define T2D_SAMPLE_ORIGIN_CORNER 1u
+#define T2D_SAMPLE_FILTER_BILINEAR (1u << 4)
+#define T2D_DST_X0 (0x8B0u / 4u)           /* then y0, width, height */
+#define T2D_DU_DX_FRAC (0x8C0u / 4u)       /* then du/dx int, dv/dy frac, dv/dy int */
+#define T2D_SRC_X0_FRAC (0x8D0u / 4u)      /* then x0 int, y0 frac */
+#define T2D_SRC_Y0_INT (0x8DCu / 4u)       /* writing it launches the copy */
+#define T2D_OP_SRCCOPY 3u
+
+typedef struct Blit_Surface {
+  uint32_t format;
+  uint32_t bytes_per_pixel;
+  uint32_t width, height;
+  Dma_Surface s;
+} Blit_Surface;
+
+/* Bytes per pixel of a 2D-engine colour format (cl902d.h SET_DST_FORMAT);
+ * 0 = not one. */
+static uint32_t t2d_format_bytes(uint32_t format) {
+  switch (format) {
+  case 0xC0: case 0xC3: return 16u;
+  case 0xC6: case 0xC7: case 0xCA: case 0xCB: case 0xCE: return 8u;
+  case 0xCF: case 0xD0: case 0xD1: case 0xD5: case 0xD6: case 0xD7: case 0xDA: case 0xDB: case 0xDE: case 0xDF:
+  case 0xE0: case 0xE5: case 0xE6: case 0xE7: case 0xF9: case 0xFA: case 0xFD: case 0xFE: case 0xFF: return 4u;
+  case 0xE8: case 0xE9: case 0xEA: case 0xEB: case 0xEE: case 0xEF: case 0xF2: case 0xF8: case 0xFB: case 0xFC: return 2u;
+  case 0x1C: case 0xF3: case 0xF4: case 0xF7: return 1u;
+  default: return 0u;
+  }
+}
+
+/* A8R8G8B8-family and A8B8G8R8-family formats differ only in R/B order. */
+static bool t2d_is_bgra(uint32_t format) { return format == 0xCF || format == 0xD0 || format == 0xE6 || format == 0xE7; }
+static bool t2d_is_rgba(uint32_t format) { return format == 0xD5 || format == 0xD6 || format == 0xF9 || format == 0xFA; }
+
+static Blit_Surface t2d_surface(const uint32_t *r, uint32_t first) {
+  Blit_Surface b;
+  memset(&b, 0, sizeof(b));
+  b.format = r[first] & 0xFFu;
+  b.bytes_per_pixel = t2d_format_bytes(b.format);
+  b.width = r[first + 6u];
+  b.height = r[first + 7u];
+  b.s.base = addr40(r[first + 8u], r[first + 9u]);
+  b.s.pitch_linear = (r[first + 1u] & 1u) == T2D_LAYOUT_PITCH;
+  b.s.pitch = r[first + 5u];
+  b.s.width_bytes = b.width * b.bytes_per_pixel;
+  b.s.block_height_log2 = (r[first + 2u] >> 4) & 7u;
+  return b;
+}
+
+/* Reads (or writes) `count` pixels of row y from x on. */
+static bool t2d_row(Gpu_Channel *ch, const Gpu_Memory *mem, const Blit_Surface *b, uint32_t x, uint32_t y, uint8_t *buffer,
+                    uint32_t count, bool write) {
+  Dma_Surface s = b->s;
+  if (s.pitch_linear) s.base += (uint64_t)x * b->bytes_per_pixel;
+  else s.origin_x = x * b->bytes_per_pixel;
+  return surface_line(ch, mem, &s, y, buffer, count * b->bytes_per_pixel, write);
+}
+
+static int64_t fixed32(uint32_t integer, uint32_t fraction) { return (int64_t)(((uint64_t)integer << 32) | fraction); }
+
+static void t2d_blit(Gpu_Channel *ch, const Gpu_Memory *mem) {
+  static bool warned;
+  const uint32_t *r = ch->engine2d;
+  const Blit_Surface src = t2d_surface(r, T2D_SRC_FORMAT), dst = t2d_surface(r, T2D_DST_FORMAT);
+  const uint32_t bpp = dst.bytes_per_pixel;
+  const bool swap_rb = (t2d_is_bgra(src.format) && t2d_is_rgba(dst.format)) || (t2d_is_rgba(src.format) && t2d_is_bgra(dst.format));
+  const bool convertible = src.format == dst.format || swap_rb || (t2d_is_rgba(src.format) && t2d_is_rgba(dst.format)) ||
+                           (t2d_is_bgra(src.format) && t2d_is_bgra(dst.format));
+  if (!bpp || src.bytes_per_pixel != bpp || !convertible) {
+    if (!warned) log_warn("[gpu] 2D blit format 0x%02x -> 0x%02x not supported", src.format, dst.format);
+    warned = true;
+    ch->faults++;
+    return;
+  }
+  if ((r[T2D_OPERATION] != T2D_OP_SRCCOPY || (r[T2D_SAMPLE_MODE] & T2D_SAMPLE_FILTER_BILINEAR)) && !warned) {
+    log_warn("[gpu] 2D blit operation %u / sample mode 0x%x: copied as point-sampled SRCCOPY", r[T2D_OPERATION],
+             r[T2D_SAMPLE_MODE]);
+    warned = true;
+  }
+  if (mem->renderer) {
+    /* The copy may read what the 3D engine drew, or overwrite what it
+     * cached (textures, render targets). */
+    raster3d_flush(mem->renderer, mem);
+    raster3d_begin_submission(mem->renderer);
+  }
+  const uint32_t dx0 = r[T2D_DST_X0], dy0 = r[T2D_DST_X0 + 1u];
+  const uint32_t w = r[T2D_DST_X0 + 2u], h = r[T2D_DST_X0 + 3u];
+  const int64_t du = fixed32(r[T2D_DU_DX_FRAC + 1u], r[T2D_DU_DX_FRAC]);
+  const int64_t dv = fixed32(r[T2D_DU_DX_FRAC + 3u], r[T2D_DU_DX_FRAC + 2u]);
+  int64_t u0 = fixed32(r[T2D_SRC_X0_FRAC + 1u], r[T2D_SRC_X0_FRAC]);
+  int64_t v0 = fixed32(r[T2D_SRC_Y0_INT], r[T2D_SRC_X0_FRAC + 2u]);
+  if (!(r[T2D_SAMPLE_MODE] & T2D_SAMPLE_ORIGIN_CORNER)) { /* centre origin: sample at each pixel's centre */
+    u0 += du / 2;
+    v0 += dv / 2;
+  }
+  if ((uint64_t)w * bpp > GPU_LINE_BYTES || (uint64_t)src.width * bpp > GPU_LINE_BYTES || !src.width || !src.height) {
+    ch->faults++;
+    return;
+  }
+  const int64_t one = (int64_t)1 << 32;
+  const bool unit = du == one && (u0 >> 32) >= 0 && (uint64_t)(u0 >> 32) + w <= src.width;
+  for (uint32_t j = 0; j < h; j++) {
+    int64_t sy = (v0 + dv * (int64_t)j) >> 32;
+    if (sy < 0) sy = 0;
+    if (sy >= (int64_t)src.height) sy = (int64_t)src.height - 1;
+    if (unit) {
+      if (!t2d_row(ch, mem, &src, (uint32_t)(u0 >> 32), (uint32_t)sy, ch->line_out, w, false)) {
+        ch->faults++;
+        return;
+      }
+    } else {
+      if (!t2d_row(ch, mem, &src, 0, (uint32_t)sy, ch->line, src.width, false)) {
+        ch->faults++;
+        return;
+      }
+      for (uint32_t i = 0; i < w; i++) {
+        int64_t sx = (u0 + du * (int64_t)i) >> 32;
+        if (sx < 0) sx = 0;
+        if (sx >= (int64_t)src.width) sx = (int64_t)src.width - 1;
+        memcpy(ch->line_out + (size_t)i * bpp, ch->line + (size_t)sx * bpp, bpp);
+      }
+    }
+    if (swap_rb) {
+      for (uint32_t i = 0; i < w; i++) {
+        uint8_t *p = ch->line_out + (size_t)i * bpp;
+        const uint8_t t = p[0];
+        p[0] = p[2];
+        p[2] = t;
+      }
+    }
+    if (!t2d_row(ch, mem, &dst, dx0, dy0 + j, ch->line_out, w, true)) {
+      ch->faults++;
+      return;
+    }
+  }
+  ch->blits++;
 }
 
 /* ------------------------------------------------------------------ */
@@ -577,6 +729,8 @@ static void i2m_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t index, u
   }
   ch->i2m[index] = data;
   if (index == I2M_LAUNCH) {
+    log_debug("[gpu] i2m: -> %llx (%s) %u x %u lines", (unsigned long long)addr40(ch->i2m[I2M_OFFSET_UPPER], ch->i2m[I2M_OFFSET]),
+              (data & I2M_LAYOUT_PITCH) ? "pitch" : "block", ch->i2m[I2M_LINE_LENGTH], ch->i2m[I2M_LINE_COUNT]);
     ch->i2m_active = true;
     ch->i2m_received = 0;
     ch->i2m_line_fill = 0;
@@ -722,10 +876,16 @@ void gpu_channel_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t subchan
     return;
   }
   const uint32_t cls = ch->subchannel_class[subchannel];
+  if (cls == GPU_CLASS_2D && method < GPU_2D_REGISTER_WORDS) {
+    ch->engine2d[method] = data;
+    if (method == T2D_SRC_Y0_INT) t2d_blit(ch, mem);
+    return;
+  }
   if ((cls == GPU_CLASS_COMPUTE || cls == GPU_CLASS_I2M) && is_i2m_method(method)) {
     i2m_method(ch, mem, method - GPU_I2M_FIRST, data);
     return;
   }
+  log_debug("[gpu] ignored: class %04x method 0x%x = 0x%x", cls, method * 4u, data);
   ch->ignored_methods++;
 }
 

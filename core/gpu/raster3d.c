@@ -892,6 +892,7 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
   slot->raw_hash = hash;
   slot->validated = r->submission;
   slot->valid = true;
+  if (r->on_texture_decoded) r->on_texture_decoded(r->on_texture_user, &slot->image, h.address);
   if (!t) {
     r->texture_count++;
     r->texture_pool_used += decoded_aligned; /* the raw staging after it is reusable */
@@ -2361,6 +2362,25 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     break;
   }
   }
+  const uint64_t pixels_before = r->stats.pixels, triangles_before = r->stats.triangles;
   assemble_end(&rs, &cache, &as);
   flush_triangles(&rs);
+  if (r->trace_draws) {
+    const Target *t0 = &rs.targets[0];
+    log_info("[gpu] draw %llu: topo %u count %u vs %llx ps %llx | rt0 %llx fmt 0x%02x %ux%u targets %u mask %x | "
+             "blend %d op %u/%u src %u/%u dst %u/%u | depth %d/%d func %u | cull %d | tris %llu px %llu",
+             (unsigned long long)r->stats.draws, draw->topology, draw->count, (unsigned long long)ctx->vs->address,
+             (unsigned long long)ctx->ps->address, (unsigned long long)(t0->surface ? t0->surface->address : 0),
+             t0->surface ? t0->surface->format : 0u, t0->surface ? t0->surface->width : 0u,
+             t0->surface ? t0->surface->height : 0u, rs.target_count, t0->write_mask, t0->blend, t0->color_op,
+             t0->alpha_op, t0->color_src, t0->alpha_src, t0->color_dst, t0->alpha_dst, rs.depth_test, rs.depth_write,
+             rs.depth_func, rs.cull, (unsigned long long)(r->stats.triangles - triangles_before),
+             (unsigned long long)(r->stats.pixels - pixels_before));
+    const Tex_Resolver *res = &g_band_state[0].resolver;
+    for (uint32_t i = 0; i < res->count; i++) {
+      const Raster3d_Texture *t = res->texture[i];
+      log_info("[gpu]   texture %08x: %ux%u fmt 0x%02x @%llx", res->handle[i], t ? t->image.width : 0u,
+               t ? t->image.height : 0u, t ? t->image.header.format : 0u, (unsigned long long)(t ? t->address : 0));
+    }
+  }
 }

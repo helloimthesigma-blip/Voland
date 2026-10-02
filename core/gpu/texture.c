@@ -635,7 +635,12 @@ static uint32_t swizzle_one(const uint32_t texel[4], uint32_t source) {
 }
 
 static void apply_swizzle(const Tex_Image *img, const uint32_t texel[4], uint32_t out[4]) {
-  for (uint32_t c = 0; c < 4; c++) out[c] = swizzle_one(texel, img->header.swizzle[c]);
+  const uint8_t *sw = img->header.swizzle;
+  if (sw[0] == TEX_SOURCE_R && sw[1] == TEX_SOURCE_G && sw[2] == TEX_SOURCE_B && sw[3] == TEX_SOURCE_A) {
+    memcpy(out, texel, 4u * sizeof(uint32_t)); /* the common identity */
+    return;
+  }
+  for (uint32_t c = 0; c < 4; c++) out[c] = swizzle_one(texel, sw[c]);
 }
 
 static bool compare(uint32_t func, float ref, float value) {

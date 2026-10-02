@@ -2427,9 +2427,17 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.65.0*
+*Document version: 3.66.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.65 → v3.66 (summary)
+
+Hollow Knight: Silksong (the user's own decrypted program NCA) now reaches and correctly renders its title screen.
+
+- **2D engine (902D) PIXELS_FROM_MEMORY** in `gpu_channel` (registers per NVIDIA's public `cl902d.h`): surface copies between pitch and block-linear layouts, nearest sampling with the 32.32 du/dx, dv/dy steps (corner or centre origin), same-format and R/B-swapped 32-bit copies. The engine was previously ignored; NVN uploads CPU-written textures through it (Unity's 256x4 colour-curve texture stayed all-zero, and its colour-correction pass turned every frame black) and Unity copies presented frames back with it. Bilinear filtering and non-SRCCOPY operations are copied as point-sampled SRCCOPY (logged once). The renderer is flushed first, as for DMA. `gpu_channel_test` covers an upload into a sub-rectangle and a 2x downscale with an R/B swap.
+- **Reference renderer:** texture instructions sample all lanes in one call (`Sm_Env.texture_batch`; raster3d resolves a handle once per instruction); identity swizzles skip the per-component switch; caches sized for commercial titles (12 surfaces, 64 programs, 256 textures, 256MB texture pool - the 32MB pool filled on the title screen).
+- **Diagnostics:** `voland-cli --dump-frames-every N`; `VOLAND_TRACE_DRAWS=START:LENGTH` logs every draw's programs, targets, blend/depth state, pixels written and textures; `VOLAND_DUMP_TEXTURES=DIR` writes each decoded texture; DMA, I2M and still-ignored methods are logged at debug level.
 
 ### Changelog v3.64 → v3.65 (summary)
 

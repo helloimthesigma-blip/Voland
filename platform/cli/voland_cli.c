@@ -187,6 +187,31 @@ static void on_guest_output(void *userdata, const char *text, size_t length) {
   }
 }
 
+/* VOLAND_DUMP_TEXTURES=DIR: every decoded RGBA8 texture as DIR/<address>-WxH.ppm
+ * and its alpha as DIR/<address>-WxH-a.pgm (diagnostics). */
+static void dump_texture(void *user, const Tex_Image *image, uint64_t address) {
+  const char *dir = (const char *)user;
+  if (!image->rgba8 && image->format != 0x08u) return;
+  char path[1024];
+  snprintf(path, sizeof(path), "%s/%llx-%ux%u.ppm", dir, (unsigned long long)address, image->width, image->height);
+  FILE *rgb = fopen(path, "wb");
+  snprintf(path, sizeof(path), "%s/%llx-%ux%u-a.pgm", dir, (unsigned long long)address, image->width, image->height);
+  FILE *alpha = fopen(path, "wb");
+  if (rgb && alpha) {
+    fprintf(rgb, "P6\n%u %u\n255\n", image->width, image->height);
+    fprintf(alpha, "P5\n%u %u\n255\n", image->width, image->height);
+    for (uint32_t y = 0; y < image->height; y++) {
+      for (uint32_t x = 0; x < image->width; x++) {
+        const uint8_t *p = image->texels + (uint64_t)y * image->row_bytes + (uint64_t)x * 4u;
+        fwrite(p, 1, 3, rgb);
+        fwrite(p + 3, 1, 1, alpha);
+      }
+    }
+  }
+  if (rgb) fclose(rgb);
+  if (alpha) fclose(alpha);
+}
+
 /* The newest frame as a P6 PPM (RGB; alpha dropped). */
 static bool dump_frame(const char *path) {
   const uint32_t published = framebuffer_published();
@@ -379,8 +404,20 @@ static int run(int argc, char **argv) {
     if (!wav) fprintf(stderr, "voland-cli: cannot write %s\n", audio_path);
     else write_wav_header(wav, 0);
   }
+  if (getenv("VOLAND_DUMP_TEXTURES")) {
+    emu.renderer.on_texture_decoded = dump_texture;
+    emu.renderer.on_texture_user = getenv("VOLAND_DUMP_TEXTURES");
+  }
+  /* VOLAND_TRACE_DRAWS=START:LENGTH logs every draw in that slice window. */
+  uint64_t trace_start = UINT64_MAX, trace_length = 0;
+  if (getenv("VOLAND_TRACE_DRAWS")) {
+    char *end = NULL;
+    trace_start = strtoull(getenv("VOLAND_TRACE_DRAWS"), &end, 0);
+    trace_length = (end && *end == ':') ? strtoull(end + 1, NULL, 0) : 1u;
+  }
   while (slices < max_slices && (status == EMULATOR_RUNNING || status == EMULATOR_IDLE)) {
     if (input_count) apply_input(inputs, input_count, slices);
+    emu.renderer.trace_draws = slices >= trace_start && slices - trace_start < trace_length;
     status = emulator_run_slice(&emu, budget);
     {
       /* A software keyboard is up: answer it like a player would. */

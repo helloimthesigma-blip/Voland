@@ -114,6 +114,10 @@ typedef struct Raster3d {
   Workers workers;
   Sm_Thread *band_threads[WORKERS_MAX];
   Raster3d_Stats stats;
+  bool trace_draws;          /* log every draw's state and result (diagnostics) */
+  /* Diagnostics: called with every newly decoded texture (may be NULL). */
+  void (*on_texture_decoded)(void *user, const Tex_Image *image, uint64_t address);
+  void *on_texture_user;
 } Raster3d;
 
 /* Bytes of backing storage raster3d_init needs (one allocation). */

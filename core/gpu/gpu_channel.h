@@ -52,6 +52,7 @@
 
 #define GPU_SUBCHANNELS 8u
 #define GPU_DMA_REGISTER_WORDS 0x200u /* B0B5 method space through 0x7FC */
+#define GPU_2D_REGISTER_WORDS 0x240u  /* 902D method space through 0x8FC */
 #define GPU_3D_REGISTER_WORDS 0x1000u /* B197 method space (0x4000 bytes) */
 #define GPU_MME_CODE_WORDS 0x1000u
 #define GPU_MME_MACROS 0x80u
@@ -86,6 +87,7 @@ typedef struct Gpu_Channel {
   uint32_t host[0x40];                       /* host method registers */
   uint32_t dma[GPU_DMA_REGISTER_WORDS];      /* B0B5 registers, by word address */
   uint32_t engine3d[GPU_3D_REGISTER_WORDS];  /* B197 registers, by word address */
+  uint32_t engine2d[GPU_2D_REGISTER_WORDS];  /* 902D registers, by word address */
   /* Macro Method Expander. */
   uint32_t mme_code[GPU_MME_CODE_WORDS];
   uint32_t mme_start[GPU_MME_MACROS];
@@ -112,6 +114,7 @@ typedef struct Gpu_Channel {
   uint64_t methods;                          /* diagnostics */
   uint64_t ignored_methods;
   uint64_t dma_copies;
+  uint64_t blits;                            /* 2D PIXELS_FROM_MEMORY */
   uint64_t faults;                           /* reads/writes to unmapped GPU VA */
   uint8_t line[GPU_LINE_BYTES];              /* DMA staging */
   uint8_t line_out[GPU_LINE_BYTES];

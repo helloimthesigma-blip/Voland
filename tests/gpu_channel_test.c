@@ -2,7 +2,8 @@
  * GPU command processing (gpu/gpu_channel.h) over a flat fake GPU memory:
  * GP entries and every method-header form, the bind/semaphore/syncpoint
  * host methods, and the DMA engine's pitch <-> block-linear multi-line
- * copies, 1D copies, component remap and semaphore releases. Method
+ * copies, 1D copies, component remap and semaphore releases, and the 2D
+ * engine's surface copies. Method
  * encodings are restated from NVIDIA's published class headers.
  */
 #define CHECK_NAME "gpu_channel_test"
@@ -351,6 +352,78 @@ static void test_inline_to_memory(void) {
   CHECK(g_mem[0x3000 + block_linear_offset(63, 1, 64, 0)] == 32);
 }
 
+/* 2D engine (902D) PIXELS_FROM_MEMORY: a pitch -> block-linear upload at
+ * 1:1 into a sub-rectangle (NVN's texture uploads), then a 2x downscale
+ * back to pitch with an R/B swap (A8B8G8R8 -> A8R8G8B8). Register offsets
+ * per cl902d.h. */
+#define B2_SRC (MEM_BASE + 0x20000u)
+#define B2_DST (MEM_BASE + 0x30000u)
+#define B2_OUT (MEM_BASE + 0x40000u)
+#define B2_W 24u
+#define B2_H 6u
+#define B2_DST_W 32u
+#define B2_DST_H 8u
+#define B2_X0 4u
+#define B2_Y0 1u
+#define FMT_A8B8G8R8 0xD5u
+#define FMT_A8R8G8B8 0xCFu
+#define HALF_TEXEL 0x80000000u
+
+static void texel(uint32_t x, uint32_t y, uint8_t out[4]) {
+  out[0] = (uint8_t)x;
+  out[1] = (uint8_t)y;
+  out[2] = (uint8_t)(x ^ y);
+  out[3] = (uint8_t)(0x80u + x);
+}
+
+static void blit_surface(uint32_t method, uint32_t format, bool pitch, uint32_t pitch_bytes, uint32_t w, uint32_t h,
+                         uint64_t va) {
+  const uint32_t regs[10] = {format, pitch ? 1u : 0u, 1u << 4 /* 2-GOB blocks */, 1, 0, pitch_bytes, w, h,
+                             (uint32_t)(va >> 32), (uint32_t)va};
+  inc(3, method, regs, 10);
+}
+
+static void blit(uint32_t dx, uint32_t dy, uint32_t w, uint32_t h, uint32_t scale) {
+  const uint32_t params[12] = {dx, dy, w, h, 0, scale, 0, scale, HALF_TEXEL, 0, HALF_TEXEL, 0};
+  one(3, R(0x2AC), 3);        /* SRCCOPY */
+  one(3, R(0x88C), 1);        /* corner origin, point filter */
+  inc(3, R(0x8B0), params, 12); /* ... SRC_Y0_INT launches */
+}
+
+static void test_2d_blit(void) {
+  one(3, 0, 0x902D);
+  for (uint32_t y = 0; y < B2_H; y++)
+    for (uint32_t x = 0; x < B2_W; x++) texel(x, y, g_mem + (B2_SRC - MEM_BASE) + (y * B2_W + x) * 4u);
+  memset(g_mem + (B2_DST - MEM_BASE), 0xEE, 0x8000);
+  blit_surface(R(0x230), FMT_A8B8G8R8, true, B2_W * 4u, B2_W, B2_H, B2_SRC);
+  blit_surface(R(0x200), FMT_A8B8G8R8, false, 0, B2_DST_W, B2_DST_H, B2_DST);
+  blit(B2_X0, B2_Y0, B2_W, B2_H, 1);
+  submit();
+  CHECK(g_channel.blits == 1 && g_channel.faults == 0);
+  for (uint32_t y = 0; y < B2_DST_H; y++) {
+    for (uint32_t x = 0; x < B2_DST_W; x++) {
+      const uint8_t *p = g_mem + (B2_DST - MEM_BASE) + block_linear_offset(x * 4u, y, B2_DST_W * 4u, 1);
+      const bool inside = x >= B2_X0 && x < B2_X0 + B2_W && y >= B2_Y0 && y < B2_Y0 + B2_H;
+      uint8_t want[4] = {0xEE, 0xEE, 0xEE, 0xEE};
+      if (inside) texel(x - B2_X0, y - B2_Y0, want);
+      CHECK(memcmp(p, want, 4) == 0);
+    }
+  }
+  /* Half size: every other texel of the uploaded 32x8 image, R/B swapped. */
+  blit_surface(R(0x230), FMT_A8B8G8R8, false, 0, B2_DST_W, B2_DST_H, B2_DST);
+  blit_surface(R(0x200), FMT_A8R8G8B8, true, (B2_DST_W / 2u) * 4u, B2_DST_W / 2u, B2_DST_H / 2u, B2_OUT);
+  blit(0, 0, B2_DST_W / 2u, B2_DST_H / 2u, 2);
+  submit();
+  CHECK(g_channel.blits == 2 && g_channel.faults == 0);
+  for (uint32_t y = 0; y < B2_DST_H / 2u; y++) {
+    for (uint32_t x = 0; x < B2_DST_W / 2u; x++) {
+      const uint8_t *src = g_mem + (B2_DST - MEM_BASE) + block_linear_offset(2u * x * 4u, 2u * y, B2_DST_W * 4u, 1);
+      const uint8_t *out = g_mem + (B2_OUT - MEM_BASE) + (y * (B2_DST_W / 2u) + x) * 4u;
+      CHECK(out[0] == src[2] && out[1] == src[1] && out[2] == src[0] && out[3] == src[3]);
+    }
+  }
+}
+
 int main(void) {
   test_headers_and_host();
   test_pitch_to_block_linear();
@@ -358,6 +431,7 @@ int main(void) {
   test_3d_sync();
   test_mme();
   test_inline_to_memory();
+  test_2d_blit();
   printf("[gpu_channel_test] passed\n");
   return 0;
 }
