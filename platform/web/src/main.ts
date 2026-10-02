@@ -290,6 +290,7 @@ async function boot(): Promise<BootResult | null> {
       buffer: memory.buffer,
       regionBase: toByteOffset(inputLayout.inputRegionBase),
       getGamepads: () => navigator.getGamepads(),
+      touchTarget: canvas,
       onConnectionChange: (change) => {
         const msg: MainToCPUMessage = change.connected
           ? { type: "controller-connected", index: change.slot, profileId: change.profileId }

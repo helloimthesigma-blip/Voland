@@ -46,6 +46,12 @@
  *           spins unbounded. On failure the caller keeps its previous
  *           state for this poll (a 60 Hz writer is mid-write for well
  *           under a microsecond; a failed read costs one stale sample).
+ * Touch block (after the slots, same seqlock protocol): the touch
+ * screen, in the console's 1280x720 coordinates.
+ *   +0   u32  sequence
+ *   +4   u32  count      touching points, 0..INPUT_TOUCH_MAX
+ *   +8   u16  x, u16 y   per point (INPUT_TOUCH_MAX of them)
+ *   rest reserved, written 0
  * The C reader uses C11 <stdatomic.h> on a 32-bit word; the web writer
  * uses Atomics.add on an Int32Array over the same shared memory - both
  * sequentially consistent at least, which subsumes acquire/release.
@@ -122,6 +128,25 @@ typedef enum Input_Device_Kind {
 } Input_Device_Kind;
 
 #define INPUT_REGION_READ_ATTEMPTS 4u
+
+#define INPUT_TOUCH_OFFSET (INPUT_REGION_SLOT_COUNT * INPUT_REGION_SLOT_BYTES)
+#define INPUT_TOUCH_OFFSET_SEQUENCE 0u
+#define INPUT_TOUCH_OFFSET_COUNT 4u
+#define INPUT_TOUCH_OFFSET_POINTS 8u
+#define INPUT_TOUCH_MAX 2u
+#define INPUT_TOUCH_WIDTH 1280u
+#define INPUT_TOUCH_HEIGHT 720u
+
+typedef struct Input_Touch_State {
+  uint32_t count;
+  uint16_t x[INPUT_TOUCH_MAX];
+  uint16_t y[INPUT_TOUCH_MAX];
+} Input_Touch_State;
+
+/* Seqlock read of the touch block; same contract as input_region_read_slot. */
+bool input_region_read_touch(const void *region_base, Input_Touch_State *out);
+/* Writer side (tests, native hosts). */
+void input_region_write_touch(void *region_base, const Input_Touch_State *state);
 
 /* One slot's payload as the reader returns it. */
 typedef struct Input_Controller_State {

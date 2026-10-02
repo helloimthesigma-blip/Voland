@@ -86,8 +86,24 @@ export function packFlags(state: ControllerState): number {
           ((state.profileId & PROFILE_ID_MASK) << FLAG_PROFILE_ID_SHIFT)) >>> 0;
 }
 
+/** Touch block after the slots (input_region.h INPUT_TOUCH_*). */
+export const INPUT_TOUCH_MAX = 2;
+export const INPUT_TOUCH_WIDTH = 1280;
+export const INPUT_TOUCH_HEIGHT = 720;
+const TOUCH_BLOCK_BYTES = 32;
+const TOUCH_OFFSET_COUNT = 4;
+const TOUCH_OFFSET_POINTS = 8;
+const TOUCH_POINT_BYTES = 4;
+
+export interface TouchPoint {
+  readonly x: number;
+  readonly y: number;
+}
+
 export interface InputRegionWriter {
   writeSlot(slot: number, state: ControllerState): void;
+  /** The touch screen: up to INPUT_TOUCH_MAX points in 1280x720 space. */
+  writeTouch(points: readonly TouchPoint[]): void;
 }
 
 /** `regionBase` is layout.inputRegionBase as a byte offset (toByteOffset). */
@@ -95,6 +111,9 @@ export function createInputRegionWriter(buffer: ArrayBufferLike, regionBase: num
   const bytes = INPUT_REGION_SLOT_COUNT * INPUT_REGION_SLOT_BYTES;
   const view = new DataView(buffer, regionBase, bytes);
   const words = new Int32Array(buffer, regionBase, bytes / Int32Array.BYTES_PER_ELEMENT);
+  const touchView = new DataView(buffer, regionBase + bytes, TOUCH_BLOCK_BYTES);
+  const touchWords = new Int32Array(buffer, regionBase + bytes, 1);
+  const clamp = (value: number, max: number): number => Math.min(max - 1, Math.max(0, Math.round(value)));
 
   return {
     writeSlot(slot: number, state: ControllerState): void {
@@ -111,6 +130,18 @@ export function createInputRegionWriter(buffer: ArrayBufferLike, regionBase: num
       view.setUint32(base + OFFSET_FLAGS, packFlags(state), true);
       view.setUint32(base + OFFSET_RESERVED, 0, true);
       Atomics.add(words, sequenceIndex, 1); // even: published
+    },
+    writeTouch(points: readonly TouchPoint[]): void {
+      const count = Math.min(points.length, INPUT_TOUCH_MAX);
+      Atomics.add(touchWords, 0, 1); // odd: write in progress
+      touchView.setUint32(TOUCH_OFFSET_COUNT, count, true);
+      for (let i = TOUCH_OFFSET_POINTS; i < TOUCH_BLOCK_BYTES; i += TOUCH_POINT_BYTES) touchView.setUint32(i, 0, true);
+      points.slice(0, count).forEach((point, i) => {
+        const at = TOUCH_OFFSET_POINTS + i * TOUCH_POINT_BYTES;
+        touchView.setUint16(at, clamp(point.x, INPUT_TOUCH_WIDTH), true);
+        touchView.setUint16(at + 2, clamp(point.y, INPUT_TOUCH_HEIGHT), true);
+      });
+      Atomics.add(touchWords, 0, 1); // even: published
     },
   };
 }

@@ -83,3 +83,46 @@ void input_region_write_end(void *region_base, uint32_t slot) {
   Input_Word *words = slot_words(region_base, slot);
   atomic_fetch_add_explicit(&words[0], 1u, memory_order_release);
 }
+
+/* ---- touch block ---------------------------------------------------- */
+
+#define INPUT_TOUCH_PAYLOAD_WORDS (1u + INPUT_TOUCH_MAX) /* count, then one x|y word per point */
+
+static Input_Word *touch_words(const void *region_base) {
+  return (Input_Word *)((uintptr_t)region_base + (uintptr_t)INPUT_TOUCH_OFFSET);
+}
+
+bool input_region_read_touch(const void *region_base, Input_Touch_State *out) {
+  if (!region_base || !out) return false;
+  Input_Word *words = touch_words(region_base);
+  for (uint32_t attempt = 0; attempt < INPUT_REGION_READ_ATTEMPTS; attempt++) {
+    const uint32_t before = atomic_load_explicit(&words[0], memory_order_acquire);
+    if (before & 1u) continue;
+    uint32_t payload[INPUT_TOUCH_PAYLOAD_WORDS];
+    for (uint32_t i = 0; i < INPUT_TOUCH_PAYLOAD_WORDS; i++) {
+      payload[i] = atomic_load_explicit(&words[INPUT_TOUCH_OFFSET_COUNT / 4u + i], memory_order_relaxed);
+    }
+    atomic_thread_fence(memory_order_acquire);
+    if (atomic_load_explicit(&words[0], memory_order_relaxed) != before) continue;
+    out->count = payload[0] > INPUT_TOUCH_MAX ? INPUT_TOUCH_MAX : payload[0];
+    for (uint32_t p = 0; p < INPUT_TOUCH_MAX; p++) {
+      out->x[p] = (uint16_t)(payload[1u + p] & 0xFFFFu);
+      out->y[p] = (uint16_t)(payload[1u + p] >> 16);
+    }
+    return true;
+  }
+  return false;
+}
+
+void input_region_write_touch(void *region_base, const Input_Touch_State *state) {
+  if (!region_base || !state) return;
+  Input_Word *words = touch_words(region_base);
+  atomic_fetch_add_explicit(&words[0], 1u, memory_order_relaxed);
+  atomic_thread_fence(memory_order_release);
+  atomic_store_explicit(&words[INPUT_TOUCH_OFFSET_COUNT / 4u], state->count, memory_order_relaxed);
+  for (uint32_t p = 0; p < INPUT_TOUCH_MAX; p++) {
+    atomic_store_explicit(&words[INPUT_TOUCH_OFFSET_POINTS / 4u + p], (uint32_t)state->x[p] | ((uint32_t)state->y[p] << 16),
+                          memory_order_relaxed);
+  }
+  atomic_fetch_add_explicit(&words[0], 1u, memory_order_release);
+}

@@ -182,12 +182,42 @@ static void test_concurrent_stress(void) {
          (unsigned long long)good, (unsigned long long)retried);
 }
 
+/* Touch block: round trip, layout, count clamp, torn read. */
+static void test_touch(void) {
+  static _Alignas(8) uint8_t region[LAYOUT_INPUT_REGION_SIZE];
+  memset(region, 0, sizeof(region));
+  CHECK(INPUT_TOUCH_OFFSET + LAYOUT_INPUT_REGION_TOUCH_BYTES <= sizeof(region));
+  Input_Touch_State in, out;
+  memset(&in, 0, sizeof(in));
+  in.count = 2;
+  in.x[0] = 100; in.y[0] = 200; in.x[1] = 1279; in.y[1] = 719;
+  input_region_write_touch(region, &in);
+  const uint8_t *block = region + INPUT_TOUCH_OFFSET;
+  CHECK(le32(block + INPUT_TOUCH_OFFSET_SEQUENCE) == 2u);
+  CHECK(le32(block + INPUT_TOUCH_OFFSET_COUNT) == 2u);
+  CHECK(le32(block + INPUT_TOUCH_OFFSET_POINTS) == (100u | (200u << 16)));
+  memset(&out, 0, sizeof(out));
+  CHECK(input_region_read_touch(region, &out));
+  CHECK(out.count == 2 && out.x[0] == 100 && out.y[0] == 200 && out.x[1] == 1279 && out.y[1] == 719);
+  /* The slots are untouched by the touch writer. */
+  for (uint32_t i = 0; i < INPUT_TOUCH_OFFSET; i++) CHECK(region[i] == 0);
+  /* A count beyond INPUT_TOUCH_MAX reads clamped. */
+  region[INPUT_TOUCH_OFFSET + INPUT_TOUCH_OFFSET_COUNT] = 9;
+  CHECK(input_region_read_touch(region, &out) && out.count == INPUT_TOUCH_MAX);
+  /* Odd sequence (writer mid-update): fails, out untouched. */
+  region[INPUT_TOUCH_OFFSET + INPUT_TOUCH_OFFSET_SEQUENCE] = 3;
+  const Input_Touch_State before = out;
+  CHECK(!input_region_read_touch(region, &out));
+  CHECK(memcmp(&before, &out, sizeof(out)) == 0);
+}
+
 int main(int argc, char **argv) {
   CHECK(argc == 2);
   test_constants();
   test_vectors(argv[1]);
   test_slots_are_independent();
   test_torn_reads();
+  test_touch();
   test_concurrent_stress();
   printf("[input_region_test] passed\n");
   return 0;

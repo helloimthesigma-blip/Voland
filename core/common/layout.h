@@ -75,8 +75,9 @@
  * rounded up to 32 bytes/slot (§18). */
 #define LAYOUT_INPUT_REGION_MAX_CONTROLLERS ((uint64_t)8)
 #define LAYOUT_INPUT_REGION_SLOT_BYTES ((uint64_t)32)
+#define LAYOUT_INPUT_REGION_TOUCH_BYTES ((uint64_t)32) /* touch block after the slots */
 #define LAYOUT_INPUT_REGION_SIZE \
-  (LAYOUT_INPUT_REGION_MAX_CONTROLLERS * LAYOUT_INPUT_REGION_SLOT_BYTES)
+  (LAYOUT_INPUT_REGION_MAX_CONTROLLERS * LAYOUT_INPUT_REGION_SLOT_BYTES + LAYOUT_INPUT_REGION_TOUCH_BYTES)
 
 /* Trace buffer: write index + pad + capacity x 24-byte Trace_Event (§23). */
 #define LAYOUT_TRACE_BUFFER_CAPACITY ((uint64_t)65536)

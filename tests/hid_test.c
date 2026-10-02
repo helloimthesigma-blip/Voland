@@ -28,7 +28,7 @@
 
 static Emulator g_emu;
 static uint8_t g_reply[TEST_IPC_BUFFER_BYTES];
-static _Alignas(8) uint8_t g_region[INPUT_REGION_SLOT_COUNT * INPUT_REGION_SLOT_BYTES];
+static _Alignas(8) uint8_t g_region[LAYOUT_INPUT_REGION_SIZE];
 static uint64_t g_shmem_gva;
 static uint64_t g_ticks;
 
@@ -292,6 +292,61 @@ static void test_shared_memory_and_npads(void) {
   CHECK(rd32(npad_gva(HID_NPAD_HANDHELD_INDEX) + HID_NPAD_STYLE_SET) == HID_STYLE_HANDHELD);
 }
 
+/* The touch-screen LIFO (HidTouchScreenLifo @0x400) as libnx reads it. */
+static uint64_t touch_latest(void) {
+  const uint64_t lifo = g_shmem_gva + HID_TOUCH_SECTION_OFFSET;
+  CHECK(rd64(lifo + HID_LIFO_HEADER_BUFFER_COUNT) == HID_LIFO_ENTRIES);
+  const uint64_t tail = rd64(lifo + HID_LIFO_HEADER_TAIL);
+  CHECK(tail < HID_LIFO_ENTRIES);
+  return lifo + HID_LIFO_STORAGE_OFFSET + tail * HID_TOUCH_STORAGE_BYTES + 8u; /* the HidTouchScreenState */
+}
+
+static void set_touch(uint32_t count, uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
+  Input_Touch_State t;
+  memset(&t, 0, sizeof(t));
+  t.count = count;
+  t.x[0] = x0; t.y[0] = y0; t.x[1] = x1; t.y[1] = y1;
+  input_region_write_touch(g_region, &t);
+}
+
+static void test_touch_screen(void) {
+  set_touch(1, 640, 360, 0, 0);
+  sample();
+  uint64_t state = touch_latest();
+  const uint64_t first_sampling = rd64(state);
+  CHECK(rd32(state + 8) == 1);
+  uint64_t point = state + HID_TOUCH_POINTS_OFFSET;
+  CHECK(rd32(point + 0x08) == HID_TOUCH_ATTRIBUTE_START);
+  const uint32_t finger = rd32(point + 0x0C);
+  CHECK(rd32(point + 0x10) == 640 && rd32(point + 0x14) == 360);
+  CHECK(rd32(point + 0x18) == HID_TOUCH_DIAMETER);
+
+  /* Held and moved: same finger, no Start; a second finger starts. */
+  set_touch(2, 650, 370, 10, 20);
+  sample();
+  state = touch_latest();
+  CHECK(rd64(state) == first_sampling + 1);
+  CHECK(rd32(state + 8) == 2);
+  point = state + HID_TOUCH_POINTS_OFFSET;
+  CHECK(rd32(point + 0x08) == 0 && rd32(point + 0x0C) == finger);
+  CHECK(rd32(point + 0x10) == 650 && rd32(point + 0x14) == 370);
+  point += HID_TOUCH_POINT_BYTES;
+  CHECK(rd32(point + 0x08) == HID_TOUCH_ATTRIBUTE_START && rd32(point + 0x0C) != finger);
+  CHECK(rd32(point + 0x10) == 10 && rd32(point + 0x14) == 20);
+
+  /* Released: zero points; a new touch gets a new finger id. */
+  set_touch(0, 0, 0, 0, 0);
+  sample();
+  CHECK(rd32(touch_latest() + 8) == 0);
+  set_touch(1, 1, 2, 0, 0);
+  sample();
+  point = touch_latest() + HID_TOUCH_POINTS_OFFSET;
+  CHECK(rd32(point + 0x08) == HID_TOUCH_ATTRIBUTE_START && rd32(point + 0x0C) != finger);
+  /* Every sample (the npad test's too) pushed an entry: the LIFO is full. */
+  CHECK(rd64(g_shmem_gva + HID_TOUCH_SECTION_OFFSET + HID_LIFO_HEADER_COUNT) == HID_LIFO_ENTRIES);
+  set_touch(0, 0, 0, 0, 0);
+}
+
 static void test_misc_commands(void) {
   const uint32_t hid = get_service("hid");
   const struct { uint32_t id, pad; uint64_t aruid; } led = {2, 0, 0};
@@ -315,6 +370,7 @@ static void test_misc_commands(void) {
 int main(void) {
   ipc_fixture_boot(&g_emu);
   test_shared_memory_and_npads();
+  test_touch_screen();
   test_misc_commands();
   /* Unload releases everything; a reload starts clean. */
   emulator_unload_program(&g_emu);

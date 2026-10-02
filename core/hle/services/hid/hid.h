@@ -32,9 +32,15 @@
  * support Handheld, slot 0 drives the Handheld entry instead. Stick
  * direction bits (HidNpadButton 16-23) are derived from the sticks.
  *
- * Scope, stated: touch screen, mouse, keyboard, gestures, six-axis and
- * vibration are accepted and inert (their LIFOs stay empty; vibration
- * values are dropped). Home/Capture go to the applet layer, not here.
+ * Touch screen (HidTouchScreenLifo @0x400: header, 17 storages of 0x298
+ * {sampling_number, HidTouchScreenState {sampling_number, count,
+ * reserved, HidTouchState[16] of 0x28}}) is fed from the input region's
+ * touch block at the same 200Hz: a point that just went down carries the
+ * Start attribute and a fresh finger id.
+ *
+ * Scope, stated: mouse, keyboard, gestures, six-axis and vibration are
+ * accepted and inert (their LIFOs stay empty; vibration values are
+ * dropped). Home/Capture go to the applet layer, not here.
  */
 #ifndef SWITCH_HLE_SERVICES_HID_HID_H
 #define SWITCH_HLE_SERVICES_HID_HID_H
@@ -55,6 +61,14 @@
 #define HID_NPAD_ID_OTHER 0x10u
 #define HID_LIFO_ENTRIES 17u
 #define HID_TICKS_PER_SAMPLE 96000u  /* 19.2MHz / 200Hz */
+#define HID_TOUCH_SECTION_OFFSET 0x400u
+#define HID_TOUCH_STORAGE_BYTES 0x298u
+#define HID_TOUCH_STATE_BYTES 0x290u
+#define HID_TOUCH_POINT_BYTES 0x28u
+#define HID_TOUCH_POINTS_OFFSET 0x10u /* within a HidTouchScreenState */
+#define HID_TOUCH_ATTRIBUTE_START (1u << 0)
+#define HID_TOUCH_ATTRIBUTE_END (1u << 1)
+#define HID_TOUCH_DIAMETER 15u
 
 /* Shared-memory layout (see above). */
 #define HID_NPAD_SECTION_OFFSET 0x9A00u
@@ -131,6 +145,11 @@ typedef struct Hid_State {
   uint64_t last_sample_ticks;
   bool sampled_once;
   Hid_Npad npads[HID_NPAD_COUNT];
+  /* touch screen LIFO */
+  uint32_t touch_tail, touch_count;
+  uint32_t touch_down;                  /* points down at the last sample */
+  uint32_t finger_ids[2];
+  uint32_t next_finger_id;
 } Hid_State;
 
 /* Resets the state and initializes the interfaces. */

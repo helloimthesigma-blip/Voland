@@ -1839,6 +1839,10 @@ INPUT_REGION_BASE: per controller slot (×8):
   +4    buttons bitmask  (u32)
   +8    axes             (8 × i16)
   +24   flags            (u32: connected, profile id)
+then the touch block (v3.55), same seqlock:
+  +0    sequence (u32, atomic)
+  +4    count    (u32, 0..2)
+  +8    points   (2 × {u16 x, u16 y}, 1280x720 screen space)
 ```
 
 - **Main thread (writer), each rAF:** bump sequence to odd → write payload → bump to even (release ordering).
@@ -2421,9 +2425,14 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.54.0*
+*Document version: 3.55.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.54 → v3.55 (summary)
+
+- **Touch screen (§18).** The input region grows a 32-byte touch block after the eight slots (`LAYOUT_INPUT_REGION_TOUCH_BYTES`; same seqlock: sequence, count 0..2, packed u16 x|y per point in 1280x720 space; `input_region_read_touch` / `_write_touch`). hid's shared-memory writer pushes one HidTouchScreenLifo entry (@0x400, 17 storages of 0x298) per 200Hz sample: a point that just went down gets the Start attribute and a fresh finger id; a torn read skips the sample. The web shell maps primary-button pointer presses on the screen canvas (pointer capture, `touch-action: none`, the 16:9 letterbox excluded) into the block every frame - mouse and real touch alike.
+- **Tests:** `input_region_test` (touch round trip, clamp, torn read), `hid_test` (Start/finger ids/held/release/LIFO fill, read through the guest mapping), unit `input-region.test.ts` (touch bytes, letterbox mapping).
 
 ### Changelog v3.53 → v3.54 (summary)
 
@@ -2530,8 +2539,9 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 ### Changelog v3.37 → v3.38 (summary)
 
 - **Shared memory** (`hle/kernel/shared_memory.{h,c}`): a pooled kernel object owning a run of guest physical pages, reference counted by handles plus its creating service; the last release frees the pages. SVCs MapSharedMemory 0x13 (W0 handle, X1 addr, X2 size, W3 perm) and UnmapSharedMemory 0x14: the view must be page-aligned, exactly the object's size, inside the ASLR region and outside heap/alias/stack (where libnx's `virtmemFindAslr` puts it), and match the object's remote permission; one view per object, tracked in `Process.shared_mappings` (QueryMemory reports MemType_SharedMem 0x06; teardown unmaps). CloseHandle releases shared-memory references. Services write the block through new `vmm_{read,write,fill}_physical()` - kernel-owned physical access, so updates land whether or not (and wherever) the guest has mapped it; §5's "HLE uses vmm only" rule holds.
-- **hid** (`hle/services/hid/hid.{h,c}`), registered as `hid`: CreateAppletResource -> IAppletResource GetSharedMemoryHandle (the 0x40000-byte HidSharedMemory), SetSupportedNpadStyleSet/Get, SetSupportedNpadIdType (X buffer), ActivateNpad(+WithRevision), AcquireNpadStyleSetUpdateEventHandle (signalled on acquire and on every style change), GetPlayerLedPattern, joy hold / handheld activation / communication mode get+set, GetVibrationDeviceInfo, CreateActiveVibrationDeviceList, and named `_stub`s for touch/mouse/keyboard/gesture/six-axis/vibration commands (§12 allowlist). **The shared-memory writer** samples the §18 input region at 200Hz of virtual time: input slot i drives npad No(i+1) in the title's preferred supported style (FullKey first; a handheld-only title gets slot 0 as the Handheld npad), each of the npad's seven common LIFOs advances in step (17 entries, consecutive sampling numbers, `tail` = newest - libnx `_hidGetStates` semantics), and style set, device type, colors, system properties and battery are rewritten on change. Stick-direction button bits are derived at half deflection. Offsets come from libnx's public `hid.h` structs (compiled offsetof shim). Test: `tests/hid_test.c` over real IPC and SVCs (handle refcounts, every Map/Unmap error path, QueryMemory type, read-only view, style negotiation, LIFO wraparound read exactly as libnx reads it, 200Hz gating, disconnect, handheld-only titles, unsupported ids, unmap/close/re-map, unload).
-- **Scope, stated:** touch screen, mouse, keyboard, gesture and six-axis LIFOs stay empty; vibration is dropped; Home/Capture are not npad buttons (they belong to the applet layer). §25's Phase 4 hid item is checked: N independent npads with style bits are what same-console multiplayer (§20) needs.
+- **hid** (`hle/services/hid/hid.{h,c}`), registered as `hid`: CreateAppletResource -> IAppletResource GetSharedMemoryHandle (the 0x40000-byte HidSharedMemory), SetSupportedNpadStyleSet/Get, SetSupportedNpadIdType (X buffer), ActivateNpad(+WithRevision), AcquireNpadStyleSetUpdateEventHandle (signalled on acquire and on every style change), GetPlayerLedPattern, joy hold / handheld activation / communication mode get+set, GetVibrationDeviceInfo, CreateActiveVibrationDeviceList, and named `_stub`s for mouse/keyboard/gesture/six-axis/vibration commands (§12 allowlist). **The shared-memory writer** samples the §18 input region at 200Hz of virtual time: input slot i drives npad No(i+1) in the title's preferred supported style (FullKey first; a handheld-only title gets slot 0 as the Handheld npad), each of the npad's seven common LIFOs advances in step (17 entries, consecutive sampling numbers, `tail` = newest - libnx `_hidGetStates` semantics), and style set, device type, colors, system properties and battery are rewritten on change. Stick-direction button bits are derived at half deflection. Offsets come from libnx's public `hid.h` structs (compiled offsetof shim). Test: `tests/hid_test.c` over real IPC and SVCs (handle refcounts, every Map/Unmap error path, QueryMemory type, read-only view, style negotiation, LIFO wraparound read exactly as libnx reads it, 200Hz gating, disconnect, handheld-only titles, unsupported ids, unmap/close/re-map, unload).
+- **Touch screen (v3.55):** the input region's touch block feeds the HidTouchScreenLifo at the same 200Hz (Start attribute on new points, stable finger ids while held).
+- **Scope, stated:** mouse, keyboard, gesture and six-axis LIFOs stay empty; vibration is dropped; Home/Capture are not npad buttons (they belong to the applet layer). §25's Phase 4 hid item is checked: N independent npads with style bits are what same-console multiplayer (§20) needs.
 
 ### Changelog v3.36 → v3.37 (summary)
 

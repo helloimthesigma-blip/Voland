@@ -181,6 +181,45 @@ static void push_sample(HLE_Context *c, Hid_State *s, uint32_t index, const Inpu
   npad->count = count;
 }
 
+/* One touch-screen sample from the input region's touch block. */
+static void push_touch(HLE_Context *c, Hid_State *s, const Input_Touch_State *touch) {
+  const uint64_t base = s->shared_memory->guest_pa + HID_TOUCH_SECTION_OFFSET;
+  const uint32_t tail = (s->touch_tail + 1u) % HID_LIFO_ENTRIES;
+  const uint32_t count = s->touch_count < HID_LIFO_ENTRIES ? s->touch_count + 1u : HID_LIFO_ENTRIES;
+  uint8_t storage[HID_TOUCH_STORAGE_BYTES];
+  memset(storage, 0, sizeof(storage));
+  wr64(storage, s->sampling_number);
+  uint8_t *state = storage + 8u;
+  wr64(state, s->sampling_number);
+  const uint32_t points = touch ? touch->count : 0u;
+  memcpy(state + 8u, &points, 4);
+  for (uint32_t p = 0; p < points && p < 2u; p++) {
+    uint8_t *point = state + HID_TOUCH_POINTS_OFFSET + p * HID_TOUCH_POINT_BYTES;
+    uint32_t attributes = 0;
+    if (p >= s->touch_down) { /* newly down */
+      s->finger_ids[p] = s->next_finger_id++;
+      attributes |= HID_TOUCH_ATTRIBUTE_START;
+    }
+    const uint32_t x = touch->x[p], y = touch->y[p], diameter = HID_TOUCH_DIAMETER;
+    memcpy(point + 0x08, &attributes, 4);
+    memcpy(point + 0x0C, &s->finger_ids[p], 4);
+    memcpy(point + 0x10, &x, 4);
+    memcpy(point + 0x14, &y, 4);
+    memcpy(point + 0x18, &diameter, 4);
+    memcpy(point + 0x1C, &diameter, 4);
+  }
+  s->touch_down = points;
+  (void)vmm_write_physical(c->vmm, base + HID_LIFO_STORAGE_OFFSET + (uint64_t)tail * HID_TOUCH_STORAGE_BYTES, storage,
+                           sizeof(storage));
+  uint8_t header[0x18];
+  wr64(header, HID_LIFO_ENTRIES);
+  wr64(header + 0x8, tail);
+  wr64(header + 0x10, count);
+  (void)vmm_write_physical(c->vmm, base + HID_LIFO_HEADER_BUFFER_COUNT, header, sizeof(header));
+  s->touch_tail = tail;
+  s->touch_count = count;
+}
+
 void hid_update(Hid_State *s, HLE_Context *c, const void *input_region, uint64_t now_ticks) {
   if (!s->shared_memory) return;
   if (s->sampled_once && now_ticks - s->last_sample_ticks < HID_TICKS_PER_SAMPLE) return;
@@ -219,6 +258,10 @@ void hid_update(Hid_State *s, HLE_Context *c, const void *input_region, uint64_t
     }
     push_sample(c, s, i, has_input[i] ? &inputs[i] : NULL);
   }
+  Input_Touch_State touch;
+  memset(&touch, 0, sizeof(touch));
+  /* A torn read skips this sample rather than reporting a release. */
+  if (!input_region || input_region_read_touch(input_region, &touch)) push_touch(c, s, &touch);
 }
 
 /* ------------------------------------------------------------------ */

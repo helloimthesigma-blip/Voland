@@ -11,13 +11,15 @@ import { fileURLToPath } from "node:url";
 import {
   DISCONNECTED,
   INPUT_REGION_SLOT_BYTES,
+  INPUT_REGION_SLOT_COUNT,
+  INPUT_TOUCH_MAX,
   InputButton,
   InputDeviceKind,
   createInputRegionWriter,
 } from "../../src/input/input-region.ts";
 import { type GamepadLike, mapStandardGamepad, toStickUnits } from "../../src/input/gamepad-mapping.ts";
 import { KEYBOARD_PROFILE_ID, mapKeyboard } from "../../src/input/keyboard-mapping.ts";
-import { collectSlotStates } from "../../src/input/input-loop.ts";
+import { collectSlotStates, mapPointerToTouch } from "../../src/input/input-loop.ts";
 
 const VECTORS = fileURLToPath(new URL("../../../../tests/data/input_region_vectors.txt", import.meta.url));
 const REGION_BASE = 256;
@@ -116,4 +118,35 @@ test("slot policy: gamepads by index, keyboard on slot 0 only when free", () => 
   assert.equal(inactive[0]?.connected, false);
   assert.equal(inactive[1]?.connected, true);
   assert.equal(inactive.length, 8);
+});
+
+test("touch block: seqlock, count, packed points, clamped", () => {
+  const buffer = sharedBuffer();
+  const writer = createInputRegionWriter(buffer, REGION_BASE);
+  const touchBase = REGION_BASE + INPUT_REGION_SLOT_COUNT * INPUT_REGION_SLOT_BYTES;
+  const view = new DataView(buffer);
+  writer.writeTouch([{ x: 100, y: 200 }, { x: 5000, y: -3 }, { x: 1, y: 1 }]);
+  assert.equal(view.getUint32(touchBase, true), 2); // two increments: published
+  assert.equal(view.getUint32(touchBase + 4, true), INPUT_TOUCH_MAX);
+  assert.equal(view.getUint32(touchBase + 8, true), 100 | (200 << 16));
+  assert.equal(view.getUint16(touchBase + 12, true), 1279);
+  assert.equal(view.getUint16(touchBase + 14, true), 0);
+  writer.writeTouch([]);
+  assert.equal(view.getUint32(touchBase, true), 4);
+  assert.equal(view.getUint32(touchBase + 4, true), 0);
+  assert.equal(view.getUint32(touchBase + 8, true), 0);
+  // The slots are not touched by the touch writer.
+  assert.equal(view.getUint32(REGION_BASE, true), 0);
+});
+
+test("pointer mapping honours the 16:9 letterbox", () => {
+  const exact = { left: 10, top: 20, width: 640, height: 360 };
+  assert.deepEqual(mapPointerToTouch(10, 20, exact), { x: 0, y: 0 });
+  assert.deepEqual(mapPointerToTouch(330, 200, exact), { x: 640, y: 360 });
+  assert.equal(mapPointerToTouch(650, 200, exact), null);
+  // A 4:3 box: bars top and bottom.
+  const tall = { left: 0, top: 0, width: 1280, height: 960 };
+  assert.equal(mapPointerToTouch(640, 100, tall), null);
+  assert.deepEqual(mapPointerToTouch(640, 120, tall), { x: 640, y: 0 });
+  assert.equal(mapPointerToTouch(0, 0, { left: 0, top: 0, width: 0, height: 0 }), null);
 });
