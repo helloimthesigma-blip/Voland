@@ -16,6 +16,7 @@
 #include "hle/loader/byte_source.h"
 
 #include <stddef.h>
+#include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
 
@@ -52,6 +53,8 @@ EXPORT void emulator_set_shared_font_ffi(uint64_t bytes, uint32_t size);
 EXPORT int emulator_sd_write_file_ffi(uint64_t path, uint64_t bytes, uint64_t size);
 EXPORT int emulator_sd_clear_ffi(void);
 EXPORT double emulator_sd_generation_ffi(void);
+EXPORT int emulator_text_request_ffi(uint64_t out, double max);
+EXPORT void emulator_text_respond_ffi(uint64_t text, int accepted);
 EXPORT double emulator_sd_manifest_ffi(uint64_t out, double max);
 EXPORT double emulator_sd_read_file_ffi(uint64_t path, uint64_t out, double max);
 
@@ -312,6 +315,26 @@ EXPORT double emulator_sd_read_file_ffi(uint64_t path, uint64_t out, double max)
   if (!g_initialised || !path) return -1.0;
   return (double)emulator_sd_card_read_file(&g_emulator, (const char *)(uintptr_t)path, (void *)(uintptr_t)out,
                                             (uint64_t)max);
+}
+
+/* Software keyboard: writes the pending request as UTF-8 fields joined by
+ * U+001F (header, sub, guide, initial, max length, min length, password)
+ * and returns 1, or returns 0 when nothing is pending. */
+EXPORT int emulator_text_request_ffi(uint64_t out, double max)
+{
+  if (!g_initialised) return 0;
+  static Am_Text_Request request;
+  if (!emulator_text_request(&g_emulator, &request)) return 0;
+  if (out && max > 0) {
+    snprintf((char *)(uintptr_t)out, (size_t)max, "%s\x1f%s\x1f%s\x1f%s\x1f%u\x1f%u\x1f%u", request.header, request.sub,
+             request.guide, request.initial, request.max_length, request.min_length, request.password ? 1u : 0u);
+  }
+  return 1;
+}
+
+EXPORT void emulator_text_respond_ffi(uint64_t text, int accepted)
+{
+  if (g_initialised) emulator_text_respond(&g_emulator, text ? (const char *)(uintptr_t)text : "", accepted != 0);
 }
 
 /* Empties the SD card; returns a Result code. */

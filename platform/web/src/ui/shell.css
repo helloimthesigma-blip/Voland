@@ -241,3 +241,25 @@
 .voland-controls dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 [data-voland-screen]:fullscreen { background: #000; display: flex; align-items: center; justify-content: center; }
 [data-voland-screen]:fullscreen canvas { width: 100vw; height: 100vh; object-fit: contain; }
+
+.voland-dialog-backdrop {
+  position: fixed; inset: 0; background: rgba(5, 6, 12, 0.6); display: flex;
+  align-items: center; justify-content: center; z-index: 100;
+}
+.voland-dialog {
+  background: #171a2b; border: 1px solid #343a5a; border-radius: 10px; padding: 18px 20px;
+  width: min(440px, calc(100vw - 32px)); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.voland-dialog h3 { margin: 0 0 6px; font-size: 16px; }
+.voland-dialog-sub { margin: 0 0 10px; color: #9da3c0; font-size: 13px; }
+.voland-dialog input {
+  width: 100%; box-sizing: border-box; background: #0f1120; color: #e6e6ea; border: 1px solid #3a3f5c;
+  border-radius: 6px; padding: 8px 10px; font: inherit; font-size: 15px;
+}
+.voland-dialog-buttons { display: flex; justify-content: flex-end; gap: 8px; margin-top: 14px; }
+.voland-dialog-buttons button {
+  background: #23263a; color: #e6e6ea; border: 1px solid #3a3f5c; border-radius: 6px; padding: 6px 14px;
+  font: inherit; cursor: pointer;
+}
+.voland-dialog-buttons button[type="submit"] { background: #2f4bd1; border-color: #3e5bea; }
+.voland-dialog-buttons button:disabled { opacity: 0.5; cursor: default; }

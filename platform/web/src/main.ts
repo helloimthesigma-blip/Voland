@@ -18,6 +18,7 @@ import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
 import { PUBLISH_INDEX } from "@bindings/framebuffer";
 import { appendGuestOutput, resetGuestConsole, setGuestFps, setGuestRunState } from "./guest-console";
+import { clearTextInput, showTextInput } from "./text-input-store";
 import { startAudioOutput } from "./audio/audio-output";
 import { startInputLoop } from "./input/input-loop";
 import { appendLogLine, setStatus } from "./log";
@@ -132,6 +133,7 @@ interface BootResult {
   readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard:  () => Promise<SdImportOutcome>;
   readonly setPaused:    (paused: boolean) => void;
+  readonly respondText:  (text: string, accepted: boolean) => void;
 }
 
 async function boot(): Promise<BootResult | null> {
@@ -237,6 +239,8 @@ async function boot(): Promise<BootResult | null> {
         pendingLoad = null;
       } else if (msg.type === "guest-output") {
         appendGuestOutput(msg.text);
+      } else if (msg.type === "text-input-request") {
+        showTextInput(msg.request);
       } else if (msg.type === "run-state") {
         appendLogLine(msg.state === "crashed" ? "error" : "info", `guest ${msg.state}${msg.detail ? `: ${msg.detail}` : ""}`);
         setGuestRunState(msg.state, msg.detail);
@@ -354,6 +358,11 @@ async function boot(): Promise<BootResult | null> {
     });
   }
 
+  function respondText(text: string, accepted: boolean): void {
+    clearTextInput();
+    cpuWorker.postMessage({ type: "text-input-response", text, accepted } satisfies MainToCPUMessage);
+  }
+
   function setPaused(paused: boolean): void {
     cpuWorker.postMessage((paused ? { type: "pause" } : { type: "resume" }) satisfies MainToCPUMessage);
   }
@@ -374,6 +383,7 @@ async function boot(): Promise<BootResult | null> {
     addToSdCard,
     clearSdCard,
     setPaused,
+    respondText,
   };
 }
 

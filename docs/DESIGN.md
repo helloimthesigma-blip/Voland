@@ -2421,9 +2421,16 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.53.0*
+*Document version: 3.54.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.53 → v3.54 (summary)
+
+- **Library applets (§12, part of the §25 Phase 6 "controller applet + swkbd overlays" item).** Storages a title pushes (PushInData / PushExtraStorage / PushInteractiveInData, CMIF input objects resolved by the new `ipc_request_in_object`) stay with the applet; ILibraryAppletCreator gains CreateTransferMemoryStorage / CreateHandleStorage (storages over guest transfer memory); the accessor gains GetResult, PopOutData, GetPopOutDataEvent and GetPopInteractiveOutDataEvent. The **software keyboard** (0x11) parses SwkbdArgCommon (header / sub / guide text, initial text from the work buffer, length limits, password flag) into a pending request the host answers (`emulator_text_request` / `emulator_text_respond`; FFI `_emulator_text_request_ffi` / `_respond_ffi`); the reply is the keyboard's output storage {u32 close result, UTF-16 text}. Controller support returns one handheld player, player select the local user; other applets complete at once.
+- **Web shell:** a text-entry dialog (`text-input-request` / `text-input-response`, lifecycle messages - rare and player-paced, §16) with OK / Cancel / Escape, password masking and length limits; pause/resume, fullscreen and a controls legend generated from the keyboard profile.
+- **CLI:** `--swkbd TEXT` / `--swkbd-cancel` answer keyboard prompts headlessly (default: accept the prompt's initial text).
+- **Tests:** `services_test` drives the keyboard applet over a domain session end to end; unit `text-input.test.ts`, `controls.test.ts`; e2e `controls.spec.ts`.
 
 ### Changelog v3.52 → v3.53 (summary)
 

@@ -684,3 +684,11 @@ const Service_Interface *ipc_find_named_port(const HLE_Context *context, const c
   if (strcmp(name, SM_PORT_NAME) == 0) return &context->sm->interface;
   return NULL;
 }
+
+Service_Object *ipc_request_in_object(Service_Object *self, const IPC_Request *request, uint32_t index) {
+  if (!self || !request || !request->is_domain_message || index >= request->in_object_count) return NULL;
+  const uint32_t self_id = request->domain_object_id, id = request->in_objects[index];
+  if (self_id == 0 || self_id > IPC_DOMAIN_MAX_OBJECTS || id == 0 || id > IPC_DOMAIN_MAX_OBJECTS) return NULL;
+  Service_Object *object = self - (self_id - 1u) + (id - 1u);
+  return object->interface ? object : NULL;
+}

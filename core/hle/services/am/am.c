@@ -9,6 +9,8 @@
 #include "hle/services/service_util.h"
 #include "hle/services/acc/acc.h"
 #include "hle/services/set/set.h"
+#include "hle/kernel/handle_table.h"
+#include "hle/kernel/transfer_memory.h"
 
 #define AM_DISPLAY_VERSION_BYTES 0x10u
 #define AM_PSEUDO_DEVICE_ID_BYTES 0x10u
@@ -276,6 +278,9 @@ static uint64_t storage_alloc(Am_State *s, uint64_t size) {
   for (uint32_t i = 0; i < AM_STORAGE_CAPACITY; i++) {
     if (s->storages[i].in_use || !s->storages[i].data) continue;
     s->storages[i].in_use = true;
+    s->storages[i].retained = false;
+    s->storages[i].tmem_address = 0;
+    s->storages[i].tmem_size = 0;
     s->storages[i].size = (uint32_t)size;
     memset(s->storages[i].data, 0, AM_STORAGE_MAX_BYTES);
     return i;
@@ -287,7 +292,19 @@ static uint64_t storage_alloc(Am_State *s, uint64_t size) {
  * when the IStorage closes (accessors close first in practice). */
 static void storage_on_close(void *service_state, uint64_t object_state) {
   Am_State *s = (Am_State *)service_state;
-  if (object_state < AM_STORAGE_CAPACITY) s->storages[object_state].in_use = false;
+  if (object_state < AM_STORAGE_CAPACITY && !s->storages[object_state].retained) s->storages[object_state].in_use = false;
+}
+
+static uint64_t storage_size(const Am_Storage *storage) {
+  return storage->tmem_address ? storage->tmem_size : storage->size;
+}
+
+/* Copies storage bytes out (host side). Returns false out of range. */
+static bool storage_read(HLE_Context *c, const Am_Storage *storage, uint64_t offset, void *out, uint64_t size) {
+  if (offset > storage_size(storage) || size > storage_size(storage) - offset) return false;
+  if (storage->tmem_address) return error_is_ok(vmm_read_block(c->vmm, storage->tmem_address + offset, out, size));
+  memcpy(out, storage->data + offset, (size_t)size);
+  return true;
 }
 
 static HLE_ServiceResult cmd_create_storage(HLE_Context *c, Service_Object *self, const IPC_Request *req,
@@ -303,6 +320,36 @@ static HLE_ServiceResult cmd_create_storage(HLE_Context *c, Service_Object *self
   }
   (void)ipc_response_push_object(res, &s->storage, index);
   return HLE_RESULT_SUCCESS;
+}
+
+/* CreateTransferMemoryStorage {u8 writable, pad, u64 size} / CreateHandle-
+ * Storage {u64 size} + the transfer memory's handle: a storage whose bytes
+ * stay in guest memory. */
+static HLE_ServiceResult create_tmem_storage(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                             IPC_Response *res, uint32_t size_offset) {
+  Am_State *s = state_of(self);
+  uint64_t size = 0;
+  if (!error_is_ok(ipc_request_read_u64(req, size_offset, &size))) return IPC_RESULT_SF_INVALID_IN_HEADER;
+  if (req->copy_handle_count < 1u) return HLE_RESULT_INVALID_HANDLE;
+  const Kernel_Transfer_Memory *tmem = (const Kernel_Transfer_Memory *)handle_table_get(
+      &c->process->handles, req->copy_handles[0], KERNEL_OBJECT_TRANSFER_MEMORY);
+  if (!tmem) return HLE_RESULT_INVALID_HANDLE;
+  const uint64_t index = storage_alloc(s, 0);
+  if (index == AM_NO_STORAGE) return HLE_RESULT_OUT_OF_MEMORY;
+  s->storages[index].tmem_address = tmem->address;
+  s->storages[index].tmem_size = size < tmem->size ? size : tmem->size;
+  (void)ipc_response_push_object(res, &s->storage, index);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_create_tmem_storage(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                                 IPC_Response *res) {
+  return create_tmem_storage(c, self, req, res, 8);
+}
+
+static HLE_ServiceResult cmd_create_handle_storage(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                                   IPC_Response *res) {
+  return create_tmem_storage(c, self, req, res, 0);
 }
 
 static HLE_ServiceResult cmd_storage_open(HLE_Context *c, Service_Object *self, const IPC_Request *req,
@@ -321,7 +368,7 @@ static HLE_ServiceResult cmd_storage_get_size(HLE_Context *c, Service_Object *se
   (void)req;
   const Am_Storage *storage = storage_of(state_of(self), self->state);
   if (!storage) return HLE_RESULT_INVALID_STATE;
-  (void)ipc_response_push_u64(res, storage->size);
+  (void)ipc_response_push_u64(res, storage_size(storage));
   return HLE_RESULT_SUCCESS;
 }
 
@@ -332,7 +379,20 @@ static HLE_ServiceResult storage_io(HLE_Context *c, Service_Object *self, const 
   if (!error_is_ok(ipc_request_read_u64(req, 0, &offset))) return IPC_RESULT_SF_INVALID_IN_HEADER;
   const IPC_Buffer *buf = write ? service_in_buffer(req, 0) : service_out_buffer(req, 0);
   if (!buf) return HLE_RESULT_SUCCESS;
-  if (offset > storage->size || buf->size > storage->size - offset) return AM_RESULT_OUT_OF_BOUNDS;
+  if (offset > storage_size(storage) || buf->size > storage_size(storage) - offset) return AM_RESULT_OUT_OF_BOUNDS;
+  if (storage->tmem_address) {
+    /* Guest memory to guest memory, through a small bounce buffer. */
+    uint8_t bounce[0x400];
+    for (uint64_t done = 0; done < buf->size;) {
+      const uint64_t n = buf->size - done < sizeof(bounce) ? buf->size - done : sizeof(bounce);
+      const uint64_t from = write ? buf->gva + done : storage->tmem_address + offset + done;
+      const uint64_t to = write ? storage->tmem_address + offset + done : buf->gva + done;
+      if (!error_is_ok(vmm_read_block(c->vmm, from, bounce, n)) || !error_is_ok(vmm_write_block(c->vmm, to, bounce, n)))
+        return HLE_RESULT_INVALID_POINTER;
+      done += n;
+    }
+    return HLE_RESULT_SUCCESS;
+  }
   const Error err = write ? vmm_read_block(c->vmm, buf->gva, storage->data + offset, buf->size)
                           : vmm_write_block(c->vmm, buf->gva, storage->data + offset, buf->size);
   return error_is_ok(err) ? HLE_RESULT_SUCCESS : HLE_RESULT_INVALID_POINTER;
@@ -351,7 +411,7 @@ static HLE_ServiceResult cmd_storage_read(HLE_Context *c, Service_Object *self, 
 }
 
 /* ------------------------------------------------------------------ */
-/* Library applets: start, complete at once, no output.                */
+/* Library applets.                                                    */
 /* ------------------------------------------------------------------ */
 
 static Am_Applet *applet_of(Am_State *s, uint64_t index) {
@@ -359,12 +419,174 @@ static Am_Applet *applet_of(Am_State *s, uint64_t index) {
   return &s->applets[index];
 }
 
+static void release_storage(Am_State *s, uint32_t index) {
+  if (index < AM_STORAGE_CAPACITY) {
+    s->storages[index].retained = false;
+    s->storages[index].in_use = false;
+  }
+}
+
 static void applet_on_close(void *service_state, uint64_t object_state) {
   Am_State *s = (Am_State *)service_state;
   Am_Applet *applet = applet_of(s, object_state);
   if (!applet) return;
+  for (uint32_t i = 0; i < applet->in_count; i++) release_storage(s, applet->in[i]);
+  for (uint32_t i = 0; i < applet->out_count; i++) release_storage(s, applet->out[(applet->out_head + i) % AM_APPLET_STORAGES]);
+  if (s->text_request.pending && s->text_request.applet == object_state) s->text_request.pending = false;
   event_release(applet->state_event);
+  event_release(applet->out_event);
+  event_release(applet->interactive_out_event);
   memset(applet, 0, sizeof(*applet));
+}
+
+/* Queues `size` bytes as an output storage of `applet`. */
+static bool applet_push_out(Am_State *s, HLE_Context *c, Am_Applet *applet, const void *data, uint32_t size) {
+  if (applet->out_count >= AM_APPLET_STORAGES) return false;
+  const uint64_t index = storage_alloc(s, size);
+  if (index == AM_NO_STORAGE) return false;
+  memcpy(s->storages[index].data, data, size);
+  s->storages[index].retained = true;
+  applet->out[(applet->out_head + applet->out_count) % AM_APPLET_STORAGES] = (uint32_t)index;
+  applet->out_count++;
+  if (applet->out_event) hle_signal_event(c, applet->out_event);
+  return true;
+}
+
+static void applet_complete(HLE_Context *c, Am_Applet *applet, uint32_t result) {
+  applet->completed = true;
+  applet->result = result;
+  if (applet->state_event) hle_signal_event(c, applet->state_event);
+}
+
+/* UTF-16LE (NUL-terminated within `units`) -> UTF-8. */
+static void utf16_to_utf8(const uint16_t *in, uint32_t units, char *out, uint32_t out_size) {
+  uint32_t o = 0;
+  for (uint32_t i = 0; i < units && in[i]; i++) {
+    uint32_t cp = in[i];
+    if (cp >= 0xD800u && cp < 0xDC00u && i + 1u < units && in[i + 1u] >= 0xDC00u && in[i + 1u] < 0xE000u) {
+      cp = 0x10000u + ((cp - 0xD800u) << 10) + (in[i + 1u] - 0xDC00u);
+      i++;
+    }
+    uint8_t buf[4];
+    uint32_t n;
+    if (cp < 0x80u) { buf[0] = (uint8_t)cp; n = 1; }
+    else if (cp < 0x800u) { buf[0] = (uint8_t)(0xC0u | (cp >> 6)); buf[1] = (uint8_t)(0x80u | (cp & 0x3Fu)); n = 2; }
+    else if (cp < 0x10000u) {
+      buf[0] = (uint8_t)(0xE0u | (cp >> 12)); buf[1] = (uint8_t)(0x80u | ((cp >> 6) & 0x3Fu));
+      buf[2] = (uint8_t)(0x80u | (cp & 0x3Fu)); n = 3;
+    } else {
+      buf[0] = (uint8_t)(0xF0u | (cp >> 18)); buf[1] = (uint8_t)(0x80u | ((cp >> 12) & 0x3Fu));
+      buf[2] = (uint8_t)(0x80u | ((cp >> 6) & 0x3Fu)); buf[3] = (uint8_t)(0x80u | (cp & 0x3Fu)); n = 4;
+    }
+    if (o + n + 1u > out_size) break;
+    memcpy(out + o, buf, n);
+    o += n;
+  }
+  if (out_size) out[o] = '\0';
+}
+
+/* UTF-8 -> UTF-16LE; returns code units written (no terminator). */
+static uint32_t utf8_to_utf16(const char *in, uint16_t *out, uint32_t max_units) {
+  uint32_t o = 0;
+  const uint8_t *p = (const uint8_t *)in;
+  while (*p && o < max_units) {
+    uint32_t cp, n;
+    if (*p < 0x80u) { cp = *p; n = 1; }
+    else if ((*p & 0xE0u) == 0xC0u) { cp = *p & 0x1Fu; n = 2; }
+    else if ((*p & 0xF0u) == 0xE0u) { cp = *p & 0x0Fu; n = 3; }
+    else { cp = *p & 0x07u; n = 4; }
+    for (uint32_t k = 1; k < n; k++) {
+      if ((p[k] & 0xC0u) != 0x80u) { n = k; cp = 0xFFFDu; break; }
+      cp = (cp << 6) | (p[k] & 0x3Fu);
+    }
+    p += n;
+    if (cp >= 0x10000u) {
+      if (o + 2u > max_units) break;
+      cp -= 0x10000u;
+      out[o++] = (uint16_t)(0xD800u + (cp >> 10));
+      out[o++] = (uint16_t)(0xDC00u + (cp & 0x3FFu));
+    } else {
+      out[o++] = (uint16_t)cp;
+    }
+  }
+  return o;
+}
+
+/* Software keyboard argument (SwkbdArgCommon, the prefix of every
+ * version): header/sub/guide text, length limits, password flag, and the
+ * initial text's offset/size in the work buffer. */
+#define SWKBD_HEADER_TEXT 0x3Cu
+#define SWKBD_HEADER_UNITS 65u
+#define SWKBD_SUB_TEXT 0x7Eu
+#define SWKBD_SUB_UNITS 129u
+#define SWKBD_GUIDE_TEXT 0x180u
+#define SWKBD_GUIDE_UNITS 257u
+#define SWKBD_LEN_MAX 0x3ACu
+#define SWKBD_LEN_MIN 0x3B0u
+#define SWKBD_PASSWORD 0x3B4u
+#define SWKBD_INITIAL_OFFSET 0x3C0u
+#define SWKBD_INITIAL_SIZE 0x3C4u
+#define SWKBD_ARG_MIN_BYTES 0x3C8u
+
+static void start_swkbd(Am_State *s, HLE_Context *c, Am_Applet *applet, uint32_t slot) {
+  Am_Text_Request *t = &s->text_request;
+  memset(t, 0, sizeof(*t));
+  /* in[0] = common args, in[1] = keyboard argument, in[2] = work buffer. */
+  static uint8_t arg[0x1000];
+  memset(arg, 0, sizeof(arg));
+  if (applet->in_count >= 2u) {
+    const Am_Storage *config = &s->storages[applet->in[1]];
+    const uint64_t n = storage_size(config) < sizeof(arg) ? storage_size(config) : sizeof(arg);
+    (void)storage_read(c, config, 0, arg, n);
+  }
+  uint16_t units[SWKBD_GUIDE_UNITS];
+  memcpy(units, arg + SWKBD_HEADER_TEXT, SWKBD_HEADER_UNITS * 2u);
+  utf16_to_utf8(units, SWKBD_HEADER_UNITS, t->header, sizeof(t->header));
+  memcpy(units, arg + SWKBD_SUB_TEXT, SWKBD_SUB_UNITS * 2u);
+  utf16_to_utf8(units, SWKBD_SUB_UNITS, t->sub, sizeof(t->sub));
+  memcpy(units, arg + SWKBD_GUIDE_TEXT, SWKBD_GUIDE_UNITS * 2u);
+  utf16_to_utf8(units, SWKBD_GUIDE_UNITS, t->guide, sizeof(t->guide));
+  memcpy(&t->max_length, arg + SWKBD_LEN_MAX, 4);
+  memcpy(&t->min_length, arg + SWKBD_LEN_MIN, 4);
+  uint32_t password = 0, initial_offset = 0, initial_size = 0;
+  memcpy(&password, arg + SWKBD_PASSWORD, 4);
+  memcpy(&initial_offset, arg + SWKBD_INITIAL_OFFSET, 4);
+  memcpy(&initial_size, arg + SWKBD_INITIAL_SIZE, 4);
+  t->password = password != 0;
+  if (applet->in_count >= 3u && initial_size) {
+    static uint16_t text[AM_TEXT_BYTES / 2u];
+    const uint32_t bytes = initial_size < sizeof(text) ? initial_size : (uint32_t)sizeof(text);
+    memset(text, 0, sizeof(text));
+    (void)storage_read(c, &s->storages[applet->in[2]], initial_offset, text, bytes);
+    utf16_to_utf8(text, bytes / 2u, t->initial, sizeof(t->initial));
+  }
+  t->applet = slot;
+  t->pending = true;
+  log_info("[am] software keyboard: \"%s\" (waiting for the host)", t->header[0] ? t->header : t->guide);
+}
+
+const Am_Text_Request *am_text_request(const Am_State *s) { return s->text_request.pending ? &s->text_request : NULL; }
+
+void am_text_respond(Am_State *s, HLE_Context *c, const char *utf8, bool accepted) {
+  Am_Text_Request *t = &s->text_request;
+  if (!t->pending) return;
+  t->pending = false;
+  Am_Applet *applet = applet_of(s, t->applet);
+  if (!applet) return;
+  static uint8_t out[AM_SWKBD_OUTPUT_BYTES];
+  memset(out, 0, sizeof(out));
+  const uint32_t close_result = accepted ? 0u : 1u;
+  memcpy(out, &close_result, 4);
+  if (accepted && utf8) {
+    uint32_t max_units = (AM_SWKBD_OUTPUT_BYTES - 4u) / 2u - 1u;
+    if (t->max_length && t->max_length < max_units) max_units = t->max_length;
+    uint16_t text[(AM_SWKBD_OUTPUT_BYTES - 4u) / 2u];
+    memset(text, 0, sizeof(text));
+    const uint32_t units = utf8_to_utf16(utf8, text, max_units);
+    memcpy(out + 4, text, units * 2u);
+  }
+  (void)applet_push_out(s, c, applet, out, sizeof(out));
+  applet_complete(c, applet, 0);
 }
 
 static HLE_ServiceResult cmd_create_library_applet(HLE_Context *c, Service_Object *self, const IPC_Request *req,
@@ -378,7 +600,7 @@ static HLE_ServiceResult cmd_create_library_applet(HLE_Context *c, Service_Objec
     memset(&s->applets[i], 0, sizeof(s->applets[i]));
     s->applets[i].in_use = true;
     s->applets[i].applet_id = applet_id;
-    log_info("[am] CreateLibraryApplet(0x%x): completes immediately (Phase 6 stub)", applet_id);
+    log_info("[am] CreateLibraryApplet(0x%x)", applet_id);
     (void)ipc_response_push_object(res, &s->library_applet_accessor, i);
     return HLE_RESULT_SUCCESS;
   }
@@ -391,18 +613,60 @@ static HLE_ServiceResult cmd_applet_state_event(HLE_Context *c, Service_Object *
   Am_Applet *applet = applet_of(state_of(self), self->state);
   if (!applet) return HLE_RESULT_INVALID_STATE;
   const HLE_ServiceResult result = service_push_event(c, res, &applet->state_event);
-  if (result == HLE_RESULT_SUCCESS && applet->started) hle_signal_event(c, applet->state_event);
+  if (result == HLE_RESULT_SUCCESS && applet->completed) hle_signal_event(c, applet->state_event);
   return result;
+}
+
+static HLE_ServiceResult cmd_applet_out_event(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                              IPC_Response *res) {
+  (void)req;
+  Am_Applet *applet = applet_of(state_of(self), self->state);
+  if (!applet) return HLE_RESULT_INVALID_STATE;
+  const HLE_ServiceResult result = service_push_event(c, res, &applet->out_event);
+  if (result == HLE_RESULT_SUCCESS && applet->out_count) hle_signal_event(c, applet->out_event);
+  return result;
+}
+
+static HLE_ServiceResult cmd_applet_interactive_event(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                                      IPC_Response *res) {
+  (void)req;
+  Am_Applet *applet = applet_of(state_of(self), self->state);
+  if (!applet) return HLE_RESULT_INVALID_STATE;
+  return service_push_event(c, res, &applet->interactive_out_event);
 }
 
 static HLE_ServiceResult cmd_applet_start(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                           IPC_Response *res) {
   (void)req;
   (void)res;
-  Am_Applet *applet = applet_of(state_of(self), self->state);
+  Am_State *s = state_of(self);
+  Am_Applet *applet = applet_of(s, self->state);
   if (!applet) return HLE_RESULT_INVALID_STATE;
   applet->started = true;
-  if (applet->state_event) hle_signal_event(c, applet->state_event);
+  switch (applet->applet_id) {
+  case AM_APPLET_SWKBD:
+    start_swkbd(s, c, applet, (uint32_t)self->state);
+    return HLE_RESULT_SUCCESS; /* completes when the host answers */
+  case AM_APPLET_CONTROLLER: {
+    /* ControllerSupportResultInfo {s8 player count, pad[3], u32 selected
+     * npad id (0 = player 1), u32 result}. */
+    uint8_t info[12] = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    (void)applet_push_out(s, c, applet, info, sizeof(info));
+    break;
+  }
+  case AM_APPLET_PLAYER_SELECT: {
+    /* {u64 result (0 = selected), AccountUid} */
+    uint8_t out[24];
+    memset(out, 0, sizeof(out));
+    memcpy(out + 8, s->player_select_uid, 16);
+    (void)applet_push_out(s, c, applet, out, sizeof(out));
+    break;
+  }
+  default:
+    log_info("[am] library applet 0x%x completes at once (no UI)", applet->applet_id);
+    break;
+  }
+  applet_complete(c, applet, 0);
   return HLE_RESULT_SUCCESS;
 }
 
@@ -411,7 +675,49 @@ static HLE_ServiceResult cmd_applet_is_completed(HLE_Context *c, Service_Object 
   (void)c;
   (void)req;
   const Am_Applet *applet = applet_of(state_of(self), self->state);
-  (void)ipc_response_push_u32(res, applet && applet->started ? 1u : 0u);
+  (void)ipc_response_push_u32(res, applet && applet->completed ? 1u : 0u);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_applet_get_result(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                               IPC_Response *res) {
+  (void)c;
+  (void)req;
+  (void)res;
+  const Am_Applet *applet = applet_of(state_of(self), self->state);
+  return applet ? applet->result : HLE_RESULT_INVALID_STATE;
+}
+
+/* PushInData / PushExtraStorage / PushInteractiveInData: the IStorage in
+ * input object 0 is kept by the applet. */
+static HLE_ServiceResult cmd_applet_push(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                         IPC_Response *res) {
+  (void)c;
+  (void)res;
+  Am_State *s = state_of(self);
+  Am_Applet *applet = applet_of(s, self->state);
+  if (!applet) return HLE_RESULT_INVALID_STATE;
+  const Service_Object *storage = ipc_request_in_object(self, req, 0);
+  if (!storage || storage->interface != &s->storage || !storage_of(s, storage->state)) return HLE_RESULT_SUCCESS;
+  if (applet->in_count < AM_APPLET_STORAGES) {
+    s->storages[storage->state].retained = true;
+    applet->in[applet->in_count++] = (uint32_t)storage->state;
+  }
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_applet_pop_out(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                            IPC_Response *res) {
+  (void)c;
+  (void)req;
+  Am_State *s = state_of(self);
+  Am_Applet *applet = applet_of(s, self->state);
+  if (!applet || !applet->out_count) return AM_RESULT_NO_DATA_IN_CHANNEL;
+  const uint32_t index = applet->out[applet->out_head];
+  applet->out_head = (applet->out_head + 1u) % AM_APPLET_STORAGES;
+  applet->out_count--;
+  s->storages[index].retained = false; /* the guest's handle owns it now */
+  (void)ipc_response_push_object(res, &s->storage, index);
   return HLE_RESULT_SUCCESS;
 }
 
@@ -595,6 +901,8 @@ static const Service_Command k_display_controller_commands[] = {
 static const Service_Command k_library_applet_creator_commands[] = {
     {0, cmd_create_library_applet, "CreateLibraryApplet"},
     {10, cmd_create_storage, "CreateStorage"},
+    {11, cmd_create_tmem_storage, "CreateTransferMemoryStorage"},
+    {12, cmd_create_handle_storage, "CreateHandleStorage"},
 };
 
 static const Service_Command k_application_functions_commands[] = {
@@ -655,14 +963,16 @@ static const Service_Command k_library_applet_accessor_commands[] = {
     {10, cmd_applet_start, "Start"},
     {20, service_cmd_ok, "RequestExit"},
     {25, service_cmd_ok, "Terminate"},
-    {30, service_cmd_ok, "GetResult"},
+    {30, cmd_applet_get_result, "GetResult"},
     {50, service_cmd_ok, "SetOutOfFocusApplicationSuspendingEnabled_stub"},
     {60, service_cmd_ok, "PresetLibraryAppletGpuTimeSliceZero_stub"},
-    {100, service_cmd_ok, "PushInData"},
-    {101, cmd_no_data, "PopOutData"},
-    {102, service_cmd_ok, "PushExtraStorage"},
-    {103, service_cmd_ok, "PushInteractiveInData"},
+    {100, cmd_applet_push, "PushInData"},
+    {101, cmd_applet_pop_out, "PopOutData"},
+    {102, cmd_applet_push, "PushExtraStorage"},
+    {103, cmd_applet_push, "PushInteractiveInData"},
     {104, cmd_no_data, "PopInteractiveOutData"},
+    {105, cmd_applet_out_event, "GetPopOutDataEvent"},
+    {106, cmd_applet_interactive_event, "GetPopInteractiveOutDataEvent"},
     {110, service_cmd_out_u8_false, "NeedsToExitProcess"},
 };
 
@@ -675,6 +985,8 @@ void am_init(Am_State *s, uint8_t *storage_pool) {
   }
   s->master_volume = 1.0f;
   s->next_layer_id = 1;
+  s->player_select_uid[0] = ACC_USER_UID_LO;
+  s->player_select_uid[1] = ACC_USER_UID_HI;
   s->oe = AM_INTERFACE("appletOE", k_oe_commands, s);
   s->ae = AM_INTERFACE("appletAE", k_ae_commands, s);
   s->proxy = AM_INTERFACE("IApplicationProxy", k_proxy_commands, s);

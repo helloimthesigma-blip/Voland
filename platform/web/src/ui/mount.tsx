@@ -16,6 +16,7 @@ export interface MountOptions {
   readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard:  () => Promise<SdImportOutcome>;
   readonly setPaused:    (paused: boolean) => void;
+  readonly respondText:  (text: string, accepted: boolean) => void;
 }
 
 /** The display canvas (transferred to the GPU worker as an
@@ -45,7 +46,7 @@ export function mountShell(options: MountOptions): void {
   const root = document.getElementById("app-root");
   if (!root) throw new Error("mountShell: #app-root missing from index.html");
 
-  render(() => <App adapterLabel={options.adapterLabel} cpuBackend={options.cpuBackend} guestRamMiB={options.guestRamMiB} loadGame={options.loadGame} addToSdCard={options.addToSdCard} clearSdCard={options.clearSdCard} setPaused={options.setPaused} />, root);
+  render(() => <App adapterLabel={options.adapterLabel} cpuBackend={options.cpuBackend} guestRamMiB={options.guestRamMiB} loadGame={options.loadGame} addToSdCard={options.addToSdCard} clearSdCard={options.clearSdCard} setPaused={options.setPaused} respondText={options.respondText} />, root);
 
   attachCanvasToScreen();
 

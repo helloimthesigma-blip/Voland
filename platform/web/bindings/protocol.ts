@@ -36,7 +36,21 @@ export type MainToCPUMessage =
   | { readonly type: "controller-disconnected"; readonly index: number }
   | { readonly type: "pause" }
   | { readonly type: "resume" }
+  /* The player's answer to a text-input-request (software keyboard). */
+  | { readonly type: "text-input-response"; readonly text: string; readonly accepted: boolean }
   | { readonly type: "halt" };
+
+/** A software-keyboard prompt (§12 library applets): a title waits for
+ * text. Rare and user-paced - a lifecycle event, not per-frame data. */
+export interface TextInputRequest {
+  readonly header: string;
+  readonly sub: string;
+  readonly guide: string;
+  readonly initial: string;
+  readonly maxLength: number;
+  readonly minLength: number;
+  readonly password: boolean;
+}
 
 export type CPUToMainMessage =
   | { readonly type: "layout"; readonly layout: MemoryLayout }
@@ -50,7 +64,8 @@ export type CPUToMainMessage =
   /* Guest debug text (svcOutputDebugString) and run-state changes: both
    * happen at guest pace, never per frame (§6). */
   | { readonly type: "guest-output"; readonly text: string }
-  | { readonly type: "run-state"; readonly state: RunState; readonly detail: string };
+  | { readonly type: "run-state"; readonly state: RunState; readonly detail: string }
+  | { readonly type: "text-input-request"; readonly request: TextInputRequest };
 
 export type MainToGPUMessage =
   | {

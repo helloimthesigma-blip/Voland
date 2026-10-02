@@ -104,6 +104,7 @@ if(EMSCRIPTEN)
                             '_emulator_set_program_path_ffi','_emulator_set_rtc_ffi',
                             '_emulator_set_shared_font_ffi','_emulator_sd_write_file_ffi','_emulator_sd_clear_ffi',
                             '_emulator_sd_generation_ffi','_emulator_sd_manifest_ffi','_emulator_sd_read_file_ffi',
+                            '_emulator_text_request_ffi','_emulator_text_respond_ffi',
                             '_malloc','_free']"
     "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap']"
   )

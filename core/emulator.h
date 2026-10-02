@@ -206,6 +206,12 @@ Error emulator_sd_card_clear(Emulator *emulator);
  * manifest needs; it is written only if that fits in `max`. */
 uint64_t emulator_sd_card_generation(const Emulator *emulator);
 uint64_t emulator_sd_card_manifest(const Emulator *emulator, char *out, uint64_t max);
+/* Software keyboard (§12 library applets): true while a title waits for
+ * text; `out` gets the request. emulator_text_respond answers it
+ * (`accepted` false = cancelled). */
+bool emulator_text_request(const Emulator *emulator, Am_Text_Request *out);
+void emulator_text_respond(Emulator *emulator, const char *utf8, bool accepted);
+
 /* Reads up to `max` bytes of an SD file; returns its size, or -1. */
 int64_t emulator_sd_card_read_file(Emulator *emulator, const char *path, void *out, uint64_t max);
 

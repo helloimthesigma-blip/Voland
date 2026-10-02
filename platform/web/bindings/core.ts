@@ -51,6 +51,10 @@ export interface SwitchCoreExports {
   readonly _emulator_sd_generation_ffi: () => number;
   readonly _emulator_sd_manifest_ffi:   (out: bigint, max: number) => number;
   readonly _emulator_sd_read_file_ffi:  (path: bigint, out: bigint, max: number) => number;
+  /* Software keyboard (v3.54): writes the pending request's fields joined
+   * by U+001F and returns 1 (0 = none); respond with UTF-8 text. */
+  readonly _emulator_text_request_ffi: (out: bigint, max: number) => number;
+  readonly _emulator_text_respond_ffi: (text: bigint, accepted: number) => void;
   /* Emscripten's own wrappers: under MEMORY64 they exchange pointers
    * as JS numbers (unlike the uint64_t parameters above). */
   readonly _malloc: (size: number) => number;

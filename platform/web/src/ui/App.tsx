@@ -11,6 +11,7 @@ import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
 import type { LogEntry } from "../log";
 import { getLogHistory, getStatus, subscribeLogs, subscribeStatus } from "../log";
 import ControlsLegend from "./ControlsLegend";
+import TextInputDialog from "./TextInputDialog";
 import LoadPanel from "./LoadPanel";
 
 interface AppProps {
@@ -21,6 +22,7 @@ interface AppProps {
   readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard:  () => Promise<SdImportOutcome>;
   readonly setPaused:    (paused: boolean) => void;
+  readonly respondText:  (text: string, accepted: boolean) => void;
 }
 
 function App(props: AppProps) {
@@ -56,6 +58,7 @@ function App(props: AppProps) {
           <div class="voland-screen" data-voland-screen data-testid="screen" />
           <LoadPanel loadGame={props.loadGame} addToSdCard={props.addToSdCard} clearSdCard={props.clearSdCard} setPaused={props.setPaused} />
           <ControlsLegend />
+          <TextInputDialog respond={props.respondText} />
           <dl class="voland-facts">
             <div><dt>CPU backend</dt><dd>{props.cpuBackend}</dd></div>
             <div><dt>GPU adapter</dt><dd>{props.adapterLabel}</dd></div>

@@ -340,6 +340,12 @@ typedef struct IPC_Session {
   Service_Object objects[IPC_DOMAIN_MAX_OBJECTS];
 } IPC_Session;
 
+/* The live object a domain request passes as CMIF input object `index`:
+ * in-objects are ids in the same domain as `self` (the target), so they
+ * are found next to it in the session's object table. NULL when absent,
+ * freed, or the request is not a domain message. */
+Service_Object *ipc_request_in_object(Service_Object *self, const IPC_Request *request, uint32_t index);
+
 typedef struct IPC_Session_Pool {
   IPC_Session sessions[IPC_MAX_SESSIONS];
   uint32_t live_count;

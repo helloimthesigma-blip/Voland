@@ -551,6 +551,113 @@ static void test_system_queries(void) {
   CHECK(test_le32(r.data) == 0);
 }
 
+
+/* Software keyboard over a domain session, the way libnx's swkbdShow
+ * drives it: storages pushed as input objects, Start, the host answers
+ * the pending request, then PopOutData returns {close result, UTF-16}. */
+static Test_Ipc_Reply dom(uint32_t session, uint32_t object, uint32_t command, const void *payload, uint32_t size,
+                          const Test_Ipc_Message *extra, uint32_t out_size) {
+  Test_Ipc_Message m;
+  if (extra) m = *extra;
+  else memset(&m, 0, sizeof(m));
+  m.framing = TEST_IPC_CMIF;
+  m.command_id = command;
+  m.payload = payload;
+  m.payload_size = size;
+  m.domain = true;
+  m.domain_type = 1;
+  m.object_id = object;
+  CHECK(ipc_fixture_send(&g_emu, session, &m, g_reply) == 0);
+  Test_Ipc_Reply reply;
+  test_ipc_parse_reply(g_reply, TEST_IPC_CMIF, true, out_size, &reply);
+  return reply;
+}
+
+static uint32_t dom_storage(uint32_t session, uint32_t creator, const void *data, uint32_t size) {
+  const uint64_t size64 = size;
+  Test_Ipc_Reply r = dom(session, creator, 10, &size64, sizeof(size64), NULL, 0);
+  CHECK(r.result == 0 && r.object_count == 1);
+  const uint32_t storage = r.object_ids[0];
+  r = dom(session, storage, 0, NULL, 0, NULL, 0);
+  CHECK(r.result == 0 && r.object_count == 1);
+  const uint32_t accessor = r.object_ids[0];
+  CHECK_OK(vmm_write_block(g_emu.vmm, SCRATCH(0xA000), data, size));
+  Test_Ipc_Message w;
+  memset(&w, 0, sizeof(w));
+  w.sends[0] = (Test_Ipc_Buffer){SCRATCH(0xA000), size, 0};
+  w.send_count = 1;
+  const uint64_t offset = 0;
+  CHECK(dom(session, accessor, 10, &offset, sizeof(offset), &w, 0).result == 0);
+  return storage;
+}
+
+static void test_software_keyboard(void) {
+  const uint32_t oe = service("appletOE");
+  Test_Ipc_Message control;
+  memset(&control, 0, sizeof(control));
+  control.framing = TEST_IPC_CONTROL;
+  control.command_id = IPC_CONTROL_CONVERT_CURRENT_OBJECT_TO_DOMAIN;
+  CHECK(ipc_fixture_send(&g_emu, oe, &control, g_reply) == 0);
+  const uint64_t pid = 0;
+  Test_Ipc_Message pid_msg;
+  memset(&pid_msg, 0, sizeof(pid_msg));
+  pid_msg.send_pid = true;
+  Test_Ipc_Reply r = dom(oe, 1, 0, &pid, sizeof(pid), &pid_msg, 0);
+  CHECK(r.result == 0 && r.object_count == 1);
+  const uint32_t proxy = r.object_ids[0];
+  r = dom(oe, proxy, 11, NULL, 0, NULL, 0);
+  const uint32_t creator = r.object_ids[0];
+  const uint32_t create_in[2] = {AM_APPLET_SWKBD, 0};
+  r = dom(oe, creator, 0, create_in, sizeof(create_in), NULL, 0);
+  CHECK(r.result == 0 && r.object_count == 1);
+  const uint32_t applet = r.object_ids[0];
+  uint8_t common[0x20];
+  memset(common, 0, sizeof(common));
+  static uint8_t config[0x4C8];
+  memset(config, 0, sizeof(config));
+  const uint16_t header[] = {'N', 'a', 'm', 'e', 0};
+  memcpy(config + 0x3C, header, sizeof(header));
+  const uint32_t max_length = 8;
+  memcpy(config + 0x3AC, &max_length, 4);
+  const uint32_t storages[2] = {dom_storage(oe, creator, common, sizeof(common)),
+                                dom_storage(oe, creator, config, sizeof(config))};
+  for (uint32_t i = 0; i < 2u; i++) {
+    Test_Ipc_Message push;
+    memset(&push, 0, sizeof(push));
+    push.in_objects[0] = storages[i];
+    push.in_object_count = 1;
+    CHECK(dom(oe, applet, 100, NULL, 0, &push, 0).result == 0);
+  }
+  CHECK(dom(oe, applet, 10, NULL, 0, NULL, 0).result == 0);
+  r = dom(oe, applet, 1, NULL, 0, NULL, 4);
+  CHECK(test_le32(r.data) == 0); /* waiting for the host */
+  Am_Text_Request request;
+  CHECK(emulator_text_request(&g_emu, &request) && strcmp(request.header, "Name") == 0 && request.max_length == 8);
+  emulator_text_respond(&g_emu, "Voland in a browser", true);
+  CHECK(!emulator_text_request(&g_emu, NULL));
+  r = dom(oe, applet, 1, NULL, 0, NULL, 4);
+  CHECK(test_le32(r.data) == 1);
+  CHECK(dom(oe, applet, 30, NULL, 0, NULL, 0).result == 0);
+  r = dom(oe, applet, 101, NULL, 0, NULL, 0);
+  CHECK(r.result == 0 && r.object_count == 1);
+  r = dom(oe, r.object_ids[0], 0, NULL, 0, NULL, 0);
+  const uint32_t out_accessor = r.object_ids[0];
+  Test_Ipc_Message rd;
+  memset(&rd, 0, sizeof(rd));
+  rd.receives[0] = (Test_Ipc_Buffer){SCRATCH(0xB800), AM_SWKBD_OUTPUT_BYTES, 0};
+  rd.receive_count = 1;
+  const uint64_t offset = 0;
+  CHECK(dom(oe, out_accessor, 11, &offset, sizeof(offset), &rd, 0).result == 0);
+  uint8_t out[24];
+  CHECK_OK(vmm_read_block(g_emu.vmm, SCRATCH(0xB800), out, sizeof(out)));
+  uint16_t text[9];
+  memcpy(text, out + 4, sizeof(text));
+  CHECK(test_le32(out) == 0); /* accepted */
+  CHECK(text[0] == 'V' && text[7] == 'i' && text[8] == 0); /* "Voland i": cut at max length 8 */
+  /* No more output. */
+  CHECK(dom(oe, applet, 101, NULL, 0, NULL, 0).result == AM_RESULT_NO_DATA_IN_CHANNEL);
+}
+
 static void test_audren(void) {
   const uint32_t manager = service("audren:u");
   /* AudioRendererParameter {48000, 240, mix buffers 2, submixes 0, voices 2,
@@ -784,6 +891,7 @@ int main(void) {
   test_audren();
   test_sd_manifest();
   test_system_queries();
+  test_software_keyboard();
   test_acc();
   emulator_destroy(&g_emu);
   printf("[services_test] passed\n");

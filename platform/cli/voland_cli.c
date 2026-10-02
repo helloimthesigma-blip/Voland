@@ -17,6 +17,9 @@
  *       --dump-audio FILE            write what the guest played as a 48kHz stereo WAV
  *       --input SLICE:BUTTONS:SLICES player 1 holds BUTTONS (hex, HidNpadButton
  *                                    bits) from SLICE for SLICES slices (repeatable)
+ *       --swkbd TEXT                 answer software-keyboard prompts with TEXT
+ *                                    (default: accept the prompt's initial text;
+ *                                    --swkbd-cancel cancels them instead)
  *     Prints guest output (svcOutputDebugString) as it happens, then a
  *     summary with the newest frame's FNV-1a-64 hash (golden-image check).
  *     Exit: 0 exited, 1 crashed, 2 deadlock, 3 slice limit, 4/5 failed
@@ -262,7 +265,8 @@ static int run(int argc, char **argv) {
   const char *path = argv[0];
   const CPU_Backend *backend = &CPU_BACKEND_INTERPRETER;
   uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES;
-  bool test_card = false, svc_stats = false;
+  bool test_card = false, svc_stats = false, swkbd_cancel = false;
+  const char *swkbd_text = NULL;
   Input_Event inputs[MAX_INPUT_EVENTS];
   uint32_t input_count = 0;
   const char *expect_output = NULL, *expect_hash = NULL, *sdmc = NULL, *frame_path = NULL, *font_path = NULL, *audio_path = NULL;
@@ -291,6 +295,10 @@ static int run(int argc, char **argv) {
         return EXIT_USAGE;
       }
       inputs[input_count++] = (Input_Event){start, buttons, length};
+    } else if (!strcmp(argv[i], "--swkbd") && has_value) {
+      swkbd_text = argv[++i];
+    } else if (!strcmp(argv[i], "--swkbd-cancel")) {
+      swkbd_cancel = true;
     } else if (!strcmp(argv[i], "--svc-stats")) {
       svc_stats = true;
     } else if (!strcmp(argv[i], "--dump-audio") && has_value) {
@@ -365,6 +373,16 @@ static int run(int argc, char **argv) {
   while (slices < max_slices && (status == EMULATOR_RUNNING || status == EMULATOR_IDLE)) {
     if (input_count) apply_input(inputs, input_count, slices);
     status = emulator_run_slice(&emu, budget);
+    {
+      /* A software keyboard is up: answer it like a player would. */
+      static Am_Text_Request request;
+      if (emulator_text_request(&emu, &request)) {
+        const char *answer = swkbd_text ? swkbd_text : request.initial;
+        fprintf(stderr, "voland-cli: software keyboard \"%s\" -> %s\n", request.header[0] ? request.header : request.guide,
+                swkbd_cancel ? "(cancelled)" : answer);
+        emulator_text_respond(&emu, answer, !swkbd_cancel);
+      }
+    }
     framebuffer_consume_all(); /* the CLI "displays" every frame at once */
     audio_frames += drain_audio(wav); /* and plays (or discards) every sample */
     slices++;

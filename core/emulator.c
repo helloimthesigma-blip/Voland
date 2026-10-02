@@ -673,6 +673,18 @@ Error emulator_sd_card_write_file(Emulator* emulator, const char* path, const vo
   return sd_result(rc, "sd card: write failed");
 }
 
+bool emulator_text_request(const Emulator* emulator, Am_Text_Request* out) {
+  if (!emulator) return false;
+  const Am_Text_Request* t = am_text_request(&emulator->am);
+  if (!t) return false;
+  if (out) *out = *t;
+  return true;
+}
+
+void emulator_text_respond(Emulator* emulator, const char* utf8, bool accepted) {
+  if (emulator) am_text_respond(&emulator->am, &emulator->hle, utf8, accepted);
+}
+
 uint64_t emulator_sd_card_generation(const Emulator* emulator) {
   return emulator && emulator->ramfs_ready ? emulator->ramfs.generation : 0;
 }

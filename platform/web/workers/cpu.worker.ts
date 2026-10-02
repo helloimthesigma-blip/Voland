@@ -19,6 +19,7 @@ import { readMemoryLayout } from "@bindings/layout";
 import { CoreResult, formatTitleId, loadFailureFromResult, readCString, runStateAfterSlice } from "@bindings/load";
 import type { CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
 import { clearSdFiles, diffManifests, parseManifest, persistSdFile, removeSdFile, restoreSdFiles } from "./sd-persistence";
+import { parseTextInputRequest } from "./text-input";
 
 const self: DedicatedWorkerGlobalScope =
   globalThis as unknown as DedicatedWorkerGlobalScope;
@@ -95,6 +96,29 @@ function postRunState(state: "running" | "exited" | "crashed" | "deadlock" | "pa
   self.postMessage(msg);
 }
 
+/* A software keyboard is up (the guest is waiting on it): ask the player
+ * once per request. */
+const TEXT_REQUEST_BYTES = 8192;
+let textRequestShown = false;
+
+function pollTextInput(): void {
+  if (!core || !coreMemory || textRequestShown) return;
+  const buffer = core._malloc(TEXT_REQUEST_BYTES);
+  if (buffer === 0) return;
+  try {
+    if (core._emulator_text_request_ffi(BigInt(buffer), TEXT_REQUEST_BYTES) !== 1) return;
+    const bytes = new Uint8Array(coreMemory.buffer, buffer, TEXT_REQUEST_BYTES).slice();
+    const end = bytes.indexOf(0);
+    const request = parseTextInputRequest(new TextDecoder().decode(bytes.subarray(0, end < 0 ? bytes.length : end)));
+    if (!request) return;
+    textRequestShown = true;
+    const msg: CPUToMainMessage = { type: "text-input-request", request };
+    self.postMessage(msg);
+  } finally {
+    core._free(buffer);
+  }
+}
+
 function runBurst(): void {
   if (!core || !running || paused) return;
   const deadline = performance.now() + BURST_MS;
@@ -111,6 +135,7 @@ function runBurst(): void {
       return;
     }
   }
+  pollTextInput();
   setTimeout(runBurst, 0);
 }
 
@@ -411,6 +436,15 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   }
   if (msg.type === "controller-disconnected") {
     log("info", `controller disconnected from slot ${msg.index}`);
+    return;
+  }
+
+  if (msg.type === "text-input-response") {
+    if (core) {
+      const sdCore = core;
+      withCString(msg.text, (pointer) => sdCore._emulator_text_respond_ffi(pointer, msg.accepted ? 1 : 0));
+    }
+    textRequestShown = false;
     return;
   }
 
