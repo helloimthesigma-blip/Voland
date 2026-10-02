@@ -80,6 +80,27 @@
 #define M3D_REPORT_SEMAPHORE_B 0x6C1u
 #define M3D_REPORT_SEMAPHORE_C 0x6C2u
 #define M3D_REPORT_SEMAPHORE_D 0x6C3u
+#define M3D_VERTEX_ARRAY_START 0x35Du
+#define M3D_DRAW_VERTEX_ARRAY 0x35Eu
+#define M3D_DRAW_VERTEX_ARRAY_FIRST 0x485u       /* ..._BEGIN_END_INSTANCE_FIRST */
+#define M3D_DRAW_VERTEX_ARRAY_SUBSEQUENT 0x486u
+#define M3D_DRAW_INLINE_INDEX 0x57Au
+#define M3D_DRAW_INLINE_INDEX2X16 0x57Cu
+#define M3D_END 0x585u
+#define M3D_BEGIN 0x586u
+#define M3D_INDEX_BUFFER_E 0x5F6u
+#define M3D_INDEX_BUFFER_F 0x5F7u
+#define M3D_DRAW_INDEX_BUFFER 0x5F8u
+#define M3D_DRAW_INDEX32_FIRST 0x5F9u             /* 32/16/8-bit FIRST, then SUBSEQUENT */
+#define M3D_DRAW_INDEX8_SUBSEQUENT 0x5FEu
+#define M3D_CLEAR_SURFACE 0x674u
+#define M3D_BIND_GROUP_CB 0x904u                  /* + 8 * group */
+#define M3D_BIND_GROUP_STRIDE 8u
+#define M3D_BEGIN_TOPOLOGY(d) ((d) & 0xFFFFu)
+#define M3D_BEGIN_INSTANCE(d) (((d) >> 26) & 3u)  /* 0 first, 1 subsequent, 2 unchanged */
+#define M3D_COMPACT_FIRST(d) ((d) & 0xFFFFu)
+#define M3D_COMPACT_COUNT(d) (((d) >> 16) & 0xFFFu)
+#define M3D_COMPACT_TOPOLOGY(d) ((d) >> 28)
 #define M3D_SYNCPT_ID(d) ((d) & 0xFFFFu)
 #define M3D_SYNCPT_INCREMENT (1u << 16)
 #define M3D_REPORT_OPERATION_MASK 3u
@@ -201,6 +222,12 @@ static void dma_semaphore(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t launc
 }
 
 static void dma_launch(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t launch) {
+  if (mem->renderer) {
+    /* The copy may read what the 3D engine drew, or overwrite what it
+     * cached (textures, render targets). */
+    raster3d_flush(mem->renderer, mem);
+    raster3d_begin_submission(mem->renderer);
+  }
   if (launch & LAUNCH_TRANSFER_MASK) {
     const bool remap = (launch & LAUNCH_REMAP) != 0;
     const uint32_t rc = ch->dma[DMA_REMAP_COMPONENTS];
@@ -468,6 +495,88 @@ static void constant_buffer_load(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_
   ch->engine3d[M3D_CB_LOAD_OFFSET] = offset + 4u;
 }
 
+static void run_draw(Gpu_Channel *ch, const Gpu_Memory *mem, Raster3d_Draw_Kind kind, uint32_t topology,
+                     uint32_t first, uint32_t count, uint32_t index_size) {
+  ch->draws++;
+  if (!mem->renderer) return;
+  Raster3d_Draw draw;
+  memset(&draw, 0, sizeof(draw));
+  draw.kind = kind;
+  draw.topology = topology;
+  draw.first = first;
+  draw.count = count;
+  draw.index_size = index_size;
+  draw.instance = ch->draw_instance;
+  draw.inline_indices = ch->inline_indices;
+  raster3d_draw(mem->renderer, ch->engine3d, &ch->bindings, mem, &draw);
+}
+
+static void inline_index(Gpu_Channel *ch, uint32_t index) {
+  if (ch->inline_count < GPU_INLINE_INDICES) ch->inline_indices[ch->inline_count++] = index;
+}
+
+/* Clears, draws and the draw-time state that is not plain registers.
+ * Returns true when `method` was one of them. */
+static bool draw_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t method, uint32_t data) {
+  if (method >= M3D_BIND_GROUP_CB && method < M3D_BIND_GROUP_CB + RASTER_BIND_GROUPS * M3D_BIND_GROUP_STRIDE &&
+      (method - M3D_BIND_GROUP_CB) % M3D_BIND_GROUP_STRIDE == 0) {
+    const uint32_t group = (method - M3D_BIND_GROUP_CB) / M3D_BIND_GROUP_STRIDE;
+    const uint32_t slot = (data >> 4) & 0x1Fu;
+    if (slot < SM_CBUF_SLOTS) {
+      const bool valid = (data & 1u) != 0;
+      ch->bindings.address[group][slot] =
+          valid ? addr40(ch->engine3d[M3D_CB_SELECTOR_ADDRESS_HI], ch->engine3d[M3D_CB_SELECTOR_ADDRESS_LO]) : 0u;
+      ch->bindings.size[group][slot] = valid ? ch->engine3d[M3D_CB_SELECTOR_SIZE] : 0u;
+    }
+    return true;
+  }
+  switch (method) {
+  case M3D_BEGIN:
+    ch->draw_topology = M3D_BEGIN_TOPOLOGY(data);
+    if (M3D_BEGIN_INSTANCE(data) == 0) ch->draw_instance = 0;
+    else if (M3D_BEGIN_INSTANCE(data) == 1) ch->draw_instance++;
+    ch->inline_count = 0;
+    return true;
+  case M3D_END:
+    if (ch->inline_count) run_draw(ch, mem, RASTER_DRAW_INLINE, ch->draw_topology, 0, ch->inline_count, 4);
+    ch->inline_count = 0;
+    return true;
+  case M3D_DRAW_INLINE_INDEX:
+    inline_index(ch, data);
+    return true;
+  case M3D_DRAW_INLINE_INDEX2X16:
+    inline_index(ch, data & 0xFFFFu);
+    inline_index(ch, data >> 16);
+    return true;
+  case M3D_DRAW_VERTEX_ARRAY:
+    run_draw(ch, mem, RASTER_DRAW_ARRAYS, ch->draw_topology, ch->engine3d[M3D_VERTEX_ARRAY_START], data, 0);
+    return true;
+  case M3D_DRAW_VERTEX_ARRAY_FIRST:
+  case M3D_DRAW_VERTEX_ARRAY_SUBSEQUENT:
+    ch->draw_instance = method == M3D_DRAW_VERTEX_ARRAY_FIRST ? 0u : ch->draw_instance + 1u;
+    run_draw(ch, mem, RASTER_DRAW_ARRAYS, M3D_COMPACT_TOPOLOGY(data), M3D_COMPACT_FIRST(data), M3D_COMPACT_COUNT(data), 0);
+    return true;
+  case M3D_DRAW_INDEX_BUFFER:
+    run_draw(ch, mem, RASTER_DRAW_INDEXED, ch->draw_topology, ch->engine3d[M3D_INDEX_BUFFER_F], data,
+             1u << (ch->engine3d[M3D_INDEX_BUFFER_E] & 3u));
+    return true;
+  case M3D_CLEAR_SURFACE:
+    if (mem->renderer) raster3d_clear(mem->renderer, ch->engine3d, mem, data);
+    return true;
+  default:
+    break;
+  }
+  if (method >= M3D_DRAW_INDEX32_FIRST && method <= M3D_DRAW_INDEX8_SUBSEQUENT) {
+    const uint32_t k = method - M3D_DRAW_INDEX32_FIRST; /* 0-2 first (32/16/8), 3-5 subsequent */
+    ch->draw_instance = k < 3u ? 0u : ch->draw_instance + 1u;
+    static const uint32_t sizes[3] = {4, 2, 1};
+    run_draw(ch, mem, RASTER_DRAW_INDEXED, M3D_COMPACT_TOPOLOGY(data), M3D_COMPACT_FIRST(data), M3D_COMPACT_COUNT(data),
+             sizes[k % 3u]);
+    return true;
+  }
+  return false;
+}
+
 static void engine3d_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t method, uint32_t data) {
   method &= GPU_3D_REGISTER_WORDS - 1u;
   if (method >= M3D_MACRO_FIRST) {
@@ -489,6 +598,7 @@ static void engine3d_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t met
     return;
   }
   ch->engine3d[method] = data;
+  if (draw_method(ch, mem, method, data)) return;
   if (method == M3D_SYNCPT_ACTION) {
     if ((data & M3D_SYNCPT_INCREMENT) && mem->syncpoint_increment) mem->syncpoint_increment(mem->user, M3D_SYNCPT_ID(data));
   } else if (method == M3D_REPORT_SEMAPHORE_D) {
@@ -553,6 +663,7 @@ static void decode_word(Gpu_Channel *ch, const Gpu_Memory *mem, Decoder *d, uint
 }
 
 void gpu_channel_submit(Gpu_Channel *ch, const Gpu_Memory *mem, const uint64_t *entries, uint32_t count) {
+  if (mem->renderer) raster3d_begin_submission(mem->renderer);
   for (uint32_t i = 0; i < count; i++) {
     const uint64_t va = entries[i] & GP_VA_MASK;
     const uint32_t words = (uint32_t)((entries[i] >> GP_LENGTH_SHIFT) & GP_LENGTH_MASK);
@@ -569,4 +680,5 @@ void gpu_channel_submit(Gpu_Channel *ch, const Gpu_Memory *mem, const uint64_t *
     }
   }
   gpu_channel_flush_macro(ch, mem);
+  if (mem->renderer) raster3d_flush(mem->renderer, mem);
 }

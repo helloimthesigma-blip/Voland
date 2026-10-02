@@ -1311,6 +1311,18 @@ Command records reference guest memory (vertex/index/uniform data, textures) by 
 
 **The present path is vi:, not raw framebuffers.** `vi:` + the buffer-queue service (`IHOSBinderDriver`, Android BufferQueue semantics over parcels) is how a game's completed frame reaches the display: the game dequeues a buffer, renders into it via nvdrv, queues it back. Voland's buffer-queue implementation feeds queued buffers into the §6 framebuffer-slot handoff (or, past Phase 4, directly into the GPU Worker's composition). The §6 slots are the *transport*; vi/BufferQueue is the *contract* games program against.
 
+### Reference renderer (in the CPU worker, today's rendering path)
+
+**Stated deviation from the ring design above.** Before the command ring and the GPU Worker exist, 3D work executes in the core, synchronously, in the CPU worker: `gpu_channel` hands CLEAR_SURFACE and every draw (DRAW_VERTEX_ARRAY / DRAW_INDEX_BUFFER and their BEGIN_END forms, inline indices) to `core/gpu/raster3d`, a software implementation of the Maxwell 3D pipeline:
+
+- **Shaders:** `core/gpu/maxwell_shader` decodes SM 5.x microcode (SPH + scheduling bundles; the opcode subset NVN and deko3d/UAM emit: float/integer ALU, XMAD, conversions, predicates, attribute load/store, IPA, constant/global/local memory, TEX/TEXS/TLD/TLDS/TLD4/TXQ, SSY/SYNC, PBK/BRK, PCNT/CONT, CAL/RET, KIL) and interprets one invocation at a time. Warp behaviour collapses to a single lane: derivatives are zero, so implicit-LOD sampling reads level 0.
+- **Fixed function:** vertex fetch (SET_VERTEX_ATTRIBUTE_A, streams, instancing), primitive assembly (all non-adjacency topologies; points/lines as 1-pixel quads), clipping (near/far, guard band), viewport transform, a half-space rasterizer (8 subpixel bits, top-left rule, scissor / viewport clip / surface clip), interpolation per the pixel program's SPH (perspective / screen-linear / flat), early or late depth test, alpha test, OGL and D3D blend enums, colour write masks, ~60 colour-target formats and the zeta formats. Not yet: stencil, tessellation and geometry stages, MSAA, mipmapped sampling.
+- **Textures:** `core/gpu/texture` parses TIC/TSC (open-gpu-doc clb197tex.h layouts), deswizzles block-linear/pitch images once per submission into a texture pool, expands BC1-5 and 8-bit UNORM formats to RGBA8, and samples with wrap modes, nearest/bilinear filtering, depth compare and gather.
+- **Render targets** live in host-linear copies (`raster3d` surface cache) and are written back to guest memory at the end of every submission and before any DMA copy, so vi/BufferQueue presents them unchanged and `voland-cli --dump-frame` golden-hashes them.
+- **Cost control:** a triangle whose pixel-program inputs do not vary (flat ImGui rectangles) is shaded once and only depth-tested / blended per pixel; RGBA8 targets and textures have byte-wise fast paths.
+
+This path is the correctness oracle the WebGPU translation (shaders to WGSL in the GPU Worker, as above) will be diffed against; it is not removed when that lands. It renders deko3d homebrew (ftpd's ImGui interface) today.
+
 ### Video decode: NVDEC/VIC
 
 The Switch's NVDEC (`/dev/nvhost-nvdec`) decodes H.264/VP8/VP9 cutscene bitstreams; VIC (`/dev/nvhost-vic`) converts/scales the output. **Games wait on syncpoints for decode completion — a stub that signals its syncpoints (black output) is mandatory from Phase 4 or cutscene-bearing titles deadlock.** Real decode rides existing infrastructure:
@@ -2409,9 +2421,16 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.46.0*
+*Document version: 3.47.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.46 → v3.47 (summary)
+
+- **GPU (§13): the reference renderer.** 3D clears and draws now execute: `gpu/maxwell_shader` (Maxwell SM 5.x decode + scalar interpreter), `gpu/texture` (TIC/TSC, texel formats, BC1-5, sampling) and `gpu/raster3d` (vertex fetch, assembly, clipping, half-space rasterizer, depth, blend, render-target cache written back to guest memory). Stated deviation: it runs in the CPU worker, synchronously, ahead of the command ring / GPU Worker (§13 "Reference renderer"). deko3d homebrew renders: ftpd's full ImGui interface.
+- **gpu_channel:** BEGIN/END topology and instance tracking, DRAW_VERTEX_ARRAY / DRAW_INDEX_BUFFER (+ BEGIN_END_INSTANCE_FIRST/SUBSEQUENT forms), DRAW_INLINE_INDEX(2X16), CLEAR_SURFACE, BIND_GROUP_CONSTANT_BUFFER bindings; the renderer is flushed at the end of each submission and before DMA copies.
+- **CLI:** a `gpu ...` summary line (clears, draws, triangles, pixels, shader faults, undecoded instructions, texture misses).
+- **Tests:** `maxwell_shader_test` (hand-assembled programs: float/integer ALU, XMAD, conversions, SSY/SYNC branches, PBK/BRK loops, ALD/AST, IPA perspective, TEXS dual destinations, LDC, KIL, SPH parsing, end-marker extent) and `raster3d_test` (synthetic GPU memory: clear, half-space coverage, scissor, alpha blend, pitch and block-linear targets, texture sampling).
 
 ### Changelog v3.45 → v3.46 (summary)
 

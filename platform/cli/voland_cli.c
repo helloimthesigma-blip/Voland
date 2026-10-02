@@ -377,6 +377,16 @@ static int run(int argc, char **argv) {
           k_status[status], (unsigned long long)slices, (unsigned long long)emu.scheduler.ticks,
           (unsigned long long)emu.hle.svc_call_count);
   if (width) fprintf(stderr, "voland-cli: frame %ux%u fnv1a64=%016llx\n", width, height, (unsigned long long)frame_hash);
+  {
+    const Raster3d_Stats *g = &emu.renderer.stats;
+    if (g->draws || g->clears)
+      fprintf(stderr,
+              "voland-cli: gpu %llu clears, %llu draws (%llu skipped), %llu triangles, %llu pixels, "
+              "%llu shader faults, %llu unknown ops, %llu texture misses\n",
+              (unsigned long long)g->clears, (unsigned long long)g->draws, (unsigned long long)g->skipped_draws,
+              (unsigned long long)g->triangles, (unsigned long long)g->pixels, (unsigned long long)g->shader_faults,
+              (unsigned long long)g->unknown_ops, (unsigned long long)g->texture_misses);
+  }
   if (wav) {
     write_wav_header(wav, audio_frames);
     fclose(wav);

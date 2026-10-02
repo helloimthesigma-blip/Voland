@@ -47,6 +47,9 @@ set(SWITCH_CORE_SOURCES
   audio/audio_ring.c
   gpu/block_linear.c
   gpu/gpu_channel.c
+  gpu/maxwell_shader.c
+  gpu/texture.c
+  gpu/raster3d.c
   hle/fs/ramfs.c
   hle/kernel/svc_thread.c
   hle/services/sm/sm.c
@@ -116,6 +119,9 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   hle/loader/nro.h
   gpu/framebuffer.h
   gpu/syncpoint.h
+  gpu/maxwell_shader.h
+  gpu/texture.h
+  gpu/raster3d.h
   emulator.h
 )
 

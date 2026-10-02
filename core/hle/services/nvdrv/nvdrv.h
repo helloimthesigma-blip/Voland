@@ -132,6 +132,7 @@ typedef struct Nvdrv_State {
   Gpu_Channel *channels;
   bool channel_used[NVDRV_MAX_CHANNELS];
   HLE_Context *hle;
+  Raster3d *renderer; /* 3D reference renderer for submissions (NULL: none) */
 } Nvdrv_State;
 
 /* Resets the state and initializes `state->interface`. `channels`:

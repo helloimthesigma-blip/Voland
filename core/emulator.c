@@ -242,6 +242,7 @@ static bool chain_load(Emulator* emulator) {
 static void reset_process_services(Emulator* emulator) {
   event_pool_init(&emulator->events);
   nvdrv_init(&emulator->nvdrv, emulator->gpu_channels); /* fds, nvmap handles, syncpoints die with the process */
+  emulator->nvdrv.renderer = emulator->renderer.ready ? &emulator->renderer : NULL;
   shared_memory_pool_init(&emulator->shared_memory, &emulator->pages);
   memset(&emulator->transfer_memory, 0, sizeof(emulator->transfer_memory));
   hid_init(&emulator->hid, &emulator->shared_memory);
@@ -341,6 +342,11 @@ Error emulator_create_with_backend(Emulator* out, const CPU_Backend* backend) {
     out->vi_scratch = ARENA_ALLOC_ARRAY(&out->service_arena, uint8_t, (size_t)VI_SCRATCH_BYTES);
     out->gpu_channels = ARENA_ALLOC_ARRAY(&out->service_arena, Gpu_Channel, NVDRV_MAX_CHANNELS);
   }
+  if (arena_create(&out->renderer_arena, raster3d_storage_bytes() + 64u)) {
+    uint8_t *storage = (uint8_t *)arena_allocate(&out->renderer_arena, raster3d_storage_bytes(), 64u);
+    raster3d_init(&out->renderer, storage, raster3d_storage_bytes());
+  }
+  if (!out->renderer.ready) log_warn("[emulator] no memory for the 3D renderer; draws will be skipped");
   out->ramfs_ready = ramfs_pool_init(&out->ramfs, EMULATOR_RAMFS_BYTES);
   if (!out->ramfs_ready) log_warn("[emulator] no RAM for the SD card / saves; fsp-srv filesystems will be full");
   fs_init(&out->fs, out->ramfs_ready ? &out->ramfs : NULL);
@@ -368,6 +374,7 @@ void emulator_destroy(Emulator* emulator) {
   }
   if (emulator->ramfs_ready) ramfs_pool_destroy(&emulator->ramfs);
   arena_destroy(&emulator->service_arena);
+  arena_destroy(&emulator->renderer_arena);
   vmm_destroy(emulator->vmm);
   layout_destroy();
   memset(emulator, 0, sizeof(*emulator));

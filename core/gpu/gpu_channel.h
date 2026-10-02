@@ -21,9 +21,12 @@
  *     method path. deko3d issues most of its state and every draw this
  *     way. MME ISA: the Fermi-family macro processor (behaviour per
  *     envytools / Mesa's MIT-licensed simulator; Voland's own code).
- * Rendering methods (3D draws, compute, 2D, inline-to-memory) are kept or
- * counted and otherwise ignored until their engines land in the GPU
- * worker (§13 command ring).
+ * 3D clears and draws (CLEAR_SURFACE, DRAW_VERTEX_ARRAY, DRAW_INDEX_BUFFER
+ * and their BEGIN_END forms, inline indices) run on the reference
+ * renderer (gpu/raster3d) when the memory interface provides one; it
+ * renders into guest memory and is flushed at the end of each
+ * submission and before DMA copies. Compute, 2D and inline-to-memory
+ * are counted and ignored.
  *
  * Wire formats (NVIDIA's published host/class headers, e.g. open-gpu-doc
  * clb06f.h / clb0b5.h):
@@ -43,6 +46,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "gpu/raster3d.h"
+
 #define GPU_SUBCHANNELS 8u
 #define GPU_DMA_REGISTER_WORDS 0x200u /* B0B5 method space through 0x7FC */
 #define GPU_3D_REGISTER_WORDS 0x1000u /* B197 method space (0x4000 bytes) */
@@ -51,6 +56,7 @@
 #define GPU_MME_MAX_PARAMS 0x4000u
 #define GPU_LINE_BYTES 0x10000u       /* longest DMA line handled */
 #define GPU_FETCH_WORDS 0x1000u       /* pushbuffer words fetched at a time */
+#define GPU_INLINE_INDICES 0x4000u    /* DRAW_INLINE_INDEX words between BEGIN and END */
 
 #define GPU_CLASS_DMA 0xB0B5u
 #define GPU_CLASS_3D 0xB197u
@@ -66,6 +72,9 @@ typedef struct Gpu_Memory {
   bool (*write)(void *user, uint64_t gpu_va, const void *src, uint64_t size);
   /* An in-stream syncpoint increment (host method 0x1D). May be NULL. */
   void (*syncpoint_increment)(void *user, uint32_t id);
+  /* The 3D reference renderer (gpu/raster3d). NULL: draws and clears
+   * are counted and skipped. */
+  Raster3d *renderer;
 } Gpu_Memory;
 
 typedef struct Gpu_Channel {
@@ -80,6 +89,13 @@ typedef struct Gpu_Channel {
   uint32_t mme_macro;
   uint32_t mme_param_count;
   uint32_t mme_params[GPU_MME_MAX_PARAMS];
+  /* 3D draw state the register file does not hold. */
+  Raster3d_Bindings bindings;                /* BIND_GROUP_CONSTANT_BUFFER */
+  uint32_t draw_topology;                    /* BEGIN */
+  uint32_t draw_instance;
+  uint32_t inline_count;
+  uint32_t inline_indices[GPU_INLINE_INDICES];
+  uint64_t draws;
   uint64_t mme_runs;
   uint64_t mme_faults;                       /* runaway or out-of-range macros */
   uint64_t methods;                          /* diagnostics */
