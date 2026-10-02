@@ -1212,7 +1212,7 @@ void sm_thread_reset_light(Sm_Thread *t, uint32_t lanes) {
 }
 
 static uint32_t sysreg(uint32_t id, uint32_t lane) {
-  static uint32_t clock;
+  static _Thread_local uint32_t clock;
   switch (id) {
   case 0x00: return lane;        /* lane id */
   case 0x12: return u32f(1.0f);  /* Y direction */
@@ -2128,7 +2128,7 @@ static bool split(Warp *warps, uint32_t *count, Warp *w, Sm_Mask stay) {
 }
 
 bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
-  static Warp warps[MAX_WARPS]; /* single-threaded core; too big for small stacks */
+  static _Thread_local Warp warps[MAX_WARPS]; /* per shading thread (raster3d workers); too big for small stacks */
   uint32_t count = 1;
   warps[0].mask = (Sm_Mask)(t->lanes >= SM_LANES ? SM_ALL_LANES : ((1u << t->lanes) - 1u));
   warps[0].pc = 1;

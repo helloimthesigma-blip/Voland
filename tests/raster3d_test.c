@@ -466,6 +466,51 @@ static void test_derivatives(Raster3d *r) {
   CHECK(rgba_is(pixel(RT, false, 10, 10), 0, 0, 0, 255), "flat triangle: zero derivatives %08x", *(const uint32_t *)(const void *)pixel(RT, false, 10, 10));
 }
 
+/* Pixel work is split over row bands (raster3d_set_workers): the output
+ * must not depend on the worker count. One draw of overlapping, blended
+ * triangles (order-sensitive) queues more than the parallel threshold,
+ * then the derivative program (2x2 quads across band edges) draws over
+ * half of it. */
+static uint32_t render_scene(Raster3d *r, uint32_t workers, uint8_t out[RT_SIZE * RT_SIZE * 4u]) {
+  raster3d_set_workers(r, workers);
+  const uint64_t pixels_before = r->stats.pixels;
+  base_state(RT, false, PS_OFFSET);
+  raster3d_begin_submission(r);
+  clear_to(r, 0.1f, 0.2f, 0.3f, 1.0f);
+  g_regs[0x4d8] = 1; /* src alpha / one-minus-src alpha */
+  g_regs[0x4d0] = 0x8006; g_regs[0x4d1] = 0x4302; g_regs[0x4d2] = 0x4303;
+  g_regs[0x4d3] = 0x8006; g_regs[0x4d4] = 0x4302; g_regs[0x4d6] = 0x4303;
+  for (uint32_t t = 0; t < 8u; t++) {
+    const float k = (float)t / 8.0f;
+    vertex(3u * t + 0u, -1.0f + k * 0.2f, -1.0f, k, 1.0f - k, 0.5f, 0.6f);
+    vertex(3u * t + 1u, 1.0f, -1.0f + k * 0.3f, 1.0f - k, k, 0.25f, 0.4f);
+    vertex(3u * t + 2u, -1.0f + k, 1.0f, 0.5f, k, 1.0f - k, 0.7f);
+  }
+  draw_arrays(r, 4, 24);
+  base_state(RT, false, PS_DERIV_OFFSET);
+  vertex(0, -1.0f, -1.0f, 0.0f, 0.0f, 0, 1);
+  vertex(1, 1.0f, -1.0f, 64.0f, 0.0f, 0, 1);
+  vertex(2, -1.0f, 1.0f, 0.0f, 64.0f, 0, 1);
+  draw_arrays(r, 4, 3); /* the upper-left half; the blended scene shows in the rest */
+  raster3d_flush(r, &k_mem);
+  memcpy(out, g_gpu + (RT - GPU_BASE), RT_SIZE * RT_SIZE * 4u);
+  return (uint32_t)(r->stats.pixels - pixels_before);
+}
+
+static void test_worker_count_invariance(Raster3d *r) {
+  static uint8_t serial[RT_SIZE * RT_SIZE * 4u], parallel[RT_SIZE * RT_SIZE * 4u];
+  const uint32_t serial_pixels = render_scene(r, 1u, serial);
+  CHECK(r->workers.count == 1u, "serial renderer");
+  CHECK(serial_pixels > 4096u, "the scene is big enough to go parallel (%u pixels)", serial_pixels);
+  static const uint32_t counts[] = {4u, 3u};
+  for (uint32_t i = 0; i < sizeof(counts) / sizeof(counts[0]); i++) {
+    const uint32_t pixels = render_scene(r, counts[i], parallel);
+    CHECK(pixels == serial_pixels, "%u workers: %u pixels, serial %u", r->workers.count, pixels, serial_pixels);
+    CHECK(memcmp(serial, parallel, sizeof(serial)) == 0, "%u workers: identical image", r->workers.count);
+  }
+  raster3d_set_workers(r, workers_default_count());
+}
+
 int main(void) {
   const size_t bytes = raster3d_storage_bytes();
   uint8_t *storage = (uint8_t *)malloc(bytes + 64u);
@@ -483,7 +528,9 @@ int main(void) {
   test_render_to_texture(&r);
   test_stencil(&r);
   test_derivatives(&r);
+  test_worker_count_invariance(&r);
   CHECK(r.stats.shader_faults == 0, "no shader faults");
+  raster3d_shutdown(&r);
   free(storage);
   if (g_failures) {
     fprintf(stderr, "raster3d_test: %d failure(s)\n", g_failures);

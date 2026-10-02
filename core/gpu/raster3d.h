@@ -28,6 +28,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "common/workers.h"
 #include "gpu/maxwell_shader.h"
 #include "gpu/texture.h"
 
@@ -107,13 +108,25 @@ typedef struct Raster3d {
   uint8_t *texture_pool;    /* RASTER_TEXTURE_POOL_BYTES */
   size_t texture_pool_used;
   uint8_t *cbuf_data;       /* 2 stages x SM_CBUF_SLOTS x 64 KiB */
-  Sm_Thread *thread;        /* one invocation's state */
+  Sm_Thread *thread;        /* one invocation's state (vertex work; band 0) */
+  /* Pixel work runs in parallel over interleaved row bands (§13): one
+   * shader state per worker; band_threads[0] is `thread`. */
+  Workers workers;
+  Sm_Thread *band_threads[WORKERS_MAX];
   Raster3d_Stats stats;
 } Raster3d;
 
 /* Bytes of backing storage raster3d_init needs (one allocation). */
 size_t raster3d_storage_bytes(void);
 void raster3d_init(Raster3d *r, uint8_t *storage, size_t bytes);
+
+/* Sets how many workers shade pixels (1 = serial; clamped to the host's
+ * cores and WORKERS_MAX). raster3d_init starts workers_default_count().
+ * Output is identical for every count. */
+void raster3d_set_workers(Raster3d *r, uint32_t count);
+
+/* Joins the workers (emulator tear-down). */
+void raster3d_shutdown(Raster3d *r);
 
 /* Per-draw inputs the register file does not hold. */
 typedef enum Raster3d_Draw_Kind {

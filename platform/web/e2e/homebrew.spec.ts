@@ -1,5 +1,4 @@
 import { existsSync, readFileSync } from "node:fs";
-import { basename } from "node:path";
 
 import { expect, test } from "@playwright/test";
 
@@ -7,7 +6,8 @@ import { decodePng } from "./png";
 
 /**
  * Real homebrew in the browser (opt-in): set VOLAND_HOMEBREW_NRO to a
- * libnx NRO you have (e.g. a released nx-hbmenu.nro) and this loads it
+ * libnx NRO (or a decrypted NCA) you have, e.g. a released
+ * nx-hbmenu.nro, and this loads it
  * through the shell, lets it run, and checks it drew something other
  * than the core's test card. No third-party binary lives in the
  * repository, so without the variable the test skips. Set
@@ -22,13 +22,14 @@ test.skip(NRO === "" || !existsSync(NRO), "set VOLAND_HOMEBREW_NRO to a homebrew
 test.setTimeout(RUN_MS + 60_000);
 
 test("a real homebrew NRO boots and presents frames", async ({ page }) => {
+  page.on("console", (message) => {
+    if (message.text().includes("[gpu] reference renderer")) console.log(message.text());
+  });
   await page.goto("/");
   await expect(page.getByTestId("load-panel")).toBeVisible({ timeout: 20_000 });
-  await page.getByTestId("load-input").setInputFiles({
-    name: basename(NRO),
-    mimeType: "application/octet-stream",
-    buffer: readFileSync(NRO),
-  });
+  // By path: the browser reads the file itself, so multi-GB content (a
+  // decrypted NCA) loads without passing through this process.
+  await page.getByTestId("load-input").setInputFiles(NRO);
   await expect(page.getByTestId("load-success")).toBeVisible();
 
   const screen = page.getByTestId("screen");
@@ -77,11 +78,9 @@ test("a homebrew menu launches an NRO from the SD card", async ({ page }) => {
   const demo = readFileSync(new URL("../public/demo/hello.nro", import.meta.url));
   await page.getByTestId("sd-input").setInputFiles({ name: "hello.nro", mimeType: "application/octet-stream", buffer: demo });
   await expect(page.getByTestId("sd-result")).toContainText("/switch/hello.nro");
-  await page.getByTestId("load-input").setInputFiles({
-    name: basename(NRO),
-    mimeType: "application/octet-stream",
-    buffer: readFileSync(NRO),
-  });
+  // By path: the browser reads the file itself, so multi-GB content (a
+  // decrypted NCA) loads without passing through this process.
+  await page.getByTestId("load-input").setInputFiles(NRO);
   await expect(page.getByTestId("load-success")).toBeVisible();
   await page.waitForTimeout(Math.min(RUN_MS, 20_000)); // let the menu scan /switch and draw
   if (SHOT) await page.getByTestId("screen").screenshot({ path: SHOT });

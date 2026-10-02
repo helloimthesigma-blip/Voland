@@ -16,6 +16,10 @@ add_executable(vmm_test vmm_test.c)
 target_link_libraries(vmm_test PRIVATE switch_core)
 add_test(NAME vmm_test COMMAND vmm_test)
 
+add_executable(workers_test workers_test.c)
+target_link_libraries(workers_test PRIVATE switch_core)
+add_test(NAME workers_test COMMAND workers_test)
+
 #
 # core/hle/loader (§1.6, §12): one unit test per parser over synthesized
 # images from loader_fixtures.c, plus loader_smoke for the composed

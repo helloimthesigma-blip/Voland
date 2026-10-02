@@ -138,7 +138,8 @@ static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); 
 #define CBUF_OFFSET (TEXTURE_POOL_OFFSET + RASTER_TEXTURE_POOL_BYTES)
 #define CBUF_BYTES ((size_t)2 * SM_CBUF_SLOTS * CBUF_SLOT_BYTES)
 #define THREAD_OFFSET (CBUF_OFFSET + CBUF_BYTES)
-#define STORAGE_BYTES (THREAD_OFFSET + sizeof(Sm_Thread) + 64u)
+#define THREAD_BYTES ((sizeof(Sm_Thread) + 63u) & ~(size_t)63u)
+#define STORAGE_BYTES (THREAD_OFFSET + THREAD_BYTES * WORKERS_MAX + 64u)
 
 size_t raster3d_storage_bytes(void) { return STORAGE_BYTES; }
 
@@ -155,10 +156,22 @@ void raster3d_init(Raster3d *r, uint8_t *storage, size_t bytes) {
   r->program_bytes = s + PROGRAM_BYTES_OFFSET;
   r->texture_pool = s + TEXTURE_POOL_OFFSET;
   r->cbuf_data = s + CBUF_OFFSET;
-  r->thread = (Sm_Thread *)(void *)(s + THREAD_OFFSET);
+  for (uint32_t i = 0; i < WORKERS_MAX; i++) r->band_threads[i] = (Sm_Thread *)(void *)(s + THREAD_OFFSET + THREAD_BYTES * i);
+  r->thread = r->band_threads[0];
   for (uint32_t i = 0; i < 256u; i++) g_unorm8[i] = (float)i / 255.0f;
+  tex_init_tables(); /* before any worker samples */
+  workers_start(&r->workers, workers_default_count());
+  log_info("[gpu] reference renderer: %u pixel worker(s)", r->workers.count);
   r->ready = true;
 }
+
+void raster3d_set_workers(Raster3d *r, uint32_t count) {
+  if (count == r->workers.count) return;
+  workers_stop(&r->workers);
+  workers_start(&r->workers, count);
+}
+
+void raster3d_shutdown(Raster3d *r) { workers_stop(&r->workers); }
 
 void raster3d_begin_submission(Raster3d *r) {
   if (!r->ready) return;
@@ -779,6 +792,20 @@ static const Sm_Program *program_get(Raster3d *r, uint64_t address, const Gpu_Me
 
 /* ---- textures ----------------------------------------------------- */
 
+#define RESOLVED_TEXTURES 16u
+
+/* Per-draw handle -> texture resolution, one per shading thread (the
+ * vertex stage's in the Draw_Context, each pixel band's in its state):
+ * hits need no lock; a miss loads under the workers' lock. Shaders' Sm_Env
+ * `user` points here. */
+typedef struct Tex_Resolver {
+  struct Draw_Context *ctx;
+  uint32_t handle[RESOLVED_TEXTURES];
+  Raster3d_Texture *texture[RESOLVED_TEXTURES];
+  Tex_Sampler sampler[RESOLVED_TEXTURES];
+  uint32_t count;
+} Tex_Resolver;
+
 typedef struct Draw_Context {
   Raster3d *r;
   const uint32_t *regs;
@@ -787,11 +814,7 @@ typedef struct Draw_Context {
   const Sm_Program *vs;
   const Sm_Program *ps;
   uint32_t instance;
-  /* per-draw handle -> texture resolution */
-  uint32_t resolved_handle[16];
-  Raster3d_Texture *resolved_texture[16];
-  Tex_Sampler resolved_sampler[16];
-  uint32_t resolved_count;
+  Tex_Resolver resolver; /* the vertex stage's (and the pixel template's) */
   /* vertex fetch windows */
   uint64_t window_base[RASTER_STREAMS];
   uint32_t window_size[RASTER_STREAMS];
@@ -876,14 +899,17 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
   return slot;
 }
 
-static bool resolve_texture(Draw_Context *ctx, uint32_t handle, Raster3d_Texture **tex, Tex_Sampler **sampler) {
-  for (uint32_t i = 0; i < ctx->resolved_count; i++) {
-    if (ctx->resolved_handle[i] == handle) {
-      *tex = ctx->resolved_texture[i];
-      *sampler = &ctx->resolved_sampler[i];
+/* Finds `handle`'s texture and sampler; caches it in `res`. A full cache
+ * still resolves (uncached). */
+static bool resolve_texture(Tex_Resolver *res, uint32_t handle, Raster3d_Texture **tex, Tex_Sampler *sampler) {
+  for (uint32_t i = 0; i < res->count; i++) {
+    if (res->handle[i] == handle) {
+      *tex = res->texture[i];
+      *sampler = res->sampler[i];
       return *tex != NULL;
     }
   }
+  Draw_Context *ctx = res->ctx;
   const uint32_t *regs = ctx->regs;
   const uint32_t tic_index = handle & 0xfffffu;
   const uint32_t tsc_index = (regs[REG_SAMPLER_BINDING] & 1u) ? tic_index : (handle >> 20) & 0xfffu;
@@ -894,30 +920,34 @@ static bool resolve_texture(Draw_Context *ctx, uint32_t handle, Raster3d_Texture
   Tex_Sampler s;
   memset(&s, 0, sizeof(s));
   s.mag_filter = 1;
+  /* The texture pool and guest reads are shared with the other bands. */
+  workers_lock(&ctx->r->workers);
   if (tic_pool && ctx->mem->read(ctx->mem->user, tic_pool + (uint64_t)tic_index * TEX_HEADER_BYTES, tic, sizeof(tic)))
     t = texture_load(ctx->r, tic, ctx->mem);
   if (tsc_pool && ctx->mem->read(ctx->mem->user, tsc_pool + (uint64_t)tsc_index * TEX_SAMPLER_BYTES, tsc, sizeof(tsc)))
     tex_sampler_parse(tsc, &s);
-  uint32_t slot = ctx->resolved_count;
-  if (slot >= 16u) slot = 15u; /* overwrite the last entry */
-  else ctx->resolved_count++;
-  ctx->resolved_handle[slot] = handle;
-  ctx->resolved_texture[slot] = t;
-  ctx->resolved_sampler[slot] = s;
+  workers_unlock(&ctx->r->workers);
+  if (res->count < RESOLVED_TEXTURES) {
+    res->handle[res->count] = handle;
+    res->texture[res->count] = t;
+    res->sampler[res->count] = s;
+    res->count++;
+  }
   *tex = t;
-  *sampler = &ctx->resolved_sampler[slot];
+  *sampler = s;
   return t != NULL;
 }
 
 static void env_texture(void *user, const Sm_Tex_Request *req, uint32_t out[4]) {
-  Draw_Context *ctx = (Draw_Context *)user;
+  Tex_Resolver *res = (Tex_Resolver *)user;
   Raster3d_Texture *t = NULL;
-  Tex_Sampler *s = NULL;
-  if (!resolve_texture(ctx, req->handle, &t, &s)) {
+  Tex_Sampler sampler;
+  if (!resolve_texture(res, req->handle, &t, &sampler)) {
     out[0] = out[1] = out[2] = 0;
     out[3] = u32f(1.0f);
     return;
   }
+  const Tex_Sampler *s = &sampler;
   const Tex_Image *img = &t->image;
   switch (req->kind) {
   case SM_TEX_FETCH:
@@ -942,14 +972,22 @@ static void env_texture(void *user, const Sm_Tex_Request *req, uint32_t out[4]) 
   }
 }
 
+/* Shader global memory (LDG/STG): guest memory is shared with the other
+ * bands, so accesses are serialised. */
 static bool env_global_read(void *user, uint64_t va, void *out, uint32_t size) {
-  const Draw_Context *ctx = (const Draw_Context *)user;
-  return ctx->mem->read(ctx->mem->user, va, out, size);
+  const Draw_Context *ctx = ((const Tex_Resolver *)user)->ctx;
+  workers_lock(&ctx->r->workers);
+  const bool ok = ctx->mem->read(ctx->mem->user, va, out, size);
+  workers_unlock(&ctx->r->workers);
+  return ok;
 }
 
 static bool env_global_write(void *user, uint64_t va, const void *src, uint32_t size) {
-  const Draw_Context *ctx = (const Draw_Context *)user;
-  return ctx->mem->write(ctx->mem->user, va, src, size);
+  const Draw_Context *ctx = ((const Tex_Resolver *)user)->ctx;
+  workers_lock(&ctx->r->workers);
+  const bool ok = ctx->mem->write(ctx->mem->user, va, src, size);
+  workers_unlock(&ctx->r->workers);
+  return ok;
 }
 
 /* Binds the constant buffers `program` reads from `group`. */
@@ -957,7 +995,7 @@ static void env_setup(Draw_Context *ctx, uint32_t stage, const Sm_Program *progr
                       uint32_t group) {
   Sm_Env *env = &ctx->env[stage];
   memset(env, 0, sizeof(*env));
-  env->user = ctx;
+  env->user = &ctx->resolver;
   env->texture = env_texture;
   env->global_read = env_global_read;
   env->global_write = env_global_write;
@@ -1202,6 +1240,14 @@ typedef struct Raster_State {
   bool span_blend[MAX_TARGETS];
   uint32_t span_word[MAX_TARGETS];
   uint8_t span_lut[MAX_TARGETS][4][256];
+  /* Pixel work: the rows this state shades (interleaved bands of
+   * BAND_ROWS; band_count 1 = every row), its shader state, texture
+   * resolver and statistics. Each worker has its own copy. */
+  uint32_t band_index, band_count;
+  Sm_Thread *thread;
+  Sm_Env ps_env;
+  Tex_Resolver resolver;
+  Raster3d_Stats stats;
 } Raster_State;
 
 /* One pixel-program result, reused across a triangle whose inputs do not
@@ -1474,8 +1520,7 @@ static void output_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, 
 /* Runs the pixel program once for a flat triangle, into `shared`. */
 static void shade_shared(Raster_State *rs, int32_t px, int32_t py, float depth, const Plane *planes, const Plane *inv_w,
                          float x0, float y0, bool front, const Screen_Vertex *provoking, Frag_Result *shared) {
-  Raster3d *r = rs->ctx->r;
-  Sm_Thread *t = r->thread;
+  Sm_Thread *t = rs->thread;
   /* A program that reads its quad neighbours gets a whole quad of the
    * same pixel: its derivatives are then exactly zero, as they are on a
    * triangle whose inputs do not vary. */
@@ -1484,8 +1529,8 @@ static void shade_shared(Raster_State *rs, int32_t px, int32_t py, float depth, 
   t->front_facing = front ? SM_ALL_LANES : 0;
   for (uint32_t l = 0; l < lanes; l++)
     setup_lane(rs, t, l, px, py, depth < 0.0f ? 0.0f : (depth > 1.0f ? 1.0f : depth), planes, inv_w, x0, y0, provoking);
-  const bool ok = sm_run(rs->ctx->ps, &rs->ctx->env[1], t);
-  if (!ok) r->stats.shader_faults++;
+  const bool ok = sm_run(rs->ctx->ps, &rs->ps_env, t);
+  if (!ok) rs->stats.shader_faults++;
   shared->killed = !ok || (t->killed & 1u);
   for (uint32_t i = 0; i < rs->out_regs; i++) shared->regs[i] = t->r[i][0];
   shared->valid = true;
@@ -1510,13 +1555,12 @@ typedef struct Pixel_Batch {
 static void shade_batch(Raster_State *rs, Pixel_Batch *b, const Plane *planes, const Plane *inv_w, float x0, float y0,
                         bool front, const Screen_Vertex *provoking) {
   if (!b->count) return;
-  Raster3d *r = rs->ctx->r;
-  Sm_Thread *t = r->thread;
+  Sm_Thread *t = rs->thread;
   sm_thread_reset_light(t, b->count);
   t->front_facing = front ? SM_ALL_LANES : 0;
   for (uint32_t l = 0; l < b->count; l++) setup_lane(rs, t, l, b->x[l], b->y[l], b->z[l], planes, inv_w, x0, y0, provoking);
-  const bool ok = sm_run(rs->ctx->ps, &rs->ctx->env[1], t);
-  if (!ok) r->stats.shader_faults++;
+  const bool ok = sm_run(rs->ctx->ps, &rs->ps_env, t);
+  if (!ok) rs->stats.shader_faults++;
   for (uint32_t l = 0; ok && l < b->count; l++) {
     if ((t->killed >> l) & 1u || !((b->live >> l) & 1u)) continue;
     uint32_t regs[MAX_TARGETS * 4u + 1u];
@@ -1596,7 +1640,7 @@ static void span_prepare(Raster_State *rs, const uint32_t *out_regs) {
 /* Pixels [x0, x1] of row y from the prepared fill. */
 static void span_fill(Raster_State *rs, int32_t y, int32_t x0, int32_t x1) {
   const uint32_t n = (uint32_t)(x1 - x0 + 1);
-  rs->ctx->r->stats.pixels += n;
+  rs->stats.pixels += n;
   for (uint32_t i = 0; i < rs->target_count; i++) {
     Target *tg = &rs->targets[i];
     if (!tg->surface) continue;
@@ -1618,7 +1662,6 @@ static void span_fill(Raster_State *rs, int32_t y, int32_t x0, int32_t x1) {
 
 /* Depth, alpha test, blending and the colour write for one shaded pixel. */
 static void output_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, const uint32_t *out_regs) {
-  Raster3d *r = rs->ctx->r;
   uint8_t *zp = rs->depth ? rs->depth->pixels + ((uint64_t)py * rs->depth->width + (uint64_t)px) * rs->depth->bytes_per_pixel
                           : NULL;
   if (rs->alpha_test) {
@@ -1663,7 +1706,7 @@ static void output_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, 
       rs->depth->dirty = true;
     }
   }
-  r->stats.pixels++;
+  rs->stats.pixels++;
   for (uint32_t i = 0; i < rs->target_count; i++) {
     Target *tg = &rs->targets[i];
     if (!tg->surface) continue;
@@ -1727,7 +1770,26 @@ static void to_screen(const Raster_State *rs, const Vertex *v, Screen_Vertex *ou
   }
 }
 
-static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
+/* Pixel work is split into interleaved bands of BAND_ROWS rows, band k
+ * shaded by worker k % band_count. Even-sized and even-aligned, so a 2x2
+ * quad never straddles two bands; every pixel still sees the draw's
+ * triangles in order - the result does not depend on the worker count. */
+#define BAND_ROWS 16
+
+static bool row_owned(const Raster_State *rs, int64_t y) {
+  return rs->band_count <= 1u || (uint32_t)((y / BAND_ROWS) % rs->band_count) == rs->band_index;
+}
+
+/* Whether any row in [y0, y1] belongs to this state's bands. */
+static bool rows_owned(const Raster_State *rs, int64_t y0, int64_t y1) {
+  if (rs->band_count <= 1u) return true;
+  for (int64_t band = y0 / BAND_ROWS; band <= y1 / BAND_ROWS; band++)
+    if ((uint32_t)(band % rs->band_count) == rs->band_index) return true;
+  return false;
+}
+
+static void raster_triangle_now(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c,
+                                const Vertex *provoking) {
   Screen_Vertex sv[3];
   to_screen(rs, a, &sv[0]);
   to_screen(rs, b, &sv[1]);
@@ -1749,7 +1811,7 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
     sv[2] = t;
     area = -area;
   }
-  rs->ctx->r->stats.triangles++;
+  if (rs->band_index == 0) rs->stats.triangles++;
   /* Bounding box in pixels whose centres may be covered. */
   int64_t minx = sv[0].fx, maxx = sv[0].fx, miny = sv[0].fy, maxy = sv[0].fy;
   for (uint32_t i = 1; i < 3; i++) {
@@ -1765,7 +1827,7 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
   if (y0 < rs->clip.y0) y0 = rs->clip.y0;
   if (x1 > rs->clip.x1 - 1) x1 = rs->clip.x1 - 1;
   if (y1 > rs->clip.y1 - 1) y1 = rs->clip.y1 - 1;
-  if (x0 > x1 || y0 > y1) return;
+  if (x0 > x1 || y0 > y1 || !rows_owned(rs, y0, y1)) return;
   /* Edge functions E_ij(p) = (xj-xi)(py-yi) - (yj-yi)(px-xi), all >= 0
    * inside; a pixel exactly on an edge belongs to it when the edge is a
    * "top-left" one (here: dy < 0, or dy == 0 and dx > 0). */
@@ -1807,6 +1869,10 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
     for (int64_t y = y0; y <= y1; y++) {
       int64_t e0 = e_row[0], e1 = e_row[1], e2 = e_row[2];
       int64_t first = -1, last = -1;
+      e_row[0] += ey[0];
+      e_row[1] += ey[1];
+      e_row[2] += ey[2];
+      if (!row_owned(rs, y)) continue;
       for (int64_t x = x0; x <= x1; x++) {
         if ((e0 | e1 | e2) >= 0) {
           if (first < 0) first = x;
@@ -1818,9 +1884,6 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
         e1 += ex[1];
         e2 += ex[2];
       }
-      e_row[0] += ey[0];
-      e_row[1] += ey[1];
-      e_row[2] += ey[2];
       if (first < 0) continue;
       if (!shared.valid) {
         const float dx = (float)first + 0.5f - sv[0].x, dy = (float)y + 0.5f - sv[0].y;
@@ -1841,6 +1904,7 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
     /* 2x2 quads: every quad with a live pixel shades all four lanes. */
     const int64_t e_base[3] = {e_row[0], e_row[1], e_row[2]};
     for (int64_t by = y0 & ~(int64_t)1; by <= y1; by += 2) {
+      if (!row_owned(rs, by)) continue;
       for (int64_t bx = x0 & ~(int64_t)1; bx <= x1; bx += 2) {
         uint32_t live = 0;
         float zq[4];
@@ -1871,6 +1935,10 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
   }
   for (int64_t y = y0; y <= y1; y++) {
     int64_t e0 = e_row[0], e1 = e_row[1], e2 = e_row[2];
+    e_row[0] += ey[0];
+    e_row[1] += ey[1];
+    e_row[2] += ey[2];
+    if (!row_owned(rs, y)) continue;
     for (int64_t x = x0; x <= x1; x++) {
       if ((e0 | e1 | e2) >= 0) {
         const float dx = (float)x + 0.5f - sv[0].x, dy = (float)y + 0.5f - sv[0].y;
@@ -1890,11 +1958,88 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
       e1 += ex[1];
       e2 += ex[2];
     }
-    e_row[0] += ey[0];
-    e_row[1] += ey[1];
-    e_row[2] += ey[2];
   }
   shade_batch(rs, &batch, planes, &wp, sv[0].x, sv[0].y, front, &prov);
+}
+
+/* ---- parallel pixel work ------------------------------------------ */
+
+/* Clipped triangles wait here until the draw ends (or the queue fills);
+ * then every worker rasterises all of them over its own bands. Small
+ * batches stay on the caller - a fork-join costs more than they do. */
+#define TRIANGLE_QUEUE 256u
+#define PARALLEL_MIN_PIXELS 4096u
+
+typedef struct Queued_Triangle {
+  Vertex v[3];
+  Vertex provoking;
+} Queued_Triangle;
+
+static Queued_Triangle g_queue[TRIANGLE_QUEUE];
+static uint32_t g_queue_count;
+static uint64_t g_queue_pixels; /* bounding-box estimate of the queued work */
+static Raster_State g_band_state[WORKERS_MAX];
+
+static void band_task(void *user, uint32_t index, uint32_t count) {
+  const Raster_State *master = (const Raster_State *)user;
+  Raster_State *w = &g_band_state[index];
+  memcpy(w, master, sizeof(*w));
+  w->band_index = index;
+  w->band_count = count;
+  w->thread = master->ctx->r->band_threads[index];
+  w->ps_env.user = &w->resolver;
+  memset(&w->stats, 0, sizeof(w->stats));
+  for (uint32_t i = 0; i < g_queue_count; i++) {
+    const Queued_Triangle *q = &g_queue[i];
+    raster_triangle_now(w, &q->v[0], &q->v[1], &q->v[2], &q->provoking);
+  }
+}
+
+static void flush_triangles(Raster_State *rs) {
+  if (!g_queue_count) return;
+  Raster3d *r = rs->ctx->r;
+  const uint32_t n = g_queue_pixels >= PARALLEL_MIN_PIXELS ? r->workers.count : 1u;
+  workers_run(&r->workers, n, band_task, rs);
+  for (uint32_t i = 0; i < n && i < WORKERS_MAX; i++) {
+    r->stats.triangles += g_band_state[i].stats.triangles;
+    r->stats.pixels += g_band_state[i].stats.pixels;
+    r->stats.shader_faults += g_band_state[i].stats.shader_faults;
+  }
+  g_queue_count = 0;
+  g_queue_pixels = 0;
+}
+
+/* Screen-space bounding box area of a clipped triangle, in pixels,
+ * clamped to the clip rectangle (the parallel-or-not estimate only). */
+static uint64_t triangle_pixels(const Raster_State *rs, const Vertex *const v[3]) {
+  float x0 = 0.0f, x1 = 0.0f, y0 = 0.0f, y1 = 0.0f;
+  for (uint32_t i = 0; i < 3u; i++) {
+    const float iw = 1.0f / v[i]->pos[3];
+    float x = v[i]->pos[0] * iw, y = v[i]->pos[1] * iw;
+    if (rs->viewport_transform) {
+      x = x * rs->vp_scale[0] + rs->vp_offset[0];
+      y = y * rs->vp_scale[1] + rs->vp_offset[1];
+    }
+    if (i == 0 || x < x0) x0 = x;
+    if (i == 0 || x > x1) x1 = x;
+    if (i == 0 || y < y0) y0 = y;
+    if (i == 0 || y > y1) y1 = y;
+  }
+  const float w = fminf(x1, (float)rs->clip.x1) - fmaxf(x0, (float)rs->clip.x0);
+  const float h = fminf(y1, (float)rs->clip.y1) - fmaxf(y0, (float)rs->clip.y0);
+  if (!(w > 0.0f) || !(h > 0.0f)) return 0;
+  return (uint64_t)(w + 1.0f) * (uint64_t)(h + 1.0f);
+}
+
+static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
+  if (g_queue_count == TRIANGLE_QUEUE) flush_triangles(rs);
+  Queued_Triangle *q = &g_queue[g_queue_count++];
+  q->v[0] = *a;
+  q->v[1] = *b;
+  q->v[2] = *c;
+  q->provoking = *provoking;
+  const Vertex *const v[3] = {a, b, c};
+  g_queue_pixels += triangle_pixels(rs, v);
 }
 
 /* ---- clipping ----------------------------------------------------- */
@@ -2093,7 +2238,8 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
   ctx->regs = regs;
   ctx->mem = mem;
   ctx->instance = draw->instance;
-  ctx->resolved_count = 0;
+  ctx->resolver.ctx = ctx;
+  ctx->resolver.count = 0;
   ctx->vs = NULL;
   ctx->ps = NULL;
   memset(ctx->window_size, 0, sizeof(ctx->window_size));
@@ -2139,6 +2285,13 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     return;
   }
   rs.span_ok = span_state_ok(&rs);
+  rs.band_index = 0;
+  rs.band_count = 1;
+  rs.thread = r->thread;
+  rs.ps_env = ctx->env[1];
+  rs.resolver = ctx->resolver;
+  rs.ps_env.user = &rs.resolver;
+  memset(&rs.stats, 0, sizeof(rs.stats));
   static Vertex_Cache cache;
   memset(cache.valid, 0, sizeof(cache.valid));
   Assembler as;
@@ -2183,4 +2336,5 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
   }
   }
   assemble_end(&rs, &cache, &as);
+  flush_triangles(&rs);
 }

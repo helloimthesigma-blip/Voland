@@ -1320,6 +1320,7 @@ Command records reference guest memory (vertex/index/uniform data, textures) by 
 - **Textures:** `core/gpu/texture` parses TIC/TSC (open-gpu-doc clb197tex.h layouts), deswizzles block-linear/pitch images once per submission into a texture pool, expands BC1-5, ASTC (LDR, every 2D footprint; `core/gpu/astc`, per the Khronos Data Format Specification) and 8-bit UNORM formats to RGBA8, and samples with wrap modes, nearest/bilinear filtering, depth compare and gather.
 - **Render targets** live in host-linear copies (`raster3d` surface cache) and are written back to guest memory at the end of every submission and before any DMA copy, so vi/BufferQueue presents them unchanged and `voland-cli --dump-frame` golden-hashes them.
 - **Cost control:** a triangle whose pixel-program inputs do not vary (flat ImGui rectangles) is shaded once and only depth-tested / blended per pixel; RGBA8 targets and textures have byte-wise fast paths.
+- **Parallel pixel work (v3.65):** vertex shading, assembly and clipping stay serial; clipped triangles queue (up to 256) and, at the end of the draw, `common/workers` (a fork-join pool: pthreads natively, Emscripten pthreads on the web, serial where neither exists) has every worker rasterise the whole queue over its own interleaved 16-row bands. Bands are even-aligned (2x2 quads never straddle), each pixel still sees triangles in submission order, and each worker has its own shader state, texture resolver and statistics - so the image is identical for every worker count (`raster3d_test` asserts it for 1, 3 and 4; homebrew golden frames are unchanged). Texture loads and shader global-memory access take the pool's lock. Batches under ~4K pixels stay on the caller. This is host-side parallelism inside one draw, not guest-visible blocking (§7). Measured on an 8-thread host: a Unity title's 3D frames 2.7x faster natively, ~3.8x in Chromium.
 
 This path is the correctness oracle the WebGPU translation (shaders to WGSL in the GPU Worker, as above) will be diffed against; it is not removed when that lands. It renders deko3d homebrew (ftpd's ImGui interface) today.
 
@@ -2212,7 +2213,8 @@ if(EMSCRIPTEN)
                                   # growth disabled this IS the maximum — views
                                   # never detach
     -sALLOW_MEMORY_GROWTH=0       # fixed at boot (§4); never enable
-    -sPTHREAD_POOL_SIZE=8
+    -sPTHREAD_POOL_SIZE=8         # the reference renderer's pixel workers
+                                  # (common/workers, WORKERS_MAX = 8; §13)
     -sEXPORTED_FUNCTIONS='["_emulator_create","_emulator_destroy",
                             "_scheduler_tick","_layout_get",
                             "_cpu_get_reg","_cpu_set_reg"]'
@@ -2425,9 +2427,13 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.64.0*
+*Document version: 3.65.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.64 → v3.65 (summary)
+
+- **§13 reference renderer: parallel pixel work.** `core/common/workers` (new: fork-join pool, `workers_test`) and row-band rasterisation in `raster3d` - see the §13 bullet. `sm_run`'s warp stack and the clock sysreg became thread-local; `tex_init_tables()` builds the sampling tables before workers start. **§24:** the existing `PTHREAD_POOL_SIZE=8` now has a user (the pixel workers; `WORKERS_MAX` must not exceed it). Verified: native suite, 11 homebrew golden frames bit-identical, the Unity title's frame bit-identical at 90k slices (217 s -> 80 s wall), Chromium e2e suite, and the title in Chromium at ~0.95 fps against ~0.25 fps single-threaded.
 
 ### Changelog v3.63 → v3.64 (summary)
 

@@ -98,6 +98,10 @@ typedef struct Tex_Image {
 void tex_header_parse(const uint32_t words[8], Tex_Header *out);
 void tex_sampler_parse(const uint32_t words[8], Tex_Sampler *out);
 
+/* Builds the sampling lookup tables. Idempotent; call once before
+ * sampling from several threads (raster3d_init does). */
+void tex_init_tables(void);
+
 /* Bytes per element and block size (1x1, or 4x4 for BCn). Returns false
  * for unsupported formats. */
 bool tex_format_info(uint32_t format, uint32_t *bytes_per_element, uint32_t *block_width, uint32_t *block_height);

@@ -587,14 +587,18 @@ static bool is_integer_type(uint32_t type) { return type == TEX_DATA_SINT || typ
 
 /* One texel (unswizzled), honouring the border. */
 /* byte -> [0,1] for RGBA8 texels */
+static float g_unorm8_table[256];
+static bool g_tables_ready;
+
+void tex_init_tables(void) {
+  if (g_tables_ready) return;
+  for (uint32_t i = 0; i < 256u; i++) g_unorm8_table[i] = (float)i / 255.0f;
+  g_tables_ready = true;
+}
+
 static const float *unorm8_table(void) {
-  static float table[256];
-  static bool ready;
-  if (!ready) {
-    for (uint32_t i = 0; i < 256u; i++) table[i] = (float)i / 255.0f;
-    ready = true;
-  }
-  return table;
+  tex_init_tables(); /* raster3d_init runs this before samplers go parallel */
+  return g_unorm8_table;
 }
 
 static void texel_at(const Tex_Image *img, const Tex_Sampler *s, int32_t x, int32_t y, uint32_t layer, uint32_t out[4]) {

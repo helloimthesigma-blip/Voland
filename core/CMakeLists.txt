@@ -6,6 +6,7 @@ set(SWITCH_CORE_SOURCES
   common/layout.c
   common/vmm.c
   common/input_region.c
+  common/workers.c
   cpu/cpu.c
   cpu/backends/noop/noop.c
   cpu/backends/interpreter/interpreter.c
@@ -114,6 +115,7 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   hle/services/sm/sm.h
   hle/services/nvdrv/nvdrv.h
   common/input_region.h
+  common/workers.h
   hle/loader/byte_source.h
   hle/loader/nca_parse.h
   hle/loader/nca_compressed.h
@@ -136,6 +138,13 @@ add_library(switch_core STATIC ${SWITCH_CORE_SOURCES} ${SWITCH_CORE_THIRD_PARTY_
 target_include_directories(switch_core PUBLIC
   $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}>
 )
+
+# common/workers: pthreads natively (the web build's -pthread covers it).
+if(NOT EMSCRIPTEN AND NOT WIN32)
+  set(THREADS_PREFER_PTHREAD_FLAG ON)
+  find_package(Threads REQUIRED)
+  target_link_libraries(switch_core PUBLIC Threads::Threads)
+endif()
 
 #
 # Backend selection. Every backend obeys CPU_Backend; a single define wires

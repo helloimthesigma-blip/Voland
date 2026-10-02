@@ -433,6 +433,7 @@ void emulator_destroy(Emulator* emulator) {
   }
   if (emulator->ramfs_ready) ramfs_pool_destroy(&emulator->ramfs);
   arena_destroy(&emulator->service_arena);
+  raster3d_shutdown(&emulator->renderer);
   arena_destroy(&emulator->renderer_arena);
   vmm_destroy(emulator->vmm);
   layout_destroy();
