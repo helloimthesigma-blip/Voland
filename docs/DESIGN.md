@@ -2425,9 +2425,16 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.58.0*
+*Document version: 3.59.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.58 → v3.59 (summary)
+
+- **ns getters corrected (§12).** IServiceGetterInterface's ids were off by one from 7994: now 7994 FactoryReset, 7995 AccountProxy, 7996 ApplicationManager, 7997 DownloadTask, 7998 ContentManagement, 7999 Document (libnx's numbering). New IContentManagementInterface: occupied size (zero), SD mount check, total/free space (the ncm figure), no content meta, nothing running. IApplicationManagerInterface's 44 is the SD-mount-status event (it had been a size stub), 47/48 the sizes.
+- **fsp-srv 400 OpenDeviceOperator** (SD card inserted with the ramfs capacity, no game card) and **ICommonStateGetter 40 GetCradleFwVersion** (no dock: zeros).
+- **Homebrew coverage:** SwitchIdent and NX-Activity-Log reach their UIs; SimpleModManager (borealis) renders its full UI.
+- **Tests:** `services_test` (content management, the SD-mount event, the device operator).
 
 ### Changelog v3.57 → v3.58 (summary)
 

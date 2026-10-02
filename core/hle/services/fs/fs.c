@@ -540,6 +540,32 @@ static HLE_ServiceResult cmd_open_save_info_reader(HLE_Context *c, Service_Objec
   return HLE_RESULT_SUCCESS;
 }
 
+/* IDeviceOperator: the SD card is always inserted (the ramfs pool is its
+ * capacity), there is never a game card. */
+static HLE_ServiceResult cmd_open_device_operator(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                                  IPC_Response *res) {
+  (void)c;
+  (void)req;
+  (void)ipc_response_push_object(res, &state_of(self)->device_operator, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_sd_user_area(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                          IPC_Response *res) {
+  (void)c;
+  (void)req;
+  (void)ipc_response_push_u64(res, ramfs_total_bytes(state_of(self)->pool));
+  return HLE_RESULT_SUCCESS;
+}
+
+static const Service_Command k_device_operator_commands[] = {
+    {0, service_cmd_out_u8_true, "IsSdCardInserted"},
+    {1, service_cmd_out_u64_zero, "GetSdCardSpeedMode"},
+    {3, cmd_sd_user_area, "GetSdCardUserAreaSize"},
+    {4, service_cmd_out_u64_zero, "GetSdCardProtectedAreaSize"},
+    {200, service_cmd_out_u8_false, "IsGameCardInserted"},
+};
+
 static const Service_Command k_proxy_commands[] = {
     {1, service_cmd_ok, "SetCurrentProcess"},
     {11, cmd_open_bis, "OpenBisFileSystem"},
@@ -556,6 +582,7 @@ static const Service_Command k_proxy_commands[] = {
     {200, cmd_open_data_storage_self, "OpenDataStorageByCurrentProcess"},
     {202, cmd_open_data_storage_by_id, "OpenDataStorageByDataId"},
     {203, cmd_open_data_storage_self, "OpenPatchDataStorageByCurrentProcess"},
+    {400, cmd_open_device_operator, "OpenDeviceOperator"},
     {1003, service_cmd_ok, "DisableAutoSaveDataCreation_stub"},
     {1004, service_cmd_ok, "SetGlobalAccessLogMode_stub"},
     {1005, cmd_get_access_log_mode, "GetGlobalAccessLogMode"},
@@ -614,6 +641,7 @@ void fs_init(Fs_State *s, Ramfs_Pool *pool) {
   s->directory = SERVICE_INTERFACE("IDirectory", k_directory_commands, 0, s);
   s->directory.on_close = directory_on_close;
   s->storage = SERVICE_INTERFACE("IStorage", k_storage_commands, 0, s);
+  s->device_operator = SERVICE_INTERFACE("IDeviceOperator", k_device_operator_commands, 0, s);
   s->sd_root = RAMFS_NO_NODE;
   if (pool && ramfs_create_filesystem(pool, &s->sd_root) != 0) s->sd_root = RAMFS_NO_NODE;
 }

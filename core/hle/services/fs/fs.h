@@ -9,8 +9,10 @@
  *   asset RomFS or the program NCA's RomFS section, as raw bytes the
  *   title parses itself), 202 OpenDataStorageByDataId (system archives:
  *   not shipped, TargetNotFound - §1.6), 203 OpenPatchDataStorage-
- *   ByCurrentProcess (same as 200; no updates yet), 1003/1004/1005/1006/
- *   1011 access-log and auto-creation knobs.
+ *   ByCurrentProcess (same as 200; no updates yet), 400 OpenDevice-
+ *   Operator (IDeviceOperator: SD card inserted with the ramfs capacity,
+ *   no game card), 1003/1004/1005/1006/1011 access-log and auto-creation
+ *   knobs.
  * IFileSystem: Create/Delete File/Directory(+Recursively), Rename*,
  *   GetEntryType, OpenFile, OpenDirectory, Commit, Get{Free,Total}Space-
  *   Size, CleanDirectoryRecursively, GetFileTimeStampRaw (zero times).
@@ -84,6 +86,7 @@ typedef struct Fs_State {
   Service_Interface file;        /* object state: open-file slot */
   Service_Interface directory;   /* object state: open-directory slot */
   Service_Interface storage;     /* object state: FS_STORAGE_* */
+  Service_Interface device_operator;
   Ramfs_Pool *pool;              /* the Emulator's; outlives processes */
   uint32_t sd_root;
   Fs_Save saves[FS_MAX_SAVES];   /* survive reloads with the pool */

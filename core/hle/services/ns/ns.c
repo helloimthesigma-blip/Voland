@@ -40,6 +40,25 @@ static HLE_ServiceResult cmd_get_record(HLE_Context *c, Service_Object *self, co
   return HLE_RESULT_SUCCESS;
 }
 
+#define NCM_REPORTED_SPACE (32ull * 1024u * 1024u * 1024u)
+
+static HLE_ServiceResult cmd_space(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                   IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)ipc_response_push_u64(res, NCM_REPORTED_SPACE);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_get_content_management(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                                     IPC_Response *res) {
+  (void)c;
+  (void)req;
+  (void)ipc_response_push_object(res, &state_of(self)->content_management, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
 static HLE_ServiceResult cmd_get_inert(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                        IPC_Response *res) {
   (void)c;
@@ -149,18 +168,61 @@ static const Service_Command k_getter_commands[] = {
     {7991, cmd_get_record, "GetReadOnlyApplicationRecordInterface"},
     {7992, cmd_get_inert, "GetECommerceInterface"},
     {7993, cmd_get_inert, "GetApplicationVersionInterface"},
-    {7994, cmd_get_inert, "GetDocumentInterface"},
-    {7995, cmd_get_inert, "GetDownloadTaskInterface"},
+    {7994, cmd_get_inert, "GetFactoryResetInterface"},
+    {7995, cmd_get_inert, "GetAccountProxyInterface"},
     {7996, cmd_get_manager, "GetApplicationManagerInterface"},
-    {7997, cmd_get_inert, "GetContentManagementInterface"},
+    {7997, cmd_get_inert, "GetDownloadTaskInterface"},
+    {7998, cmd_get_content_management, "GetContentManagementInterface"},
+    {7999, cmd_get_inert, "GetDocumentInterface"},
+};
+
+/* Nothing is installed: no occupied size, no content meta, no running
+ * application; every storage reports NCM_REPORTED_SPACE, all free. */
+static HLE_ServiceResult cmd_occupied_size(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                           IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  static const uint8_t zero[NS_OCCUPIED_SIZE_BYTES];
+  (void)ipc_response_push_bytes(res, zero, sizeof(zero));
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_sd_event(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                      IPC_Response *res) {
+  (void)req;
+  return service_push_event(c, res, &state_of(self)->sd_event);
+}
+
+static HLE_ServiceResult cmd_out_u32_zero(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                          IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)ipc_response_push_u32(res, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static const Service_Command k_content_management_commands[] = {
+    {11, cmd_occupied_size, "CalculateApplicationOccupiedSize"},
+    {43, service_cmd_ok, "CheckSdCardMountStatus"},
+    {47, cmd_space, "GetTotalSpaceSize"},
+    {48, cmd_space, "GetFreeSpaceSize"},
+    {600, cmd_out_u32_zero, "CountApplicationContentMeta"},
+    {601, cmd_out_u32_zero, "ListApplicationContentMetaStatus"},
+    {605, cmd_out_u32_zero, "ListApplicationContentMetaStatusWithRightsCheck"},
+    {607, service_cmd_out_u8_false, "IsAnyApplicationRunning"},
 };
 
 static const Service_Command k_manager_commands[] = {
     {0, cmd_list_records, "ListApplicationRecord"},
     {1, cmd_record_count, "GenerateApplicationRecordCount"},
     {2, cmd_record_event, "GetApplicationRecordUpdateSystemEvent"},
-    {44, service_cmd_out_u64_zero, "GetTotalSpaceSize_stub"},
-    {47, service_cmd_out_u64_zero, "GetFreeSpaceSize_stub"},
+    {11, cmd_occupied_size, "CalculateApplicationOccupiedSize"},
+    {43, service_cmd_ok, "CheckSdCardMountStatus"},
+    {44, cmd_sd_event, "GetSdCardMountStatusChangedEvent"},
+    {47, cmd_space, "GetTotalSpaceSize"},
+    {48, cmd_space, "GetFreeSpaceSize"},
     {400, cmd_control_data, "GetApplicationControlData"},
     {401, service_cmd_ok, "InvalidateAllApplicationControlCache"},
     {403, cmd_max_cache, "GetMaxApplicationControlCacheCount"},
@@ -226,17 +288,6 @@ static HLE_ServiceResult cmd_meta_not_found(HLE_Context *c, Service_Object *self
   (void)req;
   (void)res;
   return NCM_RESULT_CONTENT_META_NOT_FOUND;
-}
-
-#define NCM_REPORTED_SPACE (32ull * 1024u * 1024u * 1024u)
-
-static HLE_ServiceResult cmd_space(HLE_Context *c, Service_Object *self, const IPC_Request *req,
-                                   IPC_Response *res) {
-  (void)c;
-  (void)self;
-  (void)req;
-  (void)ipc_response_push_u64(res, NCM_REPORTED_SPACE);
-  return HLE_RESULT_SUCCESS;
 }
 
 static const Service_Command k_ncm_commands[] = {
@@ -344,6 +395,8 @@ void ns_init(Ns_State *s) {
   s->control_data = SERVICE_INTERFACE("IReadOnlyApplicationControlDataInterface", k_control_commands, 0, s);
   s->record = SERVICE_INTERFACE("IReadOnlyApplicationRecordInterface", k_record_commands, 0, s);
   s->inert = SERVICE_INTERFACE("INsInterface", k_inert_commands, 0, s);
+  s->content_management =
+      SERVICE_INTERFACE("IContentManagementInterface", k_content_management_commands, 0, s);
   s->ncm = SERVICE_INTERFACE("ncm", k_ncm_commands, 0, s);
   s->es = SERVICE_INTERFACE("es", k_es_commands, 0, s);
   s->ncm_storage = SERVICE_INTERFACE("IContentStorage", k_ncm_storage_commands, 0, s);

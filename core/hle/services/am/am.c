@@ -808,6 +808,7 @@ static const Service_Command k_common_state_getter_commands[] = {
     {11, service_cmd_ok, "ReleaseSleepLock_stub"},
     {12, service_cmd_ok, "ReleaseSleepLockTransiently_stub"},
     {13, cmd_sleep_lock_event, "GetAcquiredSleepLockEvent"},
+    {40, service_cmd_out_zero128, "GetCradleFwVersion"}, /* no dock */
     {50, service_cmd_out_u8_false, "IsVrModeEnabled"},
     {51, service_cmd_ok, "SetVrModeEnabled_stub"},
     {52, service_cmd_ok, "SetLcdBacklighOffEnabled_stub"},

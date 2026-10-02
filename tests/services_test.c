@@ -399,6 +399,11 @@ static void test_fs(void) {
   const uint32_t save_a = object(fsp, 51, save_in, sizeof(save_in));
   (void)save_a;
   (void)call_ex(fsp, 200, NULL, 0, NULL, FS_RESULT_TARGET_NOT_FOUND);
+  /* IDeviceOperator: SD card in, no game card. */
+  const uint32_t device = object(fsp, 400, NULL, 0);
+  CHECK(call(device, 0, NULL, 0, NULL).data[0] == 1);
+  CHECK(test_le64(call(device, 3, NULL, 0, NULL).data) == EMULATOR_RAMFS_BYTES);
+  CHECK(call(device, 200, NULL, 0, NULL).data[0] == 0);
 }
 
 /* ------------------------------------------------------------------ */
@@ -589,6 +594,24 @@ static void test_system_queries(void) {
   CHECK(test_le64(r.data) == 0);
   const uint8_t control_in[16] = {0};
   (void)call_ex(manager, 400, control_in, sizeof(control_in), &m, NS_RESULT_APPLICATION_NOT_FOUND);
+  /* IContentManagementInterface (7998, libnx's numbering): storage sizes,
+   * no content meta, nothing running. */
+  const uint32_t content = object(ns, 7998, NULL, 0);
+  const uint64_t sd_storage = 5;
+  r = call(content, 47, &sd_storage, sizeof(sd_storage), NULL);
+  const uint64_t total = test_le64(r.data);
+  r = call(content, 48, &sd_storage, sizeof(sd_storage), NULL);
+  CHECK(total > 0 && test_le64(r.data) <= total);
+  const uint64_t app_id = 0x0100000000010000ull;
+  r = call(content, 600, &app_id, sizeof(app_id), NULL);
+  CHECK(test_le32(r.data) == 0);
+  r = call(content, 607, NULL, 0, NULL);
+  CHECK(r.data[0] == 0);
+  r = call(content, 11, &app_id, sizeof(app_id), NULL);
+  CHECK(r.result == 0);
+  CHECK(call(content, 43, NULL, 0, NULL).result == 0);
+  r = call(manager, 44, NULL, 0, NULL);
+  CHECK(r.copy_count == 1);
   const uint32_t pdm = service("pdm:qry");
   r = call(pdm, 5, NULL, 0, NULL);
   CHECK(test_le64(r.data) == 0 && test_le64(r.data + 8) == 0);

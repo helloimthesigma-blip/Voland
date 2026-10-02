@@ -10,9 +10,13 @@
  *   IServiceGetterInterface: 7988 GetDynamicRightsInterface, 7989
  *     GetReadOnlyApplicationControlDataInterface, 7991 GetReadOnly-
  *     ApplicationRecordInterface, 7992 GetECommerceInterface, 7993
- *     GetApplicationVersionInterface, 7994 GetDocumentInterface, 7995
- *     GetDownloadTaskInterface, 7996 GetApplicationManagerInterface,
- *     7997 GetContentManagementInterface.
+ *     GetApplicationVersionInterface, 7994 GetFactoryResetInterface,
+ *     7995 GetAccountProxyInterface, 7996 GetApplicationManagerInterface,
+ *     7997 GetDownloadTaskInterface, 7998 GetContentManagementInterface,
+ *     7999 GetDocumentInterface.
+ *   IContentManagementInterface: 11 CalculateApplicationOccupiedSize
+ *     (zero), 43 CheckSdCardMountStatus, 47/48 Get{Total,Free}SpaceSize,
+ *     600/601/605 content meta (none), 607 IsAnyApplicationRunning.
  *   IApplicationManagerInterface: 0 ListApplicationRecord, 1 Generate-
  *     ApplicationRecordCount, 2 GetApplicationRecordUpdateSystemEvent,
  *     400 GetApplicationControlData, 403 GetMaxApplicationControlCache-
@@ -44,6 +48,7 @@
 #define NS_CONTROL_MAX_ICON_BYTES 0x20000u
 #define NS_RECORD_BYTES 0x18u
 #define NS_PORT_COUNT 6u
+#define NS_OCCUPIED_SIZE_BYTES 0x80u
 
 #define NCM_MODULE 5u
 #define NCM_RESULT_CONTENT_NOT_FOUND ((7u << 9) | NCM_MODULE)
@@ -61,7 +66,9 @@ typedef struct Ns_State {
   Service_Interface control_data;
   Service_Interface record;
   Service_Interface inert;
+  Service_Interface content_management;
   Kernel_Event *record_event;
+  Kernel_Event *sd_event;  /* SD card mount status: never changes */
   /* The title loaded from an NCA, if any. */
   bool has_title;
   uint64_t title_id;
