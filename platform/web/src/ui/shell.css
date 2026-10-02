@@ -55,10 +55,13 @@
 }
 
 .voland-hero {
+  /* The page's scroll area: the shell itself is a fixed full-window box. */
+  overflow-y: auto;
+  min-height: 0;
   padding: 56px 64px;
   display: flex;
   flex-direction: column;
-  justify-content: center;
+  justify-content: safe center; /* plain center would push the top out of reach when it overflows */
   gap: 24px;
 }
 
