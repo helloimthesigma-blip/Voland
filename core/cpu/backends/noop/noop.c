@@ -171,4 +171,5 @@ const CPU_Backend CPU_BACKEND_NOOP = {
     .name = "noop",
     .version = "1.0.0",
     .supports_jit = false,
+    .supports_multicore = true, /* no guest code runs */
 };
