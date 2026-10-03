@@ -838,17 +838,69 @@ typedef struct Draw_Context {
   uint8_t window[RASTER_STREAMS][RASTER_STREAM_WINDOW];
 } Draw_Context;
 
-static uint64_t content_hash(const uint8_t *p, uint64_t n) {
-  uint64_t h = 0x9E3779B97F4A7C15ull ^ n;
+/* Change detection for decoded textures (not cryptographic): four
+ * independent multiply-xorshift lanes over 32-byte blocks, so the CPU
+ * overlaps them; streamed, so guest memory is hashed in place-sized
+ * chunks without staging the whole texture. */
+#define HASH_MUL 0xFF51AFD7ED558CCDull
+#define HASH_CHUNK_BYTES 0x10000u
+
+typedef struct Content_Hash {
+  uint64_t lane[4];
+  uint64_t length;
+} Content_Hash;
+
+static void content_hash_begin(Content_Hash *h, uint64_t length) {
+  h->lane[0] = 0x9E3779B97F4A7C15ull ^ length;
+  h->lane[1] = 0xC2B2AE3D27D4EB4Full;
+  h->lane[2] = 0x165667B19E3779F9ull;
+  h->lane[3] = 0x27D4EB2F165667C5ull;
+  h->length = length;
+}
+
+/* `n` must be a multiple of 32 except for the last call. */
+static void content_hash_update(Content_Hash *h, const uint8_t *p, uint64_t n) {
+  uint64_t a = h->lane[0], b = h->lane[1], c = h->lane[2], d = h->lane[3];
   uint64_t i = 0;
-  for (; i + 8u <= n; i += 8u) {
-    uint64_t v;
-    memcpy(&v, p + i, 8);
-    h = (h ^ v) * 0xFF51AFD7ED558CCDull;
-    h ^= h >> 32;
+  for (; i + 32u <= n; i += 32u) {
+    uint64_t v[4];
+    memcpy(v, p + i, sizeof(v));
+    a = (a ^ v[0]) * HASH_MUL;
+    b = (b ^ v[1]) * HASH_MUL;
+    c = (c ^ v[2]) * HASH_MUL;
+    d = (d ^ v[3]) * HASH_MUL;
+    a ^= a >> 32;
+    b ^= b >> 32;
+    c ^= c >> 32;
+    d ^= d >> 32;
   }
-  for (; i < n; i++) h = (h ^ p[i]) * 0x100000001B3ull;
-  return h;
+  for (; i < n; i++) a = (a ^ p[i]) * 0x100000001B3ull;
+  h->lane[0] = a;
+  h->lane[1] = b;
+  h->lane[2] = c;
+  h->lane[3] = d;
+}
+
+static uint64_t content_hash_end(const Content_Hash *h) {
+  uint64_t x = h->lane[0] ^ (h->lane[1] * 31u) ^ (h->lane[2] * 1009u) ^ (h->lane[3] * 65537u) ^ h->length;
+  x = (x ^ (x >> 33)) * HASH_MUL;
+  return x ^ (x >> 33);
+}
+
+/* Hashes guest GPU memory [va, va + n) in chunks (callers hold the pool
+ * lock, so one chunk buffer serves). */
+static bool guest_hash(const Gpu_Memory *mem, uint64_t va, uint64_t n, uint64_t *out) {
+  static uint8_t chunk[HASH_CHUNK_BYTES];
+  Content_Hash h;
+  content_hash_begin(&h, n);
+  for (uint64_t done = 0; done < n;) {
+    const uint64_t len = n - done < HASH_CHUNK_BYTES ? n - done : HASH_CHUNK_BYTES;
+    if (!mem->read(mem->user, va + done, chunk, len)) return false;
+    content_hash_update(&h, chunk, len);
+    done += len;
+  }
+  *out = content_hash_end(&h);
+  return true;
 }
 
 #define RT_FORMAT_A8B8G8R8_UNORM 0xD5u
@@ -980,15 +1032,21 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     if (s->in_use && s->dirty && s->address < h.address + raw_bytes && h.address < s->address + s->guest_bytes)
       surface_write_back(r, s, mem);
   }
+  /* Unchanged since it was decoded? Hashed in place: the whole texture is
+   * staged only to decode it. */
+  uint64_t hash = 0;
+  if (!guest_hash(mem, h.address, raw_bytes, &hash)) {
+    texture_miss(r, &h, "unreadable");
+    return NULL;
+  }
+  if (t && t->raw_hash == hash) {
+    t->validated = r->texture_epoch;
+    return t;
+  }
   uint8_t *raw = r->texture_raw;
   if (!mem->read(mem->user, h.address, raw, raw_bytes)) {
     texture_miss(r, &h, "unreadable");
     return NULL;
-  }
-  const uint64_t hash = content_hash(raw, raw_bytes);
-  if (t && t->raw_hash == hash) {
-    t->validated = r->texture_epoch;
-    return t;
   }
   /* A changed texture decodes into its own block (same descriptor, same
    * size); a new one takes a free slot and block, evicting as needed. */
