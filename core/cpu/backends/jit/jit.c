@@ -16,9 +16,13 @@
  * pointer. Natively there is no wasm engine: installation fails, nothing
  * is compiled, and the loop is the interpreter's.
  *
- * Code validity is the interpreter's: blocks are compiled only from
- * executable, non-writable pages, and interp_code_generation() (vmm
- * mapping changes, IC maintenance, invalidate/clear_cache) retires them.
+ * Code validity: blocks are compiled only from executable, non-writable
+ * pages. When interp_code_generation() moves (any vmm mapping change, IC
+ * IVAU, invalidate/clear_cache) a block is not thrown away but re-checked
+ * the next time its PC comes up: still executable and not writable, and
+ * the same instruction bytes (a 64-bit hash of them) - compiled code
+ * depends on nothing else. Games map and unmap data constantly, so
+ * retiring every block per mapping change recompiled everything.
  * Retired functions leave the table when their cache slot is reused.
  */
 #include "cpu/backends/jit/jit.h"
@@ -34,21 +38,36 @@
 #include <emscripten/heap.h>
 #endif
 
-#define JIT_CACHE_ENTRIES 65536u
-#define JIT_CACHE_INDEX(pc) (((pc) >> 2) & (JIT_CACHE_ENTRIES - 1u))
+#define JIT_CACHE_ENTRIES (1u << JIT_CACHE_BITS)
+#define JIT_HIT_COUNTERS (1u << 16)
 #define JIT_DEFAULT_HOT_THRESHOLD 16u
-#define JIT_NEVER UINT32_MAX /* hits value: do not try to compile */
 #define JIT_MODULE_BYTES (512u * 1024u)
 
-typedef struct Jit_Entry {
-  uint64_t pc;
-  uint64_t generation; /* 0 = empty */
-  uint64_t function;   /* table index, 0 = not compiled */
-  uint32_t length;     /* guest instructions in the compiled block */
-  uint32_t hits;
-} Jit_Entry;
+#define CODE_HASH_OFFSET 0xCBF29CE484222325ull /* FNV-1a 64 */
+#define CODE_HASH_PRIME 0x100000001B3ull
 
+static uint64_t code_hash(const uint32_t *code, uint32_t count) {
+  uint64_t hash = CODE_HASH_OFFSET;
+  for (uint32_t i = 0; i < count; i++) hash = (hash ^ code[i]) * CODE_HASH_PRIME;
+  return hash;
+}
+
+/* The block's code as it is mapped now, or NULL if it is no longer
+ * executable-and-not-writable. */
+static const uint32_t *block_code(const Interp_State *s, uint64_t pc) {
+  const uint64_t pte = vmm_pte_inline(s->l1, pc);
+  if ((pte & VMM_PERM_X) == 0 || (pte & VMM_PERM_W) != 0 || (pc & 3u)) return NULL;
+  VMM_Fault fault;
+  return (const uint32_t *)(const void *)vmm_translate_inline(s->l1, pc, VMM_PERM_X, &fault);
+}
+
+/* Compiled blocks only; cold code is counted in g_hits (hashed, untagged:
+ * an alias just makes a block hot a little early). */
 static Jit_Entry g_cache[JIT_CACHE_ENTRIES];
+static uint16_t g_hits[JIT_HIT_COUNTERS];
+/* The code generation the dispatcher last saw; chained blocks only enter
+ * entries validated in it (jit_compile.c, emit_chain). */
+static uint64_t g_generation;
 static uint8_t g_module[JIT_MODULE_BYTES];
 static uint32_t g_hot_threshold = JIT_DEFAULT_HOT_THRESHOLD;
 static Jit_Stats g_stats;
@@ -66,12 +85,18 @@ EM_JS_DEPS(voland_jit, "$addFunction,$removeFunction")
 /* Compiles and instantiates the module synchronously (fine off the main
  * thread, which is where the core runs) and returns the table index of
  * its exported block function, or 0 on failure. */
-EM_JS(int64_t, jit_js_install, (const uint8_t *bytes, size_t length, void *interpret), {
+EM_JS(int64_t, jit_js_install, (const uint8_t *bytes, size_t length, void *interpret, void *read, void *store), {
   try {
     const start = Number(bytes);
     const module = new WebAssembly.Module(HEAPU8.slice(start, start + Number(length)));
     const instance = new WebAssembly.Instance(module, {
-      env: {memory: wasmMemory, interpret: wasmTable.get(interpret)},
+      env: {
+        memory: wasmMemory,
+        table: wasmTable,
+        interpret: wasmTable.get(interpret),
+        read: wasmTable.get(read),
+        store: wasmTable.get(store),
+      },
     });
     return BigInt(addFunction(instance.exports.b, 'ip'));
   } catch (error) {
@@ -83,10 +108,12 @@ EM_JS(int64_t, jit_js_install, (const uint8_t *bytes, size_t length, void *inter
 EM_JS(void, jit_js_remove, (int64_t index), { removeFunction(Number(index)); })
 
 static uint64_t install(const uint8_t *bytes, uint32_t length) {
-  return (uint64_t)jit_js_install(bytes, length, (void *)jit_helper_interpret);
+  return (uint64_t)jit_js_install(bytes, length, (void *)jit_helper_interpret, (void *)jit_helper_read,
+                                  (void *)jit_helper_store);
 }
 static void uninstall(uint64_t function) { jit_js_remove((int64_t)function); }
 static uint64_t memory_pages(void) { return (uint64_t)emscripten_get_heap_size() / WASM_PAGE_BYTES; }
+static bool can_install(void) { return true; }
 #else
 static uint64_t install(const uint8_t *bytes, uint32_t length) {
   (void)bytes;
@@ -95,6 +122,7 @@ static uint64_t install(const uint8_t *bytes, uint32_t length) {
 }
 static void uninstall(uint64_t function) { (void)function; }
 static uint64_t memory_pages(void) { return 0; }
+static bool can_install(void) { return false; } /* no wasm engine natively */
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -116,22 +144,40 @@ uint32_t jit_helper_interpret(Jit_State *state, uint32_t insn) {
   return JIT_BLOCK_CONTINUE;
 }
 
+uint32_t jit_helper_read(Jit_State *state, uint64_t address, uint32_t size) {
+  return interp_read(&state->interp, address, state->scratch, size) ? 1u : 0u;
+}
+
+#define STORE_SHAPE_SIZE_MASK 0xFFu
+#define STORE_SHAPE_PAIR 0x100u
+#define BITS_PER_BYTE 8u
+
+uint32_t jit_helper_store(Jit_State *state, uint64_t address, uint32_t shape, uint64_t first, uint64_t second) {
+  const uint32_t size = shape & STORE_SHAPE_SIZE_MASK;
+  uint8_t data[2u * sizeof(uint64_t)];
+  for (uint32_t i = 0; i < size; i++) {
+    data[i] = (uint8_t)(first >> (BITS_PER_BYTE * i));
+    data[size + i] = (uint8_t)(second >> (BITS_PER_BYTE * i));
+  }
+  const uint32_t total = (shape & STORE_SHAPE_PAIR) ? 2u * size : size;
+  return interp_write(&state->interp, address, data, total) ? 1u : 0u;
+}
+
 /* ------------------------------------------------------------------ */
 /* Compilation.                                                        */
 /* ------------------------------------------------------------------ */
 
-static void compile_entry(const Interp_State *s, Jit_Entry *e) {
-  e->hits = JIT_NEVER;
-  const uint64_t pc = e->pc;
-  const uint64_t pte = vmm_pte_inline(s->l1, pc);
-  if ((pte & VMM_PERM_X) == 0 || (pte & VMM_PERM_W) != 0 || (pc & 3u)) return;
-  VMM_Fault fault;
-  const uint8_t *host = vmm_translate_inline(s->l1, pc, VMM_PERM_X, &fault);
-  if (!host) return;
-  const uint32_t available = (uint32_t)((((pc | VMM_PAGE_OFFSET_MASK) + 1u) - pc) / sizeof(uint32_t));
+/* Compiles the block at `pc` into its cache slot (evicting whatever is
+ * there). */
+static void compile(const Interp_State *s, uint64_t pc, uint64_t generation) {
+  const uint32_t *code = block_code(s, pc);
+  if (!code) return;
+  const uint32_t *page_code = code - (pc & VMM_PAGE_OFFSET_MASK) / sizeof(uint32_t);
+  static Jit_Link link;
+  link.cache_address = (uint64_t)(uintptr_t)g_cache;
+  link.generation_address = (uint64_t)(uintptr_t)&g_generation;
   Jit_Compiled compiled;
-  if (!jit_compile_block(pc, (const uint32_t *)(const void *)host, available, memory_pages(), g_module,
-                         JIT_MODULE_BYTES, &compiled)) {
+  if (!jit_compile_block(pc, page_code, memory_pages(), &link, g_module, JIT_MODULE_BYTES, &compiled)) {
     g_stats.compile_failures++;
     return;
   }
@@ -140,23 +186,41 @@ static void compile_entry(const Interp_State *s, Jit_Entry *e) {
     g_stats.compile_failures++;
     return;
   }
+  Jit_Entry *e = &g_cache[jit_cache_index(pc)];
+  if (e->function) {
+    uninstall(e->function);
+    g_stats.evictions++;
+  }
+  e->pc = pc;
+  e->generation = generation;
   e->function = function;
   e->length = compiled.instructions;
+  e->code_start = compiled.code_start;
+  e->code_words = compiled.code_words;
+  e->code_hash = code_hash(page_code + (compiled.code_start & VMM_PAGE_OFFSET_MASK) / sizeof(uint32_t),
+                           compiled.code_words);
   g_stats.blocks_compiled++;
+  g_stats.region_blocks += compiled.blocks;
   g_stats.module_bytes += compiled.module_bytes;
 }
 
-/* The entry for `pc` in this generation, (re)initialised if stale. */
-static Jit_Entry *lookup(uint64_t pc, uint64_t generation) {
-  Jit_Entry *e = &g_cache[JIT_CACHE_INDEX(pc)];
-  if (e->pc == pc && e->generation == generation) return e;
-  if (e->function) uninstall(e->function);
-  e->pc = pc;
-  e->generation = generation;
+/* The compiled block for `pc`, valid in `generation`, or NULL. A block
+ * from an older generation is revalidated here. */
+static Jit_Entry *find(const Interp_State *s, uint64_t pc, uint64_t generation) {
+  Jit_Entry *e = &g_cache[jit_cache_index(pc)];
+  if (e->pc != pc || !e->function) return NULL;
+  if (e->generation == generation) return e;
+  const uint32_t *code = block_code(s, e->code_start);
+  if (code && code_hash(code, e->code_words) == e->code_hash) {
+    e->generation = generation;
+    g_stats.revalidations++;
+    return e;
+  }
+  g_stats.stale++;
+  uninstall(e->function);
   e->function = 0;
-  e->length = 0;
-  e->hits = 0;
-  return e;
+  e->pc = 0;
+  return NULL;
 }
 
 /* ------------------------------------------------------------------ */
@@ -167,23 +231,34 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
   Jit_State *j = (Jit_State *)state;
   Interp_State *s = &j->interp;
   SWITCH_ASSERT_ALWAYS(s->l1 != NULL, "jit run() without a vmm");
-  if (!interp_predecode_enabled()) return CPU_BACKEND_INTERPRETER.run(state, cycle_budget);
+  if (!interp_predecode_enabled() || !can_install()) return CPU_BACKEND_INTERPRETER.run(state, cycle_budget);
   s->cycles_consumed = 0;
   s->exclusive_valid = false; /* a potential context switch (§7) */
+  j->cycle_budget = cycle_budget;
   uint32_t grace = 0;
   CPU_ExitReason exit_reason = CPU_EXIT_CYCLES_ELAPSED;
   for (;;) {
-    Jit_Entry *e = lookup(s->regs.pc, interp_code_generation());
-    if (e->function) {
+    const uint64_t generation = interp_code_generation();
+    if (generation != g_generation) {
+      g_generation = generation;
+      g_stats.generations++;
+    }
+    const uint64_t pc = s->regs.pc;
+    const Jit_Entry *e = find(s, pc, generation);
+    if (e) {
       if (s->cycles_consumed + e->length <= cycle_budget) {
         g_stats.block_entries++;
         const Jit_Block_Fn fn = (Jit_Block_Fn)(uintptr_t)e->function;
         if (fn(j) == JIT_BLOCK_STOP) return j->exit_reason;
         continue;
       }
-    } else if (e->hits != JIT_NEVER && ++e->hits >= g_hot_threshold) {
-      compile_entry(s, e);
-      if (e->function) continue;
+    } else {
+      uint16_t *hits = &g_hits[jit_cache_index(pc) & (JIT_HIT_COUNTERS - 1u)];
+      if (++*hits >= g_hot_threshold) {
+        *hits = 0;
+        compile(s, pc, generation);
+        if (find(s, pc, generation)) continue;
+      }
     }
     g_stats.interpreted_blocks++;
     if (!interp_predecode_run_block(s, cycle_budget, &grace, &exit_reason)) return exit_reason;

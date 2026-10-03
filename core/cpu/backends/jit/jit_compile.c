@@ -46,7 +46,7 @@ enum {
   L_SP = 32,
   L_L1 = 33,
   L_NPC = 34,
-  L_NCYCLES = 35,
+  L_CYC = 35,  /* cycles retired in this call, not yet in the state (incl. all of the current block) */
   L_T0 = 36,
   L_T1 = 37,
   L_T2 = 38,
@@ -56,23 +56,38 @@ enum {
   L_BASE = 42,
   L_VAL = 43,
   L_VAL2 = 44,
-  L_LAST_I64 = 44,
-  L_NZCV = 45,
-  L_STATUS = 46,
-  L_LAST_I32 = 46,
+  L_ROOM = 45, /* cycle_budget - the state's cycles_consumed */
+  L_HPC = 46,  /* the instruction the shared handlers give the interpreter: PC */
+  L_HREST = 47, /* ...the instructions pre-counted in L_CYC but not run, from it on */
+  L_HNEXT = 48, /* $helper: the PC to resume at */
+  L_HNEXTLEN = 49, /* ...and that region block's length */
+  L_LAST_I64 = 49,
+  L_NZCV = 50,
+  L_STATUS = 51,
+  L_IDX = 52,    /* the region target to dispatch to */
+  L_HINSN = 53,  /* the handlers' instruction word */
+  L_RESUME = 54, /* $helper: the region block to resume in */
+  L_LAST_I32 = 54,
 };
 #define I64_LOCALS (L_LAST_I64 - L_STATE)
 #define I32_LOCALS (L_LAST_I32 - L_LAST_I64)
 
 /* Imported function indices, then the block function. */
 #define FUNC_INTERPRET 0u
-#define FUNC_BLOCK 1u
+#define FUNC_READ 1u
+#define FUNC_STORE 2u
+#define FUNC_BLOCK 3u
 #define TYPE_BLOCK 0u
 #define TYPE_INTERPRET 1u
+#define TYPE_READ 2u
+#define TYPE_STORE 3u
+#define TYPE_COUNT 4u
+#define IMPORT_COUNT 5u /* table, interpret, read, store, memory */
 
 /* Label levels (the wasm depth right after the label's block opened). */
-#define LEVEL_RAW 1u
-#define LEVEL_EXIT 2u
+#define LEVEL_LEAVE 1u    /* the instruction in L_HPC/L_HINSN through the interpreter, then return */
+#define LEVEL_EXIT 2u     /* leave normally for L_NPC */
+#define LEVEL_DISPATCH 3u /* the region loop: br_table on L_IDX */
 
 /* Register-set bits: x0..x30, then SP and NZCV. */
 #define MASK_SP ((uint64_t)1 << 31)
@@ -92,6 +107,11 @@ enum {
 #define OFF_CYCLES STATE_OFFSET(interp.cycles_consumed)
 #define OFF_TOTAL_CYCLES STATE_OFFSET(interp.total_cycles)
 #define OFF_L1 STATE_OFFSET(interp.l1)
+#define OFF_BUDGET STATE_OFFSET(cycle_budget)
+#define OFF_SCRATCH STATE_OFFSET(scratch)
+
+#define ENTRY_OFFSET(field) ((uint64_t)offsetof(Jit_Entry, field))
+#define TABLE_INDEX 0u
 
 #define ALIGN_8 3u /* memarg alignment hints, log2 */
 #define ALIGN_4 2u
@@ -107,12 +127,29 @@ enum {
 #define WALK_L2_SHIFT (VMM_PAGE_BITS - WALK_ENTRY_LOG2)
 #define WALK_L2_MASK (VMM_L2_INDEX_MASK << WALK_ENTRY_LOG2)
 
+/* Regions: the entry block plus blocks in the same page it reaches by
+ * direct branches, in one function (docs/JIT.md). */
+#define JIT_MAX_REGION_BLOCKS 32u
+
+typedef struct Region_Block {
+  uint64_t pc;
+  uint32_t length; /* instructions */
+} Region_Block;
+
 typedef struct Ctx {
   Wasm_Buf *b;
+  const Jit_Link *link;
   uint32_t depth;
   uint64_t used, written;         /* this pass */
   uint64_t all_used, all_written; /* the analysis pass's result */
-  uint32_t pending;
+  bool discover;                  /* analysis pass: collect region blocks */
+  Region_Block blocks[JIT_MAX_REGION_BLOCKS];
+  uint32_t block_count, max_blocks, max_block_insns;
+  uint64_t page;                  /* the region's code page (guest address) */
+  const uint32_t *page_code;      /* its instruction words */
+  uint32_t block_len;             /* the current block's length (final pass) */
+  bool uses_helper;               /* some block calls the shared $helper */
+  uint32_t index;                 /* the current instruction's index in its block */
   uint64_t pc;
   uint32_t insn;
 } Ctx;
@@ -280,66 +317,136 @@ static void reload(Ctx *c) {
   }
 }
 
-/* cycles_consumed and total_cycles += delta (may be negative). */
-static void add_cycles(Ctx *c, int64_t delta) {
-  if (delta == 0) return;
+/* The state's cycle counters += L_CYC - rest (the value on the stack):
+ * pre-counted instructions that have not run are taken back out. */
+static void flush_cycles(Ctx *c) {
+  lset(c, L_T0);
+  lget(c, L_CYC);
+  lget(c, L_T0);
+  op(c, WASM_OP_I64_SUB);
+  lset(c, L_T0);
   static const uint64_t offsets[2] = {OFF_CYCLES, OFF_TOTAL_CYCLES};
   for (uint32_t i = 0; i < 2u; i++) {
     lget(c, L_STATE);
     state_load64(c, offsets[i]);
-    i64c(c, (uint64_t)delta);
+    lget(c, L_T0);
     op(c, WASM_OP_I64_ADD);
     mem(c, WASM_OP_I64_STORE, ALIGN_8, offsets[i]);
   }
 }
 
-/* Spill, flush cycles, regs.pc = this instruction, call the interpreter
- * for it; the i32 status is left on the stack. */
+/* L_ROOM from the state. */
+static void compute_room(Ctx *c) {
+  state_load64(c, OFF_BUDGET);
+  state_load64(c, OFF_CYCLES);
+  op(c, WASM_OP_I64_SUB);
+  lset(c, L_ROOM);
+}
+
+/* regs.pc = L_HPC, then the interpreter runs L_HINSN; i32 status on the
+ * stack. The state must be spilled and its cycles flushed. */
 static void call_interpreter(Ctx *c) {
-  spill(c);
-  add_cycles(c, c->pending);
+  state_store64_local(c, OFF_PC, L_HPC);
   lget(c, L_STATE);
-  i64c(c, c->pc);
-  mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_PC);
-  lget(c, L_STATE);
-  i32c(c, c->insn);
+  lget(c, L_HINSN);
   op(c, WASM_OP_CALL);
   wasm_uleb(c->b, FUNC_INTERPRET);
 }
 
-/* This instruction through the interpreter, then on in the block. */
-static void helper_continue(Ctx *c) {
-  call_interpreter(c);
-  ltee(c, L_STATUS);
-  br_if(c, LEVEL_RAW);
-  reload(c);
-  c->pending = 0;
+/* This instruction through the interpreter, then return to the
+ * dispatcher (the shared $leave handler): terminating instructions, and
+ * accesses the inline softmmu and the memory helpers cannot complete -
+ * there the interpreter raises the fault exactly as it would have. */
+static void leave_via_interpreter(Ctx *c) {
+  i64c(c, c->pc);
+  lset(c, L_HPC);
+  i32c(c, c->insn);
+  lset(c, L_HINSN);
+  i64c(c, c->block_len - c->index);
+  lset(c, L_HREST);
+  br(c, LEVEL_LEAVE);
 }
 
-/* The slow path of an inlined instruction: like helper_continue, but the
- * cycle count is put back as if retired inline, so it rejoins the fast
- * path with the same static `pending` (+1 for this instruction). */
-static void helper_slow_path(Ctx *c) {
-  call_interpreter(c);
-  ltee(c, L_STATUS);
-  br_if(c, LEVEL_RAW);
-  reload(c);
-  add_cycles(c, -(int64_t)(c->pending + 1u));
-}
-
-/* This instruction through the interpreter, then leave the block. */
-static void helper_terminate(Ctx *c) {
-  call_interpreter(c);
-  lset(c, L_STATUS);
-  br(c, LEVEL_RAW);
-}
-
-/* Leave normally to the i64 on the stack, this instruction retired. */
+/* Leave the function for the PC on the stack (computed targets, calls). */
 static void exit_to_stack(Ctx *c) {
   lset(c, L_NPC);
-  i64c(c, c->pending + 1u);
-  lset(c, L_NCYCLES);
   br(c, LEVEL_EXIT);
+}
+
+static int32_t find_block(const Ctx *c, uint64_t pc) {
+  for (uint32_t i = 0; i < c->block_count; i++) {
+    if (c->blocks[i].pc == pc) return (int32_t)i;
+  }
+  return -1;
+}
+
+/* Adds `pc` as a region block if it can be one; true if it is one. */
+static bool add_block(Ctx *c, uint64_t pc) {
+  if ((pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK) != c->page || (pc & 3u)) return false;
+  if (find_block(c, pc) >= 0) return true;
+  if (c->block_count >= c->max_blocks) return false;
+  c->blocks[c->block_count].pc = pc;
+  c->blocks[c->block_count++].length = 0;
+  return true;
+}
+
+/* An instruction the compiler does not inline, mid-block: it ends this
+ * region block and the shared $helper runs it, then the region goes on
+ * with the block after it (if that can be a region block; otherwise
+ * through $leave). */
+static void helper_and_continue(Ctx *c) {
+  const uint64_t next = c->pc + INSN_BYTES;
+  if (c->discover) {
+    if (add_block(c, next)) c->uses_helper = true;
+  }
+  const int32_t m = find_block(c, next);
+  if (m < 0) {
+    leave_via_interpreter(c);
+    return;
+  }
+  i64c(c, c->pc);
+  lset(c, L_HPC);
+  i32c(c, c->insn);
+  lset(c, L_HINSN);
+  i32c(c, (uint32_t)m);
+  lset(c, L_RESUME);
+  i64c(c, c->blocks[m].length);
+  lset(c, L_HNEXTLEN);
+  i64c(c, next);
+  lset(c, L_HNEXT);
+  i32c(c, c->block_count); /* $helper's dispatch index */
+  lset(c, L_IDX);
+  br(c, LEVEL_DISPATCH);
+}
+
+/* Control goes to `target`, a direct branch: within the region if it is
+ * a region block and its instructions fit the budget, else out. */
+static void branch_to(Ctx *c, uint64_t target) {
+  if (c->discover) (void)add_block(c, target);
+  const int32_t m = c->discover ? -1 : find_block(c, target);
+  if (m < 0) {
+    i64c(c, target);
+    exit_to_stack(c);
+    return;
+  }
+  const uint32_t length = c->blocks[m].length;
+  lget(c, L_CYC);
+  i64c(c, length);
+  op(c, WASM_OP_I64_ADD);
+  ltee(c, L_T0);
+  lget(c, L_ROOM);
+  op(c, WASM_OP_I64_GT_U);
+  open_if(c, WASM_BLOCK_VOID); /* does not fit: out, the dispatcher interprets it */
+  i64c(c, target);
+  exit_to_stack(c);
+  end_(c);
+  lget(c, L_T0);
+  lset(c, L_CYC);
+  if (c->block_count > 1u) {
+    i32c(c, (uint32_t)m);
+    lset(c, L_IDX);
+  }
+  br(c, LEVEL_DISPATCH);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1068,12 +1175,11 @@ typedef enum Access {
   ACCESS_PREFETCH,
 } Access;
 
-/* Opens the fast path for an access of `size` bytes at L_ADDR: on fall-
- * through L_HOST is the host address. Close with walk_end(). */
-static void walk_begin(Ctx *c, uint32_t size, uint32_t perm) {
-  open_block(c); /* $done */
-  open_block(c); /* $slow */
-  const uint32_t slow = c->depth;
+/* The inline softmmu walk (vmm_translate_inline) for `size` bytes at
+ * L_ADDR with `perm`: branches to `slow` if the access is out of range,
+ * crosses a page, or is unmapped / not permitted; otherwise L_HOST is the
+ * host address. */
+static void emit_walk(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) {
   lget(c, L_ADDR);
   i64c(c, VMM_ADDRESS_SPACE_SIZE);
   op(c, WASM_OP_I64_GE_U);
@@ -1120,12 +1226,36 @@ static void walk_begin(Ctx *c, uint32_t size, uint32_t perm) {
   lset(c, L_HOST);
 }
 
-static void walk_end(Ctx *c) {
-  br(c, c->depth - 1u); /* $done */
-  end_(c);              /* $slow */
-  helper_slow_path(c);
-  end_(c); /* $done */
+/* L_HOST = where the `size` bytes at L_ADDR can be loaded from: guest
+ * memory, or (page-crossing) the state's scratch after jit_helper_read
+ * copied them there. A fault leaves through the interpreter. */
+static void emit_load_address(Ctx *c, uint32_t size) {
+  open_block(c); /* $go */
+  const uint32_t go = c->depth;
+  open_block(c); /* $slow */
+  emit_walk(c, size, VMM_PERM_R, c->depth);
+  br(c, go);
+  end_(c);
+  lget(c, L_STATE);
+  lget(c, L_ADDR);
+  i32c(c, size);
+  op(c, WASM_OP_CALL);
+  wasm_uleb(c->b, FUNC_READ);
+  op(c, WASM_OP_I32_EQZ);
+  open_if(c, WASM_BLOCK_VOID);
+  leave_via_interpreter(c);
+  end_(c);
+  lget(c, L_STATE);
+  i64c(c, OFF_SCRATCH);
+  op(c, WASM_OP_I64_ADD);
+  lset(c, L_HOST);
+  end_(c); /* $go */
 }
+
+/* Stores x[t] (and x[t2] after it, for a pair) of `size` bytes each at
+ * L_ADDR: inline, or through jit_helper_store, which writes nothing
+ * unless every page is writable. A fault leaves through the interpreter. */
+static void emit_store(Ctx *c, uint32_t size, uint32_t t, bool pair, uint32_t t2);
 
 static uint8_t load_opcode(Access access, uint32_t size) {
   const bool sign = access == ACCESS_LOAD_SIGN64 || access == ACCESS_LOAD_SIGN32;
@@ -1154,17 +1284,47 @@ static void emit_host_load(Ctx *c, Access access, uint32_t size, uint64_t offset
   lset(c, into);
 }
 
-/* One general-register transfer at L_ADDR; `base_local`/`offset` give
- * the written-back base when `wback`. */
+#define STORE_SHAPE_PAIR 0x100u /* jit_helper_store: two elements */
+
+static void emit_store(Ctx *c, uint32_t size, uint32_t t, bool pair, uint32_t t2) {
+  open_block(c); /* $done */
+  const uint32_t done = c->depth;
+  open_block(c); /* $slow */
+  emit_walk(c, pair ? 2u * size : size, VMM_PERM_W, c->depth);
+  lget(c, L_HOST);
+  get_x(c, t);
+  mem(c, store_opcode(size), ALIGN_1, 0);
+  if (pair) {
+    lget(c, L_HOST);
+    get_x(c, t2);
+    mem(c, store_opcode(size), ALIGN_1, size);
+  }
+  br(c, done);
+  end_(c);
+  lget(c, L_STATE);
+  lget(c, L_ADDR);
+  i32c(c, size | (pair ? STORE_SHAPE_PAIR : 0u));
+  get_x(c, t);
+  if (pair) get_x(c, t2);
+  else i64c(c, 0);
+  op(c, WASM_OP_CALL);
+  wasm_uleb(c->b, FUNC_STORE);
+  op(c, WASM_OP_I32_EQZ);
+  open_if(c, WASM_BLOCK_VOID);
+  leave_via_interpreter(c);
+  end_(c);
+  end_(c); /* $done */
+}
+
+/* One general-register transfer at L_ADDR; L_BASE + `offset` is the
+ * written-back base when `wback`. */
 static void emit_transfer(Ctx *c, Access access, uint32_t size, uint32_t t, uint32_t n, bool wback, uint64_t offset) {
   if (access == ACCESS_PREFETCH) return;
   const bool store = access == ACCESS_STORE;
-  walk_begin(c, size, store ? VMM_PERM_W : VMM_PERM_R);
   if (store) {
-    lget(c, L_HOST);
-    get_x(c, t);
-    mem(c, store_opcode(size), ALIGN_1, 0);
+    emit_store(c, size, t, false, 0);
   } else {
+    emit_load_address(c, size);
     emit_host_load(c, access, size, 0, L_VAL);
   }
   if (wback) { /* the base update first, then the loaded value wins */
@@ -1177,7 +1337,6 @@ static void emit_transfer(Ctx *c, Access access, uint32_t size, uint32_t t, uint
     lget(c, L_VAL);
     set_x(c, t);
   }
-  walk_end(c);
 }
 
 /* size/opc -> access kind (decode_single, general registers). */
@@ -1298,15 +1457,10 @@ static bool c_pair(Ctx *c, uint32_t insn) {
     op(c, WASM_OP_I64_ADD);
   }
   lset(c, L_ADDR);
-  walk_begin(c, 2u * bytes, load ? VMM_PERM_R : VMM_PERM_W);
   if (!load) {
-    lget(c, L_HOST);
-    get_x(c, t);
-    mem(c, store_opcode(bytes), ALIGN_1, 0);
-    lget(c, L_HOST);
-    get_x(c, t2);
-    mem(c, store_opcode(bytes), ALIGN_1, bytes);
+    emit_store(c, bytes, t, true, t2);
   } else {
+    emit_load_address(c, 2u * bytes);
     emit_host_load(c, access, bytes, 0, L_VAL);
     emit_host_load(c, access, bytes, bytes, L_VAL2);
   }
@@ -1322,7 +1476,6 @@ static bool c_pair(Ctx *c, uint32_t insn) {
     lget(c, L_VAL2);
     set_x(c, t2);
   }
-  walk_end(c);
   return true;
 }
 
@@ -1355,14 +1508,13 @@ static uint64_t branch_target(Ctx *c, uint32_t insn, unsigned hi, unsigned lo) {
   return c->pc + (uint64_t)sign_extend((uint64_t)bits(insn, hi, lo) << 2, hi - lo + 3u);
 }
 
-/* if (condition on stack) target else next -> exit. */
+/* if (condition on stack) target else the next instruction. */
 static void exit_conditional(Ctx *c, uint64_t target) {
-  open_if(c, WASM_TYPE_I64);
-  i64c(c, target);
+  open_if(c, WASM_BLOCK_VOID);
+  branch_to(c, target);
   else_(c);
-  i64c(c, c->pc + INSN_BYTES);
+  branch_to(c, c->pc + INSN_BYTES);
   end_(c);
-  exit_to_stack(c);
 }
 
 #define SYSREG_FIELD_MASK (0xFFFFu << 5)
@@ -1427,13 +1579,15 @@ static Outcome c_system(Ctx *c, uint32_t insn) {
 
 static Outcome c_branch_system(Ctx *c, uint32_t insn) {
   if (bits(insn, 30, 26) == 0x05) { /* B, BL */
-    if (bit(insn, 31)) {
+    if (bit(insn, 31)) { /* a call: leaves the region */
       if (g_interp_trace_count) return OUTCOME_END_HELPER;
       i64c(c, c->pc + INSN_BYTES);
       set_x(c, CPU_REG_X30);
+      i64c(c, branch_target(c, insn, 25, 0));
+      exit_to_stack(c);
+      return OUTCOME_END;
     }
-    i64c(c, branch_target(c, insn, 25, 0));
-    exit_to_stack(c);
+    branch_to(c, branch_target(c, insn, 25, 0));
     return OUTCOME_END;
   }
   if (bits(insn, 30, 25) == 0x1A) { /* CBZ, CBNZ */
@@ -1490,15 +1644,20 @@ static Outcome compile_instruction(Ctx *c, uint32_t insn) {
   }
 }
 
-/* The instructions of the block into $exit; returns how many. */
-static uint32_t compile_body(Ctx *c, const uint32_t *code, uint32_t count) {
-  uint32_t i = 0;
-  for (; i < count; i++) {
+/* Region block `b`'s instructions; returns how many. */
+static uint32_t compile_block_code(Ctx *c, uint32_t b) {
+  const uint64_t start = c->blocks[b].pc;
+  const uint32_t *code = c->page_code + ((start - c->page) / INSN_BYTES);
+  const uint32_t available = (uint32_t)((c->page + VMM_PAGE_SIZE - start) / INSN_BYTES);
+  const uint32_t count = available < c->max_block_insns ? available : c->max_block_insns;
+  c->block_len = c->blocks[b].length;
+  c->pc = start;
+  for (uint32_t i = 0; i < count; i++, c->pc += INSN_BYTES) {
     c->insn = code[i];
-    c->pc += i == 0 ? 0 : INSN_BYTES;
+    c->index = i;
     const uint32_t mark = c->b->length;
     const uint64_t used = c->used, written = c->written;
-    const uint32_t depth = c->depth;
+    const uint32_t depth = c->depth, blocks = c->block_count;
     Outcome outcome = compile_instruction(c, c->insn);
     if (outcome == OUTCOME_HELPER || outcome == OUTCOME_END_HELPER) {
       /* Throw away anything a decoder emitted before giving up. */
@@ -1506,24 +1665,70 @@ static uint32_t compile_body(Ctx *c, const uint32_t *code, uint32_t count) {
       c->used = used;
       c->written = written;
       c->depth = depth;
+      c->block_count = blocks;
     }
     switch (outcome) {
-    case OUTCOME_NEXT: c->pending++; break;
-    case OUTCOME_HELPER: helper_continue(c); break;
+    case OUTCOME_NEXT: break;
+    case OUTCOME_HELPER: helper_and_continue(c); return i + 1u;
     case OUTCOME_END: return i + 1u;
-    case OUTCOME_END_HELPER: helper_terminate(c); return i + 1u;
+    case OUTCOME_END_HELPER: leave_via_interpreter(c); return i + 1u;
     }
   }
-  /* Ran off the end (block limit or page end): continue at the next pc. */
-  i64c(c, c->pc + INSN_BYTES);
-  lset(c, L_NPC);
-  i64c(c, c->pending);
-  lset(c, L_NCYCLES);
-  br(c, LEVEL_EXIT);
-  return i;
+  /* Ran off the end (block limit or page end): on to the next pc. */
+  branch_to(c, c->pc);
+  return count;
 }
 
-static void emit_function(Ctx *c, const uint32_t *code, uint32_t count, uint64_t pc, uint32_t *compiled) {
+/* ...and if the next block is compiled, validated in the current code
+ * generation and fits the remaining budget, tail-call it (the dispatcher
+ * in jit.c makes the same checks). L_T0 holds cycles_consumed. */
+static void emit_chain(Ctx *c) {
+  lget(c, L_NPC);
+  i64c(c, JIT_INSN_SHIFT);
+  op(c, WASM_OP_I64_SHR_U);
+  i64c(c, JIT_HASH_MULTIPLIER);
+  op(c, WASM_OP_I64_MUL);
+  i64c(c, JIT_HASH_BITS - JIT_CACHE_BITS);
+  op(c, WASM_OP_I64_SHR_U);
+  i64c(c, sizeof(Jit_Entry));
+  op(c, WASM_OP_I64_MUL);
+  i64c(c, c->link->cache_address);
+  op(c, WASM_OP_I64_ADD);
+  lset(c, L_HOST); /* the entry */
+  open_block(c);
+  const uint32_t miss = c->depth;
+  lget(c, L_HOST);
+  mem(c, WASM_OP_I64_LOAD, ALIGN_8, ENTRY_OFFSET(pc));
+  lget(c, L_NPC);
+  op(c, WASM_OP_I64_NE);
+  br_if(c, miss);
+  lget(c, L_HOST);
+  mem(c, WASM_OP_I64_LOAD, ALIGN_8, ENTRY_OFFSET(generation));
+  i64c(c, c->link->generation_address);
+  mem(c, WASM_OP_I64_LOAD, ALIGN_8, 0);
+  op(c, WASM_OP_I64_NE);
+  br_if(c, miss);
+  lget(c, L_T0);
+  lget(c, L_HOST);
+  mem(c, WASM_OP_I64_LOAD32_U, ALIGN_4, ENTRY_OFFSET(length));
+  op(c, WASM_OP_I64_ADD);
+  state_load64(c, OFF_BUDGET);
+  op(c, WASM_OP_I64_GT_U);
+  br_if(c, miss);
+  lget(c, L_HOST);
+  mem(c, WASM_OP_I64_LOAD, ALIGN_8, ENTRY_OFFSET(function));
+  ltee(c, L_ADDR);
+  op(c, WASM_OP_I64_EQZ);
+  br_if(c, miss);
+  lget(c, L_STATE);
+  lget(c, L_ADDR);
+  op(c, WASM_OP_RETURN_CALL_INDIRECT);
+  wasm_uleb(c->b, TYPE_BLOCK);
+  wasm_uleb(c->b, TABLE_INDEX);
+  end_(c);
+}
+
+static void emit_function(Ctx *c) {
   /* Locals: one run of i64, one of i32. */
   wasm_uleb(c->b, 2);
   wasm_uleb(c->b, I64_LOCALS);
@@ -1531,34 +1736,95 @@ static void emit_function(Ctx *c, const uint32_t *code, uint32_t count, uint64_t
   wasm_uleb(c->b, I32_LOCALS);
   wasm_u8(c->b, WASM_TYPE_I32);
 
-  /* Prologue. */
+  /* Prologue. The caller checked that block 0 fits the budget. */
   state_load64(c, OFF_L1);
   lset(c, L_L1);
   reload(c);
+  i64c(c, c->blocks[0].length);
+  lset(c, L_CYC);
+  compute_room(c);
 
   c->depth = 0;
-  open_block(c); /* $raw */
+  open_block(c); /* $leave */
   open_block(c); /* $exit */
-  c->pc = pc;
-  c->pending = 0;
-  *compiled = compile_body(c, code, count);
+  op(c, WASM_OP_LOOP);
+  op(c, WASM_BLOCK_VOID);
+  c->depth++; /* $dispatch */
+  /* Dispatch targets: the region blocks, then $helper. Discovery appends
+   * blocks while compiling; the final pass has them all. */
+  const bool helper = !c->discover && c->uses_helper;
+  const uint32_t targets = c->discover ? 1u : c->block_count + (helper ? 1u : 0u);
+  if (targets > 1u) {
+    for (uint32_t i = 0; i < targets; i++) open_block(c);
+    lget(c, L_IDX);
+    op(c, WASM_OP_BR_TABLE);
+    wasm_uleb(c->b, targets);
+    for (uint32_t i = 0; i < targets; i++) wasm_uleb(c->b, i);
+    wasm_uleb(c->b, 0);
+  }
+  for (uint32_t b = 0; b < c->block_count; b++) {
+    if (targets > 1u) end_(c);
+    const uint32_t length = compile_block_code(c, b);
+    if (c->discover) c->blocks[b].length = length;
+  }
+  if (helper) {
+    /* $helper: the instruction in L_HPC/L_HINSN (its block's last,
+     * pre-counted) through the interpreter, then on to L_RESUME. */
+    end_(c);
+    spill(c);
+    i64c(c, 1);
+    flush_cycles(c);
+    call_interpreter(c);
+    ltee(c, L_STATUS);
+    open_if(c, WASM_BLOCK_VOID);
+    lget(c, L_STATUS);
+    op(c, WASM_OP_RETURN);
+    end_(c);
+    reload(c);
+    compute_room(c);
+    lget(c, L_HNEXTLEN);
+    lget(c, L_ROOM);
+    op(c, WASM_OP_I64_GT_U);
+    open_if(c, WASM_BLOCK_VOID);
+    i64c(c, 0);
+    lset(c, L_CYC);
+    lget(c, L_HNEXT);
+    exit_to_stack(c);
+    end_(c);
+    lget(c, L_HNEXTLEN);
+    lset(c, L_CYC);
+    lget(c, L_RESUME);
+    lset(c, L_IDX);
+    br(c, LEVEL_DISPATCH);
+  }
+  op(c, WASM_OP_UNREACHABLE); /* every block ends in a branch */
+  end_(c); /* $dispatch */
   end_(c); /* $exit */
 
-  /* Epilogue. */
+  /* Epilogue: the state is complete... */
   spill(c);
   state_store64_local(c, OFF_PC, L_NPC);
-  static const uint64_t counters[2] = {OFF_CYCLES, OFF_TOTAL_CYCLES};
-  for (uint32_t i = 0; i < 2u; i++) {
-    lget(c, L_STATE);
-    state_load64(c, counters[i]);
-    lget(c, L_NCYCLES);
-    op(c, WASM_OP_I64_ADD);
-    mem(c, WASM_OP_I64_STORE, ALIGN_8, counters[i]);
-  }
+  lget(c, L_STATE);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I64_LOAD, ALIGN_8, OFF_TOTAL_CYCLES);
+  lget(c, L_CYC);
+  op(c, WASM_OP_I64_ADD);
+  mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_TOTAL_CYCLES);
+  lget(c, L_STATE);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I64_LOAD, ALIGN_8, OFF_CYCLES);
+  lget(c, L_CYC);
+  op(c, WASM_OP_I64_ADD);
+  ltee(c, L_T0); /* cycles_consumed */
+  mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_CYCLES);
+  emit_chain(c);
   i32c(c, JIT_BLOCK_CONTINUE);
   op(c, WASM_OP_RETURN);
-  end_(c); /* $raw */
-  lget(c, L_STATUS);
+  end_(c); /* $leave: the interpreter takes the instruction, and its status is ours */
+  spill(c);
+  lget(c, L_HREST);
+  flush_cycles(c);
+  call_interpreter(c);
   op(c, WASM_OP_END);
 }
 
@@ -1575,7 +1841,7 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
 
   wasm_u8(b, WASM_SECTION_TYPE);
   uint32_t size = wasm_reserve_size(b);
-  wasm_uleb(b, 2);
+  wasm_uleb(b, TYPE_COUNT);
   wasm_u8(b, WASM_TYPE_FUNC); /* TYPE_BLOCK: (i64) -> i32 */
   wasm_uleb(b, 1);
   wasm_u8(b, WASM_TYPE_I64);
@@ -1587,15 +1853,45 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
   wasm_u8(b, WASM_TYPE_I32);
   wasm_uleb(b, 1);
   wasm_u8(b, WASM_TYPE_I32);
+  wasm_u8(b, WASM_TYPE_FUNC); /* TYPE_READ: (i64, i64, i32) -> i32 */
+  wasm_uleb(b, 3);
+  wasm_u8(b, WASM_TYPE_I64);
+  wasm_u8(b, WASM_TYPE_I64);
+  wasm_u8(b, WASM_TYPE_I32);
+  wasm_uleb(b, 1);
+  wasm_u8(b, WASM_TYPE_I32);
+  wasm_u8(b, WASM_TYPE_FUNC); /* TYPE_STORE: (i64, i64, i32, i64, i64) -> i32 */
+  wasm_uleb(b, 5);
+  wasm_u8(b, WASM_TYPE_I64);
+  wasm_u8(b, WASM_TYPE_I64);
+  wasm_u8(b, WASM_TYPE_I32);
+  wasm_u8(b, WASM_TYPE_I64);
+  wasm_u8(b, WASM_TYPE_I64);
+  wasm_uleb(b, 1);
+  wasm_u8(b, WASM_TYPE_I32);
   wasm_patch_size(b, size);
 
   wasm_u8(b, WASM_SECTION_IMPORT);
   size = wasm_reserve_size(b);
-  wasm_uleb(b, 2);
+  wasm_uleb(b, IMPORT_COUNT);
+  name(b, "env");
+  name(b, "table");
+  wasm_u8(b, WASM_EXTERNAL_TABLE);
+  wasm_u8(b, WASM_REFTYPE_FUNCREF);
+  wasm_u8(b, WASM_LIMITS_MEMORY64); /* 64-bit indices, no maximum */
+  wasm_uleb(b, 0);
   name(b, "env");
   name(b, "interpret");
   wasm_u8(b, WASM_EXTERNAL_FUNCTION);
   wasm_uleb(b, TYPE_INTERPRET);
+  name(b, "env");
+  name(b, "read");
+  wasm_u8(b, WASM_EXTERNAL_FUNCTION);
+  wasm_uleb(b, TYPE_READ);
+  name(b, "env");
+  name(b, "store");
+  wasm_u8(b, WASM_EXTERNAL_FUNCTION);
+  wasm_uleb(b, TYPE_STORE);
   name(b, "env");
   name(b, "memory");
   wasm_u8(b, WASM_EXTERNAL_MEMORY);
@@ -1623,16 +1919,24 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
 #define JIT_ANALYSIS_BYTES (256u * 1024u)
 static uint8_t g_analysis[JIT_ANALYSIS_BYTES];
 
-bool jit_compile_block(uint64_t pc, const uint32_t *code, uint32_t available, uint64_t memory_pages, uint8_t *out,
-                       uint32_t capacity, Jit_Compiled *result) {
-  uint32_t count = available < JIT_MAX_BLOCK_INSNS ? available : JIT_MAX_BLOCK_INSNS;
-  while (count > 0) {
-    /* Pass 1: which registers does the block touch? */
+bool jit_compile_block(uint64_t pc, const uint32_t *page_code, uint64_t memory_pages, const Jit_Link *link,
+                       uint8_t *out, uint32_t capacity, Jit_Compiled *result) {
+  static Ctx analysis, c;
+  uint32_t max_blocks = JIT_MAX_REGION_BLOCKS, max_block_insns = JIT_MAX_BLOCK_INSNS;
+  for (;;) {
+    /* Pass 1: the region's blocks, and which registers they touch. */
     Wasm_Buf scratch = wasm_buf(g_analysis, JIT_ANALYSIS_BYTES);
-    Ctx analysis = {0};
+    memset(&analysis, 0, sizeof(analysis));
     analysis.b = &scratch;
-    uint32_t compiled = 0;
-    emit_function(&analysis, code, count, pc, &compiled);
+    analysis.link = link;
+    analysis.discover = true;
+    analysis.page = pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK;
+    analysis.page_code = page_code;
+    analysis.max_blocks = max_blocks;
+    analysis.max_block_insns = max_block_insns;
+    analysis.blocks[0].pc = pc;
+    analysis.block_count = 1;
+    emit_function(&analysis);
 
     /* Pass 2: the module. */
     Wasm_Buf b = wasm_buf(out, capacity);
@@ -1641,19 +1945,38 @@ bool jit_compile_block(uint64_t pc, const uint32_t *code, uint32_t available, ui
     const uint32_t section = wasm_reserve_size(&b);
     wasm_uleb(&b, 1);
     const uint32_t body = wasm_reserve_size(&b);
-    Ctx c = {0};
+    memset(&c, 0, sizeof(c));
     c.b = &b;
+    c.link = link;
+    c.page = analysis.page;
+    c.page_code = page_code;
+    c.max_blocks = max_blocks;
+    c.max_block_insns = max_block_insns;
+    memcpy(c.blocks, analysis.blocks, sizeof(c.blocks));
+    c.block_count = analysis.block_count;
+    c.uses_helper = analysis.uses_helper;
     c.all_used = analysis.used | analysis.written;
     c.all_written = analysis.written;
-    emit_function(&c, code, compiled, pc, &compiled);
+    emit_function(&c);
     wasm_patch_size(&b, body);
     wasm_patch_size(&b, section);
     if (!b.overflow && !scratch.overflow) {
-      result->instructions = compiled;
+      uint64_t low = pc, high = pc;
+      for (uint32_t i = 0; i < c.block_count; i++) {
+        const uint64_t start = c.blocks[i].pc, end = start + (uint64_t)c.blocks[i].length * INSN_BYTES;
+        if (start < low) low = start;
+        if (end > high) high = end;
+      }
+      result->instructions = c.blocks[0].length;
+      result->blocks = c.block_count;
+      result->code_start = low;
+      result->code_words = (uint32_t)((high - low) / INSN_BYTES);
       result->module_bytes = b.length;
       return true;
     }
-    count /= 2u; /* too big: try a shorter block */
+    /* Too big: a smaller region, then shorter blocks. */
+    if (max_blocks > 1u) max_blocks /= 2u;
+    else if (max_block_insns > 1u) max_block_insns /= 2u;
+    else return false;
   }
-  return false;
 }

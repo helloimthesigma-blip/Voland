@@ -19,6 +19,7 @@
 
 #include "common/layout.h"
 #include "common/vmm.h"
+#include "cpu/backends/jit/jit.h"
 #include "cpu/backends/jit/jit_internal.h"
 #include "cpu/cpu.h"
 

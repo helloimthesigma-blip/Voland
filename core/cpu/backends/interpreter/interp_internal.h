@@ -94,7 +94,7 @@ bool interp_predecode_run_block(Interp_State *s, uint64_t cycle_budget, uint32_t
 /* Changes whenever decoded code may be stale: any vmm mapping change or
  * a flush (IC maintenance, invalidate_cache, clear_cache). */
 uint64_t interp_code_generation(void);
-/* SYS with CRn = 7 (IC/DC maintenance): flushes decoded code afterwards. */
+/* IC IVAU: flushes decoded code afterwards (interp_predecode.c). */
 bool interp_is_cache_maintenance(uint32_t insn);
 
 /* Instruction groups (A64 top-level encoding, DDI 0487 C4.1). */

@@ -15,6 +15,23 @@
 
 #include "cpu/cpu.h"
 
+#include <stdint.h>
+
 /* CPU_BACKEND_JIT is declared in cpu.h. */
+
+/* Process-wide counters, for measurement (voland-cli prints them). */
+typedef struct Jit_Stats {
+  uint64_t blocks_compiled;    /* regions, each a wasm function */
+  uint64_t region_blocks;      /* guest blocks in them */
+  uint64_t compile_failures;
+  uint64_t block_entries;      /* compiled-block calls */
+  uint64_t interpreted_blocks; /* blocks the interpreter ran instead */
+  uint64_t module_bytes;
+  uint64_t generations;        /* code-generation changes seen (each retires every block) */
+  uint64_t evictions;          /* compiled blocks dropped from the cache */
+  uint64_t stale;              /* compiled blocks whose code changed or was unmapped */
+  uint64_t revalidations;      /* compiled blocks kept across a generation change */
+} Jit_Stats;
+const Jit_Stats *jit_stats(void);
 
 #endif /* SWITCH_CPU_BACKENDS_JIT_JIT_H */

@@ -702,9 +702,16 @@ static bool ends_block(uint32_t insn) {
   return op0 == 0xA || op0 == 0xB;
 }
 
-/* Is it IC/DC cache maintenance (SYS with CRn = 7)? Executing one drops
- * the cache afterwards, so code written and then synchronized is seen. */
-static bool is_cache_maintenance(uint32_t insn) { return (insn & 0xFFF8F000u) == 0xD5087000u; }
+/* Is it IC IVAU (SYS #3, C7, C5, #1, Xt)? Executing one drops the cache
+ * afterwards, so code written and then synchronized is seen. Only the
+ * instruction-cache invalidate can mean code changed: DC ZVA and the DC
+ * clean/invalidate ops touch data, and blocks only come from pages that
+ * are not writable, so any code change also needs an IC IVAU (or a
+ * mapping change). Flushing on DC ZVA too - memset's hot loop - retired
+ * every block thousands of times a frame. */
+#define IC_IVAU_MASK 0xFFFFFFE0u /* everything but Rt */
+#define IC_IVAU_ENCODING 0xD50B7520u
+static bool is_cache_maintenance(uint32_t insn) { return (insn & IC_IVAU_MASK) == IC_IVAU_ENCODING; }
 
 /* Builds the block at `pc`; NULL if the page is not cacheable. */
 static Block *build(const Interp_State *s, uint64_t pc, uint64_t generation) {

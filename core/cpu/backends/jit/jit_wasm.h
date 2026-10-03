@@ -102,8 +102,11 @@ enum {
 
 enum {
   WASM_EXTERNAL_FUNCTION = 0,
+  WASM_EXTERNAL_TABLE = 1,
   WASM_EXTERNAL_MEMORY = 2,
 };
+
+#define WASM_REFTYPE_FUNCREF 0x70u
 
 /* Limits flags: has-maximum | shared | 64-bit index (memory64). */
 #define WASM_LIMITS_HAS_MAX 0x01u
@@ -135,6 +138,7 @@ enum {
   WASM_OP_BR_TABLE = 0x0E,
   WASM_OP_RETURN = 0x0F,
   WASM_OP_CALL = 0x10,
+  WASM_OP_RETURN_CALL_INDIRECT = 0x13, /* tail calls */
   WASM_OP_DROP = 0x1A,
   WASM_OP_SELECT = 0x1B,
   WASM_OP_LOCAL_GET = 0x20,

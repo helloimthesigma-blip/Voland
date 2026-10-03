@@ -55,6 +55,7 @@
 #include "emulator.h"
 #include "hle/kernel/handle_table.h"
 #include "cpu/backends/interpreter/interpreter.h"
+#include "cpu/backends/jit/jit.h"
 #include "gpu/framebuffer.h"
 #include "hle/loader/nca_parse.h"
 #include "hle/loader/nro.h"
@@ -664,6 +665,17 @@ static int run(int argc, char **argv) {
               (unsigned long long)g->clears, (unsigned long long)g->draws, (unsigned long long)g->skipped_draws,
               (unsigned long long)g->triangles, (unsigned long long)g->pixels, (unsigned long long)g->shader_faults,
               (unsigned long long)g->unknown_ops, (unsigned long long)g->texture_misses);
+  }
+  if (backend == &CPU_BACKEND_JIT) {
+    const Jit_Stats *j = jit_stats();
+    fprintf(stderr,
+            "voland-cli: jit %llu regions compiled (%llu blocks; %llu failed, %llu evicted, %llu KB of modules), "
+            "%llu compiled / %llu interpreted block runs, %llu code generations (%llu blocks kept, %llu stale)\n",
+            (unsigned long long)j->blocks_compiled, (unsigned long long)j->region_blocks,
+            (unsigned long long)j->compile_failures,
+            (unsigned long long)j->evictions, (unsigned long long)(j->module_bytes / 1024u),
+            (unsigned long long)j->block_entries, (unsigned long long)j->interpreted_blocks,
+            (unsigned long long)j->generations, (unsigned long long)j->revalidations, (unsigned long long)j->stale);
   }
   if (wav) {
     write_wav_header(wav, audio_frames);

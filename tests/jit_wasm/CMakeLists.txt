@@ -25,3 +25,22 @@ set_target_properties(jit_diff_test_wasm PROPERTIES OUTPUT_NAME "jit_diff_test" 
 
 add_test(NAME jit_diff_test_node
   COMMAND ${VOLAND_NODE} $<TARGET_FILE:jit_diff_test_wasm> 20000)
+
+# voland-cli as a Node program: the real-workload harness for the JIT
+# (docs/JIT.md "Measuring"). Same core and flags as the browser build, so
+# `--backend interpreter` vs `--backend jit` compares what the browser
+# would run, in the same engine (V8). Not a test; build it explicitly:
+#   cmake --build --preset web-jit --target voland-cli-node
+add_executable(voland-cli-node EXCLUDE_FROM_ALL ${PROJECT_SOURCE_DIR}/platform/cli/voland_cli.c)
+target_link_libraries(voland-cli-node PRIVATE switch_core)
+target_link_options(voland-cli-node PRIVATE
+  --profiling-funcs          # names in node --cpu-prof; no codegen change
+  -sENVIRONMENT=node,worker
+  -sIMPORTED_MEMORY=0
+  -sMODULARIZE=0
+  -sEXPORT_ES6=0
+  -sEXIT_RUNTIME=1
+  -sNODERAWFS=1
+  "-sEXPORTED_FUNCTIONS=['_main']"
+)
+set_target_properties(voland-cli-node PROPERTIES OUTPUT_NAME "voland-cli" SUFFIX ".js")
