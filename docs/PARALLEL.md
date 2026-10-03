@@ -212,7 +212,11 @@ core nothing changes.
 
 - **Default and override.** `cpu.worker.ts` applies `DEFAULT_HOST_CORES` on
   every load: 3 (the Switch's application cores), capped at
-  `navigator.hardwareConcurrency - 2` and at least 1. `?cores=N` on the page URL overrides it through a
+  `navigator.hardwareConcurrency - 2` and at least 1.
+  - **Under the JIT backend the default is serial (0) for now.** Every
+    core compiles its own JIT code cache, and in the browser 3 cores were
+    about 2.6× slower than serial with the JIT (title screen, 6.6k vs
+    17.3k slices/s). `?cores=N` still forces a count. `?cores=N` on the page URL overrides it through a
   `set-host-cores` message; `?cores=0` is serial.
 - **The CPU worker is Emscripten's main runtime thread.** A core's
   syscalls (stderr, anything else not marked `__proxy: none`) are proxied

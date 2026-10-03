@@ -39,6 +39,15 @@ typedef struct Jit_State {
   uint64_t scratch[4];        /* page-crossing accesses (up to a Q-register pair) */
 } Jit_State;
 
+/* A region may span this many code pages (calls and PLT stubs). */
+#define JIT_MAX_REGION_PAGES 4u
+
+/* Instruction words compiled code depends on (all in one page). */
+typedef struct Jit_Code_Range {
+  uint64_t start;
+  uint32_t words;
+} Jit_Code_Range;
+
 /* The compiled-block cache (jit.c), direct-mapped by a hash of the PC.
  * Compiled blocks read it too: a block's exit looks its successor up and
  * tail-calls it when it is compiled, current and fits the budget
@@ -47,13 +56,15 @@ typedef struct Jit_Entry {
   uint64_t pc;
   uint64_t generation; /* the code generation it was last validated in */
   uint64_t function;   /* table index; 0 = empty */
-  uint64_t code_hash;  /* of the instruction words the code depends on */
-  uint64_t code_start; /* where those words start (same page) */
+  uint64_t code_hash;  /* of the instruction words the code depends on (jit.c's ranges) */
   uint32_t length;     /* guest instructions in the entry block: the budget needed */
-  uint32_t code_words;
+  uint32_t range_count;
+  Jit_Code_Range ranges[JIT_MAX_REGION_PAGES]; /* the code it was compiled from */
+  uint64_t entries;    /* times entered (only counted with jit_set_hot_profile) */
+  bool multicore;      /* compiled under cpu_multicore() (exclusives, fences) */
 } Jit_Entry;
 
-#define JIT_CACHE_BITS 18u
+#define JIT_CACHE_BITS 17u
 #define JIT_HASH_MULTIPLIER 0x9E3779B97F4A7C15ull /* Fibonacci hashing */
 #define JIT_INSN_SHIFT 2u
 #define JIT_HASH_BITS 64u
@@ -66,6 +77,8 @@ static inline uint64_t jit_cache_index(uint64_t pc) {
 typedef struct Jit_Link {
   uint64_t cache_address;      /* &Jit_Entry[0] */
   uint64_t generation_address; /* the uint64_t generation chained blocks must carry */
+  bool count_entries;          /* prologue increments its entry's `entries` */
+  bool span_calls;             /* regions follow BL/RET and predicted PLT branches */
 } Jit_Link;
 
 typedef uint32_t (*Jit_Block_Fn)(Jit_State *state);
@@ -101,20 +114,33 @@ uint32_t jit_helper_simd(Jit_State *state, uint32_t insn);
 typedef struct Jit_Compiled {
   uint32_t instructions; /* in the entry block: the budget needed to enter */
   uint32_t blocks;       /* region blocks */
-  uint64_t code_start;   /* the instruction words the code depends on */
-  uint32_t code_words;
+  Jit_Code_Range ranges[JIT_MAX_REGION_PAGES];
+  uint32_t range_count;
   uint32_t module_bytes;
 } Jit_Compiled;
 
-/* Compiles the region at `pc` - the block there plus blocks in the same
- * page it reaches by direct branches - from that page's instruction words
- * `page_code` into a complete wasm module in `out`
+/* Where the compiler reads guest code, and guest memory for predictions
+ * (the GOT slot behind a PLT stub's indirect branch; a prediction is
+ * only a guarded guess, so stale memory costs speed, never correctness). */
+typedef struct Jit_Code_Source {
+  /* The words of the page at `page` if it is executable and not
+   * writable (code that may be compiled), else NULL. */
+  const uint32_t *(*page_code)(void *context, uint64_t page);
+  /* 8 bytes at `address` if readable. */
+  bool (*peek64)(void *context, uint64_t address, uint64_t *value);
+  void *context;
+} Jit_Code_Source;
+
+/* Compiles the region at `pc` - the block there plus blocks it reaches by
+ * direct branches, calls (with their returns) and predicted PLT branches,
+ * in up to JIT_MAX_REGION_PAGES pages read through `source` - into a
+ * complete wasm module in `out`
  * (capacity `capacity`). The module imports env.memory (memory64, shared,
  * `memory_pages` pages), env.table (the core's 64-bit function table, for
  * chaining) and env.interpret/read/store/write/simd (the jit_helper_* functions), and
  * exports the region function as "b". Returns false if nothing could be
  * compiled (buffer too small). */
-bool jit_compile_block(uint64_t pc, const uint32_t *page_code, uint64_t memory_pages, const Jit_Link *link,
+bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memory_pages, const Jit_Link *link,
                        uint8_t *out, uint32_t capacity, Jit_Compiled *result);
 
 

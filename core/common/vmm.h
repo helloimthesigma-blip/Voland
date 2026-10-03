@@ -325,8 +325,12 @@ static inline uint8_t *vmm_translate_inline(const uint64_t *l1, uint64_t gva,
 /* The page-table generation: changes whenever any mapping or permission
  * changes (and when a context is created). Decoded-code caches compare it
  * to know their blocks still describe mapped, executable memory. */
+/* The code generation: moves on every mapping or permission change and on
+ * every code flush (vmm_bump_generation). One shared word, so compiled
+ * code on any host thread can check it directly (docs/PARALLEL.md). */
 extern uint64_t g_vmm_generation; /* vmm.c; read through vmm_generation() */
-static inline uint64_t vmm_generation(void) { return g_vmm_generation; }
+static inline uint64_t vmm_generation(void) { return __atomic_load_n(&g_vmm_generation, __ATOMIC_ACQUIRE); }
+static inline void vmm_bump_generation(void) { (void)__atomic_fetch_add(&g_vmm_generation, 1u, __ATOMIC_RELEASE); }
 
 /* The raw PTE for `gva` (0 if unmapped): permissions in the low bits. */
 static inline uint64_t vmm_pte_inline(const uint64_t *l1, uint64_t gva) {

@@ -29,6 +29,8 @@
 #include <string.h>
 
 #define CODE_GVA 0x100000ull
+#define CODE2_GVA 0x101000ull /* a second code page: callees and a PLT-style stub */
+#define CODE2_PA 0x1000ull
 #define DATA_GVA 0x200000ull
 #define CODE_PA 0x0ull
 #define DATA_PA 0x10000ull
@@ -401,6 +403,20 @@ static void run_case(uint32_t iteration) {
   for (uint32_t i = 0; i < VMM_PAGE_SIZE / 4; i++) code[i] = SVC_ZERO;
   const uint32_t length = 1u + pick(STREAM_MAX);
   for (uint32_t i = 0; i < length; i++) {
+    if (i + 2u < length && pick(24) == 0) { /* overwrite the GOT slot, then call the stub: a stale prediction */
+      const uint64_t delta = ((DATA_GVA >> 12) - ((CODE_GVA + 4u * i) >> 12)) & 0x1FFFFFu;
+      code[i] = 0x90000010u | (uint32_t)((delta & 3u) << 29) | (uint32_t)((delta >> 2) << 5); /* adrp x16, DATA */
+      code[i + 1u] = 0xF9000600u | (pick(2) ? 1u : 2u); /* str x1|x2, [x16, #8] */
+      code[i + 2u] = (0x25u << 26) | (uint32_t)(((CODE2_GVA + 32u - (CODE_GVA + 4u * (i + 2u))) >> 2) & 0x3FFFFFFu);
+      i += 2u;
+      continue;
+    }
+    if (pick(10) == 0) { /* BL into the second page: a leaf function or the PLT stub (code2 below) */
+      static const uint32_t targets[3] = {0, 4, 8};
+      const uint64_t target = CODE2_GVA + 4u * targets[pick(3)];
+      code[i] = (0x25u << 26) | (uint32_t)(((target - (CODE_GVA + 4u * i)) >> 2) & 0x3FFFFFFu);
+      continue;
+    }
     if (i + 1u < length && pick(16) == 0) { /* LDAXR then STLXR on the same base: the monitor passes */
       const uint32_t size = 2u + pick(2), base = base_reg();
       code[i++] = (size << 30) | (0x08u << 24) | (1u << 22) | (31u << 16) | (pick(2) << 15) | (31u << 10) | (base << 5) | reg();
@@ -415,6 +431,20 @@ static void run_case(uint32_t iteration) {
   /* Some streams loop: a backward branch at the end makes blocks hot. */
   if (pick(2)) code[length] = (0x05u << 26) | ((uint32_t)(-(int32_t)pick(length + 1u)) & 0x3FFFFFFu);
   CHECK_OK(vmm_write_physical(g_vmm, CODE_PA, code, sizeof(code)));
+  /* Page 2: f0 = add x1, x1, #1; ret.  f4 = add x2, x2, x1; ret.
+   * stub (word 8) = adrp x16, DATA; ldr x17, [x16, #8]; br x17 - the GOT
+   * slot (data + 8) holds f0, f4 or something else (the prediction fails). */
+  static uint32_t code2[VMM_PAGE_SIZE / 4];
+  for (uint32_t i = 0; i < VMM_PAGE_SIZE / 4; i++) code2[i] = SVC_ZERO;
+  code2[0] = 0x91000421u;
+  code2[1] = 0xD65F03C0u;
+  code2[4] = 0x8B010042u;
+  code2[5] = 0xD65F03C0u;
+  const uint64_t adrp_page_delta = ((DATA_GVA >> 12) - (CODE2_GVA >> 12)) & 0x1FFFFFu;
+  code2[8] = 0x90000010u | (uint32_t)((adrp_page_delta & 3u) << 29) | (uint32_t)((adrp_page_delta >> 2) << 5);
+  code2[9] = 0xF9400611u; /* ldr x17, [x16, #8] */
+  code2[10] = 0xD61F0220u; /* br x17 */
+  CHECK_OK(vmm_write_physical(g_vmm, CODE2_PA, code2, sizeof(code2)));
   g_jit_cpu->clear_cache(g_jit);
 
   uint64_t x[31];
@@ -426,12 +456,18 @@ static void run_case(uint32_t iteration) {
   }
   for (int i = 24; i < 28; i++) x[i] = pick(64) - 16u;                                 /* indexes */
   x[28] = CODE_GVA + 4u * pick(length + 1u);                                         /* BR target */
+  if (pick(2)) x[1] = CODE2_GVA + (pick(2) ? 16u : 0u); /* a function the GOT may be pointed at */
   const uint64_t sp = (DATA_GVA + 0x1000u + pick(0x1000u)) & ~(uint64_t)15;
   const uint32_t nzcv = (uint32_t)pick(16) << 28;
   /* FP environment: mostly the default, sometimes FZ/DN/rounding modes; FPSR flags clear or sticky-set. */
   g_fpcr = pick(4) ? 0u : (pick(2) << 24) | (pick(2) << 25) | (pick(4) << 22);
   g_fpsr = pick(2) ? 0u : 0x10u;
   for (uint32_t i = 0; i < DATA_BYTES; i++) g_data_init[i] = (uint8_t)rnd();
+  { /* the stub's GOT slot: mostly a real function */
+    const uint32_t choice = pick(4);
+    const uint64_t got = choice == 0 ? CODE2_GVA : choice == 1 ? CODE2_GVA + 16u : choice == 2 ? CODE_GVA : rnd();
+    memcpy(g_data_init + 8, &got, sizeof(got));
+  }
 
   /* The same budgets for both: random sizes up to the limit. */
   uint64_t budgets[STEP_LIMIT];
@@ -536,6 +572,7 @@ int main(int argc, char **argv) {
   g_vmm = vmm_create();
   CHECK(g_vmm != NULL);
   CHECK_OK(vmm_map(g_vmm, CODE_GVA, CODE_PA, VMM_PAGE_SIZE, VMM_PERM_RX));
+  CHECK_OK(vmm_map(g_vmm, CODE2_GVA, CODE2_PA, VMM_PAGE_SIZE, VMM_PERM_RX));
   CHECK_OK(vmm_map(g_vmm, DATA_GVA, DATA_PA, DATA_BYTES, VMM_PERM_RW));
   g_ref_cpu = &CPU_BACKEND_INTERPRETER;
   g_jit_cpu = &CPU_BACKEND_JIT;

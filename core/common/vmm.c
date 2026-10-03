@@ -244,7 +244,7 @@ VMM_Context *vmm_create(void) {
   memset(g_vmm.l1, 0, (size_t)VMM_L1_TABLE_BYTES);
 
   g_vmm_live = 1;
-  g_vmm_generation++;
+  vmm_bump_generation();
 
   log_info("[vmm] created: %llu-bit VA, %llu L1 entries, up to %llu L2 tables (%llu MiB arena)",
            (unsigned long long)VMM_ADDRESS_BITS,
@@ -309,7 +309,7 @@ Error vmm_map(VMM_Context *ctx, uint64_t gva, uint64_t guest_pa, uint64_t size,
 #endif
 
   /* Commit. */
-  g_vmm_generation++;
+  vmm_bump_generation();
   for (uint64_t i = 0; i < page_count; i++) {
     const uint64_t vpn = first_vpn + i;
     const uint64_t l1_index = vpn >> VMM_L2_INDEX_BITS;
@@ -345,7 +345,7 @@ Error vmm_unmap(VMM_Context *ctx, uint64_t gva, uint64_t size) {
   debug_assert_no_live_borrow_overlaps(ctx, gva, size);
 #endif
 
-  g_vmm_generation++;
+  vmm_bump_generation();
   const uint64_t first_vpn = gva >> VMM_PAGE_BITS;
   const uint64_t page_count = size >> VMM_PAGE_BITS;
   for (uint64_t i = 0; i < page_count; i++) {
@@ -373,7 +373,7 @@ Error vmm_reprotect(VMM_Context *ctx, uint64_t gva, uint64_t size, uint32_t perm
   debug_assert_no_live_borrow_overlaps(ctx, gva, size);
 #endif
 
-  g_vmm_generation++;
+  vmm_bump_generation();
   const uint64_t first_vpn = gva >> VMM_PAGE_BITS;
   const uint64_t page_count = size >> VMM_PAGE_BITS;
   for (uint64_t i = 0; i < page_count; i++) {

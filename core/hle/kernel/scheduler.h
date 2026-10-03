@@ -72,6 +72,7 @@ typedef struct Sched_Thread {
   uint64_t core_mask;       /* affinity mask (recorded; §7 runs one worker) */
   bool paused;              /* svcSetThreadActivity(Paused): never picked until resumed */
   bool on_core;             /* inside backend->run on some host thread (parallel mode, docs/PARALLEL.md) */
+  uint32_t last_core;       /* parallel mode: the core it last ran on (affinity) */
   uint64_t last_run;        /* round-robin stamp */
 } Sched_Thread;
 
@@ -148,6 +149,10 @@ void scheduler_kernel_exit(Scheduler *sched);
 void scheduler_expire_timeouts(Scheduler *sched);
 /* The best runnable thread not already on a core, or -1. */
 int32_t scheduler_pick(Scheduler *sched);
+/* The same, for parallel core `core`: among threads of equal priority it
+ * prefers one that last ran on this core (its code is in this core's JIT
+ * cache, docs/PARALLEL.md "Affinity"), then round-robin order. */
+int32_t scheduler_pick_for_core(Scheduler *sched, uint32_t core);
 /* Nothing runnable: advance time to the next wake (IDLE), or report
  * EXITED / DEADLOCK - scheduler_tick's no-thread path. */
 Scheduler_Status scheduler_idle(Scheduler *sched);

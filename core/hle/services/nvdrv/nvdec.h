@@ -77,6 +77,7 @@ typedef void (*Mm_Written)(void *user, uint32_t handle, uint64_t offset, uint64_
 typedef struct Mm_Video {
   H264_Params params;  /* the stream's parameter sets (a change reconfigures) */
   bool configured;
+  uint32_t references; /* the most references the guest's DPB has held (sizes max_num_ref_frames) */
   uint32_t surface_iova[MM_MAX_SURFACES];
   uint32_t surface_sequence[MM_MAX_SURFACES];
   uint32_t next_surface;
@@ -107,5 +108,7 @@ void mm_engine_submit(Mm_Engine *engine, const Mm_Context *context, const uint32
 void nvdec_h264_params(const uint8_t *setup, H264_Params *out);
 /* The bitstream's length per the picture setup. */
 uint32_t nvdec_h264_stream_length(const uint8_t *setup);
+/* Reference frames in the picture's DPB. */
+uint32_t nvdec_h264_references(const uint8_t *setup);
 
 #endif /* SWITCH_HLE_SERVICES_NVDRV_NVDEC_H */

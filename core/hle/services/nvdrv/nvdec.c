@@ -142,6 +142,7 @@ void mm_engine_init(Mm_Engine *engine, uint32_t class_id) {
 void mm_video_init(Mm_Video *video) {
   memset(&video->params, 0, sizeof(video->params));
   video->configured = false;
+  video->references = 0;
   memset(video->surface_iova, 0, sizeof(video->surface_iova));
   memset(video->surface_sequence, 0, sizeof(video->surface_sequence));
   video->next_surface = 0;
@@ -226,9 +227,12 @@ void nvdec_h264_params(const uint8_t *s, H264_Params *p) {
   p->second_chroma_qp_index_offset = signed_field(flags, 27, 5);
   p->weighted_bipred_idc = field(flags2, 0, 2);
   if (!p->chroma_format_idc) p->chroma_format_idc = 1; /* 4:2:0 is all NVDEC outputs */
-  /* The DPB is NVDEC's; the decoder's own needs room for the stream's
-   * references: the most the level allows keeps any stream decodable. */
-  p->max_num_ref_frames = H264_DPB_ENTRIES;
+  /* max_num_ref_frames is not in the struct, and it must be exact: a
+   * sliding window wider than the stream's keeps stale references that
+   * shift B-slice reference lists. Encoders (x264) size it from the
+   * default list length; nvdec_h264 widens it when the guest's DPB holds
+   * more references than that. */
+  p->max_num_ref_frames = p->num_ref_idx_l0_default_minus1 + 1u;
   for (uint32_t i = 0; i < H264_SCALING_4X4_LISTS; i++) {
     for (uint32_t k = 0; k < 16u; k++) {
       p->scaling_4x4[i][k] = s[H264_WEIGHT_SCALE + i * 16u + k_zigzag4[k]];
@@ -244,6 +248,18 @@ void nvdec_h264_params(const uint8_t *s, H264_Params *p) {
 }
 
 uint32_t nvdec_h264_stream_length(const uint8_t *setup) { return rd32(setup + H264_STREAM_LEN); }
+
+/* DPB entries: index:7 col_idx:5 state:2 long_term:1 not_existing:1
+ * is_field:1 top_marking:4 bottom_marking:4 ...; marked = a reference. */
+#define DPB_MARKING_SHIFT 17u
+#define DPB_MARKING_MASK 0xFFu
+uint32_t nvdec_h264_references(const uint8_t *setup) {
+  uint32_t count = 0;
+  for (uint32_t i = 0; i < H264_DPB_ENTRIES; i++) {
+    if ((rd32(setup + H264_DPB + i * H264_DPB_ENTRY_BYTES) >> DPB_MARKING_SHIFT) & DPB_MARKING_MASK) count++;
+  }
+  return count;
+}
 
 static bool has_idr(const uint8_t *data, uint32_t bytes) {
   for (uint32_t i = 0; i + 3u < bytes; i++) {
@@ -278,7 +294,6 @@ static void nvdec_h264(Mm_Engine *e, const Mm_Context *c) {
   static uint8_t setup[NVDEC_PIC_SETUP_BYTES];
   Mm_Video *v = c->state;
   if (!read_buffer(c, e->regs[MM_REG(NVDEC_PIC_SETUP)], 0, setup, sizeof(setup))) return;
-  uint32_t length = nvdec_h264_stream_length(setup);
   if (e->executes <= DISCOVERY_DUMPS) {
     hexdump("nvdec picture setup", setup, sizeof(setup) / 2u);
     uint8_t slices[DUMP_LINE * 2u];
@@ -288,6 +303,16 @@ static void nvdec_h264(Mm_Engine *e, const Mm_Context *c) {
   }
   H264_Params params;
   nvdec_h264_params(setup, &params);
+  /* A wider reference window only takes effect at a key frame (a new
+   * decoder needs one); until then the stream keeps its current one. */
+  const uint32_t references = nvdec_h264_references(setup);
+  if (references > v->references) v->references = references;
+  if (v->references > params.max_num_ref_frames) params.max_num_ref_frames = v->references;
+  uint32_t length = nvdec_h264_stream_length(setup);
+  uint8_t head[DUMP_LINE * 4u];
+  const uint32_t peek = length < sizeof(head) ? length : (uint32_t)sizeof(head);
+  const bool idr = read_buffer(c, e->regs[MM_REG(NVDEC_BITSTREAM)], 0, head, peek) && has_idr(head, peek);
+  if (v->configured && !idr) params.max_num_ref_frames = v->params.max_num_ref_frames;
   if (!v->configured || !h264_params_equal(&params, &v->params)) {
     v->params = params;
     v->configured = true;
@@ -306,11 +331,9 @@ static void nvdec_h264(Mm_Engine *e, const Mm_Context *c) {
     return;
   }
   if (!read_buffer(c, e->regs[MM_REG(NVDEC_BITSTREAM)], 0, v->access_unit + sets, length)) return;
-  const uint8_t *slices = v->access_unit + sets;
-  const bool key = has_idr(slices, length < DUMP_LINE * 4u ? length : DUMP_LINE * 4u);
   v->frames++;
   if (!c->video) return;
-  const uint32_t sequence = video_decode(c->video, key, v->access_unit, (uint32_t)(sets + length));
+  const uint32_t sequence = video_decode(c->video, idr, v->access_unit, (uint32_t)(sets + length));
   remember_surface(v, e->regs[MM_REG(NVDEC_OUTPUT_LUMA)], sequence);
 }
 

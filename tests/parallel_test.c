@@ -28,6 +28,14 @@
 
 static Guest_Run g_run; /* Emulator is large; keep it off the stack */
 
+/* The interpreter, or the JIT in a CPU_BACKEND=jit build (per-host-thread
+ * code caches; natively it runs the interpreter's loop). */
+#ifdef SWITCH_CPU_BACKEND_JIT
+#define TEST_BACKEND (&CPU_BACKEND_JIT)
+#else
+#define TEST_BACKEND (&CPU_BACKEND_INTERPRETER)
+#endif
+
 typedef struct Program {
   const char *name;
   const uint8_t *code;
@@ -51,7 +59,7 @@ typedef struct Outcome {
 } Outcome;
 
 static void run_program(const Program *program, uint32_t cores, uint64_t budget, Outcome *out) {
-  guest_boot(&g_run, &CPU_BACKEND_INTERPRETER, program->code, program->size);
+  guest_boot(&g_run, TEST_BACKEND, program->code, program->size);
   if (cores) CHECK(emulator_set_host_cores(&g_run.emu, cores) == cores);
   out->status = guest_run(&g_run, budget, MAX_SLICES);
   out->slices = g_run.slices;
@@ -146,7 +154,7 @@ static void proxy_output(void *userdata, const char *text, size_t length) {
 static void test_host_calls(void) {
   g_driver = pthread_self();
   g_ran_on_driver = false;
-  guest_boot(&g_run, &CPU_BACKEND_INTERPRETER, k_guest_threads, sizeof(k_guest_threads));
+  guest_boot(&g_run, TEST_BACKEND, k_guest_threads, sizeof(k_guest_threads));
   CHECK(emulator_set_host_cores(&g_run.emu, 2) == 2);
   emulator_set_debug_output(&g_run.emu, proxy_output, &g_run);
   CHECK(guest_run(&g_run, 997, MAX_SLICES) == EMULATOR_EXITED);

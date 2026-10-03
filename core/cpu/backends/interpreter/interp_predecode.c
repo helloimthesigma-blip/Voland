@@ -59,16 +59,14 @@ typedef struct Block {
 /* The block cache is per host thread: with parallel guest threads
  * (docs/PARALLEL.md) several host threads decode at once. The first
  * thread to run uses the static cache; any other allocates its own once
- * (released when that thread exits). A flush bumps one shared epoch, so
+ * (released when that thread exits). A flush moves the shared code generation, so
  * it reaches every thread's cache. */
 static Block g_blocks[PREDECODE_CACHE_BLOCKS];
-static uint64_t g_flush_epoch = 1; /* folded into the generation check */
+/* A flush moves the shared code generation (vmm.h), so it reaches every
+ * host thread's cache - and compiled JIT code checking the same word. */
+void interp_predecode_flush(void) { vmm_bump_generation(); }
 
-void interp_predecode_flush(void) { __atomic_fetch_add(&g_flush_epoch, 1u, __ATOMIC_RELAXED); }
-
-static uint64_t current_generation(void) {
-  return vmm_generation() * 0x10000u + __atomic_load_n(&g_flush_epoch, __ATOMIC_RELAXED);
-}
+static uint64_t current_generation(void) { return vmm_generation(); }
 
 #if (defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)) || defined(_WIN32)
 static Block *thread_blocks(void) { return g_blocks; }
