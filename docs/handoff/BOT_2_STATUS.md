@@ -5,7 +5,11 @@ Owner: bot 2. The coordinator reads this when merging.
 ## Milestones
 
 - [x] **1. Findings.** See below.
-- [ ] 2. First frame natively.
+- [x] **2. First frame natively.** The H.264 stream rebuilt from the
+  NVDEC submissions (synthesized SPS/PPS + the guest's slices) decodes
+  bit-identically to the game's `Intro_Cinematic.mp4`: 199/199 frames
+  have the same md5 under ffmpeg. The MP4 was extracted with
+  `voland-cli romfs`.
 - [ ] 3. The opening cinematic plays in the browser.
 
 ## Findings (milestone 1)
@@ -110,4 +114,37 @@ Owner: bot 2. The coordinator reads this when merging.
 
 ## Measurements
 
-None yet.
+- Native snapshot job, opening video: 199 decoded frames, 199
+  bit-identical to the source MP4.
+- Browser worker test (`e2e/video.spec.ts`, Chromium WebCodecs, a
+  self-generated High-profile clip with a synthesized SPS): 28/30 frames
+  come out. The last 2 are held back by the declared reorder depth;
+  that's intended.
+
+## How to check
+
+- Native, offline: run a snapshot job with `VOLAND_DUMP_VIDEO=out.264`
+  (Annex-B as sent to the decoder) and decode it with ffmpeg. Snapshot
+  jobs can't use VideoToolbox (it isn't fork-safe), so they only dump.
+  - A non-forked run decodes with VideoToolbox, and
+    `VOLAND_DUMP_VIDEO_FRAMES=prefix[:N]` writes PPMs.
+- `voland-cli romfs <nca> [substring [outdir]]` lists or extracts RomFS
+  files.
+- Browser:
+  `npx playwright test -c playwright.video.config.ts --project=chromium`
+  runs the worker test. Set `VOLAND_CINEMATIC_NCA=<nca>` and use
+  `--project=chromium-gpu` to play the game to its opening cinematic.
+
+## H.264 details worth knowing
+
+- `nvdec_h264_pic_s` offsets are confirmed against the real stream
+  (`core/hle/services/nvdrv/nvdec.c`, `H264_*`). WeightScale lists are
+  in raster order.
+- **`max_num_ref_frames` isn't in the struct and must be exact.** A wider
+  window keeps stale references that shift B-slice lists; a 64x64 x264
+  test diverged at frame 20.
+  - It starts as `num_ref_idx_l0_default + 1` (x264's choice; 6 for
+    Silksong) and widens to the guest DPB's reference count at the next
+    IDR.
+- The VUI declares `max_num_reorder_frames = 2`. Zero makes ffmpeg drop
+  frames; a large value delays output.
