@@ -114,20 +114,29 @@ void scheduler_expire_timeouts(Scheduler *sched) {
   }
 }
 
-int32_t scheduler_pick(Scheduler *sched) {
+/* Is `t` a better pick than `b`? With an affine core, home threads win
+ * ties of priority before round-robin order does. */
+static bool better(const Sched_Thread *t, const Sched_Thread *b, bool affine, uint32_t core) {
+  if (t->thread.priority != b->thread.priority) return t->thread.priority < b->thread.priority;
+  if (affine) {
+    const bool t_home = t->last_core == core, b_home = b->last_core == core;
+    if (t_home != b_home) return t_home;
+  }
+  return t->last_run < b->last_run;
+}
+
+static int32_t pick(Scheduler *sched, bool affine, uint32_t core) {
   int32_t best = -1;
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     const Sched_Thread *t = &sched->threads[i];
     if (t->state != THREAD_STATE_RUNNABLE || t->paused || t->on_core) continue;
-    if (best < 0) { best = (int32_t)i; continue; }
-    const Sched_Thread *b = &sched->threads[best];
-    if (t->thread.priority < b->thread.priority ||
-        (t->thread.priority == b->thread.priority && t->last_run < b->last_run)) {
-      best = (int32_t)i;
-    }
+    if (best < 0 || better(t, &sched->threads[best], affine, core)) best = (int32_t)i;
   }
   return best;
 }
+
+int32_t scheduler_pick(Scheduler *sched) { return pick(sched, false, 0); }
+int32_t scheduler_pick_for_core(Scheduler *sched, uint32_t core) { return pick(sched, true, core); }
 
 Scheduler_Status scheduler_idle(Scheduler *sched) {
   uint64_t earliest = SCHEDULER_WAIT_FOREVER;

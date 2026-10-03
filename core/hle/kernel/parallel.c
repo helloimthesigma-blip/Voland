@@ -158,7 +158,7 @@ static uint64_t run_slice_on_core(Parallel *p, Core *core) {
     if (sched->process_crashed || sched->process_exited) return used;
     if (ran && (p->busy == 0 || used >= p->budget)) return used;
     scheduler_expire_timeouts(sched);
-    const int32_t index = scheduler_pick(sched);
+    const int32_t index = scheduler_pick_for_core(sched, core->index);
     if (index < 0) {
       if (p->busy == 0) return used; /* nothing can change until the next slice */
       pthread_cond_wait(&p->core_cv, &p->kernel);
@@ -166,6 +166,7 @@ static uint64_t run_slice_on_core(Parallel *p, Core *core) {
     }
     Sched_Thread *thread = &sched->threads[index];
     thread->on_core = true;
+    thread->last_core = core->index;
     core->running = index;
     p->busy++;
     const uint64_t start_ticks = sched->ticks;
