@@ -33,6 +33,9 @@ typedef struct Jit_Stats {
   uint64_t stale;              /* compiled blocks whose code changed or was unmapped */
   uint64_t revalidations;      /* compiled blocks kept across a generation change */
   uint64_t direct_simd;        /* SIMD&FP instructions compiled code ran through jit_helper_simd */
+  uint64_t simd_fpcr_nonzero;  /* ...with FPCR != 0 (no native fast paths) */
+  uint64_t simd_ixc_clear;     /* ...with FPCR 0 but FPSR.IXC clear */
+  uint64_t last_fpcr;
   uint64_t helper_simd_fp;     /* instructions compiled code handed to the interpreter: SIMD&FP */
   uint64_t helper_memory_simd; /* ...SIMD&FP loads/stores */
   uint64_t helper_memory_exclusive; /* ...exclusive and acquire/release */
