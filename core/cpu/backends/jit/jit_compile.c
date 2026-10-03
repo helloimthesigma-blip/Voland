@@ -2451,8 +2451,174 @@ static bool c_vector_fp_fast(Ctx *c, uint32_t insn) {
   return false;
 }
 
+/* ------------------------------------------------------------------ */
+/* Integer Advanced SIMD: bitwise ops and permutes, inline.            */
+/* ------------------------------------------------------------------ */
+
+/* V[d] = shuffle(V[n], V[m]) by byte lanes (0-15 from n, 16-31 from m). */
+static void emit_shuffle_store(Ctx *c, uint32_t n, uint32_t m, const uint8_t lanes[SIMD_LANE_BYTES], bool q,
+                               uint32_t d) {
+  load_v(c, n);
+  load_v(c, m);
+  v128_shuffle(c, lanes);
+  lset(c, L_VR);
+  store_v(c, d, L_VR, q);
+}
+
+/* Byte lanes for "result element i = (from_m ? m : n) element src[i]". */
+static void element_lanes(uint8_t lanes[SIMD_LANE_BYTES], uint32_t esize_bytes, uint32_t count, const uint8_t *src,
+                          const bool *from_m) {
+  memset(lanes, 0, SIMD_LANE_BYTES);
+  for (uint32_t i = 0; i < count; i++) {
+    for (uint32_t b = 0; b < esize_bytes; b++) {
+      lanes[i * esize_bytes + b] = (uint8_t)((from_m[i] ? SIMD_LANE_BYTES : 0u) + src[i] * esize_bytes + b);
+    }
+  }
+}
+
+/* An instruction whose result is (Vd & and_mask) | or_mask whatever the
+ * other registers hold (MOVI, MVNI, ORR/BIC (immediate), FMOV (vector,
+ * immediate)): the interpreter evaluates it at compile time on two
+ * scratch states, Vd all zeros and all ones. */
+static bool c_vector_affine_immediate(Ctx *c, uint32_t insn) {
+  static Interp_State scratch;
+  CPU_Vector_Register results[2];
+  for (uint32_t k = 0; k < 2u; k++) {
+    memset(&scratch, 0, sizeof(scratch));
+    const uint64_t fill = k ? ~(uint64_t)0 : 0;
+    scratch.v[bits(insn, 4, 0)].lo = fill;
+    scratch.v[bits(insn, 4, 0)].hi = fill;
+    if (interp_execute(&scratch, insn) != INTERP_CONTINUE) return false;
+    results[k] = scratch.v[bits(insn, 4, 0)];
+  }
+  const uint32_t d = bits(insn, 4, 0);
+  load_v(c, d);
+  v128_const(c, results[1].lo, results[1].hi);
+  simd(c, WASM_SIMD_V128_AND);
+  v128_const(c, results[0].lo, results[0].hi);
+  simd(c, WASM_SIMD_V128_OR);
+  lset(c, L_VR);
+  store_v(c, d, L_VR, true);
+  return true;
+}
+
+#define VECTOR_MAX_LANES 16u
+
+static bool c_vector_int_fast(Ctx *c, uint32_t insn) {
+  if (bit(insn, 31)) return false;
+  const bool q = bit(insn, 30), u = bit(insn, 29);
+  const uint32_t size = bits(insn, 23, 22), rn = bits(insn, 9, 5), rm = bits(insn, 20, 16), rd = bits(insn, 4, 0);
+  uint8_t lanes[SIMD_LANE_BYTES];
+  uint8_t src[VECTOR_MAX_LANES];
+  bool from_m[VECTOR_MAX_LANES];
+  if (bits(insn, 28, 24) == 0x0F && bit(insn, 10) && bits(insn, 23, 19) == 0) { /* modified immediate */
+    return c_vector_affine_immediate(c, insn);
+  }
+  if (bits(insn, 28, 24) != 0x0E) return false;
+  if (bit(insn, 21) && bit(insn, 10) && bits(insn, 15, 11) == 0x03) { /* AND/BIC/ORR/ORN/EOR/BSL/BIT/BIF */
+    load_v(c, rn);
+    lset(c, L_VA);
+    load_v(c, rm);
+    lset(c, L_VB);
+    const uint32_t which = ((uint32_t)u << 2) | size;
+    if (which >= 5u) {
+      load_v(c, rd);
+      lset(c, L_VD);
+    }
+    switch (which) {
+    case 0: lget(c, L_VA); lget(c, L_VB); simd(c, WASM_SIMD_V128_AND); break;
+    case 1: lget(c, L_VA); lget(c, L_VB); simd(c, WASM_SIMD_V128_ANDNOT); break;
+    case 2: lget(c, L_VA); lget(c, L_VB); simd(c, WASM_SIMD_V128_OR); break;
+    case 3: lget(c, L_VA); lget(c, L_VB); simd(c, WASM_SIMD_V128_NOT); simd(c, WASM_SIMD_V128_OR); break;
+    case 4: lget(c, L_VA); lget(c, L_VB); simd(c, WASM_SIMD_V128_XOR); break;
+    case 5: lget(c, L_VA); lget(c, L_VB); lget(c, L_VD); simd(c, WASM_SIMD_V128_BITSELECT); break; /* BSL */
+    case 6: lget(c, L_VA); lget(c, L_VD); lget(c, L_VB); simd(c, WASM_SIMD_V128_BITSELECT); break; /* BIT */
+    default: lget(c, L_VD); lget(c, L_VA); lget(c, L_VB); simd(c, WASM_SIMD_V128_BITSELECT); break; /* BIF */
+    }
+    lset(c, L_VR);
+    store_v(c, rd, L_VR, q);
+    return true;
+  }
+  if (!bit(insn, 21) && !bit(insn, 15) && !bit(insn, 10) && u) { /* EXT */
+    const uint32_t imm4 = bits(insn, 14, 11), bytes = q ? 16u : 8u;
+    if (size != 0 || (!q && (imm4 & 8u))) return false;
+    for (uint32_t i = 0; i < bytes; i++) {
+      src[i] = (uint8_t)((imm4 + i) % bytes);
+      from_m[i] = imm4 + i >= bytes;
+    }
+    element_lanes(lanes, 1, bytes, src, from_m);
+    emit_shuffle_store(c, rn, rm, lanes, q, rd);
+    return true;
+  }
+  const uint32_t esize = 1u << size, count = (q ? 16u : 8u) / esize;
+  if (!bit(insn, 21) && !bit(insn, 15) && bits(insn, 11, 10) == 2 && !u) { /* UZP/TRN/ZIP */
+    const uint32_t opcode = bits(insn, 14, 12), part = (opcode >> 2) & 1u, pairs = count / 2u;
+    if (size == 3 && !q) return false;
+    switch (opcode & 3u) {
+    case 1:
+      for (uint32_t i = 0; i < count; i++) {
+        const uint32_t s2 = 2u * i + part;
+        from_m[i] = s2 >= count;
+        src[i] = (uint8_t)(s2 % count);
+      }
+      break;
+    case 2:
+      for (uint32_t p = 0; p < pairs; p++) {
+        src[2u * p] = src[2u * p + 1u] = (uint8_t)(2u * p + part);
+        from_m[2u * p] = false;
+        from_m[2u * p + 1u] = true;
+      }
+      break;
+    case 3:
+      for (uint32_t p = 0; p < pairs; p++) {
+        src[2u * p] = src[2u * p + 1u] = (uint8_t)(part * pairs + p);
+        from_m[2u * p] = false;
+        from_m[2u * p + 1u] = true;
+      }
+      break;
+    default:
+      return false;
+    }
+    element_lanes(lanes, esize, count, src, from_m);
+    emit_shuffle_store(c, rn, rm, lanes, q, rd);
+    return true;
+  }
+  if (bit(insn, 21) && bits(insn, 11, 10) == 2 && bits(insn, 20, 17) == 0) { /* two-reg misc: REV16/32/64 */
+    const uint32_t opcode = bits(insn, 16, 12);
+    const uint32_t key = ((uint32_t)u << 5) | opcode;
+    if (key != 0x00 && key != 0x20 && key != 0x01) return false;
+    const uint32_t container = opcode == 0x01 ? 2u : (u ? 4u : 8u); /* bytes */
+    if (esize >= container) return false;
+    const uint32_t per = container / esize;
+    for (uint32_t i = 0; i < count; i++) {
+      const uint32_t base = (i / per) * per;
+      src[i] = (uint8_t)(base + (per - 1u - (i - base)));
+      from_m[i] = false;
+    }
+    element_lanes(lanes, esize, count, src, from_m);
+    emit_shuffle_store(c, rn, rn, lanes, q, rd);
+    return true;
+  }
+  if (!bit(insn, 21) && bit(insn, 10) && bits(insn, 23, 21) == 0 && !bit(insn, 15) && !u &&
+      bits(insn, 14, 11) == 0) { /* DUP (element) */
+    const uint32_t imm5 = bits(insn, 20, 16);
+    uint32_t lsize = 0;
+    while (lsize < 4u && !((imm5 >> lsize) & 1u)) lsize++;
+    if (lsize > 3u || (lsize == 3u && !q)) return false;
+    const uint32_t lbytes = 1u << lsize, lcount = (q ? 16u : 8u) / lbytes;
+    for (uint32_t i = 0; i < lcount; i++) {
+      src[i] = (uint8_t)(imm5 >> (lsize + 1u));
+      from_m[i] = false;
+    }
+    element_lanes(lanes, lbytes, lcount, src, from_m);
+    emit_shuffle_store(c, rn, rn, lanes, q, rd);
+    return true;
+  }
+  return false;
+}
+
 static bool c_simd_fp(Ctx *c, uint32_t insn) {
-  if (c_scalar_fp_fast(c, insn) || c_vector_fp_fast(c, insn)) return true;
+  if (c_scalar_fp_fast(c, insn) || c_vector_fp_fast(c, insn) || c_vector_int_fast(c, insn)) return true;
   Sync sync = {0};
   simd_fp_sync(insn, &sync);
   emit_direct_call(c, &sync);

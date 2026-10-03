@@ -910,6 +910,9 @@ static int run(int argc, char **argv) {
             (unsigned long long)j->direct_simd, (unsigned long long)j->helper_simd_fp, (unsigned long long)j->helper_memory_simd,
             (unsigned long long)j->helper_memory_exclusive, (unsigned long long)j->helper_memory,
             (unsigned long long)j->helper_system, (unsigned long long)j->helper_other);
+    fprintf(stderr, "voland-cli: jit SIMD&FP direct calls with FPCR != 0: %llu (last FPCR %llx), IXC clear: %llu\n",
+            (unsigned long long)j->simd_fpcr_nonzero, (unsigned long long)j->last_fpcr,
+            (unsigned long long)j->simd_ixc_clear);
     if (jit_fallbacks) jit_print_fallback_profile(60);
   }
   if (wav) {

@@ -210,7 +210,7 @@ static uint32_t gen_exclusive(void) {
 static uint32_t vreg(void) { return pick(32); }
 static uint32_t ftype(void) { return pick(8) == 0 ? 3u : pick(2); } /* single/double, sometimes half/undefined */
 static uint32_t gen_simd_fp(void) {
-  switch (pick(16)) {
+  switch (pick(17)) {
   case 0: return 0x1E200800u | (ftype() << 22) | (vreg() << 16) | (pick(9) << 12) | (vreg() << 5) | vreg(); /* 2-source */
   case 1: return 0x1E204000u | (ftype() << 22) | (pick(16) << 15) | (vreg() << 5) | vreg();               /* 1-source */
   case 2: return 0x1F000000u | (ftype() << 22) | (pick(2) << 21) | (vreg() << 16) | (pick(2) << 15) | (vreg() << 10) |
@@ -249,6 +249,16 @@ static uint32_t gen_simd_fp(void) {
     static const uint32_t ops[3] = {0x1, 0x5, 0x9};
     return 0x0F800000u | (pick(4) ? 1u << 30 : 0) | (pick(8) == 0 ? 1u << 29 : 0) | (pick(3) == 0 ? 1u << 22 : 0) |
            (pick(2) << 21) | (v_rm << 16) | (ops[pick(3)] << 12) | (pick(2) << 11) | (v_rn << 5) | v_rd;
+  }
+  case 14: { /* EXT, UZP/TRN/ZIP, modified immediate */
+    switch (pick(3)) {
+    case 0: return 0x2E000000u | (pick(2) << 30) | (pick(8) == 0 ? pick(4) << 22 : 0) | (vreg() << 16) |
+                   (pick(16) << 11) | (vreg() << 5) | vreg();
+    case 1: return 0x0E000800u | (pick(2) << 30) | (pick(4) << 22) | (vreg() << 16) | (pick(8) << 12) | (vreg() << 5) |
+                   vreg();
+    default: return 0x0F000400u | (pick(2) << 30) | (pick(2) << 29) | (pick(8) << 16) | (pick(16) << 12) |
+                    (pick(8) == 0 ? 1u << 11 : 0) | (pick(32) << 5) | vreg();
+    }
   }
   default: /* scalar/vector by element, shifts, pairwise: anything in the space */
     return 0x0E000000u | ((uint32_t)rnd() & 0xF0FFFFFFu & ~(1u << 31)) | (pick(2) << 28);

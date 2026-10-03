@@ -214,6 +214,9 @@ uint32_t jit_helper_read(Jit_State *state, uint64_t address, uint32_t size) {
 
 uint32_t jit_helper_simd(Jit_State *state, uint32_t insn) {
   if (g_fallback_profile) profile_fallback(insn);
+  if (state->interp.fpcr != 0) g_stats.simd_fpcr_nonzero++;
+  else if (!(state->interp.fpsr & 0x10u)) g_stats.simd_ixc_clear++;
+  g_stats.last_fpcr = state->interp.fpcr;
   g_stats.direct_simd++;
   return interp_execute(&state->interp, insn) == INTERP_CONTINUE ? 0u : 1u;
 }
