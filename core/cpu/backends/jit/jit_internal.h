@@ -52,6 +52,7 @@ typedef struct Jit_Entry {
   uint32_t length;     /* guest instructions in the entry block: the budget needed */
   uint32_t code_words;
   uint64_t entries;    /* times entered (only counted with jit_set_hot_profile) */
+  bool multicore;      /* compiled under cpu_multicore() (exclusives, fences) */
 } Jit_Entry;
 
 #define JIT_CACHE_BITS 18u

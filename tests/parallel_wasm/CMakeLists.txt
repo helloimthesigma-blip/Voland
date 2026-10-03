@@ -26,7 +26,7 @@ add_executable(parallel_test_wasm EXCLUDE_FROM_ALL
   ../parallel_test.c ../guest_fixture.c ../loader_fixtures.c)
 target_link_libraries(parallel_test_wasm PRIVATE switch_core)
 target_include_directories(parallel_test_wasm PRIVATE ..)
-target_link_options(parallel_test_wasm PRIVATE ${PARALLEL_NODE_LINK_OPTIONS})
+target_link_options(parallel_test_wasm PRIVATE --profiling-funcs ${PARALLEL_NODE_LINK_OPTIONS})
 set_target_properties(parallel_test_wasm PROPERTIES OUTPUT_NAME "parallel_test" SUFFIX ".js")
 add_test(NAME parallel_test_node COMMAND ${VOLAND_NODE} $<TARGET_FILE:parallel_test_wasm>)
 
