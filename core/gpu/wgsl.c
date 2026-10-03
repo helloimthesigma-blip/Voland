@@ -70,6 +70,8 @@ typedef struct Tr {
   uint32_t cbuf_slots;
   uint32_t textures_used;
   bool uses_local;
+  bool straight;    /* no branches or flow stacks: blocks run in order, no dispatch loop */
+  bool straight_live; /* straight: the blocks so far can fall through to the next */
   bool leader[SM_MAX_WORDS];
   bool reached[SM_MAX_WORDS];
 } Tr;
@@ -123,10 +125,13 @@ static Ex reg_dst(Tr *t, uint32_t r) {
   return ex("r%u", r);
 }
 
+/* A constant-buffer word at a constant offset: its slot's base and size
+ * are read once per invocation (cbB<slot>, cbN<slot>). */
 static Ex cbuf(Tr *t, uint32_t slot, uint32_t byte_offset) {
   if (slot >= SM_CBUF_SLOTS) return ex("0u");
   t->cbuf_slots |= 1u << slot;
-  return ex("cb(%uu, %uu)", slot, byte_offset / 4u);
+  const uint32_t w = byte_offset / 4u;
+  return ex("select(0u, D[cbB%u + %uu], %uu < cbN%u)", slot, w, w, slot);
 }
 
 static Ex op_b(Tr *t, const Sm_Insn *in) {
@@ -532,12 +537,13 @@ static const char *const k_prelude[] = {
 /* Per-texture helpers (texture.c's texel_at / tex_sample / tex_gather /
  * tex_fetch); %1$u = index, %2$s = the WGSL sample type, %3$s = the texel
  * -> u32 conversion, %4$s = whether bilinear filtering applies. */
-static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type) {
+static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool hw) {
   const char *type = sample_type == WGSL_SAMPLE_UINT ? "u32" : (sample_type == WGSL_SAMPLE_SINT ? "i32" : "f32");
   const char *conv = sample_type == WGSL_SAMPLE_UINT ? "v" : "bitcast<vec4<u32>>(v)";
   const bool filterable = sample_type == WGSL_SAMPLE_FLOAT;
   const uint32_t pw = WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEX_PARAM_WORDS * i;
   out_add(o, "@group(0) @binding(%u) var T%u: texture_2d_array<%s>;\n", WGSL_TEXTURE_BINDING_BASE + i, i, type);
+  if (hw) out_add(o, "@group(0) @binding(%u) var S%u: sampler;\n", WGSL_SAMPLER_BINDING_BASE + i, i);
   out_add(o,
           "fn t%u_texel(x: i32, y: i32, l: u32) -> vec4<u32> {\n"
           "  let dm = vec2<i32>(textureDimensions(T%u)); let wr = D[%uu];\n"
@@ -559,11 +565,18 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type) {
           "  return vec3<f32>(s, t, l);\n"
           "}\n",
           i, pw + WGSL_TEXP_FLAGS, i, WGSL_TEXP_CUBE, WGSL_TEXP_SCALE | WGSL_TEXP_CUBE);
+  char hw_tap[256] = "";
+  if (hw)
+    snprintf(hw_tap, sizeof(hw_tap),
+             "  if (!shadow) { let uv = (q.xy + vec2<f32>(off)) / vec2<f32>(textureDimensions(T%u));\n"
+             "    return swz(bitcast<vec4<u32>>(textureSampleLevel(T%u, S%u, uv, l, 0.0)), sw); }\n",
+             i, i, i);
   out_add(o,
           "fn t%u_sample(c: vec3<f32>, layer: f32, dref: f32, shadow: bool, off: vec2<i32>) -> vec4<u32> {\n"
           "  let fl = D[%uu]; let sw = D[%uu]; let cf = D[%uu];\n"
           "  let q = t%u_coords(c, layer); let l = u32(q.z);\n"
           "  let cmp = shadow && (fl & %uu) != 0u;\n"
+          "%s"
           "  if (!%s || (fl & %uu) == 0u) {\n"
           "    var tx = t%u_texel(i32(floor(q.x)) + off.x, i32(floor(q.y)) + off.y, l);\n"
           "    if (cmp) { let r = select(0u, 0x3f800000u, tcmp(cf, dref, F(tx.x))); tx = vec4<u32>(r, r, r, tx.w); }\n"
@@ -584,7 +597,7 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type) {
           "  return swz(bitcast<vec4<u32>>(top + (bottom - top) * ay), sw);\n"
           "}\n",
           i, pw + WGSL_TEXP_FLAGS, pw + WGSL_TEXP_SWIZZLE, pw + WGSL_TEXP_COMPARE, i, WGSL_TEXP_DEPTH_COMPARE,
-          filterable ? "true" : "false", WGSL_TEXP_LINEAR, i, i, i, i, i, i);
+          hw_tap, filterable ? "true" : "false", WGSL_TEXP_LINEAR, i, i, i, i, i, i);
   out_add(o,
           "fn t%u_gather(c: vec3<f32>, layer: f32, comp: u32, dref: f32, shadow: bool, off: vec2<i32>) -> vec4<u32> {\n"
           "  let fl = D[%uu]; let sw = D[%uu]; let cf = D[%uu];\n"
@@ -1578,9 +1591,32 @@ static void emit_flow_push(Tr *t, const Sm_Insn *in) {
        norm_pc((uint32_t)in->target), PC_FAULT);
 }
 
+static bool is_flow(uint16_t op) {
+  switch ((Sm_Op)op) {
+  case SM_OP_BRA: case SM_OP_SSY: case SM_OP_SYNC: case SM_OP_PBK: case SM_OP_BRK: case SM_OP_PCNT: case SM_OP_CONT:
+  case SM_OP_CAL: case SM_OP_RET:
+    return true;
+  default:
+    return false;
+  }
+}
+
+/* Straight-line programs: each block's ending EXIT / KIL leaves the
+ * enclosing `loop { ... break; }`. Returns false once nothing after it can
+ * run (an unconditional end). */
+static bool emit_straight_end(Tr *t, const Sm_Insn *in) {
+  const Ex g = control_guard(in);
+  const bool always = !strcmp(g.s, "true");
+  const char *leave = in->op == SM_OP_KIL ? "discard; break;" : "break;";
+  if (always) EMIT("%s ", leave);
+  else EMIT("if (%s) { %s } ", g.s, leave);
+  return !always;
+}
+
 static void emit_block(Tr *t, uint32_t start) {
   const Sm_Program *p = t->p;
-  EMIT("    case %uu: {\n      ", start);
+  if (t->straight) EMIT("    ");
+  else EMIT("    case %uu: {\n      ", start);
   uint32_t pc = start;
   for (;;) {
     if (pc >= p->word_count) {
@@ -1589,7 +1625,8 @@ static void emit_block(Tr *t, uint32_t start) {
     }
     const Sm_Insn *in = &p->insns[pc];
     if (is_control(in->op)) {
-      emit_control(t, in);
+      if (t->straight) t->straight_live = emit_straight_end(t, in);
+      else emit_control(t, in);
       break;
     }
     if (in->op == SM_OP_SSY || in->op == SM_OP_PBK || in->op == SM_OP_PCNT) {
@@ -1609,12 +1646,19 @@ static void emit_block(Tr *t, uint32_t start) {
     }
     const uint32_t next = norm_pc(in->next);
     if (next >= p->word_count || t->leader[next]) {
-      EMIT("pc = %uu; ", next >= p->word_count ? PC_FAULT : next);
+      if (t->straight) {
+        if (next >= p->word_count) {
+          EMIT("discard; break; ");
+          t->straight_live = false;
+        }
+      } else {
+        EMIT("pc = %uu; ", next >= p->word_count ? PC_FAULT : next);
+      }
       break;
     }
     pc = next;
   }
-  EMIT("\n    }\n");
+  EMIT(t->straight ? "\n" : "\n    }\n");
 }
 
 /* ---- the whole program -------------------------------------------- */
@@ -1711,7 +1755,11 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   t->body.buf = buffer + half;
   t->body.cap = capacity - half;
   find_blocks(t);
-  for (uint32_t pc = 0; pc < program->word_count && t->ok; pc++)
+  t->straight = true;
+  for (uint32_t pc = 0; pc < program->word_count; pc++)
+    if (t->reached[pc] && is_flow(program->insns[pc].op)) t->straight = false;
+  t->straight_live = true;
+  for (uint32_t pc = 0; pc < program->word_count && t->ok && (!t->straight || t->straight_live); pc++)
     if (t->leader[pc] && t->reached[pc]) emit_block(t, pc);
   Out head = {buffer, half, 0, false};
   /* Outputs reference registers too: emit them into a scratch tail first
@@ -1732,7 +1780,9 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
     out_add(&head, k_prelude[i], WGSL_DRAW_CBUF_TABLE, WGSL_DRAW_CBUF_TABLE, WGSL_DRAW_CBUF_TABLE);
   out_add(&head, "%s", k_quad);
   for (uint32_t i = 0; i < desc->texture_count && i < WGSL_MAX_TEXTURES; i++)
-    if ((t->textures_used >> i) & 1u) emit_texture_helpers(&head, i, desc->sample_type[i]);
+    if ((t->textures_used >> i) & 1u)
+      emit_texture_helpers(&head, i, desc->sample_type[i],
+                           ((desc->hw_sample_mask >> i) & 1u) && desc->sample_type[i] == WGSL_SAMPLE_FLOAT);
   emit_io(&head, desc, program->header.omap_depth);
   const bool has_out = desc->target_count || program->header.omap_depth;
   out_add(&head, "@fragment fn fs(fin: VOut, @builtin(front_facing) ff: bool)%s {\n", has_out ? " -> FOut" : "");
@@ -1743,13 +1793,21 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
     if ((t->reg_used[r / 8u] >> (r % 8u)) & 1u) out_add(&head, "  var r%u: u32;\n", r);
   out_add(&head, "  var _d: u32;\n  var p0: bool; var p1: bool; var p2: bool; var p3: bool; var p4: bool; var p5: bool; "
                  "var p6: bool;\n  var ccz: bool; var ccs: bool; var ccc: bool; var cco: bool;\n");
-  out_add(&head, "  var fsk: array<u32, %u>; var fst: array<u32, %u>; var fsd = 0u;\n", FLOW_DEPTH, FLOW_DEPTH);
-  out_add(&head, "  var cst: array<u32, %u>; var csd = 0u;\n", SM_STACK_DEPTH);
+  for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++)
+    if ((t->cbuf_slots >> s) & 1u)
+      out_add(&head, "  let cbB%u = D[%uu]; let cbN%u = D[%uu];\n", s, WGSL_DRAW_CBUF_TABLE + 2u * s, s,
+              WGSL_DRAW_CBUF_TABLE + 2u * s + 1u);
   if (t->uses_local) out_add(&head, "  var lm: array<u32, %u>;\n", LOCAL_WORDS);
-  out_add(&head, "  var pc = %uu; var steps = 0u;\n", norm_pc(1u));
-  out_add(&head, "  loop {\n    if (pc >= %uu) { if (pc != %uu) { discard; } break; }\n", PC_FAULT, PC_DONE);
-  out_add(&head, "    steps = steps + 1u; if (steps > %uu) { pc = %uu; continue; }\n", MAX_BLOCK_STEPS, PC_FAULT);
-  out_add(&head, "    switch (pc) {\n");
+  if (t->straight) {
+    out_add(&head, "  loop {\n");
+  } else {
+    out_add(&head, "  var fsk: array<u32, %u>; var fst: array<u32, %u>; var fsd = 0u;\n", FLOW_DEPTH, FLOW_DEPTH);
+    out_add(&head, "  var cst: array<u32, %u>; var csd = 0u;\n", SM_STACK_DEPTH);
+    out_add(&head, "  var pc = %uu; var steps = 0u;\n", norm_pc(1u));
+    out_add(&head, "  loop {\n    if (pc >= %uu) { if (pc != %uu) { discard; } break; }\n", PC_FAULT, PC_DONE);
+    out_add(&head, "    steps = steps + 1u; if (steps > %uu) { pc = %uu; continue; }\n", MAX_BLOCK_STEPS, PC_FAULT);
+    out_add(&head, "    switch (pc) {\n");
+  }
   if (head.overflow || t->body.overflow || head.len + t->body.len + 4096u > capacity) {
     res.ok = false;
     snprintf(res.reason, sizeof(res.reason), "WGSL exceeds %zu bytes", capacity);
@@ -1759,7 +1817,8 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   memmove(buffer + head.len, t->body.buf, t->body.len);
   head.len += t->body.len;
   head.cap = capacity;
-  out_add(&head, "    default: { pc = %uu; }\n    }\n  }\n", PC_FAULT);
+  if (t->straight) out_add(&head, "%s  }\n", t->straight_live ? "    break;\n" : "");
+  else out_add(&head, "    default: { pc = %uu; }\n    }\n  }\n", PC_FAULT);
   emit_outputs(t, &head);
   out_add(&head, "}\n");
   if (head.overflow) {
@@ -1833,6 +1892,7 @@ uint64_t wgsl_desc_hash(const Wgsl_Program_Desc *desc, const Sm_Program *program
   MIX(&desc->target_int_mask, sizeof(desc->target_int_mask));
   MIX(&desc->target_sint_mask, sizeof(desc->target_sint_mask));
   MIX(&desc->mrt, sizeof(desc->mrt));
+  MIX(&desc->hw_sample_mask, sizeof(desc->hw_sample_mask));
 #undef MIX
   return h;
 }

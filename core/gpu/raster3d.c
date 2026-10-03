@@ -2702,6 +2702,18 @@ static bool gpu_format_is_int(uint32_t f, bool *is_signed) {
          f == GPU_FMT_RG32_UINT || f == GPU_FMT_R32_UINT;
 }
 
+/* Formats a WebGPU filtering sampler accepts without optional features. */
+static bool gpu_format_filterable(uint32_t f) {
+  switch (f) {
+  case GPU_FMT_RGBA8_UNORM: case GPU_FMT_RGBA8_SRGB: case GPU_FMT_BGRA8_UNORM: case GPU_FMT_BGRA8_SRGB:
+  case GPU_FMT_RGBA16_FLOAT: case GPU_FMT_R8_UNORM: case GPU_FMT_RG8_UNORM: case GPU_FMT_R16_FLOAT:
+  case GPU_FMT_RG16_FLOAT: case GPU_FMT_RG11B10_UFLOAT: case GPU_FMT_RGB10A2_UNORM:
+    return true;
+  default:
+    return false;
+  }
+}
+
 static void gpu_destroy(Raster3d *r, uint32_t id) {
   if (id) gpu_stream_write(r->gpu, GPU_REC_TEXTURE_DESTROY, &id, sizeof(id));
 }
@@ -2920,6 +2932,7 @@ typedef struct Gpu_Draw {
   uint32_t shader_id;
   uint32_t texture_count;
   uint32_t texture_id[WGSL_MAX_TEXTURES];
+  uint32_t sampler_state[WGSL_MAX_TEXTURES]; /* GPU_SAMPLER_*, for hardware-sampled bindings */
   uint32_t data_words;
   Wgsl_Program_Desc desc;
 } Gpu_Draw;
@@ -3038,6 +3051,7 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
   Wgsl_Program_Desc *desc = &g->desc;
   memset(desc->binding_of, WGSL_NO_BINDING, sizeof(desc->binding_of));
   desc->texture_count = 0;
+  desc->hw_sample_mask = 0;
   uint32_t *data = r->gpu_data;
   memset(data, 0, WGSL_DRAW_CONSTANT_WORDS * 4u);
   uint32_t handles[WGSL_MAX_TEXTURES];
@@ -3062,18 +3076,30 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
       s.mag_filter = 1;
       if (tsc_pool && ctx->mem->read(ctx->mem->user, tsc_pool + (uint64_t)tsc_index * TEX_SAMPLER_BYTES, tsc, sizeof(tsc)))
         tex_sampler_parse(tsc, &s);
-      uint32_t id = 0, sample_type = WGSL_SAMPLE_FLOAT;
+      uint32_t id = 0, sample_type = WGSL_SAMPLE_FLOAT, gpu_format = 0;
       Raster3d_Gpu_Surface *surf = gpu_surface_at(r, h.address, h.width);
       if (surf) {
         bool is_signed = false;
         id = surf->id;
+        gpu_format = surf->gpu_format;
         if (gpu_format_is_int(surf->gpu_format, &is_signed)) sample_type = is_signed ? WGSL_SAMPLE_SINT : WGSL_SAMPLE_UINT;
       } else {
         Raster3d_Texture *tex = texture_load(r, tic, ctx->mem);
         if (!tex) continue;
         id = gpu_texture(r, tex);
+        gpu_format = tex->gpu_format;
         if (h.data_type[0] == TEX_DATA_UINT) sample_type = WGSL_SAMPLE_UINT;
         if (h.data_type[0] == TEX_DATA_SINT) sample_type = WGSL_SAMPLE_SINT;
+      }
+      /* A hardware sampler where it gives the reference's result. */
+      const bool cube_map = h.type == TEX_TYPE_CUBE || h.type == TEX_TYPE_CUBE_ARRAY;
+      if (sample_type == WGSL_SAMPLE_FLOAT && !cube_map && gpu_format_filterable(gpu_format) && s.wrap[0] <= 2u &&
+          s.wrap[1] <= 2u) {
+        desc->hw_sample_mask |= 1u << b;
+        g->sampler_state[b] = (s.mag_filter == 2u ? GPU_SAMPLER_LINEAR : 0u) |
+                              ((uint32_t)s.wrap[0] << GPU_SAMPLER_WRAP_SHIFT(0)) |
+                              ((uint32_t)s.wrap[1] << GPU_SAMPLER_WRAP_SHIFT(1)) |
+                              ((uint32_t)(s.wrap[2] <= 2u ? s.wrap[2] : 2u) << GPU_SAMPLER_WRAP_SHIFT(2));
       }
       handles[b] = handle;
       g->texture_id[b] = id;
@@ -3164,7 +3190,9 @@ static void gpu_emit_draw(Raster_State *rs) {
   Raster3d *r = rs->ctx->r;
   Gpu_Draw *g = &g_gpu_draw;
   if (!g->vertices) return;
-  const uint32_t bindings = 1u + g->texture_count;
+  uint32_t samplers = 0;
+  for (uint32_t i = 0; i < g->texture_count; i++) samplers += (g->desc.hw_sample_mask >> i) & 1u;
+  const uint32_t bindings = 1u + g->texture_count + samplers;
   const uint64_t bytes = sizeof(Gpu_Rec_Draw) + sizeof(Gpu_Rec_Binding) * bindings + (uint64_t)g->data_words * 4u +
                          g->vertex_bytes;
   if (bytes > gpu_stream_max_payload(r->gpu)) {
@@ -3224,9 +3252,15 @@ static void gpu_emit_draw(Raster_State *rs) {
   memcpy(p, r->gpu_data, (size_t)g->data_words * 4u);
   p += (size_t)g->data_words * 4u;
   for (uint32_t i = 0; i < g->texture_count; i++) {
-    const Gpu_Rec_Binding tb = {GPU_BIND_TEXTURE, WGSL_TEXTURE_BINDING_BASE + i, 0, g->texture_id[i]};
+    const bool hw = (g->desc.hw_sample_mask >> i) & 1u;
+    const Gpu_Rec_Binding tb = {GPU_BIND_TEXTURE, WGSL_TEXTURE_BINDING_BASE + i, hw ? GPU_BIND_FILTERED : 0u,
+                                g->texture_id[i]};
     memcpy(p, &tb, sizeof(tb));
     p += sizeof(tb);
+    if (!hw) continue;
+    const Gpu_Rec_Binding sb = {GPU_BIND_SAMPLER, WGSL_SAMPLER_BINDING_BASE + i, 0, g->sampler_state[i]};
+    memcpy(p, &sb, sizeof(sb));
+    p += sizeof(sb);
   }
   memcpy(p, r->gpu_vertices, g->vertex_bytes);
   gpu_stream_end(r->gpu);

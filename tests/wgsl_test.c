@@ -184,11 +184,15 @@ static const char *g_dir;
 static char g_text[1u << 20];
 static uint32_t g_vectors;
 
+static uint32_t g_hw_sample_mask; /* the next vector's hardware-sampled textures */
+
 static void finish(const Builder *b, const char *name, bool float_compare) {
   sm_program_decode(b->bytes, SM_SPH_BYTES + 8u * b->words, 0, &g_prog);
   Wgsl_Program_Desc desc;
   wgsl_default_desc(&g_prog, &desc);
   desc.target_int_mask = 1u; /* raw register bits out (rgba32uint) */
+  desc.hw_sample_mask = g_hw_sample_mask;
+  g_hw_sample_mask = 0;
   const Wgsl_Result r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   if (!r.ok) fprintf(stderr, "[wgsl_test] %s: %s\n", name, r.reason);
   CHECK(r.ok);
@@ -329,6 +333,21 @@ static void vector_select_texture(void) {
   finish(&b, "texture", true);
 }
 
+/* The same sample through a hardware sampler (bilinear weights differ in
+ * the last bits: compared as floats). */
+static void vector_texture_hw(void) {
+  Builder b;
+  begin(&b);
+  put_varying(0, 0.3f, 0.6f, 0.0f, 0.0f);
+  put_varying(1, 1.0f, 2.0f, 0.0f, 0.0f);
+  emit(&b, IPA(4, SM_ATTR_GENERIC, 0, (uint32_t)RZ));
+  emit(&b, IPA(5, SM_ATTR_GENERIC + 4u, 0, (uint32_t)RZ));
+  emit(&b, TEXS(0, 2, 4, 5, 1, 4, 0));
+  emit(&b, EXIT());
+  g_hw_sample_mask = 1u;
+  finish(&b, "texture_hw", true);
+}
+
 static void vector_kill(void) {
   Builder b;
   begin(&b);
@@ -407,6 +426,7 @@ int main(int argc, char **argv) {
   vector_integer();
   vector_branches();
   vector_select_texture();
+  vector_texture_hw();
   vector_kill();
   vector_ldc();
   printf("[wgsl_test] passed (%u vectors%s%s)\n", g_vectors, g_dir ? " written to " : "", g_dir ? g_dir : "");

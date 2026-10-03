@@ -105,6 +105,9 @@ const results = await page.evaluate(
       });
       const entries = [{ binding: 0, resource: { buffer } }];
       if (v.code.includes("var T0:")) entries.push({ binding: 1, resource: tex.createView({ dimension: "2d-array" }) });
+      if (v.code.includes("var S0:")) {
+        entries.push({ binding: 17, resource: device.createSampler({ magFilter: "linear", minFilter: "linear" }) });
+      }
       const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
       const readback = device.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       const enc = device.createCommandEncoder();
@@ -149,7 +152,7 @@ for (const r of results) {
       if (!v.float) return false;
       const a = asFloat(e);
       const b = asFloat(r.got[i]);
-      return Math.abs(a - b) <= 1e-5 * Math.max(1, Math.abs(a));
+      return Math.abs(a - b) <= (v.name.endsWith("_hw") ? 4e-3 : 1e-5) * Math.max(1, Math.abs(a));
     });
   }
   if (!ok) failures++;

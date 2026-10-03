@@ -25,6 +25,8 @@
  *     border, bilinear filtering, depth compare and the swizzle are done
  *     in the shader from the draw constants, exactly as texture.c does,
  *     so sampler state never changes the WGSL (level 0, as the reference).
+ *     Where the descriptor allows (hw_sample_mask), plain samples use a
+ *     hardware sampler instead - one tap rather than four loads.
  *
  * Bindings (group 0): 0 = the draw's data (one read-only storage buffer of
  * u32: the draw constants below, then the constant buffers the program
@@ -55,6 +57,7 @@
 #define WGSL_MAX_TEXTURES 16u
 #define WGSL_DATA_BINDING 0u
 #define WGSL_TEXTURE_BINDING_BASE 1u
+#define WGSL_SAMPLER_BINDING_BASE (WGSL_TEXTURE_BINDING_BASE + WGSL_MAX_TEXTURES) /* + i: texture i's sampler */
 #define WGSL_NO_BINDING 0xffu
 #define WGSL_MAX_TARGETS 8u
 #define WGSL_DRAW_SURFACE_HEIGHT 0u /* draw-constant words */
@@ -94,6 +97,11 @@ typedef struct Wgsl_Program_Desc {
   uint8_t binding_of[SM_MAX_WORDS];
   uint32_t texture_count;
   uint8_t sample_type[WGSL_MAX_TEXTURES]; /* Wgsl_Sample_Type per texture */
+  /* Bit per texture: plain samples (no depth compare) go through a
+   * hardware sampler at WGSL_SAMPLER_BINDING_BASE + i - the texture is
+   * filterable and its wrap modes are WebGPU's (repeat, mirror, clamp to
+   * edge), so the result is the reference's (filtering weights aside). */
+  uint32_t hw_sample_mask;
   /* Varyings: generic input vector v arrives at location varying_location[v]
    * (0xff: not passed); flat_mask bit per location (not interpolated). */
   uint8_t varying_location[SM_ATTR_GENERIC_COUNT];

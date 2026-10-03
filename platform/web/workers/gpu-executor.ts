@@ -8,13 +8,16 @@
  * the same attachments share a render pass. Per-draw data (constants +
  * constant buffers) and vertices go to CPU staging arrays and reach their
  * GPU buffers with writeBuffer just before the encoder is submitted - the
- * queue orders that write after every earlier submission, so the buffers
- * are reused every batch. Anything that must happen on the queue timeline
+ * queue orders that write after every earlier submission. The buffers
+ * rotate (BUFFER_SETS) so that write does not stall on in-flight work.
+ * Anything that must happen on the queue timeline
  * between draws (texture uploads) flushes the batch first.
  */
 
 import {
   BIND_DATA,
+  BIND_FILTERED,
+  BIND_SAMPLER,
   BIND_TEXTURE,
   BINDING_BYTES,
   BLEND_FACTORS,
@@ -39,6 +42,8 @@ import {
   REC_TEXTURE_CREATE,
   REC_TEXTURE_DESTROY,
   REC_TEXTURE_WRITE,
+  SAMPLER_LINEAR,
+  SAMPLER_WRAPS,
   STENCIL_OPS,
   TEXTURE_WRITE_BYTES,
   USAGE_RENDER,
@@ -51,9 +56,13 @@ import {
   parseTextureWrite,
 } from "@bindings/gpu-records";
 
-const VERTEX_BUFFER_BYTES = 64 * 1024 * 1024;
-const DATA_BUFFER_BYTES = 32 * 1024 * 1024;
+const VERTEX_BUFFER_BYTES = 16 * 1024 * 1024;
+const DATA_BUFFER_BYTES = 16 * 1024 * 1024;
+/* Batches rotate through this many buffer pairs, so writing the next
+ * batch's data never waits for the GPU to finish reading the last one. */
+const BUFFER_SETS = 3;
 const DATA_ALIGN = 256;
+const MAX_TEXTURES = 16; /* core/gpu/wgsl.h WGSL_MAX_TEXTURES: samplers bind at 1 + MAX_TEXTURES + i */
 
 export interface PresentTarget {
   readonly view: GPUTextureView;
@@ -94,6 +103,7 @@ export interface ExecutorStats {
   pipelines: number;
   presents: number;
   errors: number;
+  shadows: number;
 }
 
 const FULLSCREEN_VS = /* wgsl */ `
@@ -178,13 +188,17 @@ function f32Bits(v: number): number {
 }
 
 export class GpuExecutor {
-  readonly stats: ExecutorStats = { draws: 0, passes: 0, submits: 0, pipelines: 0, presents: 0, errors: 0 };
+  readonly stats: ExecutorStats = { draws: 0, passes: 0, submits: 0, pipelines: 0, presents: 0, errors: 0, shadows: 0 };
   private readonly textures = new Map<number, Tex>();
   private readonly shaders = new Map<number, GPUShaderModule>();
   private readonly pipelines = new Map<string, CachedPipeline>();
   private readonly shadows = new Map<string, Tex>();
-  private readonly vertexBuffer: GPUBuffer;
-  private readonly dataBuffer: GPUBuffer;
+  private readonly samplers = new Map<number, GPUSampler>();
+  private readonly vertexBuffers: GPUBuffer[] = [];
+  private readonly dataBuffers: GPUBuffer[] = [];
+  private set = 0;
+  private get vertexBuffer(): GPUBuffer { return this.vertexBuffers[this.set] as GPUBuffer; }
+  private get dataBuffer(): GPUBuffer { return this.dataBuffers[this.set] as GPUBuffer; }
   private readonly vertexStaging = new Uint8Array(VERTEX_BUFFER_BYTES);
   private readonly dataStaging = new Uint8Array(DATA_BUFFER_BYTES);
   private readonly linearSampler: GPUSampler;
@@ -198,8 +212,10 @@ export class GpuExecutor {
   private readonly warned = new Set<string>();
 
   constructor(private readonly device: GPUDevice, private readonly host: ExecutorHost) {
-    this.vertexBuffer = device.createBuffer({ size: VERTEX_BUFFER_BYTES, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST });
-    this.dataBuffer = device.createBuffer({ size: DATA_BUFFER_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    for (let i = 0; i < BUFFER_SETS; i++) {
+      this.vertexBuffers.push(device.createBuffer({ size: VERTEX_BUFFER_BYTES, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }));
+      this.dataBuffers.push(device.createBuffer({ size: DATA_BUFFER_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }));
+    }
     this.linearSampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
   }
 
@@ -220,14 +236,22 @@ export class GpuExecutor {
   }
 
   /** Submits everything recorded so far. */
+  readonly prof = { write: 0, finish: 0, submit: 0 };
   flush(): void {
     this.endPass();
     if (!this.encoder) return;
-    if (this.vertexUsed) this.device.queue.writeBuffer(this.vertexBuffer, 0, this.vertexStaging, 0, this.vertexUsed);
-    if (this.dataUsed) this.device.queue.writeBuffer(this.dataBuffer, 0, this.dataStaging, 0, this.dataUsed);
-    this.device.queue.submit([this.encoder.finish()]);
+    const t0 = performance.now();
+    if (this.vertexUsed) this.device.queue.writeBuffer(this.vertexBuffer, 0, this.vertexStaging.slice(0, this.vertexUsed));
+    if (this.dataUsed) this.device.queue.writeBuffer(this.dataBuffer, 0, this.dataStaging.slice(0, this.dataUsed));
+    const t1 = performance.now();
+    const cb = this.encoder.finish();
+    const t2 = performance.now();
+    this.device.queue.submit([cb]);
+    const t3 = performance.now();
+    this.prof.write += t1 - t0; this.prof.finish += t2 - t1; this.prof.submit += t3 - t2;
     this.stats.submits++;
     this.encoder = null;
+    if (this.vertexUsed || this.dataUsed) this.set = (this.set + 1) % BUFFER_SETS;
     this.vertexUsed = 0;
     this.dataUsed = 0;
     for (const t of this.pendingDestroy) t.destroy();
@@ -300,7 +324,11 @@ export class GpuExecutor {
   private shader(v: DataView, payload: Uint8Array): void {
     const id = v.getUint32(0, true);
     const bytes = v.getUint32(4, true);
-    const code = new TextDecoder().decode(payload.slice(8, 8 + bytes));
+    let code = new TextDecoder().decode(payload.slice(8, 8 + bytes));
+    if ((globalThis as { TRIVIAL_SHADERS?: boolean }).TRIVIAL_SHADERS) {
+      code = code.replace(/@fragment fn fs\(([^)]*)\)( -> FOut)? \{[\s\S]*$/, (_m, args: string, ret: string | undefined) =>
+        ret ? `@fragment fn fs(${args}) -> FOut { var fo: FOut; return fo; }` : `@fragment fn fs(${args}) { }`);
+    }
     this.shaders.set(id, this.device.createShaderModule({ code }));
   }
 
@@ -393,11 +421,22 @@ export class GpuExecutor {
     return made;
   }
 
-  private drawPipeline(d: Draw, module: GPUShaderModule, textures: readonly Tex[], colorFormats: readonly (GPUTextureFormat | null)[],
-                       depth: Tex | undefined): CachedPipeline {
+  private sampler(state: number): GPUSampler {
+    let s = this.samplers.get(state);
+    if (!s) {
+      const filter: GPUFilterMode = state & SAMPLER_LINEAR ? "linear" : "nearest";
+      const wrap = (axis: number): GPUAddressMode => SAMPLER_WRAPS[(state >> (1 + 2 * axis)) & 3] ?? "clamp-to-edge";
+      s = this.device.createSampler({ magFilter: filter, minFilter: filter, addressModeU: wrap(0), addressModeV: wrap(1), addressModeW: wrap(2) });
+      this.samplers.set(state, s);
+    }
+    return s;
+  }
+
+  private drawPipeline(d: Draw, module: GPUShaderModule, textures: readonly Tex[], filtered: readonly boolean[],
+                       colorFormats: readonly (GPUTextureFormat | null)[], depth: Tex | undefined): CachedPipeline {
     const key = [
       "draw", d.shaderId, d.varyingCount,
-      textures.map((t) => t.sampleType).join(","),
+      textures.map((t, i) => (filtered[i] ? "F" : t.sampleType)).join(","),
       d.targets.map((t, i) => `${colorFormats[i] ?? "-"}:${t.writeMask}:${t.blend ? `${t.colorOp}.${t.colorSrc}.${t.colorDst}.${t.alphaOp}.${t.alphaSrc}.${t.alphaDst}` : ""}`).join(","),
       depth ? `${depth.format}:${d.depthTest}:${d.depthWrite}:${d.depthCompare}:${d.stencil ? JSON.stringify([d.stencilFront, d.stencilBack, d.stencilReadMask, d.stencilWriteMask]) : ""}` : "",
     ].join("|");
@@ -405,9 +444,13 @@ export class GpuExecutor {
       const entries: GPUBindGroupLayoutEntry[] = [
         { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
       ];
-      textures.forEach((t, i) => entries.push({
-        binding: 1 + i, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: t.sampleType, viewDimension: "2d-array" },
-      }));
+      textures.forEach((t, i) => {
+        entries.push({
+          binding: 1 + i, visibility: GPUShaderStage.FRAGMENT,
+          texture: { sampleType: filtered[i] ? "float" : t.sampleType, viewDimension: "2d-array" },
+        });
+        if (filtered[i]) entries.push({ binding: 1 + MAX_TEXTURES + i, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } });
+      });
       const layout = this.device.createBindGroupLayout({ entries });
       const attributes: GPUVertexAttribute[] = [{ shaderLocation: 0, offset: 0, format: "float32x4" }];
       for (let i = 0; i < d.varyingCount; i++) attributes.push({ shaderLocation: i + 1, offset: VERTEX_HEADER_BYTES + 16 * i, format: "uint32x4" });
@@ -485,6 +528,7 @@ export class GpuExecutor {
       this.shadows.set(key, s);
     }
     this.endPass();
+    this.stats.shadows++;
     this.ensureEncoder().copyTextureToTexture({ texture: t.texture }, { texture: s.texture }, [t.width, t.height, t.layers]);
     return s;
   }
@@ -510,8 +554,11 @@ export class GpuExecutor {
     let at = DRAW_BYTES;
     let data: Uint8Array | null = null;
     const textureIds: number[] = [];
+    const filtered: boolean[] = [];
+    const samplerStates = new Map<number, number>();
     for (let i = 0; i < d.bindingCount; i++) {
       const kind = v.getUint32(at, true);
+      const binding = v.getUint32(at + 4, true);
       const bytes = v.getUint32(at + 8, true);
       const texture = v.getUint32(at + 12, true);
       at += BINDING_BYTES;
@@ -520,12 +567,15 @@ export class GpuExecutor {
         at += bytes;
       } else if (kind === BIND_TEXTURE) {
         textureIds.push(texture);
+        filtered.push((bytes & BIND_FILTERED) !== 0);
+      } else if (kind === BIND_SAMPLER) {
+        samplerStates.set(binding, texture);
       }
     }
     const stride = VERTEX_HEADER_BYTES + 16 * d.varyingCount;
     const vertices = payload.subarray(at, at + stride * d.vertexCount);
     const colorIds = d.targets.map((t) => (t.id && this.textures.get(t.id)?.renderView ? t.id : 0));
-    const depthTex = d.depthId ? this.textures.get(d.depthId) : undefined;
+    const depthTex = d.depthId && !(globalThis as { NO_DEPTH?: boolean }).NO_DEPTH ? this.textures.get(d.depthId) : undefined;
     const depthId = depthTex?.renderView ? d.depthId : 0;
     /* Textures; one that is also an attachment is sampled from a copy. */
     const attached = new Set<number>([...colorIds, depthId].filter((id) => id !== 0));
@@ -539,7 +589,7 @@ export class GpuExecutor {
       textures.push(attached.has(id) ? this.shadowOf(t) : t);
     }
     const colorFormats = colorIds.map((id) => (id ? this.textures.get(id)?.format ?? null : null));
-    const { pipeline, layout } = this.drawPipeline(d, module, textures, colorFormats, depthId ? depthTex : undefined);
+    const { pipeline, layout } = this.drawPipeline(d, module, textures, filtered, colorFormats, depthId ? depthTex : undefined);
     /* Vertices and data (a flush may happen in between: stage both first). */
     if (this.vertexUsed + vertices.byteLength > VERTEX_BUFFER_BYTES ||
         Math.ceil(this.dataUsed / DATA_ALIGN) * DATA_ALIGN + (data?.byteLength ?? 0) > DATA_BUFFER_BYTES) this.flush();
@@ -556,6 +606,7 @@ export class GpuExecutor {
       entries: [
         { binding: 0, resource: { buffer: this.dataBuffer, offset: dataOffset, size: dataSize } },
         ...textures.map((t, i) => ({ binding: 1 + i, resource: t.sampleView })),
+        ...[...samplerStates].map(([binding, state]) => ({ binding, resource: this.sampler(state) })),
       ],
     });
     pass.setPipeline(pipeline);

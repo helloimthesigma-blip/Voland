@@ -59,6 +59,10 @@ await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 await page.goto(`http://localhost:${server.address().port}/`);
 await page.addScriptTag({ content: bundle });
 if (process.env.TRACE_RECORDS) await page.evaluate(() => { globalThis.TRACE_RECORDS = true; });
+if (process.env.TRIVIAL_SHADERS) await page.evaluate(() => { globalThis.TRIVIAL_SHADERS = true; });
+if (process.env.MEASURE) await page.evaluate(() => { globalThis.MEASURE = true; });
+if (process.env.NO_DEPTH) await page.evaluate(() => { globalThis.NO_DEPTH = true; });
+if (process.env.SKIP_TYPES) await page.evaluate((t) => { globalThis.SKIP_TYPES = t; }, process.env.SKIP_TYPES.split(",").map(Number));
 const result = await page.evaluate(async ({ every }) => {
   const a = await navigator.gpu.requestAdapter();
   const features = ["rg11b10ufloat-renderable", "depth32float-stencil8", "float32-filterable"].filter((f) => a.features.has(f));
@@ -116,17 +120,26 @@ const result = await page.evaluate(async ({ every }) => {
     const type = view.getUint32(at, true), size = view.getUint32(at + 4, true);
     if (globalThis.TRACE_RECORDS) console.log(`record ${records} type ${type} size ${size}`);
     const r0 = performance.now();
-    ex.execute(type, bytes.subarray(at + 8, at + 8 + size));
+    if (globalThis.MEASURE && type === 6 && records > 8000 && records < 12000) {
+      ex.flush(); await device.queue.onSubmittedWorkDone();
+      const m0 = performance.now();
+      ex.execute(type, bytes.subarray(at + 8, at + 8 + size));
+      ex.flush(); await device.queue.onSubmittedWorkDone();
+      const shader = view.getUint32(at + 8, true);
+      const m = (globalThis.MEASURED ??= {});
+      const e = (m[shader] ??= { n: 0, ms: 0 }); e.n++; e.ms += performance.now() - m0;
+    } else if (!(globalThis.SKIP_TYPES ?? []).includes(type)) ex.execute(type, bytes.subarray(at + 8, at + 8 + size));
     const e = (byType[type] ??= { n: 0, ms: 0, bytes: 0 });
     e.n++; e.ms += performance.now() - r0; e.bytes += size;
     at += 8 + size;
     records++;
   }
   const cpuMs = performance.now() - t0;
+  if (globalThis.MEASURED) console.log(`per-shader draw ms: ${JSON.stringify(Object.fromEntries(Object.entries(globalThis.MEASURED).map(([k, v]) => [k, { n: v.n, avg: +(v.ms / v.n).toFixed(3) }])))}`);
   ex.flush();
   await device.queue.onSubmittedWorkDone();
   const elapsed = performance.now() - t0;
-  console.log(`CPU side ${cpuMs.toFixed(0)} ms; by record type ${JSON.stringify(Object.fromEntries(Object.entries(byType).map(([k, v]) => [k, { n: v.n, ms: Math.round(v.ms), MB: +(v.bytes / 1048576).toFixed(1) }])))}`);
+  console.log(`prof ${JSON.stringify(ex.prof)}`); console.log(`CPU side ${cpuMs.toFixed(0)} ms; by record type ${JSON.stringify(Object.fromEntries(Object.entries(byType).map(([k, v]) => [k, { n: v.n, ms: Math.round(v.ms), MB: +(v.bytes / 1048576).toFixed(1) }])))}`);
   if (target && !(every && presents % every === 0)) readback(presents);
   const out = await Promise.all(pending);
   return { records, presents, elapsed, stats: ex.stats, errors, frames: out, features };

@@ -138,13 +138,19 @@ typedef struct Gpu_Rec_Draw {
 } Gpu_Rec_Draw;
 
 #define GPU_BIND_DATA 1u    /* read-only storage buffer: Gpu_Rec_Binding, then `bytes` of data (a multiple of 8) */
-#define GPU_BIND_TEXTURE 2u /* texture_2d_array (gpu/wgsl.h: read with textureLoad) */
+#define GPU_BIND_TEXTURE 2u /* texture_2d_array (gpu/wgsl.h); `bytes` = GPU_BIND_FILTERED when a sampler filters it */
+#define GPU_BIND_SAMPLER 3u /* filtering sampler; `texture_id` = GPU_SAMPLER_* state */
+#define GPU_BIND_FILTERED 1u
+/* Sampler state: bit 0 linear (else nearest), then 2 bits per axis u, v, w:
+ * 0 repeat, 1 mirror-repeat, 2 clamp-to-edge. */
+#define GPU_SAMPLER_LINEAR 1u
+#define GPU_SAMPLER_WRAP_SHIFT(axis) (1u + 2u * (axis))
 
 typedef struct Gpu_Rec_Binding {
   uint32_t kind;
   uint32_t binding;
-  uint32_t bytes;        /* DATA: data bytes that follow */
-  uint32_t texture_id;   /* TEXTURE */
+  uint32_t bytes;        /* DATA: data bytes that follow; TEXTURE: GPU_BIND_FILTERED or 0 */
+  uint32_t texture_id;   /* TEXTURE: the texture; SAMPLER: its state */
 } Gpu_Rec_Binding;
 
 /* Vertex: x, y (WebGPU NDC), z, 1/w (f32), then varying_count x 4 u32.
