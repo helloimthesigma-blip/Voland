@@ -10,7 +10,13 @@ Owner: bot 2. The coordinator reads this when merging.
   bit-identically to the game's `Intro_Cinematic.mp4`: 199/199 frames
   have the same md5 under ffmpeg. The MP4 was extracted with
   `voland-cli romfs`.
-- [ ] 3. The opening cinematic plays in the browser.
+- [x] **3. The opening cinematic plays in the browser.**
+  `e2e/cinematic.spec.ts` passes on chromium-gpu (JIT core, WebGPU
+  renderer). It presses A through title, profile and New Game, and the
+  video stream starts 358 s after load. Over 120 s the screen fades in
+  from black (mean luma 1 to 65) and keeps changing, and the frames
+  match `Intro_Cinematic.mp4` (cave light, fern, the figures on the
+  path).
 
 ## Findings (milestone 1)
 
@@ -113,6 +119,12 @@ Owner: bot 2. The coordinator reads this when merging.
   to texture memory, or VIC output will look frozen.
 
 ## Measurements
+
+- Browser, 2026-10-03: the video started 358 s after load. WebCodecs
+  decodes at 1280x720 NV12 and the cinematic is visible and moving.
+- One early run crashed the guest 11 s after load (`pc=0x2de7bb7640`,
+  well before any video). It did not reproduce in 2 reruns; it looks
+  like nondeterminism in the JIT or parallel guest threads, not video.
 
 - Native snapshot job, opening video: 199 decoded frames, 199
   bit-identical to the source MP4.

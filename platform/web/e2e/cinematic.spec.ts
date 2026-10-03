@@ -13,6 +13,7 @@ import { decodePng } from "./png";
  * the screen must show the video: neither black nor frozen. Run with
  * playwright.video.config.ts (project chromium-gpu: the real GPU).
  *   VOLAND_CINEMATIC_SHOT=prefix keeps screenshots (prefix-N.png).
+ *   VOLAND_CINEMATIC_QUERY=... adds page options (e.g. cores=0).
  */
 const NCA = process.env["VOLAND_CINEMATIC_NCA"] ?? "";
 const SHOT = process.env["VOLAND_CINEMATIC_SHOT"];
@@ -33,9 +34,11 @@ test("the opening cinematic plays", async ({ page }) => {
     const text = message.text();
     if (/video stream \d+:/.test(text)) videoStream = text;
     if (/first video frame decoded/.test(text)) decodedFrames = true;
-    if (/video|VideoDecoder|\[video\]|WebGPU|crash/.test(text)) console.log(text);
+    if (/video|VideoDecoder|\[video\]|WebGPU|crash|fault|abort|guest/i.test(text)) console.log(text);
   });
-  await page.goto("/");
+  /* VOLAND_CINEMATIC_QUERY: page options, e.g. "cores=0". */
+  const query = process.env["VOLAND_CINEMATIC_QUERY"] ?? "";
+  await page.goto(query === "" ? "/" : `/?${query}`);
   await expect(page.getByTestId("load-panel")).toBeVisible({ timeout: 20_000 });
   await page.getByTestId("load-input").setInputFiles(NCA);
   await expect(page.getByTestId("load-success")).toBeVisible();
