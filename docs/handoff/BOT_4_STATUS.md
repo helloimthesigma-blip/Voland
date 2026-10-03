@@ -131,10 +131,40 @@ slices/s wall time on the loaded machine:
   updates every slice), `scheduler_tick` and the FFI together are under 1%
   of the worker. Nothing to gain there.
 
+### After the coordinator's texture fix (local/dev 8d4eb35 merged into bot4 ccb7fcf)
+
+Same harness and recipe. Load average was 40–50 during these runs, worse
+than before.
+
+| Scene | Host cores | fps | slices/s | ticks/s |
+|---|---|---|---|---|
+| Gameplay (4.8M) | serial (`?cores=0`) | **3.12** (was 0.78) | 1,620 (was 439) | 1.00 M (5.2% of real time) |
+| Gameplay (4.8M) | 2 (`?cores=2`) | **3.27** | 2,084 | 1.04 M |
+| Title (860k) | serial | 7.00 | 8,268 | 2.24 M |
+| Title (860k) | 2, 60 s window | 2.82 (see below) | 6,662 | 2.45 M |
+| Title (860k) | 2, 120 s rerun | **8.43** | 9,622 | 2.70 M |
+
+- The gameplay screenshot (`--shot`) shows Hornet in the first room, so
+  this is real gameplay.
+- Serial gameplay profile: `interp_run` 29%, `interp_execute` 12%,
+  `round_value` 5%, `texture_load` gone from the top. Gameplay is
+  interpreter-bound now (the JIT agent).
+- With 2 cores the CPU worker's own profile is 97.5%
+  `emscripten_futex_wait`: it drives slices while the guest threads run
+  on pthreads.
+- Boot to gameplay: 1,588 s worker time serial vs. 1,309 s with 2 cores
+  (−18%).
+- **One-off:** in the first 2-core title run, presents stopped (fps 0) for
+  the last 36 s of the window while ticks kept advancing and one 0.4 MiB
+  file read happened. A 120 s rerun at the same point never dropped. With
+  host cores, slice counts aren't deterministic, so this may be the game
+  doing something else (a load) rather than a hang. Watch for it.
+
 ## Next
 
-- Re-measure gameplay once the coordinator's texture fix lands on
-  `local/dev`.
+- Gameplay is interpreter-bound; browser-side levers left are small.
+  Next candidates: the GPU worker and main thread under load, and repeat
+  measurements on a quieter machine.
 - wasm-opt / clang flag variants for the texture and hash loops.
 
 ## Needs from others
