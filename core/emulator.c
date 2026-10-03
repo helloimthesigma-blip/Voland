@@ -693,8 +693,8 @@ uint32_t emulator_set_host_cores(Emulator* emulator, uint32_t cores) {
     cpu_set_multicore(false);
   }
   if (cores == 0) return 0;
-  if (!parallel_supported() || emulator->cpu_backend->supports_jit) {
-    /* A JIT's code cache is not yet shareable between host threads. */
+  if (!parallel_supported() || !emulator->cpu_backend->supports_multicore) {
+    /* e.g. a JIT whose compiled code lives in one host thread's table. */
     log_warn("[emulator] parallel guest threads unavailable (%s); staying serial", emulator->cpu_backend->name);
     return 0;
   }

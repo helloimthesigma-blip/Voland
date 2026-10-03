@@ -205,7 +205,7 @@ core nothing changes.
 | `Interp_State` | Per guest thread; only its own core touches it, apart from wakes (above). |
 | Call trace (`interp_set_call_trace`) | Debug-only globals, not thread-safe: use with 0 or 1 core. |
 | Logging | `fprintf(stderr)`, natively fine. On the web it is a syscall proxied to the main runtime thread, so log lines from other threads go straight to the console with `emscripten_errn` (`log.c`). |
-| JIT backend | Its code cache is not shareable yet, so `emulator_set_host_cores` refuses a backend with `supports_jit` and stays serial. See the JIT handoff in the status file. |
+| JIT backend | Its code cache is not shareable yet, so `emulator_set_host_cores` accepts only a backend with `supports_multicore` (the interpreter, noop); the JIT stays serial until it sets the flag. See the JIT handoff in the status file. |
 
 ## Web
 

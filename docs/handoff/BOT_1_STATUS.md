@@ -96,7 +96,7 @@ Gameplay numbers (snapshot at 4.75M slices) are pending.
 ## Needs from others
 
 - **JIT agent.**
-  - `emulator_set_host_cores` refuses a backend with `supports_jit`, so
+  - `emulator_set_host_cores` accepts only a backend with `supports_multicore` (new `CPU_Backend` flag), so a JIT
     it stays serial: the JIT code cache would be shared by host threads.
   - To lift that: make the code cache per host thread (as
     `interp_predecode.c` now does) or safe to share, and route
