@@ -70,7 +70,8 @@ enum {
   L_IDX = 55,    /* the region target to dispatch to */
   L_HINSN = 56,  /* the handlers' instruction word */
   L_RESUME = 57, /* $helper: the region block to resume in */
-  L_LAST_I32 = 57,
+  L_PASS = 58,   /* store-exclusive: did the monitor pass */
+  L_LAST_I32 = 58,
 };
 #define I64_LOCALS (L_LAST_I64 - L_STATE)
 #define I32_LOCALS (L_LAST_I32 - L_LAST_I64)
@@ -79,13 +80,14 @@ enum {
 #define FUNC_INTERPRET 0u
 #define FUNC_READ 1u
 #define FUNC_STORE 2u
-#define FUNC_BLOCK 3u
+#define FUNC_WRITE 3u
+#define FUNC_BLOCK 4u
 #define TYPE_BLOCK 0u
 #define TYPE_INTERPRET 1u
 #define TYPE_READ 2u
 #define TYPE_STORE 3u
 #define TYPE_COUNT 4u
-#define IMPORT_COUNT 5u /* table, interpret, read, store, memory */
+#define IMPORT_COUNT 6u /* table, interpret, read, store, write, memory */
 
 /* Label levels (the wasm depth right after the label's block opened). */
 #define LEVEL_LEAVE 1u    /* the instruction in L_HPC/L_HINSN through the interpreter, then return */
@@ -112,6 +114,9 @@ enum {
 #define OFF_L1 STATE_OFFSET(interp.l1)
 #define OFF_BUDGET STATE_OFFSET(cycle_budget)
 #define OFF_SCRATCH STATE_OFFSET(scratch)
+#define OFF_EXCLUSIVE_ADDRESS STATE_OFFSET(interp.exclusive_address)
+#define OFF_V(t) (STATE_OFFSET(interp.v) + (uint64_t)(t) * sizeof(CPU_Vector_Register))
+#define V_HIGH_HALF 8u /* CPU_Vector_Register.hi */
 
 #define ENTRY_OFFSET(field) ((uint64_t)offsetof(Jit_Entry, field))
 #define TABLE_INDEX 0u
@@ -1650,10 +1655,241 @@ static bool c_pair(Ctx *c, uint32_t insn) {
   return true;
 }
 
-static bool c_load_store(Ctx *c, uint32_t insn) {
-  if (bit(insn, 26)) return false; /* SIMD&FP: the interpreter, for now */
+/* ------------------------------------------------------------------ */
+/* SIMD&FP loads and stores (the vector registers live in the state).  */
+/* ------------------------------------------------------------------ */
+
+/* v[t] = the `bytes` (1..16) at L_HOST + offset, zero-extended to 128
+ * bits (a scalar SIMD&FP write clears the rest of the register). */
+static void emit_vector_load(Ctx *c, uint32_t bytes, uint64_t offset, uint32_t t) {
+  lget(c, L_STATE);
+  lget(c, L_HOST);
+  mem(c, load_opcode(ACCESS_LOAD_ZERO, bytes < sizeof(uint64_t) ? bytes : sizeof(uint64_t)), ALIGN_1, offset);
+  mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_V(t));
+  lget(c, L_STATE);
+  if (bytes > sizeof(uint64_t)) {
+    lget(c, L_HOST);
+    mem(c, WASM_OP_I64_LOAD, ALIGN_1, offset + V_HIGH_HALF);
+  } else {
+    i64c(c, 0);
+  }
+  mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_V(t) + V_HIGH_HALF);
+}
+
+/* The low `bytes` of v[t] to `local` + offset. */
+static void emit_vector_store_to(Ctx *c, uint32_t local, uint32_t bytes, uint64_t offset, uint32_t t) {
+  const uint32_t low = bytes < sizeof(uint64_t) ? bytes : sizeof(uint64_t);
+  lget(c, local);
+  state_load64(c, OFF_V(t));
+  mem(c, store_opcode(low), ALIGN_1, offset);
+  if (bytes > sizeof(uint64_t)) {
+    lget(c, local);
+    state_load64(c, OFF_V(t) + V_HIGH_HALF);
+    mem(c, WASM_OP_I64_STORE, ALIGN_1, offset + V_HIGH_HALF);
+  }
+}
+
+/* Stores v[t] (and v[t2] after it) of `bytes` each at L_ADDR: inline, or
+ * staged in the scratch and written by jit_helper_write (all or nothing).
+ * A fault leaves through the interpreter. */
+static void emit_vector_store(Ctx *c, uint32_t bytes, uint32_t t, bool pair, uint32_t t2) {
+  const uint32_t total = pair ? 2u * bytes : bytes;
+  open_block(c); /* $done */
+  const uint32_t done = c->depth;
+  open_block(c); /* $slow */
+  emit_walk(c, total, VMM_PERM_W, c->depth);
+  emit_vector_store_to(c, L_HOST, bytes, 0, t);
+  if (pair) emit_vector_store_to(c, L_HOST, bytes, bytes, t2);
+  br(c, done);
+  end_(c);
+  lget(c, L_STATE);
+  i64c(c, OFF_SCRATCH);
+  op(c, WASM_OP_I64_ADD);
+  lset(c, L_HOST);
+  emit_vector_store_to(c, L_HOST, bytes, 0, t);
+  if (pair) emit_vector_store_to(c, L_HOST, bytes, bytes, t2);
+  lget(c, L_STATE);
+  lget(c, L_ADDR);
+  i32c(c, total);
+  op(c, WASM_OP_CALL);
+  wasm_uleb(c->b, FUNC_WRITE);
+  op(c, WASM_OP_I32_EQZ);
+  open_if(c, WASM_BLOCK_VOID);
+  leave_via_interpreter(c);
+  end_(c);
+  end_(c); /* $done */
+}
+
+/* One SIMD&FP transfer (or pair) at L_ADDR, then the base writeback. */
+static void emit_vector_transfer(Ctx *c, bool load, uint32_t bytes, uint32_t t, bool pair, uint32_t t2, uint32_t n,
+                                 bool wback, uint64_t offset) {
+  if (load) {
+    emit_load_address(c, pair ? 2u * bytes : bytes);
+    emit_vector_load(c, bytes, 0, t);
+    if (pair) emit_vector_load(c, bytes, bytes, t2);
+  } else {
+    emit_vector_store(c, bytes, t, pair, t2);
+  }
+  if (wback) {
+    lget(c, L_BASE);
+    i64c(c, offset);
+    op(c, WASM_OP_I64_ADD);
+    set_xsp(c, n);
+  }
+}
+
+/* L_ADDR = L_BASE (+ offset unless post-index). */
+static void address_from_base(Ctx *c, uint32_t n, bool post, uint64_t offset) {
+  base_to_locals(c, n);
+  lget(c, L_BASE);
+  if (!post) {
+    i64c(c, offset);
+    op(c, WASM_OP_I64_ADD);
+  }
+  lset(c, L_ADDR);
+}
+
+static bool c_vector_load_store(Ctx *c, uint32_t insn) {
+  const uint32_t t = bits(insn, 4, 0), n = bits(insn, 9, 5);
   switch (bits(insn, 29, 28)) {
-  case 0: return false; /* exclusive, acquire/release */
+  case 1: { /* LDR (literal, SIMD&FP) */
+    const uint32_t opc = bits(insn, 31, 30);
+    if (bit(insn, 24) || opc == 3) return false;
+    i64c(c, c->pc + (uint64_t)sign_extend((uint64_t)bits(insn, 23, 5) << 2, 21));
+    lset(c, L_ADDR);
+    emit_vector_transfer(c, true, 4u << opc, t, false, 0, 0, false, 0);
+    return true;
+  }
+  case 2: { /* LDP/STP/LDNP/STNP (SIMD&FP) */
+    const uint32_t opc = bits(insn, 31, 30), form = bits(insn, 24, 23);
+    if (opc == 3) return false;
+    const uint32_t bytes = 4u << opc;
+    const uint64_t offset = (uint64_t)sign_extend(bits(insn, 21, 15), 7) * bytes;
+    address_from_base(c, n, form == 1, offset);
+    emit_vector_transfer(c, bit(insn, 22), bytes, t, true, bits(insn, 14, 10), n, form == 1 || form == 3, offset);
+    return true;
+  }
+  case 3: { /* LDR/STR (SIMD&FP): unsigned offset, imm9, register offset */
+    const uint32_t scale = (bits(insn, 23, 23) << 2) | bits(insn, 31, 30);
+    if (scale > 4u) return false;
+    const uint32_t bytes = 1u << scale;
+    const bool load = bit(insn, 22);
+    if (bit(insn, 24)) {
+      get_xsp(c, n);
+      i64c(c, (uint64_t)bits(insn, 21, 10) * bytes);
+      op(c, WASM_OP_I64_ADD);
+      lset(c, L_ADDR);
+      emit_vector_transfer(c, load, bytes, t, false, 0, n, false, 0);
+      return true;
+    }
+    if (bit(insn, 21) == 0) {
+      const uint32_t form = bits(insn, 11, 10);
+      if (form == 2) return false; /* no unprivileged SIMD&FP form */
+      const uint64_t offset = (uint64_t)sign_extend(bits(insn, 20, 12), 9);
+      address_from_base(c, n, form == 1, offset);
+      emit_vector_transfer(c, load, bytes, t, false, 0, n, form == 1 || form == 3, offset);
+      return true;
+    }
+    if (bits(insn, 11, 10) != 2) return false;
+    const uint32_t option = bits(insn, 15, 13);
+    if (!(option & 2u)) return false;
+    get_xsp(c, n);
+    get_x(c, bits(insn, 20, 16));
+    if (option == 2) mask32(c);
+    else if (option == 6) op(c, WASM_OP_I64_EXTEND32_S);
+    if (bit(insn, 12) && scale) {
+      i64c(c, scale);
+      op(c, WASM_OP_I64_SHL);
+    }
+    op(c, WASM_OP_I64_ADD);
+    lset(c, L_ADDR);
+    emit_vector_transfer(c, load, bytes, t, false, 0, n, false, 0);
+    return true;
+  }
+  default:
+    return false; /* LD1-LD4 & co.: the interpreter */
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Exclusive and acquire/release (interp_load_store.c, exclusive()).   */
+/* ------------------------------------------------------------------ */
+
+#define EXCLUSIVE_GRANULE_MASK (~(uint64_t)(INTERP_EXCLUSIVE_GRANULE - 1u))
+
+static bool c_exclusive(Ctx *c, uint32_t insn) {
+  const uint32_t size = bits(insn, 31, 30);
+  const bool o2 = bit(insn, 23), load = bit(insn, 22), o1 = bit(insn, 21), o0 = bit(insn, 15);
+  const uint32_t rs = bits(insn, 20, 16), n = bits(insn, 9, 5), t = bits(insn, 4, 0);
+  const uint32_t element = 1u << size;
+  if (o1) return false;        /* pairs (and LSE CAS): the interpreter */
+  if (o2 && !o0) return false; /* LORegion: undefined */
+  get_xsp(c, n);
+  lset(c, L_ADDR);
+  if (element > 1u) { /* alignment fault: the interpreter raises it */
+    lget(c, L_ADDR);
+    i64c(c, element - 1u);
+    op(c, WASM_OP_I64_AND);
+    op(c, WASM_OP_I64_EQZ);
+    op(c, WASM_OP_I32_EQZ);
+    open_if(c, WASM_BLOCK_VOID);
+    leave_via_interpreter(c);
+    end_(c);
+  }
+  if (o2) { /* LDAR / STLR */
+    if (load) {
+      emit_load_address(c, element);
+      emit_host_load(c, ACCESS_LOAD_ZERO, element, 0, L_VAL);
+      lget(c, L_VAL);
+      set_x(c, t);
+    } else {
+      emit_store(c, element, t, false, 0);
+    }
+    return true;
+  }
+  if (load) { /* LDXR / LDAXR: arm the monitor */
+    emit_load_address(c, element);
+    emit_host_load(c, ACCESS_LOAD_ZERO, element, 0, L_VAL);
+    lget(c, L_STATE);
+    i32c(c, 1);
+    mem(c, WASM_OP_I32_STORE8, ALIGN_1, OFF_EXCLUSIVE_VALID);
+    state_store64_local(c, OFF_EXCLUSIVE_ADDRESS, L_ADDR);
+    lget(c, L_VAL);
+    set_x(c, t);
+    return true;
+  }
+  /* STXR / STLXR: stores iff the monitor holds this granule; the status
+   * register and the monitor's clearing happen either way. A failing
+   * store still checks translation (a 1-byte read probe). */
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD8_U, ALIGN_1, OFF_EXCLUSIVE_VALID);
+  state_load64(c, OFF_EXCLUSIVE_ADDRESS);
+  lget(c, L_ADDR);
+  op(c, WASM_OP_I64_XOR);
+  i64c(c, EXCLUSIVE_GRANULE_MASK);
+  op(c, WASM_OP_I64_AND);
+  op(c, WASM_OP_I64_EQZ);
+  op(c, WASM_OP_I32_AND);
+  ltee(c, L_PASS);
+  open_if(c, WASM_BLOCK_VOID);
+  emit_store(c, element, t, false, 0);
+  else_(c);
+  emit_load_address(c, 1u);
+  end_(c);
+  lget(c, L_STATE);
+  i32c(c, 0);
+  mem(c, WASM_OP_I32_STORE8, ALIGN_1, OFF_EXCLUSIVE_VALID);
+  lget(c, L_PASS);
+  op(c, WASM_OP_I32_EQZ);
+  op(c, WASM_OP_I64_EXTEND_I32_U);
+  set_x(c, rs);
+  return true;
+}
+
+static bool c_load_store(Ctx *c, uint32_t insn) {
+  if (bit(insn, 26)) return c_vector_load_store(c, insn);
+  switch (bits(insn, 29, 28)) {
+  case 0: return bit(insn, 24) ? false : c_exclusive(c, insn);
   case 1: return bit(insn, 24) ? false : c_load_literal(c, insn);
   case 2: return c_pair(c, insn);
   default:
@@ -2070,6 +2306,10 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
   name(b, "store");
   wasm_u8(b, WASM_EXTERNAL_FUNCTION);
   wasm_uleb(b, TYPE_STORE);
+  name(b, "env");
+  name(b, "write");
+  wasm_u8(b, WASM_EXTERNAL_FUNCTION);
+  wasm_uleb(b, TYPE_READ);
   name(b, "env");
   name(b, "memory");
   wasm_u8(b, WASM_EXTERNAL_MEMORY);

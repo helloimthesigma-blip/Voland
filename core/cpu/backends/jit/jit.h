@@ -31,6 +31,12 @@ typedef struct Jit_Stats {
   uint64_t evictions;          /* compiled blocks dropped from the cache */
   uint64_t stale;              /* compiled blocks whose code changed or was unmapped */
   uint64_t revalidations;      /* compiled blocks kept across a generation change */
+  uint64_t helper_simd_fp;     /* instructions compiled code handed to the interpreter: SIMD&FP */
+  uint64_t helper_memory_simd; /* ...SIMD&FP loads/stores */
+  uint64_t helper_memory_exclusive; /* ...exclusive and acquire/release */
+  uint64_t helper_memory;      /* ...other loads/stores (faults, LSE...) */
+  uint64_t helper_system;      /* ...system, exceptions */
+  uint64_t helper_other;       /* ...everything else */
 } Jit_Stats;
 const Jit_Stats *jit_stats(void);
 

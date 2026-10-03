@@ -682,6 +682,12 @@ static int run(int argc, char **argv) {
             (unsigned long long)j->evictions, (unsigned long long)(j->module_bytes / 1024u),
             (unsigned long long)j->block_entries, (unsigned long long)j->interpreted_blocks,
             (unsigned long long)j->generations, (unsigned long long)j->revalidations, (unsigned long long)j->stale);
+    fprintf(stderr,
+            "voland-cli: jit interpreter fallbacks: %llu SIMD&FP, %llu SIMD&FP memory, %llu exclusive/acquire-release, "
+            "%llu other memory, %llu system, %llu other\n",
+            (unsigned long long)j->helper_simd_fp, (unsigned long long)j->helper_memory_simd,
+            (unsigned long long)j->helper_memory_exclusive, (unsigned long long)j->helper_memory,
+            (unsigned long long)j->helper_system, (unsigned long long)j->helper_other);
   }
   if (wav) {
     write_wav_header(wav, audio_frames);

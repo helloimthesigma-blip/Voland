@@ -99,7 +99,8 @@ EM_JS_DEPS(voland_jit, "$addFunction,$removeFunction")
 /* Compiles and instantiates the module synchronously (fine off the main
  * thread, which is where the core runs) and returns the table index of
  * its exported block function, or 0 on failure. */
-EM_JS(int64_t, jit_js_install, (const uint8_t *bytes, size_t length, void *interpret, void *read, void *store), {
+EM_JS(int64_t, jit_js_install,
+      (const uint8_t *bytes, size_t length, void *interpret, void *read, void *store, void *write), {
   try {
     const start = Number(bytes);
     const module = new WebAssembly.Module(HEAPU8.slice(start, start + Number(length)));
@@ -110,6 +111,7 @@ EM_JS(int64_t, jit_js_install, (const uint8_t *bytes, size_t length, void *inter
         interpret: wasmTable.get(interpret),
         read: wasmTable.get(read),
         store: wasmTable.get(store),
+        write: wasmTable.get(write),
       },
     });
     return BigInt(addFunction(instance.exports.b, 'ip'));
@@ -123,7 +125,7 @@ EM_JS(void, jit_js_remove, (int64_t index), { removeFunction(Number(index)); })
 
 static uint64_t install(const uint8_t *bytes, uint32_t length) {
   return (uint64_t)jit_js_install(bytes, length, (void *)jit_helper_interpret, (void *)jit_helper_read,
-                                  (void *)jit_helper_store);
+                                  (void *)jit_helper_store, (void *)jit_helper_write);
 }
 static void uninstall(uint64_t function) { jit_js_remove((int64_t)function); }
 static uint64_t memory_pages(void) { return (uint64_t)emscripten_get_heap_size() / WASM_PAGE_BYTES; }
@@ -143,7 +145,21 @@ static bool can_install(void) { return false; } /* no wasm engine natively */
 /* The interpreter fallback compiled blocks import.                    */
 /* ------------------------------------------------------------------ */
 
+static void count_helper(uint32_t insn) {
+  switch (bits(insn, 28, 25)) {
+  case 0x7: case 0xF: g_stats.helper_simd_fp++; break;
+  case 0x4: case 0x6: case 0xC: case 0xE:
+    if (bit(insn, 26)) g_stats.helper_memory_simd++;
+    else if (bits(insn, 29, 28) == 0) g_stats.helper_memory_exclusive++;
+    else g_stats.helper_memory++;
+    break;
+  case 0xA: case 0xB: g_stats.helper_system++; break;
+  default: g_stats.helper_other++; break;
+  }
+}
+
 uint32_t jit_helper_interpret(Jit_State *state, uint32_t insn) {
+  count_helper(insn);
   Interp_State *s = &state->interp;
   const uint64_t pc = s->regs.pc;
   CPU_ExitReason exit_reason = CPU_EXIT_CYCLES_ELAPSED;
@@ -160,6 +176,10 @@ uint32_t jit_helper_interpret(Jit_State *state, uint32_t insn) {
 
 uint32_t jit_helper_read(Jit_State *state, uint64_t address, uint32_t size) {
   return interp_read(&state->interp, address, state->scratch, size) ? 1u : 0u;
+}
+
+uint32_t jit_helper_write(Jit_State *state, uint64_t address, uint32_t size) {
+  return interp_write(&state->interp, address, state->scratch, size) ? 1u : 0u;
 }
 
 #define STORE_SHAPE_SIZE_MASK 0xFFu
