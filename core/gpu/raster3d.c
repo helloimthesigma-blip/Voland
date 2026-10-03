@@ -2748,6 +2748,16 @@ static uint32_t gpu_zeta_format(uint32_t format) {
   }
 }
 
+/* A colour format without an alpha channel (X8 and padded formats): the
+ * reference stores and reads alpha as 1 there. */
+static bool format_lacks_alpha(uint32_t format) {
+  const Color_Format *f = color_format(format);
+  if (!f) return false;
+  for (uint32_t i = 0; i < f->count; i++)
+    if (f->channel[i] == 3u) return false;
+  return true;
+}
+
 static bool gpu_format_is_int(uint32_t f, bool *is_signed) {
   *is_signed = f == GPU_FMT_RGBA16_SINT || f == GPU_FMT_RGBA32_SINT || f == GPU_FMT_R32_SINT;
   return *is_signed || f == GPU_FMT_RGBA32_UINT || f == GPU_FMT_RGBA16_UINT || f == GPU_FMT_RGBA8_UINT ||
@@ -2813,6 +2823,8 @@ static void gpu_surface_upload(Raster3d *r, Raster3d_Gpu_Surface *s, const Gpu_M
       if (!mem->read(mem->user, s->address + (uint64_t)y * s->pitch, pixels + (uint64_t)y * row, row))
         memset(pixels + (uint64_t)y * row, 0, row);
   }
+  if (format_lacks_alpha(s->format) && s->bytes_per_pixel == 4u) /* the pad byte: alpha 1 */
+    for (uint64_t i = 3; i < (uint64_t)row * s->height; i += 4u) pixels[i] = 0xffu;
   gpu_write_rows(r, s->id, s->width, s->height, 0, row, pixels);
 }
 
@@ -2988,6 +3000,7 @@ typedef struct Gpu_Draw {
   uint32_t width, height;
   uint32_t target_id[MAX_TARGETS];
   uint32_t target_format[MAX_TARGETS];
+  bool target_no_alpha[MAX_TARGETS]; /* format_lacks_alpha: alpha writes masked */
   uint32_t depth_id;
   uint32_t depth_format;
   /* varyings: word (vector * 4 + component) -> rs->varyings index; per location its vector */
@@ -3062,6 +3075,7 @@ static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs) {
     g->height = d.height;
     g->target_id[i] = s->id;
     g->target_format[i] = s->gpu_format;
+    g->target_no_alpha[i] = format_lacks_alpha(d.format);
   }
   if (rs->depth) {
     Surface_Desc zd;
@@ -3297,7 +3311,7 @@ static void gpu_emit_draw(Raster_State *rs) {
     const Target *t = &rs->targets[i];
     Gpu_Rec_Target *o = &d.targets[i];
     o->id = g->target_id[i];
-    o->write_mask = t->write_mask;
+    o->write_mask = g->target_no_alpha[i] ? t->write_mask & 7u : t->write_mask;
     o->blend = t->blend ? 1u : 0u;
     o->color_op = t->color_op;
     o->alpha_op = t->alpha_op;
@@ -3451,6 +3465,10 @@ static void gpu_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, 
         Raster3d_Gpu_Surface *s = gpu_surface_get(r, &d, mem, !full);
         c.color_id = s->id;
         for (uint32_t i = 0; i < 4; i++) c.color[i] = regs[REG_CLEAR_COLOR + i];
+        if (format_lacks_alpha(d.format)) { /* alpha reads as 1 there */
+          c.color[3] = u32f(1.0f);
+          c.color_mask |= 8u;
+        }
         /* Integer targets hold what encode_color stores: each channel's low
          * bits (sign-extended for SINT, as sampling reads them back). */
         const Color_Format *f = color_format(d.format);
