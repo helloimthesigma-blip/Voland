@@ -369,9 +369,77 @@ static Blit_Surface t2d_surface(const uint32_t *r, uint32_t first) {
   return b;
 }
 
+/* Guest bytes a surface spans (the range a copy reads or writes). */
+static uint64_t t2d_bytes(const Blit_Surface *b) {
+  if (b->s.pitch_linear) return (uint64_t)b->s.pitch * b->height;
+  return block_linear_size(b->s.width_bytes, b->height, b->s.block_height_log2);
+}
+
+/* Rows move through one block row at a time: a block row (every block
+ * across the width, 8 << block_height_log2 rows) is contiguous in memory,
+ * so it is one guest access, swizzled locally - not one per 16-byte run. */
+#define T2D_STAGING_BYTES ((size_t)4 * 1024 * 1024)
+static uint8_t g_t2d_src[T2D_STAGING_BYTES], g_t2d_dst[T2D_STAGING_BYTES];
+
+typedef struct Block_Rows {
+  const Blit_Surface *b;
+  uint8_t *buffer;
+  uint32_t rows;        /* rows per block row; 0: the surface is pitch-linear or too wide to stage */
+  uint64_t bytes;       /* one block row */
+  int64_t loaded;       /* block row in `buffer`, or -1 */
+  bool dirty;
+} Block_Rows;
+
+static Block_Rows block_rows(const Blit_Surface *b, uint8_t *buffer) {
+  Block_Rows r;
+  memset(&r, 0, sizeof(r));
+  r.b = b;
+  r.buffer = buffer;
+  r.loaded = -1;
+  if (b->s.pitch_linear) return r;
+  const uint32_t rows = BLOCK_LINEAR_GOB_HEIGHT << b->s.block_height_log2;
+  const uint64_t bytes = block_linear_size(b->s.width_bytes, rows, b->s.block_height_log2);
+  if (bytes <= T2D_STAGING_BYTES) {
+    r.rows = rows;
+    r.bytes = bytes;
+  }
+  return r;
+}
+
+static bool block_rows_flush(Block_Rows *r, const Gpu_Memory *mem) {
+  if (r->loaded < 0 || !r->dirty) return true;
+  r->dirty = false;
+  return mem->write(mem->user, r->b->s.base + (uint64_t)r->loaded * r->bytes, r->buffer, r->bytes);
+}
+
+/* Makes row y's block row current; `whole`: the caller overwrites all of
+ * it, so it is not read first. */
+static bool block_rows_load(Block_Rows *r, const Gpu_Memory *mem, uint32_t y, bool whole) {
+  const int64_t index = y / r->rows;
+  if (index == r->loaded) return true;
+  if (!block_rows_flush(r, mem)) return false;
+  r->loaded = index;
+  return whole || mem->read(mem->user, r->b->s.base + (uint64_t)index * r->bytes, r->buffer, r->bytes);
+}
+
 /* Reads (or writes) `count` pixels of row y from x on. */
-static bool t2d_row(Gpu_Channel *ch, const Gpu_Memory *mem, const Blit_Surface *b, uint32_t x, uint32_t y, uint8_t *buffer,
-                    uint32_t count, bool write) {
+static bool t2d_row(Gpu_Channel *ch, const Gpu_Memory *mem, Block_Rows *br, uint32_t x, uint32_t y, uint8_t *buffer,
+                    uint32_t count, bool write, bool whole_block_row) {
+  const Blit_Surface *b = br->b;
+  if (br->rows) {
+    if (!block_rows_load(br, mem, y, whole_block_row)) return false;
+    const uint32_t row = y % br->rows;
+    for (uint32_t done = 0; done < count * b->bytes_per_pixel;) {
+      const uint32_t bx = x * b->bytes_per_pixel + done;
+      const uint32_t run = 16u - bx % 16u < count * b->bytes_per_pixel - done ? 16u - bx % 16u : count * b->bytes_per_pixel - done;
+      uint8_t *p = br->buffer + block_linear_offset(bx, row, b->s.width_bytes, b->s.block_height_log2);
+      if (write) memcpy(p, buffer + done, run);
+      else memcpy(buffer + done, p, run);
+      done += run;
+    }
+    if (write) br->dirty = true;
+    return true;
+  }
   Dma_Surface s = b->s;
   if (s.pitch_linear) s.base += (uint64_t)x * b->bytes_per_pixel;
   else s.origin_x = x * b->bytes_per_pixel;
@@ -400,10 +468,10 @@ static void t2d_blit(Gpu_Channel *ch, const Gpu_Memory *mem) {
     warned = true;
   }
   if (mem->renderer) {
-    /* The copy may read what the 3D engine drew, or overwrite what it
-     * cached (textures, render targets). */
-    raster3d_flush(mem->renderer, mem);
-    raster3d_begin_submission(mem->renderer);
+    /* What the 3D engine drew into the source; what it cached over the
+     * destination. */
+    raster3d_sync_range(mem->renderer, mem, src.s.base, t2d_bytes(&src), false);
+    raster3d_sync_range(mem->renderer, mem, dst.s.base, t2d_bytes(&dst), true);
   }
   const uint32_t dx0 = r[T2D_DST_X0], dy0 = r[T2D_DST_X0 + 1u];
   const uint32_t w = r[T2D_DST_X0 + 2u], h = r[T2D_DST_X0 + 3u];
@@ -419,30 +487,31 @@ static void t2d_blit(Gpu_Channel *ch, const Gpu_Memory *mem) {
     ch->faults++;
     return;
   }
+  Block_Rows src_rows = block_rows(&src, g_t2d_src), dst_rows = block_rows(&dst, g_t2d_dst);
+  if (src.s.base < dst.s.base + t2d_bytes(&dst) && dst.s.base < src.s.base + t2d_bytes(&src)) {
+    src_rows.rows = dst_rows.rows = 0; /* overlapping: no staged rows, every access direct */
+  }
+  /* A destination block row the copy covers entirely is not read first. */
+  const bool full_width = dx0 == 0 && (uint64_t)w * bpp >= dst.s.width_bytes;
   const int64_t one = (int64_t)1 << 32;
   const bool unit = du == one && (u0 >> 32) >= 0 && (uint64_t)(u0 >> 32) + w <= src.width;
-  for (uint32_t j = 0; j < h; j++) {
+  bool ok = true;
+  for (uint32_t j = 0; j < h && ok; j++) {
     int64_t sy = (v0 + dv * (int64_t)j) >> 32;
     if (sy < 0) sy = 0;
     if (sy >= (int64_t)src.height) sy = (int64_t)src.height - 1;
     if (unit) {
-      if (!t2d_row(ch, mem, &src, (uint32_t)(u0 >> 32), (uint32_t)sy, ch->line_out, w, false)) {
-        ch->faults++;
-        return;
-      }
+      ok = t2d_row(ch, mem, &src_rows, (uint32_t)(u0 >> 32), (uint32_t)sy, ch->line_out, w, false, false);
     } else {
-      if (!t2d_row(ch, mem, &src, 0, (uint32_t)sy, ch->line, src.width, false)) {
-        ch->faults++;
-        return;
-      }
-      for (uint32_t i = 0; i < w; i++) {
+      ok = t2d_row(ch, mem, &src_rows, 0, (uint32_t)sy, ch->line, src.width, false, false);
+      for (uint32_t i = 0; ok && i < w; i++) {
         int64_t sx = (u0 + du * (int64_t)i) >> 32;
         if (sx < 0) sx = 0;
         if (sx >= (int64_t)src.width) sx = (int64_t)src.width - 1;
         memcpy(ch->line_out + (size_t)i * bpp, ch->line + (size_t)sx * bpp, bpp);
       }
     }
-    if (swap_rb) {
+    if (ok && swap_rb) {
       for (uint32_t i = 0; i < w; i++) {
         uint8_t *p = ch->line_out + (size_t)i * bpp;
         const uint8_t t = p[0];
@@ -450,10 +519,18 @@ static void t2d_blit(Gpu_Channel *ch, const Gpu_Memory *mem) {
         p[2] = t;
       }
     }
-    if (!t2d_row(ch, mem, &dst, dx0, dy0 + j, ch->line_out, w, true)) {
-      ch->faults++;
-      return;
+    const uint32_t y = dy0 + j;
+    bool whole = false;
+    if (dst_rows.rows && full_width) {
+      const uint32_t first = y - y % dst_rows.rows;
+      whole = first >= dy0 && first + dst_rows.rows <= dy0 + h;
     }
+    if (ok) ok = t2d_row(ch, mem, &dst_rows, dx0, y, ch->line_out, w, true, whole);
+  }
+  if (ok) ok = block_rows_flush(&dst_rows, mem);
+  if (!ok) {
+    ch->faults++;
+    return;
   }
   ch->blits++;
 }

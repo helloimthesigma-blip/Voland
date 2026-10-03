@@ -1320,7 +1320,7 @@ Command records reference guest memory (vertex/index/uniform data, textures) by 
 - **Textures:** `core/gpu/texture` parses TIC/TSC (open-gpu-doc clb197tex.h layouts), deswizzles block-linear/pitch images once per submission into a texture pool, expands BC1-5, ASTC (LDR, every 2D footprint; `core/gpu/astc`, per the Khronos Data Format Specification) and 8-bit UNORM formats to RGBA8, and samples with wrap modes, nearest/bilinear filtering, depth compare and gather.
 - **Render targets** live in host-linear copies (`raster3d` surface cache) and are written back to guest memory at the end of every submission and before any DMA copy, so vi/BufferQueue presents them unchanged and `voland-cli --dump-frame` golden-hashes them.
 - **Cost control:** a triangle whose pixel-program inputs do not vary (flat ImGui rectangles) is shaded once and only depth-tested / blended per pixel; RGBA8 targets and textures have byte-wise fast paths.
-- **Parallel pixel work (v3.65):** vertex shading, assembly and clipping stay serial; clipped triangles queue (up to 256) and, at the end of the draw, `common/workers` (a fork-join pool: pthreads natively, Emscripten pthreads on the web, serial where neither exists) has every worker rasterise the whole queue over its own interleaved 16-row bands. Bands are even-aligned (2x2 quads never straddle), each pixel still sees triangles in submission order, and each worker has its own shader state, texture resolver and statistics - so the image is identical for every worker count (`raster3d_test` asserts it for 1, 3 and 4; homebrew golden frames are unchanged). Texture loads and shader global-memory access take the pool's lock. Batches under ~4K pixels stay on the caller. This is host-side parallelism inside one draw, not guest-visible blocking (§7). Measured on an 8-thread host: a Unity title's 3D frames 2.7x faster natively, ~3.8x in Chromium.
+- **Parallel pixel work (v3.65):** vertex shading (32 vertices per interpreter run since v3.68), assembly and clipping stay serial; clipped triangles queue (up to 256, each with a conservative row range) and, at the end of the draw, `common/workers` (a fork-join pool: pthreads natively, Emscripten pthreads on the web, serial where neither exists) has the workers take 16-row bands in turn (dynamically since v3.68 - hosts mix fast and slow cores) and rasterise every queued triangle that reaches the band. Bands are even-aligned (2x2 quads never straddle), each pixel still sees triangles in submission order, and each worker has its own shader state, texture resolver and statistics - so the image is identical for every worker count (`raster3d_test` asserts it for 1, 3 and 4; homebrew golden frames are unchanged). Texture loads and shader global-memory access take the pool's lock. Batches under ~4K pixels stay on the caller. This is host-side parallelism inside one draw, not guest-visible blocking (§7). Measured on an 8-thread host: a Unity title's 3D frames 2.7x faster natively, ~3.8x in Chromium.
 
 This path is the correctness oracle the WebGPU translation (shaders to WGSL in the GPU Worker, as above) will be diffed against; it is not removed when that lands. It renders deko3d homebrew (ftpd's ImGui interface) today.
 
@@ -2427,9 +2427,14 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.67.0*
+*Document version: 3.68.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.67 → v3.68 (summary)
+
+- **Reference renderer:** pixel bands are taken dynamically (a shared counter under the pool's lock) instead of interleaved by worker index - on a 4+4 performance/efficiency-core host the main thread had been idling ~25% of its time waiting for slow-core bands; queued triangles carry a row range so a band skips the rest cheaply. Vertices are shaded SM_LANES at a time: each index chunk is prefetched into a 1024-entry vertex cache before assembly.
+- **2D engine:** copies stage whole block rows (contiguous in memory) and swizzle locally instead of one guest access per 16-byte run, and the renderer syncs only the surfaces and textures over the copy (`raster3d_sync_range`: write back what it reads; reload / re-validate what it writes) instead of flushing everything. Unity's per-frame copy of the presented frame had cost ~90 ms per frame; 90k slices of Silksong now take 63.6 s (75.6 s before; 62 s with copies skipped).
 
 ### Changelog v3.66 → v3.67 (summary)
 

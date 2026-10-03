@@ -95,7 +95,7 @@
 #define SUBPIXEL_ONE (1 << SUBPIXEL_BITS)
 #define GUARD_BAND 4096.0f          /* clip-space x/y limit, in w units */
 #define MAX_POLY 12u
-#define VERTEX_CACHE 32u
+#define VERTEX_CACHE 1024u /* direct-mapped by index; covers a prefetched chunk */
 #define INDEX_BATCH 1024u
 #define CBUF_SLOT_BYTES 0x10000u
 #define MAX_VARYINGS (SM_ATTR_GENERIC_COUNT * 4u)
@@ -605,6 +605,17 @@ void raster3d_flush(Raster3d *r, const Gpu_Memory *mem) {
   for (uint32_t i = 0; i < RASTER_SURFACES; i++) surface_write_back(r, &r->surfaces[i], mem);
   /* The guest may change these before the next submission. */
   for (uint32_t i = 0; i < RASTER_SURFACES; i++) r->surfaces[i].loaded = r->surfaces[i].in_use ? false : r->surfaces[i].loaded;
+}
+
+void raster3d_sync_range(Raster3d *r, const Gpu_Memory *mem, uint64_t address, uint64_t bytes, bool write) {
+  if (!r || !r->ready || !bytes) return;
+  for (uint32_t i = 0; i < RASTER_SURFACES; i++) {
+    Raster3d_Surface *s = &r->surfaces[i];
+    if (!s->in_use || s->address >= address + bytes || address >= s->address + s->guest_bytes) continue;
+    surface_write_back(r, s, mem);
+    if (write) s->loaded = false; /* reload what the copy leaves there */
+  }
+  if (write) textures_invalidate(r, address, bytes);
 }
 
 /* ---- clip rectangle ----------------------------------------------- */
@@ -1180,38 +1191,76 @@ typedef struct Vertex_Cache {
   Vertex vertex[VERTEX_CACHE];
 } Vertex_Cache;
 
-static bool run_vertex(Draw_Context *ctx, uint32_t index, Vertex *out) {
+/* Shades `n` (<= SM_LANES) vertices at once, one per lane. */
+static bool run_vertices(Draw_Context *ctx, const uint32_t *indices, uint32_t n, Vertex *const *out) {
   Sm_Thread *t = ctx->r->thread;
-  sm_thread_reset(t, 1);
+  sm_thread_reset(t, n);
   const Sm_Header *h = &ctx->vs->header;
   for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++) {
     const uint32_t mask = (h->input_generic[v / 8u] >> ((v % 8u) * 4u)) & 0xfu;
     const uint32_t base = (SM_ATTR_GENERIC / 4u) + v * 4u;
     if (!mask) continue;
-    uint32_t value[4];
-    fetch_attribute(ctx, v, index, value);
-    for (uint32_t c = 0; c < 4; c++) t->attr_in[base + c][0] = value[c];
+    for (uint32_t l = 0; l < n; l++) {
+      uint32_t value[4];
+      fetch_attribute(ctx, v, indices[l], value);
+      for (uint32_t c = 0; c < 4; c++) t->attr_in[base + c][l] = value[c];
+    }
   }
-  for (uint32_t i = 0; i < SM_ATTRIBUTE_WORDS; i++) t->attr_out[i][0] = 0;
-  t->attr_out[(SM_ATTR_POSITION / 4u) + 3u][0] = u32f(1.0f);
-  t->vertex_id[0] = index;
-  t->instance_id[0] = ctx->instance;
+  memset(t->attr_out, 0, sizeof(t->attr_out));
+  for (uint32_t l = 0; l < n; l++) {
+    t->attr_out[(SM_ATTR_POSITION / 4u) + 3u][l] = u32f(1.0f);
+    t->vertex_id[l] = indices[l];
+    t->instance_id[l] = ctx->instance;
+  }
   if (!sm_run(ctx->vs, &ctx->env[0], t)) {
     ctx->r->stats.shader_faults++;
     return false;
   }
-  for (uint32_t c = 0; c < 4; c++) out->pos[c] = f32(t->attr_out[SM_ATTR_POSITION / 4u + c][0]);
-  for (uint32_t i = 0; i < MAX_VARYINGS; i++) out->varying[i] = t->attr_out[SM_ATTR_GENERIC / 4u + i][0];
+  for (uint32_t l = 0; l < n; l++) {
+    for (uint32_t c = 0; c < 4; c++) out[l]->pos[c] = f32(t->attr_out[SM_ATTR_POSITION / 4u + c][l]);
+    for (uint32_t i = 0; i < MAX_VARYINGS; i++) out[l]->varying[i] = t->attr_out[SM_ATTR_GENERIC / 4u + i][l];
+  }
   return true;
 }
 
 static const Vertex *vertex_get(Draw_Context *ctx, Vertex_Cache *cache, uint32_t index, bool *ok) {
   const uint32_t slot = index % VERTEX_CACHE;
   if (cache->valid[slot] && cache->index[slot] == index) return &cache->vertex[slot];
-  cache->valid[slot] = run_vertex(ctx, index, &cache->vertex[slot]);
+  Vertex *out = &cache->vertex[slot];
+  cache->valid[slot] = run_vertices(ctx, &index, 1u, &out);
   cache->index[slot] = index;
   *ok = cache->valid[slot];
   return &cache->vertex[slot];
+}
+
+/* Shades the not-yet-cached vertices among `indices` (a chunk the
+ * assembler is about to consume) SM_LANES at a time. Indices that collide
+ * in the cache are left to vertex_get. */
+static void vertex_prefetch(Draw_Context *ctx, Vertex_Cache *cache, const uint32_t *indices, uint32_t count) {
+  uint32_t batch[SM_LANES];
+  Vertex *out[SM_LANES];
+  uint32_t n = 0;
+  for (uint32_t i = 0; i <= count; i++) {
+    if (i < count) {
+      const uint32_t index = indices[i], slot = index % VERTEX_CACHE;
+      if (cache->valid[slot] && cache->index[slot] == index) continue;
+      bool queued = false;
+      for (uint32_t k = 0; k < n && !queued; k++) queued = batch[k] == index || batch[k] % VERTEX_CACHE == slot;
+      if (queued) continue;
+      batch[n] = index;
+      out[n] = &cache->vertex[slot];
+      n++;
+    }
+    if (n == SM_LANES || (i == count && n)) {
+      const bool ok = run_vertices(ctx, batch, n, out);
+      for (uint32_t k = 0; k < n; k++) {
+        const uint32_t slot = batch[k] % VERTEX_CACHE;
+        cache->valid[slot] = ok;
+        cache->index[slot] = batch[k];
+      }
+      n = 0;
+    }
+  }
 }
 
 /* ---- per-draw raster state ---------------------------------------- */
@@ -1267,10 +1316,10 @@ typedef struct Raster_State {
   bool span_blend[MAX_TARGETS];
   uint32_t span_word[MAX_TARGETS];
   uint8_t span_lut[MAX_TARGETS][4][256];
-  /* Pixel work: the rows this state shades (interleaved bands of
-   * BAND_ROWS; band_count 1 = every row), its shader state, texture
-   * resolver and statistics. Each worker has its own copy. */
-  uint32_t band_index, band_count;
+  /* Pixel work: the rows this state shades now ([row_begin, row_end), one
+   * band at a time), its shader state, texture resolver and statistics.
+   * Each worker has its own copy. */
+  int64_t row_begin, row_end;
   Sm_Thread *thread;
   Sm_Env ps_env;
   Tex_Resolver resolver;
@@ -1797,23 +1846,17 @@ static void to_screen(const Raster_State *rs, const Vertex *v, Screen_Vertex *ou
   }
 }
 
-/* Pixel work is split into interleaved bands of BAND_ROWS rows, band k
- * shaded by worker k % band_count. Even-sized and even-aligned, so a 2x2
- * quad never straddles two bands; every pixel still sees the draw's
+/* Pixel work is split into bands of BAND_ROWS rows that workers take in
+ * turn (dynamically: host cores differ in speed). Even-sized and
+ * even-aligned, so a 2x2 quad never straddles two bands; a band runs
+ * every queued triangle in order, so each pixel still sees the draw's
  * triangles in order - the result does not depend on the worker count. */
 #define BAND_ROWS 16
 
-static bool row_owned(const Raster_State *rs, int64_t y) {
-  return rs->band_count <= 1u || (uint32_t)((y / BAND_ROWS) % rs->band_count) == rs->band_index;
-}
+static bool row_owned(const Raster_State *rs, int64_t y) { return y >= rs->row_begin && y < rs->row_end; }
 
-/* Whether any row in [y0, y1] belongs to this state's bands. */
-static bool rows_owned(const Raster_State *rs, int64_t y0, int64_t y1) {
-  if (rs->band_count <= 1u) return true;
-  for (int64_t band = y0 / BAND_ROWS; band <= y1 / BAND_ROWS; band++)
-    if ((uint32_t)(band % rs->band_count) == rs->band_index) return true;
-  return false;
-}
+/* Whether any row in [y0, y1] is in this state's band. */
+static bool rows_owned(const Raster_State *rs, int64_t y0, int64_t y1) { return y1 >= rs->row_begin && y0 < rs->row_end; }
 
 static void raster_triangle_now(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c,
                                 const Vertex *provoking) {
@@ -1838,7 +1881,6 @@ static void raster_triangle_now(Raster_State *rs, const Vertex *a, const Vertex 
     sv[2] = t;
     area = -area;
   }
-  if (rs->band_index == 0) rs->stats.triangles++;
   /* Bounding box in pixels whose centres may be covered. */
   int64_t minx = sv[0].fx, maxx = sv[0].fx, miny = sv[0].fy, maxy = sv[0].fy;
   for (uint32_t i = 1; i < 3; i++) {
@@ -1855,6 +1897,7 @@ static void raster_triangle_now(Raster_State *rs, const Vertex *a, const Vertex 
   if (x1 > rs->clip.x1 - 1) x1 = rs->clip.x1 - 1;
   if (y1 > rs->clip.y1 - 1) y1 = rs->clip.y1 - 1;
   if (x0 > x1 || y0 > y1 || !rows_owned(rs, y0, y1)) return;
+  if (row_owned(rs, y0)) rs->stats.triangles++; /* once: in the band of its first row */
   /* Edge functions E_ij(p) = (xj-xi)(py-yi) - (yj-yi)(px-xi), all >= 0
    * inside; a pixel exactly on an edge belongs to it when the edge is a
    * "top-left" one (here: dy < 0, or dy == 0 and dx > 0). */
@@ -2000,6 +2043,7 @@ static void raster_triangle_now(Raster_State *rs, const Vertex *a, const Vertex 
 typedef struct Queued_Triangle {
   Vertex v[3];
   Vertex provoking;
+  int64_t y_min, y_max; /* conservative screen rows it can touch */
 } Queued_Triangle;
 
 static Queued_Triangle g_queue[TRIANGLE_QUEUE];
@@ -2007,18 +2051,35 @@ static uint32_t g_queue_count;
 static uint64_t g_queue_pixels; /* bounding-box estimate of the queued work */
 static Raster_State g_band_state[WORKERS_MAX];
 
+typedef struct Band_Job {
+  const Raster_State *master;
+  int64_t first_row;  /* band 0's first row (BAND_ROWS-aligned) */
+  uint32_t bands;
+  uint32_t next;      /* the next band to take, under the workers' lock */
+} Band_Job;
+
 static void band_task(void *user, uint32_t index, uint32_t count) {
-  const Raster_State *master = (const Raster_State *)user;
+  Band_Job *job = (Band_Job *)user;
+  const Raster_State *master = job->master;
+  Raster3d *r = master->ctx->r;
   Raster_State *w = &g_band_state[index];
   memcpy(w, master, sizeof(*w));
-  w->band_index = index;
-  w->band_count = count;
-  w->thread = master->ctx->r->band_threads[index];
+  w->thread = r->band_threads[index];
   w->ps_env.user = &w->resolver;
   memset(&w->stats, 0, sizeof(w->stats));
-  for (uint32_t i = 0; i < g_queue_count; i++) {
-    const Queued_Triangle *q = &g_queue[i];
-    raster_triangle_now(w, &q->v[0], &q->v[1], &q->v[2], &q->provoking);
+  for (;;) {
+    uint32_t band;
+    if (count > 1u) workers_lock(&r->workers);
+    band = job->next++;
+    if (count > 1u) workers_unlock(&r->workers);
+    if (band >= job->bands) break;
+    w->row_begin = job->first_row + (int64_t)band * BAND_ROWS;
+    w->row_end = job->bands == 1u ? INT64_MAX : w->row_begin + BAND_ROWS;
+    for (uint32_t i = 0; i < g_queue_count; i++) {
+      const Queued_Triangle *q = &g_queue[i];
+      if (q->y_max < w->row_begin || q->y_min >= w->row_end) continue;
+      raster_triangle_now(w, &q->v[0], &q->v[1], &q->v[2], &q->provoking);
+    }
   }
 }
 
@@ -2026,7 +2087,17 @@ static void flush_triangles(Raster_State *rs) {
   if (!g_queue_count) return;
   Raster3d *r = rs->ctx->r;
   const uint32_t n = g_queue_pixels >= PARALLEL_MIN_PIXELS ? r->workers.count : 1u;
-  workers_run(&r->workers, n, band_task, rs);
+  Band_Job job;
+  job.master = rs;
+  job.next = 0;
+  if (n == 1u) {
+    job.first_row = INT64_MIN / 2;
+    job.bands = 1u; /* every row in one pass */
+  } else {
+    job.first_row = ((int64_t)rs->clip.y0 / BAND_ROWS) * BAND_ROWS;
+    job.bands = (uint32_t)(((int64_t)rs->clip.y1 - job.first_row + BAND_ROWS - 1) / BAND_ROWS);
+  }
+  workers_run(&r->workers, n, band_task, &job);
   for (uint32_t i = 0; i < n && i < WORKERS_MAX; i++) {
     r->stats.triangles += g_band_state[i].stats.triangles;
     r->stats.pixels += g_band_state[i].stats.pixels;
@@ -2036,9 +2107,10 @@ static void flush_triangles(Raster_State *rs) {
   g_queue_pixels = 0;
 }
 
-/* Screen-space bounding box area of a clipped triangle, in pixels,
- * clamped to the clip rectangle (the parallel-or-not estimate only). */
-static uint64_t triangle_pixels(const Raster_State *rs, const Vertex *const v[3]) {
+/* Screen-space bounding box of a clipped triangle, clamped to the clip
+ * rectangle: its area in pixels (the parallel-or-not estimate) and a
+ * conservative row range (a row of margin each side). */
+static uint64_t triangle_extent(const Raster_State *rs, const Vertex *const v[3], int64_t *y_min, int64_t *y_max) {
   float x0 = 0.0f, x1 = 0.0f, y0 = 0.0f, y1 = 0.0f;
   for (uint32_t i = 0; i < 3u; i++) {
     const float iw = 1.0f / v[i]->pos[3];
@@ -2047,10 +2119,18 @@ static uint64_t triangle_pixels(const Raster_State *rs, const Vertex *const v[3]
       x = x * rs->vp_scale[0] + rs->vp_offset[0];
       y = y * rs->vp_scale[1] + rs->vp_offset[1];
     }
+    if (rs->lower_left) y = (float)rs->surface_height - y;
     if (i == 0 || x < x0) x0 = x;
     if (i == 0 || x > x1) x1 = x;
     if (i == 0 || y < y0) y0 = y;
     if (i == 0 || y > y1) y1 = y;
+  }
+  /* NaN or huge coordinates: claim every row. */
+  *y_min = (y0 > (float)rs->clip.y0) ? (int64_t)y0 - 1 : rs->clip.y0;
+  *y_max = (y1 < (float)rs->clip.y1) ? (int64_t)y1 + 1 : rs->clip.y1;
+  if (!(y0 > -1e9f && y1 < 1e9f)) {
+    *y_min = rs->clip.y0;
+    *y_max = rs->clip.y1;
   }
   const float w = fminf(x1, (float)rs->clip.x1) - fmaxf(x0, (float)rs->clip.x0);
   const float h = fminf(y1, (float)rs->clip.y1) - fmaxf(y0, (float)rs->clip.y0);
@@ -2066,7 +2146,7 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
   q->v[2] = *c;
   q->provoking = *provoking;
   const Vertex *const v[3] = {a, b, c};
-  g_queue_pixels += triangle_pixels(rs, v);
+  g_queue_pixels += triangle_extent(rs, v, &q->y_min, &q->y_max);
 }
 
 /* ---- clipping ----------------------------------------------------- */
@@ -2312,8 +2392,8 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     return;
   }
   rs.span_ok = span_state_ok(&rs);
-  rs.band_index = 0;
-  rs.band_count = 1;
+  rs.row_begin = INT64_MIN;
+  rs.row_end = INT64_MAX;
   rs.thread = r->thread;
   rs.ps_env = ctx->env[1];
   rs.resolver = ctx->resolver;
@@ -2327,41 +2407,48 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
   const bool restart = (regs[REG_PRIMITIVE_RESTART] & 1u) != 0;
   const uint32_t restart_index = regs[REG_PRIMITIVE_RESTART_INDEX];
   const uint32_t base_vertex = regs[REG_BASE_VERTEX];
+  /* Each chunk's vertices are shaded SM_LANES at a time before the
+   * assembler consumes it; RESTART marks a primitive restart. */
+#define RESTART UINT32_MAX
+  static uint32_t chunk[INDEX_BATCH], vertices[INDEX_BATCH];
   switch (draw->kind) {
   case RASTER_DRAW_ARRAYS:
-    for (uint32_t i = 0; i < draw->count; i++) assemble(&rs, &cache, &as, draw->first + i);
-    break;
-  case RASTER_DRAW_INLINE:
-    for (uint32_t i = 0; i < draw->count; i++) {
-      const uint32_t index = draw->inline_indices[i];
-      if (restart && index == restart_index) {
-        assemble_end(&rs, &cache, &as);
-        continue;
-      }
-      assemble(&rs, &cache, &as, index + base_vertex);
+    for (uint32_t done = 0; done < draw->count;) {
+      const uint32_t n = draw->count - done < INDEX_BATCH ? draw->count - done : INDEX_BATCH;
+      for (uint32_t i = 0; i < n; i++) chunk[i] = draw->first + done + i;
+      vertex_prefetch(ctx, &cache, chunk, n);
+      for (uint32_t i = 0; i < n; i++) assemble(&rs, &cache, &as, chunk[i]);
+      done += n;
     }
     break;
   default: {
-    const uint32_t size = draw->index_size;
+    const bool inline_indices = draw->kind == RASTER_DRAW_INLINE;
+    const uint32_t size = inline_indices ? 4u : draw->index_size;
     const uint64_t base = addr40(regs[REG_INDEX_BUFFER], regs[REG_INDEX_BUFFER + 1u]) + (uint64_t)draw->first * size;
+    const uint32_t restart_value = size == 4u ? restart_index : (restart_index & ((1u << (8u * size)) - 1u));
     static uint8_t batch[INDEX_BATCH * 4u];
     for (uint32_t done = 0; done < draw->count;) {
       const uint32_t n = draw->count - done < INDEX_BATCH ? draw->count - done : INDEX_BATCH;
-      if (!mem->read(mem->user, base + (uint64_t)done * size, batch, (uint64_t)n * size)) break;
+      if (inline_indices) memcpy(batch, draw->inline_indices + done, (size_t)n * 4u);
+      else if (!mem->read(mem->user, base + (uint64_t)done * size, batch, (uint64_t)n * size)) break;
+      uint32_t vertex_count = 0;
       for (uint32_t i = 0; i < n; i++) {
         uint32_t index = 0;
         memcpy(&index, batch + (size_t)i * size, size);
-        if (restart && index == (size == 4u ? restart_index : (restart_index & ((1u << (8u * size)) - 1u)))) {
-          assemble_end(&rs, &cache, &as);
-          continue;
-        }
-        assemble(&rs, &cache, &as, index + base_vertex);
+        chunk[i] = (restart && index == restart_value) ? RESTART : index + base_vertex;
+        if (chunk[i] != RESTART) vertices[vertex_count++] = chunk[i];
+      }
+      vertex_prefetch(ctx, &cache, vertices, vertex_count);
+      for (uint32_t i = 0; i < n; i++) {
+        if (chunk[i] == RESTART) assemble_end(&rs, &cache, &as);
+        else assemble(&rs, &cache, &as, chunk[i]);
       }
       done += n;
     }
     break;
   }
   }
+#undef RESTART
   const uint64_t pixels_before = r->stats.pixels, triangles_before = r->stats.triangles;
   assemble_end(&rs, &cache, &as);
   flush_triangles(&rs);

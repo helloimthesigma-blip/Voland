@@ -153,6 +153,12 @@ void raster3d_begin_submission(Raster3d *r);
 void raster3d_clear(Raster3d *r, const uint32_t *regs, const struct Gpu_Memory *mem, uint32_t clear);
 void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *bindings,
                    const struct Gpu_Memory *mem, const Raster3d_Draw *draw);
+/* A copy engine is about to read (write = false) or overwrite (write =
+ * true) guest GPU memory [address, address + bytes): cached render targets
+ * over it are written back, and when it is written, they reload and
+ * decoded textures over it re-validate at their next use. */
+void raster3d_sync_range(Raster3d *r, const struct Gpu_Memory *mem, uint64_t address, uint64_t bytes, bool write);
+
 /* Writes every dirty render target back to guest memory. */
 void raster3d_flush(Raster3d *r, const struct Gpu_Memory *mem);
 
