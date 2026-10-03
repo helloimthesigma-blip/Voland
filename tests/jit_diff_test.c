@@ -210,7 +210,7 @@ static uint32_t gen_exclusive(void) {
 static uint32_t vreg(void) { return pick(32); }
 static uint32_t ftype(void) { return pick(8) == 0 ? 3u : pick(2); } /* single/double, sometimes half/undefined */
 static uint32_t gen_simd_fp(void) {
-  switch (pick(16)) {
+  switch (pick(17)) {
   case 0: return 0x1E200800u | (ftype() << 22) | (vreg() << 16) | (pick(9) << 12) | (vreg() << 5) | vreg(); /* 2-source */
   case 1: return 0x1E204000u | (ftype() << 22) | (pick(16) << 15) | (vreg() << 5) | vreg();               /* 1-source */
   case 2: return 0x1F000000u | (ftype() << 22) | (pick(2) << 21) | (vreg() << 16) | (pick(2) << 15) | (vreg() << 10) |
@@ -249,6 +249,16 @@ static uint32_t gen_simd_fp(void) {
     static const uint32_t ops[3] = {0x1, 0x5, 0x9};
     return 0x0F800000u | (pick(4) ? 1u << 30 : 0) | (pick(8) == 0 ? 1u << 29 : 0) | (pick(3) == 0 ? 1u << 22 : 0) |
            (pick(2) << 21) | (v_rm << 16) | (ops[pick(3)] << 12) | (pick(2) << 11) | (v_rn << 5) | v_rd;
+  }
+  case 14: { /* EXT, UZP/TRN/ZIP, modified immediate */
+    switch (pick(3)) {
+    case 0: return 0x2E000000u | (pick(2) << 30) | (pick(8) == 0 ? pick(4) << 22 : 0) | (vreg() << 16) |
+                   (pick(16) << 11) | (vreg() << 5) | vreg();
+    case 1: return 0x0E000800u | (pick(2) << 30) | (pick(4) << 22) | (vreg() << 16) | (pick(8) << 12) | (vreg() << 5) |
+                   vreg();
+    default: return 0x0F000400u | (pick(2) << 30) | (pick(2) << 29) | (pick(8) << 16) | (pick(16) << 12) |
+                    (pick(8) == 0 ? 1u << 11 : 0) | (pick(32) << 5) | vreg();
+    }
   }
   default: /* scalar/vector by element, shifts, pairwise: anything in the space */
     return 0x0E000000u | ((uint32_t)rnd() & 0xF0FFFFFFu & ~(1u << 31)) | (pick(2) << 28);
@@ -331,17 +341,23 @@ static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint64_t *x, u
     CPU_Vector_Register v = {x[i % 31] * 3u, x[(i + 7) % 31]};
     const int64_t small = (int64_t)(x[i] & 0xFFFF) - 32768;
     if (i < 8) { /* ordinary doubles: the FP fast paths */
-      const double d = (i & 1) ? (double)small : (double)small / 3.0;
+      double d = (i & 1) ? (double)small : (double)small / 3.0;
+      if (((x[i] >> 40) & 3u) == 0) d = (i & 2) ? -0.0 : 0.0;
+      if (((x[i] >> 42) & 7u) == 1) d *= 1e-160;
       memcpy(&v.lo, &d, sizeof(d));
     } else if (i < 16) { /* ordinary singles */
-      const float f = (i & 1) ? (float)small : (float)small / 7.0f;
+      float f = (i & 1) ? (float)small : (float)small / 7.0f;
+      if (((x[i] >> 40) & 3u) == 0) f = 0.0f;
+      if (((x[i] >> 42) & 7u) == 1) f *= 1e-22f;
       uint32_t bits32;
       memcpy(&bits32, &f, sizeof(bits32));
       v.lo = bits32;
     } else if (i < 24) { /* vectors of four ordinary singles */
       uint32_t lanes[4];
       for (uint32_t k = 0; k < 4u; k++) {
-        const float f = (float)((int64_t)((x[(i + k) % 31] >> (k * 8u)) & 0xFFF) - 2048) / (float)(k + 3u);
+        float f = (float)((int64_t)((x[(i + k) % 31] >> (k * 8u)) & 0xFFF) - 2048) / (float)(k + 3u);
+        if (((x[(i + k) % 31] >> 40) & 3u) == 0) f = (k & 1u) ? -0.0f : 0.0f; /* exact zeros: x*0, 0/x */
+        if (((x[(i + k) % 31] >> 42) & 7u) == 1) f *= 1e-22f;               /* tiny: products underflow */
         memcpy(&lanes[k], &f, sizeof(lanes[k]));
       }
       v.lo = lanes[0] | ((uint64_t)lanes[1] << 32);
