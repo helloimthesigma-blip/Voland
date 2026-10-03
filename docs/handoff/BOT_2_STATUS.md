@@ -4,21 +4,58 @@ Owner: bot 2. The coordinator reads this when merging.
 
 ## Milestones
 
-- [ ] **1. Findings.** In progress (see below).
+- [x] **1. Findings.** See below.
 - [ ] 2. First frame natively.
 - [ ] 3. The opening cinematic plays in the browser.
 
-## Findings so far
+## Findings (milestone 1)
 
 - **The videos are H.264 in MP4.** Silksong's RomFS carries about 31 MP4s
-  (`ct_03_Intro.mp4`, `Bellbeast_Travel_Children.mp4`, ...). They were
-  encoded with x264, in Main (77) and High (100) profiles at levels
-  3.1–4.2. The RomFS is compressed in the NCA, so the files can't be
-  carved out raw.
-- **The decode path** (nvhost-nvdec ioctls, host1x command buffers, the
-  picture-setup struct): being captured from a native run through the
-  opening video. Details land here.
+  (`ct_03_Intro.mp4`, `Bellbeast_Travel_Children.mp4`, ...), encoded with
+  x264. The opening one's SPS: Main profile, 1280x720 (80x45 MBs), CABAC,
+  9 reference frames, `max_num_reorder_frames = 2`.
+- **They are decoded on NVDEC**, through `/dev/nvhost-nvdec` channel
+  SUBMITs: one command buffer per picture, with host1x METHOD0/METHOD1
+  pairs for class 0xF0.
+  - Buffers are named by the IOVAs MAP_BUFFER returned, >> 8.
+  - Relocations are present but redundant: the commands already hold the
+    IOVAs.
+- **NVDEC registers** used per picture:
 
+  | Method | Meaning |
+  |---|---|
+  | 0x200 | application id (3 = H.264) |
+  | 0x400 | control params (0x53) |
+  | 0x404 | picture setup (`nvdec_h264_pic_s`) |
+  | 0x408 | bitstream: Annex-B slices only, **no SPS/PPS** (`00 00 01 65 ...`) |
+  | 0x40C | picture index |
+  | 0x410 | slice table `{u32 offset, u32 size}` |
+  | 0x414 | co-located MVs |
+  | 0x418 | history |
+  | 0x420 | histogram |
+  | 0x424 | status |
+  | 0x428 / 0x42C | output luma / chroma |
+  | 0x430.. / 0x470.. | reference surfaces |
+
+  The output surfaces are 983040 + 491520 bytes: 1280x720 NV12,
+  block-linear with 16-GOB blocks.
+- **The game then runs VIC** (class 0x5D) on each decoded picture.
+
+  | Method | Meaning |
+  |---|---|
+  | 0x400 / 0x404 | input luma / chroma (the NVDEC output surface) |
+  | 0x704 | control params |
+  | 0x708 | config struct |
+  | 0x70C | filter struct |
+  | 0x720 / 0x724 | output luma / chroma |
+
+  - The config struct's output-surface word at +0x20 is **format 0x44
+    (NV12), pitch-linear**. Sizes at +0x24/+0x28/+0x2C (14-bit `value - 1`
+    pairs) are 1280x720 luma and 640x360 chroma.
+  - VIC only de-tiles: the game converts YUV to RGB in its own shader.
+- **The decoded frames never need to go back into NVDEC's surfaces.** VIC
+  is the only reader, so the core's VIC writes the decoded frame straight
+  into VIC's output surface.
 ## What landed
 
 - `core/video/host1x.{h,c}`: a host1x command-buffer parser (SETCLASS,
