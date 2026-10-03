@@ -173,6 +173,12 @@ void raster3d_set_workers(Raster3d *r, uint32_t count) {
 
 void raster3d_shutdown(Raster3d *r) { workers_stop(&r->workers); }
 
+void raster3d_restart_workers_after_fork(Raster3d *r) {
+  r->workers.impl = NULL; /* the parent's: no threads here to join */
+  r->workers.count = 1u;
+  workers_start(&r->workers, workers_default_count());
+}
+
 void raster3d_begin_submission(Raster3d *r) {
   if (!r->ready) return;
   r->submission++;

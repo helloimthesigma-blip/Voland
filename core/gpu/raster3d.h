@@ -129,6 +129,10 @@ void raster3d_init(Raster3d *r, uint8_t *storage, size_t bytes);
  * Output is identical for every count. */
 void raster3d_set_workers(Raster3d *r, uint32_t count);
 
+/* After fork(): the parent's helper threads do not exist in this process;
+ * forget them (without joining) and start new ones. Diagnostics only. */
+void raster3d_restart_workers_after_fork(Raster3d *r);
+
 /* Joins the workers (emulator tear-down). */
 void raster3d_shutdown(Raster3d *r);
 

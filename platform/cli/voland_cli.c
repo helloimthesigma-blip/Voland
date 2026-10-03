@@ -14,6 +14,14 @@
  *       --dump-frame FILE            write the newest frame as a binary PPM (P6)
  *       --dump-frames-every N        with --dump-frame: also write FILE.<slice>.ppm
  *                                    every N slices (watching a long run progress)
+ *       --snapshot-at N --snapshot-dir DIR
+ *                                    (POSIX) at slice N, stop and serve jobs: each
+ *                                    DIR/job file forks a copy-on-write child that
+ *                                    continues from slice N with the job's lines
+ *                                    (max_slices N, input S:HEX:L, frame PATH,
+ *                                    every N, trace S:L, log PATH); the result is
+ *                                    DIR/job.done.<pid>. DIR/quit ends the server.
+ *                                    Iterating on a late scene without replaying.
  *       --font FILE                  the TTF/OTF pl:u serves as the system font
  *       --svc-stats                  print per-SVC call counts at the end
  *       --dump-audio FILE            write what the guest played as a 48kHz stereo WAV
@@ -289,13 +297,76 @@ static int import_sdmc(Emulator *emu, const char *host, const char *guest) {
   return imported;
 }
 
+#ifndef _WIN32
+#include <sys/wait.h>
+#include <unistd.h>
+
+/* A snapshot job's settings (see --snapshot-at). */
+typedef struct Snapshot_Job {
+  uint64_t max_slices, dump_every, trace_start, trace_length;
+  char frame_path[512];
+  Input_Event inputs[MAX_INPUT_EVENTS];
+  uint32_t input_count;
+} Snapshot_Job;
+
+static bool read_job(const char *path, Snapshot_Job *job) {
+  FILE *f = fopen(path, "r");
+  if (!f) return false;
+  char line[600], log_path[512] = "";
+  while (fgets(line, sizeof(line), f)) {
+    unsigned long long a = 0, b = 0;
+    unsigned buttons = 0;
+    if (sscanf(line, "max_slices %llu", &a) == 1) job->max_slices = a;
+    else if (sscanf(line, "every %llu", &a) == 1) job->dump_every = a;
+    else if (sscanf(line, "trace %llu:%llu", &a, &b) == 2) {
+      job->trace_start = a;
+      job->trace_length = b;
+    } else if (sscanf(line, "input %llu:%x:%llu", &a, &buttons, &b) == 3 && job->input_count < MAX_INPUT_EVENTS) {
+      job->inputs[job->input_count++] = (Input_Event){a, buttons, b};
+    } else if (sscanf(line, "frame %511s", job->frame_path) == 1) {
+    } else if (sscanf(line, "log %511s", log_path) == 1) {
+    }
+  }
+  fclose(f);
+  if (log_path[0] && !freopen(log_path, "w", stderr)) return false;
+  return true;
+}
+
+/* Parent: serves jobs until DIR/quit, then exits. Child: returns the job. */
+static void snapshot_serve(const char *dir, Snapshot_Job *job) {
+  char job_path[1024], running[1024], done[1024], quit[1024];
+  snprintf(job_path, sizeof(job_path), "%s/job", dir);
+  snprintf(running, sizeof(running), "%s/job.running", dir);
+  snprintf(quit, sizeof(quit), "%s/quit", dir);
+  fprintf(stderr, "voland-cli: snapshot ready; waiting for %s\n", job_path);
+  fflush(stderr);
+  for (;;) {
+    if (access(quit, F_OK) == 0) exit(0);
+    if (rename(job_path, running) != 0) {
+      sleep(1);
+      continue;
+    }
+    const pid_t pid = fork();
+    if (pid == 0) {
+      if (!read_job(running, job)) _exit(EXIT_USAGE);
+      return;
+    }
+    int status = 0;
+    if (pid > 0) waitpid(pid, &status, 0);
+    snprintf(done, sizeof(done), "%s/job.done.%d", dir, (int)pid);
+    rename(running, done);
+  }
+}
+#endif
+
 static void setup_call_trace(Emulator *emu);
 
 static int run(int argc, char **argv) {
   if (argc < 1) return EXIT_USAGE;
   const char *path = argv[0];
   const CPU_Backend *backend = &CPU_BACKEND_INTERPRETER;
-  uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES, dump_every = 0;
+  uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES, dump_every = 0, snapshot_at = 0;
+  const char *snapshot_dir = NULL;
   bool test_card = false, svc_stats = false, swkbd_cancel = false;
   const char *swkbd_text = NULL;
   Input_Event inputs[MAX_INPUT_EVENTS];
@@ -336,6 +407,10 @@ static int run(int argc, char **argv) {
       audio_path = argv[++i];
     } else if (!strcmp(argv[i], "--font") && has_value) {
       font_path = argv[++i];
+    } else if (!strcmp(argv[i], "--snapshot-at") && has_value) {
+      snapshot_at = strtoull(argv[++i], NULL, 0);
+    } else if (!strcmp(argv[i], "--snapshot-dir") && has_value) {
+      snapshot_dir = argv[++i];
     } else if (!strcmp(argv[i], "--dump-frames-every") && has_value) {
       dump_every = strtoull(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--dump-frame") && has_value) {
@@ -416,6 +491,24 @@ static int run(int argc, char **argv) {
     trace_length = (end && *end == ':') ? strtoull(end + 1, NULL, 0) : 1u;
   }
   while (slices < max_slices && (status == EMULATOR_RUNNING || status == EMULATOR_IDLE)) {
+#ifndef _WIN32
+    if (snapshot_dir && snapshot_at && slices == snapshot_at) {
+      static Snapshot_Job job;
+      memset(&job, 0, sizeof(job));
+      job.max_slices = max_slices;
+      job.trace_start = UINT64_MAX;
+      snapshot_serve(snapshot_dir, &job); /* returns in a job's child */
+      raster3d_restart_workers_after_fork(&emu.renderer);
+      max_slices = job.max_slices;
+      if (job.dump_every) dump_every = job.dump_every;
+      if (job.frame_path[0]) frame_path = job.frame_path;
+      if (job.trace_length) {
+        trace_start = job.trace_start;
+        trace_length = job.trace_length;
+      }
+      for (uint32_t k = 0; k < job.input_count && input_count < MAX_INPUT_EVENTS; k++) inputs[input_count++] = job.inputs[k];
+    }
+#endif
     if (input_count) apply_input(inputs, input_count, slices);
     emu.renderer.trace_draws = slices >= trace_start && slices - trace_start < trace_length;
     status = emulator_run_slice(&emu, budget);
