@@ -1,6 +1,7 @@
 #include "hle/hle.h"
 #include "common/assert.h"
 #include "common/log.h"
+#include "hle/kernel/scheduler.h"
 #include "hle/kernel/svc_ipc.h"
 #include "hle/kernel/svc_memory.h"
 #include "hle/kernel/svc_thread.h"
@@ -99,10 +100,21 @@ static const char *svc_name(uint32_t swi)
   }
 }
 
+static void dispatch_svc(HLE_Context *context, CPU_State *cpu_state, uint32_t swi);
+
+/* Every SVC runs under the scheduler's kernel lock (a no-op in serial
+ * mode; docs/PARALLEL.md). */
 void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
 {
   HLE_Context *context = (HLE_Context *)userdata;
   SWITCH_ASSERT_ALWAYS(context != NULL, "hle_on_svc: context is NULL");
+  scheduler_kernel_enter(context->scheduler, cpu_state);
+  dispatch_svc(context, cpu_state, swi);
+  scheduler_kernel_exit(context->scheduler);
+}
+
+static void dispatch_svc(HLE_Context *context, CPU_State *cpu_state, uint32_t swi)
+{
   SWITCH_ASSERT_ALWAYS(context->cpu_backend != NULL, "hle_on_svc: backend is NULL");
 
   const CPU_Backend *cpu = context->cpu_backend;

@@ -5,6 +5,7 @@
 
 #include "common/log.h"
 #include "hle/hle.h"
+#include "hle/kernel/parallel.h"
 
 #include <string.h>
 
@@ -94,8 +95,18 @@ void scheduler_exit_thread(Scheduler *sched, Sched_Thread *thread, const CPU_Bac
   }
 }
 
+void scheduler_wake_off_core_waiters(Scheduler *sched, const Sched_Thread *thread) {
+  const uint64_t index = (uint64_t)(thread - sched->threads);
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    Sched_Thread *t = &sched->threads[i];
+    if (t->state == THREAD_STATE_WAITING && t->wait == WAIT_OFF_CORE && t->wait_address == index) {
+      scheduler_wake(sched, t, HLE_RESULT_SUCCESS);
+    }
+  }
+}
+
 /* Wakes every thread whose timeout has passed. */
-static void expire_timeouts(Scheduler *sched) {
+void scheduler_expire_timeouts(Scheduler *sched) {
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     Sched_Thread *t = &sched->threads[i];
     if (t->state != THREAD_STATE_WAITING || t->wake_at > sched->ticks) continue;
@@ -103,11 +114,11 @@ static void expire_timeouts(Scheduler *sched) {
   }
 }
 
-static int32_t pick(Scheduler *sched) {
+int32_t scheduler_pick(Scheduler *sched) {
   int32_t best = -1;
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     const Sched_Thread *t = &sched->threads[i];
-    if (t->state != THREAD_STATE_RUNNABLE || t->paused) continue;
+    if (t->state != THREAD_STATE_RUNNABLE || t->paused || t->on_core) continue;
     if (best < 0) { best = (int32_t)i; continue; }
     const Sched_Thread *b = &sched->threads[best];
     if (t->thread.priority < b->thread.priority ||
@@ -118,59 +129,88 @@ static int32_t pick(Scheduler *sched) {
   return best;
 }
 
-Scheduler_Status scheduler_tick(Scheduler *sched, const CPU_Backend *backend, uint64_t budget,
-                                CPU_ExitReason *reason) {
-  if (sched->process_crashed) return SCHEDULER_CRASHED;
-  if (sched->process_exited) return SCHEDULER_EXITED;
-  expire_timeouts(sched);
-
-  const int32_t index = pick(sched);
-  if (index < 0) {
-    uint64_t earliest = SCHEDULER_WAIT_FOREVER;
-    bool alive = false;
-    for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
-      const Sched_Thread *t = &sched->threads[i];
-      if (t->state == THREAD_STATE_WAITING) {
-        alive = true;
-        if (t->wake_at < earliest) earliest = t->wake_at;
-      } else if (t->state == THREAD_STATE_CREATED) {
-        alive = true;
-      }
+Scheduler_Status scheduler_idle(Scheduler *sched) {
+  uint64_t earliest = SCHEDULER_WAIT_FOREVER;
+  bool alive = false;
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    const Sched_Thread *t = &sched->threads[i];
+    if (t->state == THREAD_STATE_WAITING) {
+      alive = true;
+      if (t->wake_at < earliest) earliest = t->wake_at;
+    } else if (t->state == THREAD_STATE_CREATED) {
+      alive = true;
     }
-    if (!alive) return SCHEDULER_EXITED;
-    if (sched->device_wake_at < earliest) {
-      /* A device signals first: jump there; its update runs next slice. */
-      if (sched->device_wake_at > sched->ticks) sched->ticks = sched->device_wake_at;
-      return SCHEDULER_IDLE;
-    }
-    if (earliest == SCHEDULER_WAIT_FOREVER) return SCHEDULER_DEADLOCK;
-    sched->ticks = earliest;
-    expire_timeouts(sched);
+  }
+  if (!alive) return SCHEDULER_EXITED;
+  if (sched->device_wake_at < earliest) {
+    /* A device signals first: jump there; its update runs next slice. */
+    if (sched->device_wake_at > sched->ticks) sched->ticks = sched->device_wake_at;
     return SCHEDULER_IDLE;
   }
+  if (earliest == SCHEDULER_WAIT_FOREVER) return SCHEDULER_DEADLOCK;
+  sched->ticks = earliest;
+  scheduler_expire_timeouts(sched);
+  return SCHEDULER_IDLE;
+}
 
-  Sched_Thread *thread = &sched->threads[index];
-  sched->current = index;
-  backend->set_sys_reg(thread->thread.cpu_state, CPU_SYSREG_CNTVCT_EL0, sched->ticks);
-  const CPU_ExitReason exit_reason = backend->run(thread->thread.cpu_state, budget);
+Scheduler_Status scheduler_finish_run(Scheduler *sched, const CPU_Backend *backend, Sched_Thread *thread,
+                                      uint64_t start_ticks, CPU_ExitReason exit_reason) {
   const uint64_t cycles = backend->get_cycles_consumed(thread->thread.cpu_state);
-  const uint64_t scaled = cycles * TICKS_PER_CYCLE_NUMERATOR + sched->cycle_remainder;
-  sched->ticks += scaled / TICKS_PER_CYCLE_DENOMINATOR;
-  sched->cycle_remainder = scaled % TICKS_PER_CYCLE_DENOMINATOR;
+  if (start_ticks == sched->ticks) {
+    /* Time did not move during the run (always so in serial mode): exact,
+     * with the sub-tick remainder carried. */
+    const uint64_t scaled = cycles * TICKS_PER_CYCLE_NUMERATOR + sched->cycle_remainder;
+    sched->ticks += scaled / TICKS_PER_CYCLE_DENOMINATOR;
+    sched->cycle_remainder = scaled % TICKS_PER_CYCLE_DENOMINATOR;
+  } else {
+    /* Another core moved time meanwhile: this run ends at its own start
+     * plus its cycles, and time is the latest any core has reached
+     * (docs/PARALLEL.md "Virtual time"). */
+    const uint64_t end = start_ticks + cycles * TICKS_PER_CYCLE_NUMERATOR / TICKS_PER_CYCLE_DENOMINATOR;
+    if (end > sched->ticks) sched->ticks = end;
+  }
   thread->last_run = ++sched->run_counter;
-  sched->current = -1;
-  if (reason) *reason = exit_reason;
 
   if (exit_reason == CPU_EXIT_FAULT || exit_reason == CPU_EXIT_BREAKPOINT) {
-    sched->process_crashed = true;
-    sched->crash_pc = backend->get_pc(thread->thread.cpu_state);
-    sched->crash_address = backend->get_fault_address(thread->thread.cpu_state);
+    if (!sched->process_crashed) {
+      sched->process_crashed = true;
+      sched->crash_pc = backend->get_pc(thread->thread.cpu_state);
+      sched->crash_address = backend->get_fault_address(thread->thread.cpu_state);
+    }
     log_error("[scheduler] thread %llu stopped: %s at pc=0x%010llx (address 0x%010llx)",
               (unsigned long long)thread->thread_id, exit_reason == CPU_EXIT_FAULT ? "fault" : "breakpoint",
-              (unsigned long long)sched->crash_pc, (unsigned long long)sched->crash_address);
+              (unsigned long long)backend->get_pc(thread->thread.cpu_state),
+              (unsigned long long)backend->get_fault_address(thread->thread.cpu_state));
     return SCHEDULER_CRASHED;
   }
   if (sched->process_crashed) return SCHEDULER_CRASHED;
   if (sched->process_exited) return SCHEDULER_EXITED;
   return SCHEDULER_RAN;
+}
+
+void scheduler_kernel_enter(Scheduler *sched, const CPU_State *state) {
+  if (sched && sched->parallel) parallel_kernel_enter(sched->parallel, state);
+}
+
+void scheduler_kernel_exit(Scheduler *sched) {
+  if (sched && sched->parallel) parallel_kernel_exit(sched->parallel);
+}
+
+Scheduler_Status scheduler_tick(Scheduler *sched, const CPU_Backend *backend, uint64_t budget,
+                                CPU_ExitReason *reason) {
+  if (sched->process_crashed) return SCHEDULER_CRASHED;
+  if (sched->process_exited) return SCHEDULER_EXITED;
+  scheduler_expire_timeouts(sched);
+
+  const int32_t index = scheduler_pick(sched);
+  if (index < 0) return scheduler_idle(sched);
+
+  Sched_Thread *thread = &sched->threads[index];
+  sched->current = index;
+  const uint64_t start_ticks = sched->ticks;
+  backend->set_sys_reg(thread->thread.cpu_state, CPU_SYSREG_CNTVCT_EL0, start_ticks);
+  const CPU_ExitReason exit_reason = backend->run(thread->thread.cpu_state, budget);
+  sched->current = -1;
+  if (reason) *reason = exit_reason;
+  return scheduler_finish_run(sched, backend, thread, start_ticks, exit_reason);
 }

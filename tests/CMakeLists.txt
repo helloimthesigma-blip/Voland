@@ -159,6 +159,12 @@ add_executable(scheduler_test scheduler_test.c)
 target_link_libraries(scheduler_test PRIVATE switch_core guest_fixture loader_fixtures)
 add_test(NAME scheduler_test COMMAND scheduler_test)
 
+# Parallel guest threads (docs/PARALLEL.md): one core == serial, and
+# exclusives on two and three real host threads.
+add_executable(parallel_test parallel_test.c)
+target_link_libraries(parallel_test PRIVATE switch_core guest_fixture loader_fixtures)
+add_test(NAME parallel_test COMMAND parallel_test)
+
 # Homebrew NRO (§12): the committed demo NRO loads and runs end to end.
 add_executable(nro_test nro_test.c)
 target_link_libraries(nro_test PRIVATE switch_core)
