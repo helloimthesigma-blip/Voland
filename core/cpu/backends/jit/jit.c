@@ -160,8 +160,16 @@ static bool can_install(void) { return false; } /* no wasm engine natively */
 
 #if (defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)) || defined(_WIN32)
 static Jit_Thread *thread_jit(void) { return &g_main_thread; }
+static void compiler_lock(void) {}
+static void compiler_unlock(void) {}
 #else
 #include <pthread.h>
+
+/* jit_compile_block keeps its working state (contexts, the analysis
+ * buffer) in statics: one compilation at a time across host threads. */
+static pthread_mutex_t g_compiler = PTHREAD_MUTEX_INITIALIZER;
+static void compiler_lock(void) { pthread_mutex_lock(&g_compiler); }
+static void compiler_unlock(void) { pthread_mutex_unlock(&g_compiler); }
 
 static _Thread_local Jit_Thread *t_jit;
 static bool g_main_claimed;
@@ -308,7 +316,10 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
   link.cache_address = (uint64_t)(uintptr_t)t->cache;
   link.generation_address = (uint64_t)(uintptr_t)&t->generation;
   Jit_Compiled compiled;
-  if (!jit_compile_block(pc, page_code, memory_pages(), &link, t->module, JIT_MODULE_BYTES, &compiled)) {
+  compiler_lock();
+  const bool built = jit_compile_block(pc, page_code, memory_pages(), &link, t->module, JIT_MODULE_BYTES, &compiled);
+  compiler_unlock();
+  if (!built) {
     g_stats.compile_failures++;
     return;
   }
