@@ -145,6 +145,17 @@
         "noTestsAction": "error",
         "stopOnFailure": true
       }
+    },
+    {
+      "name": "web-jit",
+      "configurePreset": "web-jit",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": true
+      }
     }
   ]
 }

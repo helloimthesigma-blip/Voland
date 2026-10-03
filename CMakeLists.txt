@@ -89,6 +89,9 @@ if(EMSCRIPTEN)
                                   # growth disabled this IS the maximum, so no
                                   # separate MAXIMUM_MEMORY - views never detach
     -sALLOW_MEMORY_GROWTH=0       # fixed at boot (§4); never enable
+    -sALLOW_TABLE_GROWTH=1        # the JIT installs compiled blocks with
+                                  # addFunction (docs/JIT.md); the function
+                                  # table grows, linear memory never does
     -sPTHREAD_POOL_SIZE=8
     -sMODULARIZE=1             # emits a factory function, not a self-executing script
     -sEXPORT_ES6=1             # ...as an ES module, so cpu.worker.ts can `import()` it
@@ -124,4 +127,8 @@ option(SWITCH_EMU_BUILD_TESTS "Build test binaries" ON)
 if(SWITCH_EMU_BUILD_TESTS AND NOT EMSCRIPTEN)
   enable_testing()
   add_subdirectory(tests)
+elseif(SWITCH_EMU_BUILD_TESTS AND EMSCRIPTEN AND CPU_BACKEND STREQUAL "jit")
+  # Wasm-side JIT tests, run under Node: ctest --preset web-jit
+  enable_testing()
+  add_subdirectory(tests/jit_wasm)
 endif()

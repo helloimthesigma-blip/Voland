@@ -20,6 +20,7 @@ set(SWITCH_CORE_SOURCES
   cpu/backends/interpreter/interp_predecode.c
   cpu/backends/interpreter/softfloat.c
   cpu/backends/jit/jit.c
+  cpu/backends/jit/jit_compile.c
   hle/hle.c
   hle/kernel/page_allocator.c
   hle/kernel/address_space.c

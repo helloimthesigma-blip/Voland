@@ -143,6 +143,12 @@ add_executable(predecode_test predecode_test.c)
 target_link_libraries(predecode_test PRIVATE switch_core)
 add_test(NAME predecode_test COMMAND predecode_test)
 
+# The JIT's mixed-mode loop vs the reference decoder (natively nothing is
+# compiled; tests/jit_wasm runs the same test under Node, compiled).
+add_executable(jit_diff_test jit_diff_test.c)
+target_link_libraries(jit_diff_test PRIVATE switch_core)
+add_test(NAME jit_diff_test COMMAND jit_diff_test 5000)
+
 #
 # Guest threads end to end (§7): real ARM64 programs (tests/guest/*.s,
 # assembled into *.inc by tools/guest_asm.py) run on the interpreter

@@ -1,0 +1,1659 @@
+/**
+ * A64 block -> WebAssembly function (jit_internal.h, docs/JIT.md).
+ *
+ * Function shape (depths are wasm label depths inside the body):
+ *
+ *   prologue: l1 and every guest register the block touches -> locals
+ *   block $raw                       ;; leave with $status, state complete
+ *     block $exit                    ;; leave normally: $npc, $ncycles
+ *       ...instructions...
+ *     end
+ *     epilogue: written locals -> state, pc = $npc, cycles += $ncycles
+ *     return JIT_BLOCK_CONTINUE
+ *   end
+ *   return $status
+ *
+ * Semantics come from the interpreter (interp_*.c), which is the oracle
+ * tests/jit_diff_test.c checks every compiled form against. Anything not
+ * inlined here calls jit_helper_interpret for that one instruction with
+ * the state spilled; loads and stores inline the softmmu walk of
+ * vmm_translate_inline() and take the same helper when the walk cannot
+ * finish (unmapped, no permission, page-crossing), so faults are exactly
+ * the interpreter's.
+ *
+ * Cycle accounting is exact: `pending` counts instructions retired inline
+ * since the state's counters were last brought up to date; every exit adds
+ * it, and a helper call flushes it first (the helper retires its own
+ * instruction).
+ *
+ * The body is emitted twice: the first pass only collects which registers
+ * the block reads and writes, the second emits the prologue/spill/reload
+ * code from those sets.
+ */
+#include "cpu/backends/jit/jit_internal.h"
+
+#include <stddef.h>
+
+#include "cpu/backends/jit/jit_wasm.h"
+
+/* ------------------------------------------------------------------ */
+/* Function layout.                                                    */
+/* ------------------------------------------------------------------ */
+
+enum {
+  L_STATE = 0, /* the parameter */
+  L_X0 = 1,    /* x0..x30 -> 1..31 */
+  L_SP = 32,
+  L_L1 = 33,
+  L_NPC = 34,
+  L_NCYCLES = 35,
+  L_T0 = 36,
+  L_T1 = 37,
+  L_T2 = 38,
+  L_T3 = 39,
+  L_ADDR = 40,
+  L_HOST = 41,
+  L_BASE = 42,
+  L_VAL = 43,
+  L_VAL2 = 44,
+  L_LAST_I64 = 44,
+  L_NZCV = 45,
+  L_STATUS = 46,
+  L_LAST_I32 = 46,
+};
+#define I64_LOCALS (L_LAST_I64 - L_STATE)
+#define I32_LOCALS (L_LAST_I32 - L_LAST_I64)
+
+/* Imported function indices, then the block function. */
+#define FUNC_INTERPRET 0u
+#define FUNC_BLOCK 1u
+#define TYPE_BLOCK 0u
+#define TYPE_INTERPRET 1u
+
+/* Label levels (the wasm depth right after the label's block opened). */
+#define LEVEL_RAW 1u
+#define LEVEL_EXIT 2u
+
+/* Register-set bits: x0..x30, then SP and NZCV. */
+#define MASK_SP ((uint64_t)1 << 31)
+#define MASK_NZCV ((uint64_t)1 << 32)
+#define REG_ZR 31u
+
+#define STATE_OFFSET(field) ((uint64_t)offsetof(Jit_State, field))
+#define OFF_X(r) (STATE_OFFSET(interp.regs.x) + (uint64_t)(r) * sizeof(uint64_t))
+#define OFF_SP STATE_OFFSET(interp.regs.sp)
+#define OFF_PC STATE_OFFSET(interp.regs.pc)
+#define OFF_PSTATE STATE_OFFSET(interp.regs.pstate)
+#define OFF_FPCR STATE_OFFSET(interp.fpcr)
+#define OFF_FPSR STATE_OFFSET(interp.fpsr)
+#define OFF_TPIDR STATE_OFFSET(interp.tpidr_el0)
+#define OFF_TPIDRRO STATE_OFFSET(interp.tpidrro_el0)
+#define OFF_EXCLUSIVE_VALID STATE_OFFSET(interp.exclusive_valid)
+#define OFF_CYCLES STATE_OFFSET(interp.cycles_consumed)
+#define OFF_TOTAL_CYCLES STATE_OFFSET(interp.total_cycles)
+#define OFF_L1 STATE_OFFSET(interp.l1)
+
+#define ALIGN_8 3u /* memarg alignment hints, log2 */
+#define ALIGN_4 2u
+#define ALIGN_1 0u
+
+#define MASK32 0xFFFFFFFFull
+#define INSN_BYTES 4u
+
+/* The softmmu walk (vmm.h): L1 index = gva >> (page + L2 index bits);
+ * L2 byte offset = ((gva >> page bits) & L2 mask) * 8. */
+#define WALK_L1_SHIFT (VMM_PAGE_BITS + VMM_L2_INDEX_BITS)
+#define WALK_ENTRY_LOG2 3u
+#define WALK_L2_SHIFT (VMM_PAGE_BITS - WALK_ENTRY_LOG2)
+#define WALK_L2_MASK (VMM_L2_INDEX_MASK << WALK_ENTRY_LOG2)
+
+typedef struct Ctx {
+  Wasm_Buf *b;
+  uint32_t depth;
+  uint64_t used, written;         /* this pass */
+  uint64_t all_used, all_written; /* the analysis pass's result */
+  uint32_t pending;
+  uint64_t pc;
+  uint32_t insn;
+} Ctx;
+
+/* ------------------------------------------------------------------ */
+/* Emission primitives.                                                */
+/* ------------------------------------------------------------------ */
+
+static void op(Ctx *c, uint8_t opcode) { wasm_u8(c->b, opcode); }
+static void i64c(Ctx *c, uint64_t value) {
+  op(c, WASM_OP_I64_CONST);
+  wasm_sleb(c->b, (int64_t)value);
+}
+static void i32c(Ctx *c, uint32_t value) {
+  op(c, WASM_OP_I32_CONST);
+  wasm_sleb(c->b, (int32_t)value);
+}
+static void lget(Ctx *c, uint32_t local) {
+  op(c, WASM_OP_LOCAL_GET);
+  wasm_uleb(c->b, local);
+}
+static void lset(Ctx *c, uint32_t local) {
+  op(c, WASM_OP_LOCAL_SET);
+  wasm_uleb(c->b, local);
+}
+static void ltee(Ctx *c, uint32_t local) {
+  op(c, WASM_OP_LOCAL_TEE);
+  wasm_uleb(c->b, local);
+}
+static void mem(Ctx *c, uint8_t opcode, uint32_t align_log2, uint64_t offset) {
+  op(c, opcode);
+  wasm_uleb(c->b, align_log2);
+  wasm_uleb(c->b, offset);
+}
+static void open_block(Ctx *c) {
+  op(c, WASM_OP_BLOCK);
+  op(c, WASM_BLOCK_VOID);
+  c->depth++;
+}
+static void open_if(Ctx *c, uint8_t result_type) {
+  op(c, WASM_OP_IF);
+  op(c, result_type);
+  c->depth++;
+}
+static void else_(Ctx *c) { op(c, WASM_OP_ELSE); }
+static void end_(Ctx *c) {
+  op(c, WASM_OP_END);
+  c->depth--;
+}
+static void br(Ctx *c, uint32_t level) {
+  op(c, WASM_OP_BR);
+  wasm_uleb(c->b, c->depth - level);
+}
+static void br_if(Ctx *c, uint32_t level) {
+  op(c, WASM_OP_BR_IF);
+  wasm_uleb(c->b, c->depth - level);
+}
+
+/* State fields (the parameter is the state's address). */
+static void state_load64(Ctx *c, uint64_t offset) {
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I64_LOAD, ALIGN_8, offset);
+}
+/* Stores the i64 in `local` to the state field. */
+static void state_store64_local(Ctx *c, uint64_t offset, uint32_t local) {
+  lget(c, L_STATE);
+  lget(c, local);
+  mem(c, WASM_OP_I64_STORE, ALIGN_8, offset);
+}
+
+/* 32-bit results are zero-extended. */
+static void mask32(Ctx *c) {
+  op(c, WASM_OP_I32_WRAP_I64);
+  op(c, WASM_OP_I64_EXTEND_I32_U);
+}
+static void width(Ctx *c, bool sf) {
+  if (!sf) mask32(c);
+}
+static uint64_t width_mask_of(bool sf) { return sf ? ~(uint64_t)0 : MASK32; }
+
+/* ------------------------------------------------------------------ */
+/* Guest registers. Field value 31 is XZR or SP by instruction context. */
+/* ------------------------------------------------------------------ */
+
+static void get_x(Ctx *c, uint32_t r) {
+  if (r == REG_ZR) {
+    i64c(c, 0);
+    return;
+  }
+  c->used |= (uint64_t)1 << r;
+  lget(c, L_X0 + r);
+}
+static void get_xsp(Ctx *c, uint32_t r) {
+  if (r != REG_ZR) {
+    get_x(c, r);
+    return;
+  }
+  c->used |= MASK_SP;
+  lget(c, L_SP);
+}
+static void get_xw(Ctx *c, uint32_t r, bool sf) {
+  get_x(c, r);
+  width(c, sf);
+}
+/* Pops the value into the register (dropped for XZR). */
+static void set_x(Ctx *c, uint32_t r) {
+  if (r == REG_ZR) {
+    op(c, WASM_OP_DROP);
+    return;
+  }
+  c->used |= (uint64_t)1 << r;
+  c->written |= (uint64_t)1 << r;
+  lset(c, L_X0 + r);
+}
+static void set_xsp(Ctx *c, uint32_t r) {
+  if (r != REG_ZR) {
+    set_x(c, r);
+    return;
+  }
+  c->used |= MASK_SP;
+  c->written |= MASK_SP;
+  lset(c, L_SP);
+}
+static void load_flags(Ctx *c) {
+  c->used |= MASK_NZCV;
+  lget(c, L_NZCV);
+}
+static void store_flags(Ctx *c) {
+  c->used |= MASK_NZCV;
+  c->written |= MASK_NZCV;
+  lset(c, L_NZCV);
+}
+
+/* ------------------------------------------------------------------ */
+/* Spill / reload / exits.                                             */
+/* ------------------------------------------------------------------ */
+
+static void spill(Ctx *c) {
+  for (uint32_t r = 0; r < REG_ZR; r++) {
+    if (c->all_written & ((uint64_t)1 << r)) state_store64_local(c, OFF_X(r), L_X0 + r);
+  }
+  if (c->all_written & MASK_SP) state_store64_local(c, OFF_SP, L_SP);
+  if (c->all_written & MASK_NZCV) {
+    lget(c, L_STATE);
+    lget(c, L_NZCV);
+    mem(c, WASM_OP_I32_STORE, ALIGN_4, OFF_PSTATE);
+  }
+}
+
+static void reload(Ctx *c) {
+  for (uint32_t r = 0; r < REG_ZR; r++) {
+    if (c->all_used & ((uint64_t)1 << r)) {
+      state_load64(c, OFF_X(r));
+      lset(c, L_X0 + r);
+    }
+  }
+  if (c->all_used & MASK_SP) {
+    state_load64(c, OFF_SP);
+    lset(c, L_SP);
+  }
+  if (c->all_used & MASK_NZCV) {
+    lget(c, L_STATE);
+    mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_PSTATE);
+    lset(c, L_NZCV);
+  }
+}
+
+/* cycles_consumed and total_cycles += delta (may be negative). */
+static void add_cycles(Ctx *c, int64_t delta) {
+  if (delta == 0) return;
+  static const uint64_t offsets[2] = {OFF_CYCLES, OFF_TOTAL_CYCLES};
+  for (uint32_t i = 0; i < 2u; i++) {
+    lget(c, L_STATE);
+    state_load64(c, offsets[i]);
+    i64c(c, (uint64_t)delta);
+    op(c, WASM_OP_I64_ADD);
+    mem(c, WASM_OP_I64_STORE, ALIGN_8, offsets[i]);
+  }
+}
+
+/* Spill, flush cycles, regs.pc = this instruction, call the interpreter
+ * for it; the i32 status is left on the stack. */
+static void call_interpreter(Ctx *c) {
+  spill(c);
+  add_cycles(c, c->pending);
+  lget(c, L_STATE);
+  i64c(c, c->pc);
+  mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_PC);
+  lget(c, L_STATE);
+  i32c(c, c->insn);
+  op(c, WASM_OP_CALL);
+  wasm_uleb(c->b, FUNC_INTERPRET);
+}
+
+/* This instruction through the interpreter, then on in the block. */
+static void helper_continue(Ctx *c) {
+  call_interpreter(c);
+  ltee(c, L_STATUS);
+  br_if(c, LEVEL_RAW);
+  reload(c);
+  c->pending = 0;
+}
+
+/* The slow path of an inlined instruction: like helper_continue, but the
+ * cycle count is put back as if retired inline, so it rejoins the fast
+ * path with the same static `pending` (+1 for this instruction). */
+static void helper_slow_path(Ctx *c) {
+  call_interpreter(c);
+  ltee(c, L_STATUS);
+  br_if(c, LEVEL_RAW);
+  reload(c);
+  add_cycles(c, -(int64_t)(c->pending + 1u));
+}
+
+/* This instruction through the interpreter, then leave the block. */
+static void helper_terminate(Ctx *c) {
+  call_interpreter(c);
+  lset(c, L_STATUS);
+  br(c, LEVEL_RAW);
+}
+
+/* Leave normally to the i64 on the stack, this instruction retired. */
+static void exit_to_stack(Ctx *c) {
+  lset(c, L_NPC);
+  i64c(c, c->pending + 1u);
+  lset(c, L_NCYCLES);
+  br(c, LEVEL_EXIT);
+}
+
+/* ------------------------------------------------------------------ */
+/* Flags and conditions.                                               */
+/* ------------------------------------------------------------------ */
+
+typedef enum Carry { CARRY_ZERO, CARRY_ONE, CARRY_FLAG } Carry;
+
+#define NZCV_SHIFT_N 31u
+#define NZCV_SHIFT_Z 30u
+#define NZCV_SHIFT_C 29u
+#define NZCV_SHIFT_V 28u
+
+/* AddWithCarry(T0, T1, carry): T0 and T1 hold width-masked operands; the
+ * width-masked result goes to T2, and NZCV is set when `set_flags`. */
+static void emit_add_with_carry(Ctx *c, bool sf, Carry carry, bool set_flags) {
+  const uint64_t msb = sf ? 63u : 31u;
+  lget(c, L_T0);
+  lget(c, L_T1);
+  op(c, WASM_OP_I64_ADD);
+  if (carry == CARRY_ONE) {
+    i64c(c, 1);
+    op(c, WASM_OP_I64_ADD);
+  } else if (carry == CARRY_FLAG) {
+    load_flags(c);
+    i32c(c, NZCV_SHIFT_C);
+    op(c, WASM_OP_I32_SHR_U);
+    i32c(c, 1);
+    op(c, WASM_OP_I32_AND);
+    op(c, WASM_OP_I64_EXTEND_I32_U);
+    op(c, WASM_OP_I64_ADD);
+  }
+  if (sf) {
+    lset(c, L_T2);
+  } else {
+    ltee(c, L_T3); /* the 33-bit sum: bit 32 is the carry */
+    mask32(c);
+    lset(c, L_T2);
+  }
+  if (!set_flags) return;
+
+  /* C */
+  if (!sf) {
+    lget(c, L_T3);
+    i64c(c, 32);
+    op(c, WASM_OP_I64_SHR_U);
+    op(c, WASM_OP_I32_WRAP_I64);
+  } else if (carry == CARRY_ZERO) {
+    lget(c, L_T2);
+    lget(c, L_T0);
+    op(c, WASM_OP_I64_LT_U);
+  } else if (carry == CARRY_ONE) {
+    lget(c, L_T2);
+    lget(c, L_T0);
+    op(c, WASM_OP_I64_LE_U);
+  } else {
+    lget(c, L_T2);
+    lget(c, L_T0);
+    op(c, WASM_OP_I64_LT_U);
+    load_flags(c);
+    i32c(c, NZCV_SHIFT_C);
+    op(c, WASM_OP_I32_SHR_U);
+    lget(c, L_T2);
+    lget(c, L_T0);
+    op(c, WASM_OP_I64_EQ);
+    op(c, WASM_OP_I32_AND);
+    op(c, WASM_OP_I32_OR);
+    i32c(c, 1);
+    op(c, WASM_OP_I32_AND);
+  }
+  i32c(c, NZCV_SHIFT_C);
+  op(c, WASM_OP_I32_SHL);
+  /* V = ((a ^ r) & (y ^ r)) >> msb */
+  lget(c, L_T0);
+  lget(c, L_T2);
+  op(c, WASM_OP_I64_XOR);
+  lget(c, L_T1);
+  lget(c, L_T2);
+  op(c, WASM_OP_I64_XOR);
+  op(c, WASM_OP_I64_AND);
+  i64c(c, msb);
+  op(c, WASM_OP_I64_SHR_U);
+  op(c, WASM_OP_I32_WRAP_I64);
+  i32c(c, NZCV_SHIFT_V);
+  op(c, WASM_OP_I32_SHL);
+  op(c, WASM_OP_I32_OR);
+  /* N */
+  lget(c, L_T2);
+  i64c(c, msb);
+  op(c, WASM_OP_I64_SHR_U);
+  op(c, WASM_OP_I32_WRAP_I64);
+  i32c(c, NZCV_SHIFT_N);
+  op(c, WASM_OP_I32_SHL);
+  op(c, WASM_OP_I32_OR);
+  /* Z */
+  lget(c, L_T2);
+  op(c, WASM_OP_I64_EQZ);
+  i32c(c, NZCV_SHIFT_Z);
+  op(c, WASM_OP_I32_SHL);
+  op(c, WASM_OP_I32_OR);
+  store_flags(c);
+}
+
+/* Logical-op flags from the width-masked result in T2: N, Z; C = V = 0. */
+static void emit_logic_flags(Ctx *c, bool sf) {
+  lget(c, L_T2);
+  i64c(c, sf ? 63u : 31u);
+  op(c, WASM_OP_I64_SHR_U);
+  op(c, WASM_OP_I32_WRAP_I64);
+  i32c(c, NZCV_SHIFT_N);
+  op(c, WASM_OP_I32_SHL);
+  lget(c, L_T2);
+  op(c, WASM_OP_I64_EQZ);
+  i32c(c, NZCV_SHIFT_Z);
+  op(c, WASM_OP_I32_SHL);
+  op(c, WASM_OP_I32_OR);
+  store_flags(c);
+}
+
+/* ConditionHolds(cond) as a truthy i32 (non-zero = holds). */
+static void emit_condition(Ctx *c, uint32_t cond) {
+  switch (cond >> 1) {
+  case 0: /* EQ: Z */
+    load_flags(c);
+    i32c(c, CPU_PSTATE_Z);
+    op(c, WASM_OP_I32_AND);
+    break;
+  case 1: /* CS: C */
+    load_flags(c);
+    i32c(c, CPU_PSTATE_C);
+    op(c, WASM_OP_I32_AND);
+    break;
+  case 2: /* MI: N */
+    load_flags(c);
+    i32c(c, CPU_PSTATE_N);
+    op(c, WASM_OP_I32_AND);
+    break;
+  case 3: /* VS: V */
+    load_flags(c);
+    i32c(c, CPU_PSTATE_V);
+    op(c, WASM_OP_I32_AND);
+    break;
+  case 4: /* HI: C && !Z */
+    load_flags(c);
+    i32c(c, CPU_PSTATE_C | CPU_PSTATE_Z);
+    op(c, WASM_OP_I32_AND);
+    i32c(c, CPU_PSTATE_C);
+    op(c, WASM_OP_I32_EQ);
+    break;
+  case 5: /* GE: N == V, i.e. ((nzcv << 3) ^ nzcv) has bit 31 clear */
+  case 6: /* GT: N == V && !Z */
+    load_flags(c);
+    i32c(c, NZCV_SHIFT_N - NZCV_SHIFT_V);
+    op(c, WASM_OP_I32_SHL);
+    load_flags(c);
+    op(c, WASM_OP_I32_XOR);
+    i32c(c, CPU_PSTATE_N);
+    op(c, WASM_OP_I32_AND);
+    if ((cond >> 1) == 6) {
+      load_flags(c);
+      i32c(c, CPU_PSTATE_Z);
+      op(c, WASM_OP_I32_AND);
+      op(c, WASM_OP_I32_OR);
+    }
+    op(c, WASM_OP_I32_EQZ);
+    break;
+  default: /* AL, NV */
+    i32c(c, 1);
+    return;
+  }
+  if (cond & 1u) op(c, WASM_OP_I32_EQZ);
+}
+
+/* ------------------------------------------------------------------ */
+/* Shifts and extends.                                                 */
+/* ------------------------------------------------------------------ */
+
+/* ROR of the width-masked value in `local` by a constant. */
+static void emit_ror_local(Ctx *c, uint32_t local, uint32_t amount, bool sf) {
+  lget(c, local);
+  if (amount == 0) return;
+  if (sf) {
+    i64c(c, amount);
+    op(c, WASM_OP_I64_ROTR);
+  } else {
+    op(c, WASM_OP_I32_WRAP_I64);
+    i32c(c, amount);
+    op(c, WASM_OP_I32_ROTR);
+    op(c, WASM_OP_I64_EXTEND_I32_U);
+  }
+}
+
+/* ShiftReg(r, type, amount) for a constant amount, width-masked. */
+static void emit_shift_reg(Ctx *c, uint32_t r, uint32_t type, uint32_t amount, bool sf) {
+  get_xw(c, r, sf);
+  if (amount == 0) return;
+  switch (type) {
+  case 0: /* LSL */
+    i64c(c, amount);
+    op(c, WASM_OP_I64_SHL);
+    width(c, sf);
+    break;
+  case 1: /* LSR */
+    i64c(c, amount);
+    op(c, WASM_OP_I64_SHR_U);
+    break;
+  case 2: /* ASR */
+    if (!sf) op(c, WASM_OP_I64_EXTEND32_S);
+    i64c(c, amount);
+    op(c, WASM_OP_I64_SHR_S);
+    width(c, sf);
+    break;
+  default: /* ROR */
+    lset(c, L_T3);
+    emit_ror_local(c, L_T3, amount, sf);
+    break;
+  }
+}
+
+/* ExtendReg's extension step (before the shift). */
+static void emit_extend(Ctx *c, uint32_t option) {
+  switch (option) {
+  case 0: i64c(c, 0xFFu); op(c, WASM_OP_I64_AND); break;
+  case 1: i64c(c, 0xFFFFu); op(c, WASM_OP_I64_AND); break;
+  case 2: mask32(c); break;
+  case 4: op(c, WASM_OP_I64_EXTEND8_S); break;
+  case 5: op(c, WASM_OP_I64_EXTEND16_S); break;
+  case 6: op(c, WASM_OP_I64_EXTEND32_S); break;
+  default: break; /* UXTX, SXTX */
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Data processing - immediate.                                        */
+/* ------------------------------------------------------------------ */
+
+static bool c_pc_relative(Ctx *c, uint32_t insn) {
+  const uint64_t imm = (uint64_t)sign_extend((bits(insn, 23, 5) << 2) | bits(insn, 30, 29), 21);
+  i64c(c, bit(insn, 31) ? (c->pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK) + (imm << 12) : c->pc + imm);
+  set_x(c, bits(insn, 4, 0));
+  return true;
+}
+
+static bool c_add_sub_immediate(Ctx *c, uint32_t insn) {
+  const bool sf = bit(insn, 31), sub = bit(insn, 30), set_flags = bit(insn, 29);
+  const uint32_t rn = bits(insn, 9, 5), rd = bits(insn, 4, 0);
+  const uint64_t imm = (uint64_t)bits(insn, 21, 10) << (bit(insn, 22) ? 12 : 0);
+  if (!set_flags) {
+    get_xsp(c, rn);
+    i64c(c, imm);
+    op(c, sub ? WASM_OP_I64_SUB : WASM_OP_I64_ADD);
+    width(c, sf);
+    set_xsp(c, rd);
+    return true;
+  }
+  get_xsp(c, rn);
+  width(c, sf);
+  lset(c, L_T0);
+  i64c(c, sub ? (~imm & width_mask_of(sf)) : imm);
+  lset(c, L_T1);
+  emit_add_with_carry(c, sf, sub ? CARRY_ONE : CARRY_ZERO, true);
+  lget(c, L_T2);
+  set_x(c, rd);
+  return true;
+}
+
+static bool c_logical_immediate(Ctx *c, uint32_t insn) {
+  const bool sf = bit(insn, 31);
+  const uint32_t opc = bits(insn, 30, 29), n = bit(insn, 22);
+  if (!sf && n) return false;
+  uint64_t imm = 0, unused = 0;
+  if (!interp_decode_bit_masks(n, bits(insn, 15, 10), bits(insn, 21, 16), true, sf, &imm, &unused)) return false;
+  static const uint8_t ops[4] = {WASM_OP_I64_AND, WASM_OP_I64_OR, WASM_OP_I64_XOR, WASM_OP_I64_AND};
+  get_x(c, bits(insn, 9, 5));
+  i64c(c, imm);
+  op(c, ops[opc]);
+  width(c, sf);
+  lset(c, L_T2);
+  if (opc == 3) emit_logic_flags(c, sf);
+  lget(c, L_T2);
+  if (opc == 3) set_x(c, bits(insn, 4, 0));
+  else set_xsp(c, bits(insn, 4, 0));
+  return true;
+}
+
+static bool c_move_wide(Ctx *c, uint32_t insn) {
+  const bool sf = bit(insn, 31);
+  const uint32_t opc = bits(insn, 30, 29), hw = bits(insn, 22, 21), rd = bits(insn, 4, 0);
+  if (opc == 1 || (!sf && hw >= 2)) return false;
+  const unsigned shift = hw * 16u;
+  const uint64_t imm = (uint64_t)bits(insn, 20, 5) << shift;
+  if (opc == 3) { /* MOVK */
+    get_x(c, rd);
+    i64c(c, ~((uint64_t)0xFFFF << shift));
+    op(c, WASM_OP_I64_AND);
+    i64c(c, imm);
+    op(c, WASM_OP_I64_OR);
+    width(c, sf);
+  } else {
+    i64c(c, (opc == 0 ? ~imm : imm) & width_mask_of(sf));
+  }
+  set_x(c, rd);
+  return true;
+}
+
+static bool c_bitfield(Ctx *c, uint32_t insn) {
+  const bool sf = bit(insn, 31);
+  const uint32_t opc = bits(insn, 30, 29), n = bit(insn, 22);
+  const uint32_t immr = bits(insn, 21, 16), imms = bits(insn, 15, 10);
+  const uint32_t rn = bits(insn, 9, 5), rd = bits(insn, 4, 0);
+  if (opc == 3 || n != (uint32_t)sf) return false;
+  if (!sf && ((immr | imms) & 0x20u)) return false;
+  uint64_t wmask = 0, tmask = 0;
+  if (!interp_decode_bit_masks(n, imms, immr, false, sf, &wmask, &tmask)) return false;
+  const bool inzero = opc != 1, extend = opc == 0;
+  get_xw(c, rn, sf);
+  lset(c, L_T0); /* src */
+  /* bot = (dst & ~wmask) | (ROR(src, immr) & wmask) */
+  emit_ror_local(c, L_T0, immr, sf);
+  i64c(c, wmask);
+  op(c, WASM_OP_I64_AND);
+  if (!inzero) {
+    get_x(c, rd);
+    i64c(c, ~wmask);
+    op(c, WASM_OP_I64_AND);
+    op(c, WASM_OP_I64_OR);
+  }
+  lset(c, L_T1);
+  /* top */
+  if (extend) {
+    i64c(c, 0);
+    lget(c, L_T0);
+    i64c(c, imms);
+    op(c, WASM_OP_I64_SHR_U);
+    i64c(c, 1);
+    op(c, WASM_OP_I64_AND);
+    op(c, WASM_OP_I64_SUB);
+    width(c, sf);
+  } else if (inzero) {
+    i64c(c, 0);
+  } else {
+    get_x(c, rd);
+  }
+  i64c(c, ~tmask);
+  op(c, WASM_OP_I64_AND);
+  lget(c, L_T1);
+  i64c(c, tmask);
+  op(c, WASM_OP_I64_AND);
+  op(c, WASM_OP_I64_OR);
+  width(c, sf);
+  set_x(c, rd);
+  return true;
+}
+
+static bool c_extract(Ctx *c, uint32_t insn) {
+  const bool sf = bit(insn, 31);
+  const uint32_t op21 = bits(insn, 30, 29), n = bit(insn, 22), o0 = bit(insn, 21);
+  const uint32_t lsb = bits(insn, 15, 10);
+  if (op21 != 0 || o0 != 0 || n != (uint32_t)sf || (!sf && lsb >= 32u)) return false;
+  get_xw(c, bits(insn, 20, 16), sf);
+  if (lsb != 0) {
+    i64c(c, lsb);
+    op(c, WASM_OP_I64_SHR_U);
+    get_xw(c, bits(insn, 9, 5), sf);
+    i64c(c, (sf ? 64u : 32u) - lsb);
+    op(c, WASM_OP_I64_SHL);
+    op(c, WASM_OP_I64_OR);
+    width(c, sf);
+  }
+  set_x(c, bits(insn, 4, 0));
+  return true;
+}
+
+static bool c_dp_immediate(Ctx *c, uint32_t insn) {
+  switch (bits(insn, 25, 23)) {
+  case 0: case 1: return c_pc_relative(c, insn);
+  case 2: return c_add_sub_immediate(c, insn);
+  case 4: return c_logical_immediate(c, insn);
+  case 5: return c_move_wide(c, insn);
+  case 6: return c_bitfield(c, insn);
+  case 7: return c_extract(c, insn);
+  default: return false;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Data processing - register.                                         */
+/* ------------------------------------------------------------------ */
+
+static bool c_logical_shifted(Ctx *c, uint32_t insn) {
+  const bool sf = bit(insn, 31), invert = bit(insn, 21);
+  const uint32_t opc = bits(insn, 30, 29), amount = bits(insn, 15, 10);
+  if (!sf && amount >= 32u) return false;
+  static const uint8_t ops[4] = {WASM_OP_I64_AND, WASM_OP_I64_OR, WASM_OP_I64_XOR, WASM_OP_I64_AND};
+  get_xw(c, bits(insn, 9, 5), sf);
+  emit_shift_reg(c, bits(insn, 20, 16), bits(insn, 23, 22), amount, sf);
+  if (invert) {
+    i64c(c, width_mask_of(sf));
+    op(c, WASM_OP_I64_XOR);
+  }
+  op(c, ops[opc]);
+  lset(c, L_T2);
+  if (opc == 3) emit_logic_flags(c, sf);
+  lget(c, L_T2);
+  set_x(c, bits(insn, 4, 0));
+  return true;
+}
+
+static bool c_add_sub_shifted(Ctx *c, uint32_t insn) {
+  const bool sf = bit(insn, 31), sub = bit(insn, 30), set_flags = bit(insn, 29);
+  const uint32_t type = bits(insn, 23, 22), amount = bits(insn, 15, 10);
+  if (type == 3u || (!sf && amount >= 32u)) return false;
+  get_xw(c, bits(insn, 9, 5), sf);
+  lset(c, L_T0);
+  emit_shift_reg(c, bits(insn, 20, 16), type, amount, sf);
+  if (sub) {
+    i64c(c, width_mask_of(sf));
+    op(c, WASM_OP_I64_XOR);
+  }
+  lset(c, L_T1);
+  emit_add_with_carry(c, sf, sub ? CARRY_ONE : CARRY_ZERO, set_flags);
+  lget(c, L_T2);
+  set_x(c, bits(insn, 4, 0));
+  return true;
+}
+
+static bool c_add_sub_extended(Ctx *c, uint32_t insn) {
+  const bool sf = bit(insn, 31), sub = bit(insn, 30), set_flags = bit(insn, 29);
+  const uint32_t shift = bits(insn, 12, 10);
+  if (bits(insn, 23, 22) != 0 || shift > 4u) return false;
+  get_xsp(c, bits(insn, 9, 5));
+  width(c, sf);
+  lset(c, L_T0);
+  get_x(c, bits(insn, 20, 16));
+  emit_extend(c, bits(insn, 15, 13));
+  if (shift) {
+    i64c(c, shift);
+    op(c, WASM_OP_I64_SHL);
+  }
+  width(c, sf);
+  if (sub) {
+    i64c(c, width_mask_of(sf));
+    op(c, WASM_OP_I64_XOR);
+  }
+  lset(c, L_T1);
+  emit_add_with_carry(c, sf, sub ? CARRY_ONE : CARRY_ZERO, set_flags);
+  lget(c, L_T2);
+  if (set_flags) set_x(c, bits(insn, 4, 0));
+  else set_xsp(c, bits(insn, 4, 0));
+  return true;
+}
+
+static bool c_add_sub_carry(Ctx *c, uint32_t insn) {
+  if (bits(insn, 15, 10) != 0) return false;
+  const bool sf = bit(insn, 31), sub = bit(insn, 30), set_flags = bit(insn, 29);
+  get_xw(c, bits(insn, 9, 5), sf);
+  lset(c, L_T0);
+  get_xw(c, bits(insn, 20, 16), sf);
+  if (sub) {
+    i64c(c, width_mask_of(sf));
+    op(c, WASM_OP_I64_XOR);
+  }
+  lset(c, L_T1);
+  emit_add_with_carry(c, sf, CARRY_FLAG, set_flags);
+  lget(c, L_T2);
+  set_x(c, bits(insn, 4, 0));
+  return true;
+}
+
+static bool c_conditional_compare(Ctx *c, uint32_t insn) {
+  if (!bit(insn, 29) || bit(insn, 10) || bit(insn, 4)) return false;
+  const bool sf = bit(insn, 31), sub = bit(insn, 30), immediate = bit(insn, 11);
+  emit_condition(c, bits(insn, 15, 12));
+  open_if(c, WASM_BLOCK_VOID);
+  get_xw(c, bits(insn, 9, 5), sf);
+  lset(c, L_T0);
+  if (immediate) i64c(c, bits(insn, 20, 16));
+  else get_xw(c, bits(insn, 20, 16), sf);
+  if (sub) {
+    i64c(c, width_mask_of(sf));
+    op(c, WASM_OP_I64_XOR);
+  }
+  lset(c, L_T1);
+  emit_add_with_carry(c, sf, sub ? CARRY_ONE : CARRY_ZERO, true);
+  else_(c);
+  i32c(c, bits(insn, 3, 0) << NZCV_SHIFT_V);
+  store_flags(c);
+  end_(c);
+  return true;
+}
+
+static bool c_conditional_select(Ctx *c, uint32_t insn) {
+  if (bit(insn, 29) || bit(insn, 11)) return false;
+  const bool sf = bit(insn, 31), else_inv = bit(insn, 30), else_inc = bit(insn, 10);
+  get_x(c, bits(insn, 9, 5));
+  get_x(c, bits(insn, 20, 16));
+  if (else_inv) {
+    i64c(c, ~(uint64_t)0);
+    op(c, WASM_OP_I64_XOR);
+  }
+  if (else_inc) {
+    i64c(c, 1);
+    op(c, WASM_OP_I64_ADD);
+  }
+  emit_condition(c, bits(insn, 15, 12));
+  op(c, WASM_OP_SELECT);
+  width(c, sf);
+  set_x(c, bits(insn, 4, 0));
+  return true;
+}
+
+static void shr32(Ctx *c) {
+  i64c(c, 32);
+  op(c, WASM_OP_I64_SHR_U);
+}
+
+/* High 64 bits of T0 * T1 (unsigned, or signed when `is_signed`). */
+static void emit_multiply_high(Ctx *c, bool is_signed) {
+  lget(c, L_T0);
+  mask32(c);
+  lget(c, L_T1);
+  mask32(c);
+  op(c, WASM_OP_I64_MUL);
+  shr32(c); /* p0 >> 32 */
+  lget(c, L_T0);
+  mask32(c);
+  lget(c, L_T1);
+  shr32(c);
+  op(c, WASM_OP_I64_MUL);
+  ltee(c, L_T2); /* p1 */
+  mask32(c);
+  op(c, WASM_OP_I64_ADD);
+  lget(c, L_T0);
+  shr32(c);
+  lget(c, L_T1);
+  mask32(c);
+  op(c, WASM_OP_I64_MUL);
+  ltee(c, L_T3); /* p2 */
+  mask32(c);
+  op(c, WASM_OP_I64_ADD); /* middle */
+  shr32(c);
+  lget(c, L_T0);
+  shr32(c);
+  lget(c, L_T1);
+  shr32(c);
+  op(c, WASM_OP_I64_MUL); /* p3 */
+  op(c, WASM_OP_I64_ADD);
+  lget(c, L_T2);
+  shr32(c);
+  op(c, WASM_OP_I64_ADD);
+  lget(c, L_T3);
+  shr32(c);
+  op(c, WASM_OP_I64_ADD);
+  if (!is_signed) return;
+  /* hi -= (a < 0 ? b : 0) + (b < 0 ? a : 0) */
+  lget(c, L_T1);
+  lget(c, L_T0);
+  i64c(c, 63);
+  op(c, WASM_OP_I64_SHR_S);
+  op(c, WASM_OP_I64_AND);
+  op(c, WASM_OP_I64_SUB);
+  lget(c, L_T0);
+  lget(c, L_T1);
+  i64c(c, 63);
+  op(c, WASM_OP_I64_SHR_S);
+  op(c, WASM_OP_I64_AND);
+  op(c, WASM_OP_I64_SUB);
+}
+
+static bool c_dp_three_source(Ctx *c, uint32_t insn) {
+  if (bits(insn, 30, 29) != 0) return false;
+  const bool sf = bit(insn, 31), subtract = bit(insn, 15);
+  const uint32_t op31 = bits(insn, 23, 21);
+  const uint32_t rn = bits(insn, 9, 5), rm = bits(insn, 20, 16), ra = bits(insn, 14, 10), rd = bits(insn, 4, 0);
+  if (op31 == 0) { /* MADD / MSUB */
+    get_x(c, ra);
+    get_xw(c, rn, sf);
+    get_xw(c, rm, sf);
+    op(c, WASM_OP_I64_MUL);
+    op(c, subtract ? WASM_OP_I64_SUB : WASM_OP_I64_ADD);
+    width(c, sf);
+    set_x(c, rd);
+    return true;
+  }
+  if (!sf) return false;
+  switch (op31) {
+  case 1: case 5: /* SMADDL/SMSUBL, UMADDL/UMSUBL */
+    get_x(c, ra);
+    get_x(c, rn);
+    if (op31 == 1) op(c, WASM_OP_I64_EXTEND32_S);
+    else mask32(c);
+    get_x(c, rm);
+    if (op31 == 1) op(c, WASM_OP_I64_EXTEND32_S);
+    else mask32(c);
+    op(c, WASM_OP_I64_MUL);
+    op(c, subtract ? WASM_OP_I64_SUB : WASM_OP_I64_ADD);
+    set_x(c, rd);
+    return true;
+  case 2: case 6: /* SMULH, UMULH */
+    if (subtract) return false;
+    get_x(c, rn);
+    lset(c, L_T0);
+    get_x(c, rm);
+    lset(c, L_T1);
+    emit_multiply_high(c, op31 == 2);
+    set_x(c, rd);
+    return true;
+  default:
+    return false;
+  }
+}
+
+static bool c_dp_two_source(Ctx *c, uint32_t insn) {
+  if (bit(insn, 29)) return false;
+  const bool sf = bit(insn, 31);
+  const uint32_t opcode = bits(insn, 15, 10);
+  get_xw(c, bits(insn, 9, 5), sf);
+  lset(c, L_T0);
+  get_xw(c, bits(insn, 20, 16), sf);
+  lset(c, L_T1);
+  switch (opcode) {
+  case 0x02: /* UDIV: x / 0 = 0 */
+    lget(c, L_T1);
+    op(c, WASM_OP_I64_EQZ);
+    open_if(c, WASM_TYPE_I64);
+    i64c(c, 0);
+    else_(c);
+    lget(c, L_T0);
+    lget(c, L_T1);
+    op(c, WASM_OP_I64_DIV_U);
+    end_(c);
+    break;
+  case 0x03: /* SDIV: x / 0 = 0, INT_MIN / -1 = INT_MIN */
+    if (!sf) { /* the 32-bit quotient can't overflow in 64 bits */
+      lget(c, L_T0);
+      op(c, WASM_OP_I64_EXTEND32_S);
+      lset(c, L_T0);
+      lget(c, L_T1);
+      op(c, WASM_OP_I64_EXTEND32_S);
+      lset(c, L_T1);
+    }
+    lget(c, L_T1);
+    op(c, WASM_OP_I64_EQZ);
+    open_if(c, WASM_TYPE_I64);
+    i64c(c, 0);
+    else_(c);
+    lget(c, L_T1);
+    i64c(c, ~(uint64_t)0);
+    op(c, WASM_OP_I64_EQ);
+    open_if(c, WASM_TYPE_I64);
+    i64c(c, 0);
+    lget(c, L_T0);
+    op(c, WASM_OP_I64_SUB);
+    else_(c);
+    lget(c, L_T0);
+    lget(c, L_T1);
+    op(c, WASM_OP_I64_DIV_S);
+    end_(c);
+    end_(c);
+    width(c, sf);
+    break;
+  case 0x08: case 0x09: case 0x0A: case 0x0B: { /* LSLV, LSRV, ASRV, RORV: amount mod width */
+    static const uint8_t ops64[4] = {WASM_OP_I64_SHL, WASM_OP_I64_SHR_U, WASM_OP_I64_SHR_S, WASM_OP_I64_ROTR};
+    static const uint8_t ops32[4] = {WASM_OP_I32_SHL, WASM_OP_I32_SHR_U, WASM_OP_I32_SHR_S, WASM_OP_I32_ROTR};
+    lget(c, L_T0);
+    if (sf) {
+      lget(c, L_T1);
+      op(c, ops64[opcode - 0x08u]);
+    } else {
+      op(c, WASM_OP_I32_WRAP_I64);
+      lget(c, L_T1);
+      op(c, WASM_OP_I32_WRAP_I64);
+      op(c, ops32[opcode - 0x08u]);
+      op(c, WASM_OP_I64_EXTEND_I32_U);
+    }
+    break;
+  }
+  default:
+    return false; /* CRC32 & co.: the interpreter */
+  }
+  set_x(c, bits(insn, 4, 0));
+  return true;
+}
+
+static bool c_dp_one_source(Ctx *c, uint32_t insn) {
+  if (bit(insn, 29) || bits(insn, 20, 16) != 0) return false;
+  const bool sf = bit(insn, 31);
+  if (bits(insn, 15, 10) != 4u) return false; /* only CLZ inline so far */
+  get_x(c, bits(insn, 9, 5));
+  if (sf) {
+    op(c, WASM_OP_I64_CLZ);
+  } else {
+    op(c, WASM_OP_I32_WRAP_I64);
+    op(c, WASM_OP_I32_CLZ);
+    op(c, WASM_OP_I64_EXTEND_I32_U);
+  }
+  set_x(c, bits(insn, 4, 0));
+  return true;
+}
+
+static bool c_dp_register(Ctx *c, uint32_t insn) {
+  if (!bit(insn, 28)) {
+    if (!bit(insn, 24)) return c_logical_shifted(c, insn);
+    if (!bit(insn, 21)) return c_add_sub_shifted(c, insn);
+    return c_add_sub_extended(c, insn);
+  }
+  if (bit(insn, 24)) return c_dp_three_source(c, insn);
+  switch (bits(insn, 23, 21)) {
+  case 0: return c_add_sub_carry(c, insn);
+  case 2: return c_conditional_compare(c, insn);
+  case 4: return c_conditional_select(c, insn);
+  case 6: return bit(insn, 30) ? c_dp_one_source(c, insn) : c_dp_two_source(c, insn);
+  default: return false;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Loads and stores (general registers).                               */
+/* ------------------------------------------------------------------ */
+
+typedef enum Access {
+  ACCESS_STORE,
+  ACCESS_LOAD_ZERO,
+  ACCESS_LOAD_SIGN64,
+  ACCESS_LOAD_SIGN32,
+  ACCESS_PREFETCH,
+} Access;
+
+/* Opens the fast path for an access of `size` bytes at L_ADDR: on fall-
+ * through L_HOST is the host address. Close with walk_end(). */
+static void walk_begin(Ctx *c, uint32_t size, uint32_t perm) {
+  open_block(c); /* $done */
+  open_block(c); /* $slow */
+  const uint32_t slow = c->depth;
+  lget(c, L_ADDR);
+  i64c(c, VMM_ADDRESS_SPACE_SIZE);
+  op(c, WASM_OP_I64_GE_U);
+  br_if(c, slow);
+  if (size > 1u) {
+    lget(c, L_ADDR);
+    i64c(c, VMM_PAGE_OFFSET_MASK);
+    op(c, WASM_OP_I64_AND);
+    i64c(c, VMM_PAGE_SIZE - size);
+    op(c, WASM_OP_I64_GT_U);
+    br_if(c, slow);
+  }
+  lget(c, L_L1);
+  lget(c, L_ADDR);
+  i64c(c, WALK_L1_SHIFT);
+  op(c, WASM_OP_I64_SHR_U);
+  i64c(c, WALK_ENTRY_LOG2);
+  op(c, WASM_OP_I64_SHL);
+  op(c, WASM_OP_I64_ADD);
+  mem(c, WASM_OP_I64_LOAD, ALIGN_8, 0);
+  ltee(c, L_HOST);
+  op(c, WASM_OP_I64_EQZ);
+  br_if(c, slow);
+  lget(c, L_HOST);
+  lget(c, L_ADDR);
+  i64c(c, WALK_L2_SHIFT);
+  op(c, WASM_OP_I64_SHR_U);
+  i64c(c, WALK_L2_MASK);
+  op(c, WASM_OP_I64_AND);
+  op(c, WASM_OP_I64_ADD);
+  mem(c, WASM_OP_I64_LOAD, ALIGN_8, 0);
+  ltee(c, L_HOST);
+  i64c(c, perm);
+  op(c, WASM_OP_I64_AND);
+  op(c, WASM_OP_I64_EQZ);
+  br_if(c, slow);
+  lget(c, L_HOST);
+  i64c(c, VMM_PTE_HOST_MASK);
+  op(c, WASM_OP_I64_AND);
+  lget(c, L_ADDR);
+  i64c(c, VMM_PAGE_OFFSET_MASK);
+  op(c, WASM_OP_I64_AND);
+  op(c, WASM_OP_I64_OR);
+  lset(c, L_HOST);
+}
+
+static void walk_end(Ctx *c) {
+  br(c, c->depth - 1u); /* $done */
+  end_(c);              /* $slow */
+  helper_slow_path(c);
+  end_(c); /* $done */
+}
+
+static uint8_t load_opcode(Access access, uint32_t size) {
+  const bool sign = access == ACCESS_LOAD_SIGN64 || access == ACCESS_LOAD_SIGN32;
+  switch (size) {
+  case 1: return sign ? WASM_OP_I64_LOAD8_S : WASM_OP_I64_LOAD8_U;
+  case 2: return sign ? WASM_OP_I64_LOAD16_S : WASM_OP_I64_LOAD16_U;
+  case 4: return sign ? WASM_OP_I64_LOAD32_S : WASM_OP_I64_LOAD32_U;
+  default: return WASM_OP_I64_LOAD;
+  }
+}
+
+static uint8_t store_opcode(uint32_t size) {
+  switch (size) {
+  case 1: return WASM_OP_I64_STORE8;
+  case 2: return WASM_OP_I64_STORE16;
+  case 4: return WASM_OP_I64_STORE32;
+  default: return WASM_OP_I64_STORE;
+  }
+}
+
+/* Host value -> L_VAL for a load. */
+static void emit_host_load(Ctx *c, Access access, uint32_t size, uint64_t offset, uint32_t into) {
+  lget(c, L_HOST);
+  mem(c, load_opcode(access, size), ALIGN_1, offset);
+  if (access == ACCESS_LOAD_SIGN32) mask32(c);
+  lset(c, into);
+}
+
+/* One general-register transfer at L_ADDR; `base_local`/`offset` give
+ * the written-back base when `wback`. */
+static void emit_transfer(Ctx *c, Access access, uint32_t size, uint32_t t, uint32_t n, bool wback, uint64_t offset) {
+  if (access == ACCESS_PREFETCH) return;
+  const bool store = access == ACCESS_STORE;
+  walk_begin(c, size, store ? VMM_PERM_W : VMM_PERM_R);
+  if (store) {
+    lget(c, L_HOST);
+    get_x(c, t);
+    mem(c, store_opcode(size), ALIGN_1, 0);
+  } else {
+    emit_host_load(c, access, size, 0, L_VAL);
+  }
+  if (wback) { /* the base update first, then the loaded value wins */
+    lget(c, L_BASE);
+    i64c(c, offset);
+    op(c, WASM_OP_I64_ADD);
+    set_xsp(c, n);
+  }
+  if (!store) {
+    lget(c, L_VAL);
+    set_x(c, t);
+  }
+  walk_end(c);
+}
+
+/* size/opc -> access kind (decode_single, general registers). */
+static bool decode_access(uint32_t size, uint32_t opc, bool allow_prefetch, Access *access) {
+  switch (opc) {
+  case 0: *access = ACCESS_STORE; return true;
+  case 1: *access = ACCESS_LOAD_ZERO; return true;
+  case 2:
+    if (size == 3) {
+      *access = ACCESS_PREFETCH;
+      return allow_prefetch;
+    }
+    *access = ACCESS_LOAD_SIGN64;
+    return true;
+  default:
+    if (size >= 2) return false;
+    *access = ACCESS_LOAD_SIGN32;
+    return true;
+  }
+}
+
+static void base_to_locals(Ctx *c, uint32_t n) {
+  get_xsp(c, n);
+  lset(c, L_BASE);
+}
+
+static bool c_single_unsigned_offset(Ctx *c, uint32_t insn) {
+  const uint32_t size = bits(insn, 31, 30);
+  Access access;
+  if (!decode_access(size, bits(insn, 23, 22), true, &access)) return false;
+  const uint32_t bytes = 1u << size, n = bits(insn, 9, 5);
+  if (access == ACCESS_PREFETCH) return true;
+  get_xsp(c, n);
+  i64c(c, (uint64_t)bits(insn, 21, 10) * bytes);
+  op(c, WASM_OP_I64_ADD);
+  lset(c, L_ADDR);
+  emit_transfer(c, access, bytes, bits(insn, 4, 0), n, false, 0);
+  return true;
+}
+
+static bool c_single_imm9(Ctx *c, uint32_t insn) {
+  const uint32_t size = bits(insn, 31, 30), form = bits(insn, 11, 10);
+  Access access;
+  if (!decode_access(size, bits(insn, 23, 22), form == 0, &access)) return false;
+  if (access == ACCESS_PREFETCH) return true;
+  const uint32_t n = bits(insn, 9, 5);
+  const uint64_t offset = (uint64_t)sign_extend(bits(insn, 20, 12), 9);
+  const bool wback = form == 1 || form == 3;
+  base_to_locals(c, n);
+  lget(c, L_BASE);
+  if (form != 1) {
+    i64c(c, offset);
+    op(c, WASM_OP_I64_ADD);
+  }
+  lset(c, L_ADDR);
+  emit_transfer(c, access, 1u << size, bits(insn, 4, 0), n, wback, offset);
+  return true;
+}
+
+static bool c_single_register_offset(Ctx *c, uint32_t insn) {
+  const uint32_t size = bits(insn, 31, 30), option = bits(insn, 15, 13);
+  if (!(option & 2u)) return false;
+  Access access;
+  if (!decode_access(size, bits(insn, 23, 22), true, &access)) return false;
+  if (access == ACCESS_PREFETCH) return true;
+  const uint32_t shift = bit(insn, 12) ? size : 0;
+  const uint32_t n = bits(insn, 9, 5);
+  get_xsp(c, n);
+  get_x(c, bits(insn, 20, 16));
+  if (option == 2) mask32(c);
+  else if (option == 6) op(c, WASM_OP_I64_EXTEND32_S);
+  if (shift) {
+    i64c(c, shift);
+    op(c, WASM_OP_I64_SHL);
+  }
+  op(c, WASM_OP_I64_ADD);
+  lset(c, L_ADDR);
+  emit_transfer(c, access, 1u << size, bits(insn, 4, 0), n, false, 0);
+  return true;
+}
+
+static bool c_load_literal(Ctx *c, uint32_t insn) {
+  Access access;
+  uint32_t bytes;
+  switch (bits(insn, 31, 30)) {
+  case 0: access = ACCESS_LOAD_ZERO; bytes = 4; break;
+  case 1: access = ACCESS_LOAD_ZERO; bytes = 8; break;
+  case 2: access = ACCESS_LOAD_SIGN64; bytes = 4; break;
+  default: return true; /* PRFM (literal) */
+  }
+  i64c(c, c->pc + (uint64_t)sign_extend((uint64_t)bits(insn, 23, 5) << 2, 21));
+  lset(c, L_ADDR);
+  emit_transfer(c, access, bytes, bits(insn, 4, 0), 0, false, 0);
+  return true;
+}
+
+static bool c_pair(Ctx *c, uint32_t insn) {
+  const uint32_t opc = bits(insn, 31, 30), form = bits(insn, 24, 23);
+  const bool load = bit(insn, 22);
+  Access access;
+  uint32_t bytes;
+  switch (opc) {
+  case 0: bytes = 4; access = load ? ACCESS_LOAD_ZERO : ACCESS_STORE; break;
+  case 1:
+    if (!load || form == 0) return false;
+    bytes = 4; access = ACCESS_LOAD_SIGN64;
+    break;
+  case 2: bytes = 8; access = load ? ACCESS_LOAD_ZERO : ACCESS_STORE; break;
+  default: return false;
+  }
+  const uint32_t n = bits(insn, 9, 5), t = bits(insn, 4, 0), t2 = bits(insn, 14, 10);
+  const uint64_t offset = (uint64_t)sign_extend(bits(insn, 21, 15), 7) * bytes;
+  const bool wback = form == 1 || form == 3;
+  base_to_locals(c, n);
+  lget(c, L_BASE);
+  if (form != 1) {
+    i64c(c, offset);
+    op(c, WASM_OP_I64_ADD);
+  }
+  lset(c, L_ADDR);
+  walk_begin(c, 2u * bytes, load ? VMM_PERM_R : VMM_PERM_W);
+  if (!load) {
+    lget(c, L_HOST);
+    get_x(c, t);
+    mem(c, store_opcode(bytes), ALIGN_1, 0);
+    lget(c, L_HOST);
+    get_x(c, t2);
+    mem(c, store_opcode(bytes), ALIGN_1, bytes);
+  } else {
+    emit_host_load(c, access, bytes, 0, L_VAL);
+    emit_host_load(c, access, bytes, bytes, L_VAL2);
+  }
+  if (wback) {
+    lget(c, L_BASE);
+    i64c(c, offset);
+    op(c, WASM_OP_I64_ADD);
+    set_xsp(c, n);
+  }
+  if (load) {
+    lget(c, L_VAL);
+    set_x(c, t);
+    lget(c, L_VAL2);
+    set_x(c, t2);
+  }
+  walk_end(c);
+  return true;
+}
+
+static bool c_load_store(Ctx *c, uint32_t insn) {
+  if (bit(insn, 26)) return false; /* SIMD&FP: the interpreter, for now */
+  switch (bits(insn, 29, 28)) {
+  case 0: return false; /* exclusive, acquire/release */
+  case 1: return bit(insn, 24) ? false : c_load_literal(c, insn);
+  case 2: return c_pair(c, insn);
+  default:
+    if (bit(insn, 24)) return c_single_unsigned_offset(c, insn);
+    if (bit(insn, 21) == 0) return c_single_imm9(c, insn);
+    if (bits(insn, 11, 10) == 2) return c_single_register_offset(c, insn);
+    return false;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Branches and system.                                                */
+/* ------------------------------------------------------------------ */
+
+typedef enum Outcome {
+  OUTCOME_NEXT,     /* inlined; the block goes on */
+  OUTCOME_HELPER,   /* not inlined; the interpreter runs it, block goes on */
+  OUTCOME_END,      /* the block ended (an exit was emitted) */
+  OUTCOME_END_HELPER, /* not inlined, and the block ends after it */
+} Outcome;
+
+static uint64_t branch_target(Ctx *c, uint32_t insn, unsigned hi, unsigned lo) {
+  return c->pc + (uint64_t)sign_extend((uint64_t)bits(insn, hi, lo) << 2, hi - lo + 3u);
+}
+
+/* if (condition on stack) target else next -> exit. */
+static void exit_conditional(Ctx *c, uint64_t target) {
+  open_if(c, WASM_TYPE_I64);
+  i64c(c, target);
+  else_(c);
+  i64c(c, c->pc + INSN_BYTES);
+  end_(c);
+  exit_to_stack(c);
+}
+
+#define SYSREG_FIELD_MASK (0xFFFFu << 5)
+
+static Outcome c_system(Ctx *c, uint32_t insn) {
+  const bool read = bit(insn, 21);
+  const uint32_t op0 = bits(insn, 20, 19), op1 = bits(insn, 18, 16);
+  const uint32_t crn = bits(insn, 15, 12), op2 = bits(insn, 7, 5), rt = bits(insn, 4, 0);
+  if (op0 == 0) {
+    if (read || op1 != 3 || rt != REG_ZR) return OUTCOME_END_HELPER;
+    if (crn == 2) return OUTCOME_NEXT; /* hints */
+    if (crn == 3) {
+      if (op2 == 2) { /* CLREX */
+        lget(c, L_STATE);
+        i32c(c, 0);
+        mem(c, WASM_OP_I32_STORE8, ALIGN_1, OFF_EXCLUSIVE_VALID);
+        return OUTCOME_NEXT;
+      }
+      if (op2 >= 4 && op2 != 7) return OUTCOME_NEXT; /* DSB, DMB, ISB */
+    }
+    return OUTCOME_END_HELPER;
+  }
+  if (op0 == 1) return OUTCOME_END_HELPER; /* SYS: cache maintenance, DC ZVA */
+  const uint32_t reg = insn & SYSREG_FIELD_MASK;
+  if (read) {
+    switch (reg) {
+    case CPU_SYSREG_TPIDRRO_EL0: state_load64(c, OFF_TPIDRRO); break;
+    case CPU_SYSREG_TPIDR_EL0: state_load64(c, OFF_TPIDR); break;
+    case CPU_SYSREG_NZCV: load_flags(c); op(c, WASM_OP_I64_EXTEND_I32_U); break;
+    case CPU_SYSREG_FPCR:
+      lget(c, L_STATE);
+      mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPCR);
+      op(c, WASM_OP_I64_EXTEND_I32_U);
+      break;
+    case CPU_SYSREG_FPSR:
+      lget(c, L_STATE);
+      mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
+      op(c, WASM_OP_I64_EXTEND_I32_U);
+      break;
+    default: return OUTCOME_HELPER; /* counters (exact cycles), CTR, DCZID, unknown */
+    }
+    set_x(c, rt);
+    return OUTCOME_NEXT;
+  }
+  switch (reg) {
+  case CPU_SYSREG_NZCV:
+    get_x(c, rt);
+    op(c, WASM_OP_I32_WRAP_I64);
+    i32c(c, CPU_PSTATE_NZCV_MASK);
+    op(c, WASM_OP_I32_AND);
+    store_flags(c);
+    return OUTCOME_NEXT;
+  case CPU_SYSREG_TPIDR_EL0:
+    lget(c, L_STATE);
+    get_x(c, rt);
+    mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_TPIDR);
+    return OUTCOME_NEXT;
+  default:
+    return OUTCOME_HELPER;
+  }
+}
+
+static Outcome c_branch_system(Ctx *c, uint32_t insn) {
+  if (bits(insn, 30, 26) == 0x05) { /* B, BL */
+    if (bit(insn, 31)) {
+      if (g_interp_trace_count) return OUTCOME_END_HELPER;
+      i64c(c, c->pc + INSN_BYTES);
+      set_x(c, CPU_REG_X30);
+    }
+    i64c(c, branch_target(c, insn, 25, 0));
+    exit_to_stack(c);
+    return OUTCOME_END;
+  }
+  if (bits(insn, 30, 25) == 0x1A) { /* CBZ, CBNZ */
+    get_xw(c, bits(insn, 4, 0), bit(insn, 31));
+    op(c, WASM_OP_I64_EQZ);
+    if (bit(insn, 24)) op(c, WASM_OP_I32_EQZ);
+    exit_conditional(c, branch_target(c, insn, 23, 5));
+    return OUTCOME_END;
+  }
+  if (bits(insn, 30, 25) == 0x1B) { /* TBZ, TBNZ */
+    get_x(c, bits(insn, 4, 0));
+    i64c(c, (uint64_t)1 << ((bit(insn, 31) << 5) | bits(insn, 23, 19)));
+    op(c, WASM_OP_I64_AND);
+    op(c, WASM_OP_I64_EQZ);
+    if (bit(insn, 24)) op(c, WASM_OP_I32_EQZ);
+    exit_conditional(c, branch_target(c, insn, 18, 5));
+    return OUTCOME_END;
+  }
+  if (bits(insn, 31, 24) == 0x54) { /* B.cond */
+    if (bit(insn, 4)) return OUTCOME_END_HELPER;
+    emit_condition(c, bits(insn, 3, 0));
+    exit_conditional(c, branch_target(c, insn, 23, 5));
+    return OUTCOME_END;
+  }
+  if (bits(insn, 31, 22) == 0x354) return c_system(c, insn);
+  if (bits(insn, 31, 25) == 0x6B) { /* BR, BLR, RET */
+    const uint32_t opc = bits(insn, 24, 21);
+    if (bits(insn, 20, 16) != 0x1F || bits(insn, 15, 10) != 0 || bits(insn, 4, 0) != 0 || opc > 2u) {
+      return OUTCOME_END_HELPER;
+    }
+    if (g_interp_trace_count && opc != 0) return OUTCOME_END_HELPER;
+    get_x(c, bits(insn, 9, 5));
+    if (opc == 1) {
+      i64c(c, c->pc + INSN_BYTES);
+      set_x(c, CPU_REG_X30);
+    }
+    exit_to_stack(c);
+    return OUTCOME_END;
+  }
+  return OUTCOME_END_HELPER; /* SVC, BRK, undefined */
+}
+
+/* ------------------------------------------------------------------ */
+/* Blocks and modules.                                                 */
+/* ------------------------------------------------------------------ */
+
+static Outcome compile_instruction(Ctx *c, uint32_t insn) {
+  switch (bits(insn, 28, 25)) {
+  case 0x8: case 0x9: return c_dp_immediate(c, insn) ? OUTCOME_NEXT : OUTCOME_HELPER;
+  case 0xA: case 0xB: return c_branch_system(c, insn);
+  case 0x4: case 0x6: case 0xC: case 0xE: return c_load_store(c, insn) ? OUTCOME_NEXT : OUTCOME_HELPER;
+  case 0x5: case 0xD: return c_dp_register(c, insn) ? OUTCOME_NEXT : OUTCOME_HELPER;
+  default: return OUTCOME_HELPER; /* SIMD&FP, undefined */
+  }
+}
+
+/* The instructions of the block into $exit; returns how many. */
+static uint32_t compile_body(Ctx *c, const uint32_t *code, uint32_t count) {
+  uint32_t i = 0;
+  for (; i < count; i++) {
+    c->insn = code[i];
+    c->pc += i == 0 ? 0 : INSN_BYTES;
+    const uint32_t mark = c->b->length;
+    const uint64_t used = c->used, written = c->written;
+    const uint32_t depth = c->depth;
+    Outcome outcome = compile_instruction(c, c->insn);
+    if (outcome == OUTCOME_HELPER || outcome == OUTCOME_END_HELPER) {
+      /* Throw away anything a decoder emitted before giving up. */
+      c->b->length = mark;
+      c->used = used;
+      c->written = written;
+      c->depth = depth;
+    }
+    switch (outcome) {
+    case OUTCOME_NEXT: c->pending++; break;
+    case OUTCOME_HELPER: helper_continue(c); break;
+    case OUTCOME_END: return i + 1u;
+    case OUTCOME_END_HELPER: helper_terminate(c); return i + 1u;
+    }
+  }
+  /* Ran off the end (block limit or page end): continue at the next pc. */
+  i64c(c, c->pc + INSN_BYTES);
+  lset(c, L_NPC);
+  i64c(c, c->pending);
+  lset(c, L_NCYCLES);
+  br(c, LEVEL_EXIT);
+  return i;
+}
+
+static void emit_function(Ctx *c, const uint32_t *code, uint32_t count, uint64_t pc, uint32_t *compiled) {
+  /* Locals: one run of i64, one of i32. */
+  wasm_uleb(c->b, 2);
+  wasm_uleb(c->b, I64_LOCALS);
+  wasm_u8(c->b, WASM_TYPE_I64);
+  wasm_uleb(c->b, I32_LOCALS);
+  wasm_u8(c->b, WASM_TYPE_I32);
+
+  /* Prologue. */
+  state_load64(c, OFF_L1);
+  lset(c, L_L1);
+  reload(c);
+
+  c->depth = 0;
+  open_block(c); /* $raw */
+  open_block(c); /* $exit */
+  c->pc = pc;
+  c->pending = 0;
+  *compiled = compile_body(c, code, count);
+  end_(c); /* $exit */
+
+  /* Epilogue. */
+  spill(c);
+  state_store64_local(c, OFF_PC, L_NPC);
+  static const uint64_t counters[2] = {OFF_CYCLES, OFF_TOTAL_CYCLES};
+  for (uint32_t i = 0; i < 2u; i++) {
+    lget(c, L_STATE);
+    state_load64(c, counters[i]);
+    lget(c, L_NCYCLES);
+    op(c, WASM_OP_I64_ADD);
+    mem(c, WASM_OP_I64_STORE, ALIGN_8, counters[i]);
+  }
+  i32c(c, JIT_BLOCK_CONTINUE);
+  op(c, WASM_OP_RETURN);
+  end_(c); /* $raw */
+  lget(c, L_STATUS);
+  op(c, WASM_OP_END);
+}
+
+static void name(Wasm_Buf *b, const char *text) {
+  const uint32_t length = (uint32_t)strlen(text);
+  wasm_uleb(b, length);
+  wasm_bytes(b, text, length);
+}
+
+static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
+  wasm_bytes(b, WASM_MAGIC, WASM_MAGIC_BYTES);
+  const uint8_t version[WASM_VERSION_BYTES] = {WASM_VERSION, 0, 0, 0};
+  wasm_bytes(b, version, WASM_VERSION_BYTES);
+
+  wasm_u8(b, WASM_SECTION_TYPE);
+  uint32_t size = wasm_reserve_size(b);
+  wasm_uleb(b, 2);
+  wasm_u8(b, WASM_TYPE_FUNC); /* TYPE_BLOCK: (i64) -> i32 */
+  wasm_uleb(b, 1);
+  wasm_u8(b, WASM_TYPE_I64);
+  wasm_uleb(b, 1);
+  wasm_u8(b, WASM_TYPE_I32);
+  wasm_u8(b, WASM_TYPE_FUNC); /* TYPE_INTERPRET: (i64, i32) -> i32 */
+  wasm_uleb(b, 2);
+  wasm_u8(b, WASM_TYPE_I64);
+  wasm_u8(b, WASM_TYPE_I32);
+  wasm_uleb(b, 1);
+  wasm_u8(b, WASM_TYPE_I32);
+  wasm_patch_size(b, size);
+
+  wasm_u8(b, WASM_SECTION_IMPORT);
+  size = wasm_reserve_size(b);
+  wasm_uleb(b, 2);
+  name(b, "env");
+  name(b, "interpret");
+  wasm_u8(b, WASM_EXTERNAL_FUNCTION);
+  wasm_uleb(b, TYPE_INTERPRET);
+  name(b, "env");
+  name(b, "memory");
+  wasm_u8(b, WASM_EXTERNAL_MEMORY);
+  wasm_u8(b, WASM_LIMITS_HAS_MAX | WASM_LIMITS_SHARED | WASM_LIMITS_MEMORY64);
+  wasm_uleb(b, memory_pages);
+  wasm_uleb(b, memory_pages);
+  wasm_patch_size(b, size);
+
+  wasm_u8(b, WASM_SECTION_FUNCTION);
+  size = wasm_reserve_size(b);
+  wasm_uleb(b, 1);
+  wasm_uleb(b, TYPE_BLOCK);
+  wasm_patch_size(b, size);
+
+  wasm_u8(b, WASM_SECTION_EXPORT);
+  size = wasm_reserve_size(b);
+  wasm_uleb(b, 1);
+  name(b, "b");
+  wasm_u8(b, WASM_EXTERNAL_FUNCTION);
+  wasm_uleb(b, FUNC_BLOCK);
+  wasm_patch_size(b, size);
+}
+
+/* Analysis output is discarded; it only needs room. */
+#define JIT_ANALYSIS_BYTES (256u * 1024u)
+static uint8_t g_analysis[JIT_ANALYSIS_BYTES];
+
+bool jit_compile_block(uint64_t pc, const uint32_t *code, uint32_t available, uint64_t memory_pages, uint8_t *out,
+                       uint32_t capacity, Jit_Compiled *result) {
+  uint32_t count = available < JIT_MAX_BLOCK_INSNS ? available : JIT_MAX_BLOCK_INSNS;
+  while (count > 0) {
+    /* Pass 1: which registers does the block touch? */
+    Wasm_Buf scratch = wasm_buf(g_analysis, JIT_ANALYSIS_BYTES);
+    Ctx analysis = {0};
+    analysis.b = &scratch;
+    uint32_t compiled = 0;
+    emit_function(&analysis, code, count, pc, &compiled);
+
+    /* Pass 2: the module. */
+    Wasm_Buf b = wasm_buf(out, capacity);
+    emit_module_header(&b, memory_pages);
+    wasm_u8(&b, WASM_SECTION_CODE);
+    const uint32_t section = wasm_reserve_size(&b);
+    wasm_uleb(&b, 1);
+    const uint32_t body = wasm_reserve_size(&b);
+    Ctx c = {0};
+    c.b = &b;
+    c.all_used = analysis.used | analysis.written;
+    c.all_written = analysis.written;
+    emit_function(&c, code, compiled, pc, &compiled);
+    wasm_patch_size(&b, body);
+    wasm_patch_size(&b, section);
+    if (!b.overflow && !scratch.overflow) {
+      result->instructions = compiled;
+      result->module_bytes = b.length;
+      return true;
+    }
+    count /= 2u; /* too big: try a shorter block */
+  }
+  return false;
+}
