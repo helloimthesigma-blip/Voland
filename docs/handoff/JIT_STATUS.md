@@ -48,6 +48,17 @@ SVC count are identical to the interpreter's.
   for the hottest FP ops are next. The full gameplay recipe has not been
   checked yet.
 
+## Whole-game check
+
+The CLI gameplay recipe ran 3.3M slices on the same commit (a5a4d0d):
+the JIT under Node/wasm, and the native interpreter. They end with
+identical virtual time (1,390,127,058 ticks), SVC count (1,687,655) and
+final frame hash (52bda05e66a4a325).
+
+Intermediate frame dumps differ by a few pixels (at most 0.08%). That
+comes from the software rasterizer's floating point, native versus wasm;
+the guest's own history is identical.
+
 ## How it is tested
 
 `tests/jit_diff_test.c` runs random A64 streams through the interpreter's
