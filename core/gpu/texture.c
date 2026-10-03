@@ -831,6 +831,10 @@ void tex_gather(const Tex_Image *img, const Tex_Sampler *s, const float coords[3
   }
 }
 
+void tex_texel(const Tex_Image *img, uint32_t x, uint32_t y, uint32_t layer, uint32_t out[4]) {
+  texel_at(img, NULL, (int32_t)x, (int32_t)y, layer, out);
+}
+
 void tex_fetch(const Tex_Image *img, const int32_t coords[3], int32_t layer, uint32_t out[4]) {
   if (!img || !img->valid || coords[0] < 0 || coords[1] < 0 || (uint32_t)coords[0] >= img->width ||
       (uint32_t)coords[1] >= img->height) {

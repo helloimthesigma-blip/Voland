@@ -463,6 +463,22 @@ static void t2d_blit(Gpu_Channel *ch, const Gpu_Memory *mem) {
   const uint32_t *r = ch->engine2d;
   const Blit_Surface src = t2d_surface(r, T2D_SRC_FORMAT), dst = t2d_surface(r, T2D_DST_FORMAT);
   const uint32_t bpp = dst.bytes_per_pixel;
+  if (mem->renderer && mem->renderer->gpu) {
+    /* GPU mode: a blit from a GPU surface stays on the GPU. */
+    const int64_t du_dx = fixed32(r[T2D_DU_DX_FRAC + 1u], r[T2D_DU_DX_FRAC]);
+    const int64_t dv_dy = fixed32(r[T2D_DU_DX_FRAC + 3u], r[T2D_DU_DX_FRAC + 2u]);
+    const uint32_t w = r[T2D_DST_X0 + 2u], h = r[T2D_DST_X0 + 3u];
+    const Raster3d_Surface_Ref sref = {src.s.base, src.width, src.height, src.format, !src.s.pitch_linear,
+                                       src.s.block_height_log2, src.s.pitch};
+    const Raster3d_Surface_Ref dref = {dst.s.base, dst.width, dst.height, dst.format, !dst.s.pitch_linear,
+                                       dst.s.block_height_log2, dst.s.pitch};
+    const int32_t src_rect[4] = {(int32_t)r[T2D_SRC_X0_FRAC + 1u], (int32_t)r[T2D_SRC_Y0_INT],
+                                 (int32_t)(((int64_t)w * du_dx) >> 32), (int32_t)(((int64_t)h * dv_dy) >> 32)};
+    const int32_t dst_rect[4] = {(int32_t)r[T2D_DST_X0], (int32_t)r[T2D_DST_X0 + 1u], (int32_t)w, (int32_t)h};
+    if (raster3d_gpu_copy(mem->renderer, mem, &sref, &dref, src_rect, dst_rect,
+                          (r[T2D_SAMPLE_MODE] & T2D_SAMPLE_FILTER_BILINEAR) != 0))
+      return;
+  }
   const bool swap_rb = (t2d_is_bgra(src.format) && t2d_is_rgba(dst.format)) || (t2d_is_rgba(src.format) && t2d_is_bgra(dst.format));
   const bool convertible = src.format == dst.format || swap_rb || (t2d_is_rgba(src.format) && t2d_is_rgba(dst.format)) ||
                            (t2d_is_bgra(src.format) && t2d_is_bgra(dst.format));

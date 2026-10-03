@@ -33,6 +33,7 @@
 #include "gpu/texture.h"
 
 struct Gpu_Memory;
+struct Gpu_Stream;
 
 #define RASTER_BIND_GROUPS 5u
 #define RASTER_SURFACES 12u
@@ -55,6 +56,9 @@ struct Gpu_Memory;
 #define RASTER_STREAMS 32u
 #define RASTER_STREAM_WINDOW 0x1000u
 #define RASTER_PROGRAM_READ_BYTES (SM_SPH_BYTES + SM_MAX_WORDS * 8u)
+/* GPU mode (raster3d_set_gpu): render targets as GPU textures, shaders. */
+#define RASTER_GPU_SURFACES 64u
+#define RASTER_GPU_SHADERS 1024u
 
 typedef struct Raster3d_Bindings {
   uint64_t address[RASTER_BIND_GROUPS][SM_CBUF_SLOTS];
@@ -96,7 +100,48 @@ typedef struct Raster3d_Texture {
   size_t pool_bytes;
   uint32_t last_used;    /* draw serial; the current draw's textures are never evicted */
   Tex_Image image;
+  /* GPU mode: the GPU texture holding it (0 = none) and what was uploaded. */
+  uint32_t gpu_id;
+  uint64_t gpu_hash;
+  uint32_t gpu_width, gpu_height, gpu_layers, gpu_format;
 } Raster3d_Texture;
+
+/* GPU mode: a render target that lives only on the GPU (its guest memory
+ * is not written: presents and copies of it become stream records). */
+typedef struct Raster3d_Gpu_Surface {
+  bool in_use;
+  bool depth;
+  bool stale;           /* guest memory was written by someone else: re-upload before use */
+  uint32_t id;
+  uint64_t address;     /* GPU virtual address */
+  uint64_t cpu_address; /* the guest address it maps to (presents name buffers by it) */
+  uint32_t width, height;
+  uint32_t format;      /* the render-target (or zeta) format */
+  uint32_t gpu_format;  /* GPU_FMT_* */
+  uint32_t bytes_per_pixel;
+  bool block_linear;
+  uint32_t block_height_log2;
+  uint32_t pitch;
+  uint64_t guest_bytes;
+  uint32_t last_used;
+} Raster3d_Gpu_Surface;
+
+typedef struct Raster3d_Gpu_Shader {
+  uint64_t key;         /* wgsl_desc_hash */
+  uint32_t id;          /* 0: free; UINT32_MAX: did not translate */
+} Raster3d_Gpu_Shader;
+
+typedef struct Raster3d_Gpu_Stats {
+  uint64_t draws;
+  uint64_t triangles;
+  uint64_t shaders;
+  uint64_t untranslated_draws;
+  uint64_t texture_uploads;
+  uint64_t upload_bytes;
+  uint64_t surfaces;
+  uint64_t presents;
+  uint64_t copies;
+} Raster3d_Gpu_Stats;
 
 typedef struct Raster3d_Stats {
   uint64_t draws;
@@ -141,6 +186,15 @@ typedef struct Raster3d {
   /* Diagnostics: called with every newly decoded shader program (may be NULL). */
   void (*on_program_decoded)(void *user, const Sm_Program *program);
   void *on_program_user;
+  /* GPU mode (§13 WebGPU renderer): set by raster3d_set_gpu. */
+  struct Gpu_Stream *gpu;
+  uint32_t gpu_next_id;
+  Raster3d_Gpu_Surface gpu_surfaces[RASTER_GPU_SURFACES];
+  Raster3d_Gpu_Shader *gpu_shaders;  /* RASTER_GPU_SHADERS, open addressing */
+  char *gpu_wgsl;                    /* translation buffer */
+  uint8_t *gpu_vertices;             /* the current draw's vertices */
+  uint32_t *gpu_data;                /* the current draw's constants + constant buffers */
+  Raster3d_Gpu_Stats gpu_stats;
 } Raster3d;
 
 /* Bytes of backing storage raster3d_init needs (one allocation). */
@@ -192,7 +246,38 @@ void raster3d_sync_range(Raster3d *r, const struct Gpu_Memory *mem, uint64_t add
  * raster3d_sync_range) invalidate exactly what they touch at once. */
 void raster3d_end_frame(Raster3d *r);
 
-/* Writes every dirty render target back to guest memory. */
+/* Writes every dirty render target back to guest memory (GPU mode:
+ * publishes the stream). */
 void raster3d_flush(Raster3d *r, const struct Gpu_Memory *mem);
+
+/* GPU mode: draws, clears and copies become records on `stream` for the
+ * GPU worker's WebGPU renderer instead of being rasterised here; vertex
+ * work, assembly, clipping and culling stay on this side, pixel programs
+ * are translated to WGSL (gpu/wgsl.h). NULL returns to software. */
+void raster3d_set_gpu(Raster3d *r, struct Gpu_Stream *stream);
+
+/* GPU mode: the guest presents the buffer at `address` (width x height,
+ * QueueBuffer's crop rectangle x, y, w, h - w 0 for all - and
+ * GPU_PRESENT_FLIP_* flags). True when a GPU surface holds it and a
+ * PRESENT record went out; false: the caller presents guest memory. */
+bool raster3d_gpu_present(Raster3d *r, uint64_t cpu_address, uint32_t width, uint32_t height, const int32_t crop[4],
+                          uint32_t flags);
+
+/* A surface a copy engine names (the 2D engine's source / destination). */
+typedef struct Raster3d_Surface_Ref {
+  uint64_t address;
+  uint32_t width, height;
+  uint32_t format;        /* render-target colour format */
+  bool block_linear;
+  uint32_t block_height_log2;
+  uint32_t pitch;
+} Raster3d_Surface_Ref;
+
+/* GPU mode: a 2D-engine blit. True when the source is a GPU surface and a
+ * COPY record went out (the destination becomes one); false: the caller
+ * copies guest memory. Rectangles are x, y, w, h. */
+bool raster3d_gpu_copy(Raster3d *r, const struct Gpu_Memory *mem, const Raster3d_Surface_Ref *src,
+                       const Raster3d_Surface_Ref *dst, const int32_t src_rect[4], const int32_t dst_rect[4],
+                       bool linear);
 
 #endif /* SWITCH_GPU_RASTER3D_H */

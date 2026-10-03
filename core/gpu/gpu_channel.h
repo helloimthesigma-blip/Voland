@@ -80,6 +80,10 @@ typedef struct Gpu_Memory {
   /* The 3D reference renderer (gpu/raster3d). NULL: draws and clears
    * are counted and skipped. */
   Raster3d *renderer;
+  /* The guest (CPU) address of GPU address `gpu_va`; may be NULL. The
+   * WebGPU renderer matches presented buffers (CPU addresses) to the
+   * render targets (GPU addresses) that hold them. */
+  bool (*translate)(void *user, uint64_t gpu_va, uint64_t *guest_va);
 } Gpu_Memory;
 
 typedef struct Gpu_Channel {

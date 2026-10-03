@@ -133,6 +133,11 @@ void tex_gather(const Tex_Image *image, const Tex_Sampler *sampler, const float 
                 uint32_t component, float dref, bool shadow, const int32_t offset[3], uint32_t out[4]);
 void tex_fetch(const Tex_Image *image, const int32_t coords[3], int32_t layer, uint32_t out[4]);
 
+/* The texel at (x, y, layer) of a valid image as sampling sees it before
+ * the swizzle: floats (as bits) or raw integers (the WebGPU renderer's
+ * upload of formats it has no direct equivalent for). */
+void tex_texel(const Tex_Image *image, uint32_t x, uint32_t y, uint32_t layer, uint32_t out[4]);
+
 /* One texel, unswizzled, as floats (or integer bits): R, G, B, A. */
 void tex_decode_texel(uint32_t format, const uint8_t data_type[4], bool srgb, const uint8_t *texel, uint32_t out[4]);
 

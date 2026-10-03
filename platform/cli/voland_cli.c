@@ -14,6 +14,9 @@
  *       --dump-frame FILE            write the newest frame as a binary PPM (P6)
  *       --frame-skip N               rasterise and show one of every N + 1 frames
  *       --dump-frames-every N        with --dump-frame: also write FILE.<slice>.ppm
+ *       --gpu-stream FILE            run the WebGPU renderer's producer (GPU mode) and record
+ *                                    its stream to FILE (u32 type, u32 bytes, payload per
+ *                                    record) - replayed by platform/web/tools/replay-gpu-stream.mjs
  *                                    every N slices (watching a long run progress)
  *       --snapshot-at N --snapshot-dir DIR
  *                                    (POSIX) at slice N, stop and serve jobs: each
@@ -56,6 +59,7 @@
 #include "hle/kernel/handle_table.h"
 #include "cpu/backends/interpreter/interpreter.h"
 #include "gpu/framebuffer.h"
+#include "gpu/gpu_stream.h"
 #include "gpu/wgsl.h"
 #include "hle/loader/nca_parse.h"
 #include "hle/loader/nro.h"
@@ -412,12 +416,39 @@ static void snapshot_serve(const char *dir, Snapshot_Job *job) {
 
 static void setup_call_trace(Emulator *emu);
 
+/* --gpu-stream: the ring the GPU-mode producer writes, drained into a file
+ * whenever it fills and after every slice. */
+#define CLI_GPU_RING_BYTES ((uint64_t)4 * 1024 * 1024)
+static _Alignas(8) uint8_t g_gpu_header[GPU_STREAM_HEADER_BYTES];
+static _Alignas(8) uint8_t g_gpu_ring[CLI_GPU_RING_BYTES];
+static Gpu_Stream g_gpu_stream;
+static FILE *g_gpu_file;
+static uint64_t g_gpu_records;
+
+static void gpu_stream_drain(void) {
+  Gpu_Stream_Record rec;
+  while (gpu_stream_read(g_gpu_header, &rec)) {
+    const uint32_t head[2] = {rec.type, rec.payload_bytes};
+    fwrite(head, sizeof(head), 1, g_gpu_file);
+    fwrite(rec.payload, 1, rec.payload_bytes, g_gpu_file);
+    gpu_stream_consume(g_gpu_header, &rec);
+    g_gpu_records++;
+  }
+}
+
+static void gpu_stream_wait(void *user, volatile int32_t *word, int32_t expected) {
+  (void)user;
+  (void)word;
+  (void)expected;
+  gpu_stream_drain();
+}
+
 static int run(int argc, char **argv) {
   if (argc < 1) return EXIT_USAGE;
   const char *path = argv[0];
   const CPU_Backend *backend = &CPU_BACKEND_INTERPRETER;
   uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES, dump_every = 0, snapshot_at = 0;
-  const char *snapshot_dir = NULL;
+  const char *snapshot_dir = NULL, *gpu_stream_path = NULL;
   uint32_t frame_skip = 0;
   bool test_card = false, svc_stats = false, swkbd_cancel = false;
   const char *swkbd_text = NULL;
@@ -467,6 +498,8 @@ static int run(int argc, char **argv) {
       snapshot_dir = argv[++i];
     } else if (!strcmp(argv[i], "--dump-frames-every") && has_value) {
       dump_every = strtoull(argv[++i], NULL, 0);
+    } else if (!strcmp(argv[i], "--gpu-stream") && has_value) {
+      gpu_stream_path = argv[++i];
     } else if (!strcmp(argv[i], "--dump-frame") && has_value) {
       frame_path = argv[++i];
     } else if (!strcmp(argv[i], "--sdmc") && has_value) {
@@ -542,6 +575,15 @@ static int run(int argc, char **argv) {
     emu.renderer.on_texture_decoded = dump_texture;
     emu.renderer.on_texture_user = getenv("VOLAND_DUMP_TEXTURES");
   }
+  if (gpu_stream_path) {
+    g_gpu_file = fopen(gpu_stream_path, "wb");
+    if (!g_gpu_file) {
+      fprintf(stderr, "voland-cli: cannot write %s\n", gpu_stream_path);
+      return EXIT_USAGE;
+    }
+    gpu_stream_init(&g_gpu_stream, g_gpu_header, g_gpu_ring, CLI_GPU_RING_BYTES, gpu_stream_wait, NULL);
+    raster3d_set_gpu(&emu.renderer, &g_gpu_stream);
+  }
   /* VOLAND_TRACE_DRAWS=START:LENGTH logs every draw in that slice window. */
   uint64_t trace_start = UINT64_MAX, trace_length = 0;
   if (getenv("VOLAND_TRACE_DRAWS")) {
@@ -588,6 +630,7 @@ static int run(int argc, char **argv) {
       }
     }
     framebuffer_consume_all(); /* the CLI "displays" every frame at once */
+    if (g_gpu_file) gpu_stream_drain();
     audio_frames += drain_audio(wav); /* and plays (or discards) every sample */
     slices++;
     if (frame_path && dump_every && slices % dump_every == 0) {
@@ -597,6 +640,20 @@ static int run(int argc, char **argv) {
     }
   }
 
+  if (g_gpu_file) {
+    gpu_stream_publish(&g_gpu_stream);
+    gpu_stream_drain();
+    fclose(g_gpu_file);
+    const Raster3d_Gpu_Stats *gs = &emu.renderer.gpu_stats;
+    fprintf(stderr,
+            "voland-cli: GPU stream: %llu records (%llu MB); %llu draws, %llu triangles, %llu shaders, %llu untranslated "
+            "draws, %llu texture uploads (%llu MB), %llu surfaces, %llu presents, %llu copies\n",
+            (unsigned long long)g_gpu_records, (unsigned long long)(g_gpu_stream.bytes >> 20),
+            (unsigned long long)gs->draws, (unsigned long long)gs->triangles, (unsigned long long)gs->shaders,
+            (unsigned long long)gs->untranslated_draws, (unsigned long long)gs->texture_uploads,
+            (unsigned long long)(gs->upload_bytes >> 20), (unsigned long long)gs->surfaces,
+            (unsigned long long)gs->presents, (unsigned long long)gs->copies);
+  }
   uint32_t width = 0, height = 0;
   const uint64_t frame_hash = newest_frame_hash(&width, &height);
   static const char *const k_status[] = {"running", "idle", "exited", "crashed", "deadlock", "not loaded"};

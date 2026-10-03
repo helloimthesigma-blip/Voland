@@ -53,6 +53,11 @@ enum {
   GPU_FMT_DEPTH24_STENCIL8,
   GPU_FMT_DEPTH32F,
   GPU_FMT_DEPTH32F_STENCIL8,
+  GPU_FMT_BGRA8_SRGB,
+  GPU_FMT_STENCIL8,
+  GPU_FMT_RGBA16_SINT,
+  GPU_FMT_RGBA32_SINT,
+  GPU_FMT_R32_SINT,
   GPU_FMT_COUNT,
 };
 
@@ -79,7 +84,8 @@ typedef struct Gpu_Rec_Clear {
   uint32_t flags;        /* GPU_CLEAR_* */
   uint32_t depth;        /* f32 bits */
   uint32_t stencil;
-  int32_t rect[4];       /* x, y, width, height; width 0 = whole target */
+  uint32_t stencil_mask; /* bits of the stencil value written */
+  int32_t rect[4];       /* x, y, width, height */
 } Gpu_Rec_Clear;
 
 /* Blend factors / ops / compare functions: WebGPU's, by index into the
@@ -131,20 +137,20 @@ typedef struct Gpu_Rec_Draw {
   uint32_t vertex_count;      /* vertices (a triangle list) follow the bindings */
 } Gpu_Rec_Draw;
 
-#define GPU_BIND_CBUF 1u    /* storage buffer: Gpu_Rec_Binding, then `bytes` of data (padded to 8) */
-#define GPU_BIND_TEXTURE 2u /* texture + sampler at `binding` and `binding + 1` */
+#define GPU_BIND_DATA 1u    /* read-only storage buffer: Gpu_Rec_Binding, then `bytes` of data (a multiple of 8) */
+#define GPU_BIND_TEXTURE 2u /* texture_2d_array (gpu/wgsl.h: read with textureLoad) */
 
 typedef struct Gpu_Rec_Binding {
   uint32_t kind;
   uint32_t binding;
-  uint32_t bytes;        /* CBUF: data bytes that follow */
+  uint32_t bytes;        /* DATA: data bytes that follow */
   uint32_t texture_id;   /* TEXTURE */
-  uint32_t filter;       /* TEXTURE: 0 nearest, 1 linear */
-  uint32_t wrap[3];      /* TEXTURE: 0 repeat, 1 mirror, 2 clamp */
-  uint32_t compare;      /* TEXTURE: 0 none, else GPU_CMP_* + 1 */
 } Gpu_Rec_Binding;
 
-/* Vertex: x, y, z, 1/w (f32), then varying_count x 4 u32. */
+/* Vertex: x, y (WebGPU NDC), z, 1/w (f32), then varying_count x 4 u32.
+ * Front-facing triangles wind counter-clockwise in NDC (y up), back-facing
+ * ones clockwise: the producer has culled already (cullMode none), the
+ * winding only feeds @builtin(front_facing). */
 #define GPU_VERTEX_HEADER_WORDS 4u
 
 typedef struct Gpu_Rec_Copy {

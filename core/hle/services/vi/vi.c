@@ -7,6 +7,8 @@
 #include "common/log.h"
 #include "gpu/block_linear.h"
 #include "gpu/framebuffer.h"
+#include "gpu/gpu_records.h"
+#include "gpu/raster3d.h"
 #include "hle/services/service_util.h"
 
 /* IGraphicBufferProducer transaction codes. */
@@ -274,6 +276,23 @@ static void composite(Vi_State *s, HLE_Context *c, const Vi_Slot *slot) {
   if (!s->scratch || !nvdrv_nvmap_lookup(s->nvdrv, slot->nvmap_id, &base, &nvmap_size)) {
     s->frames_dropped++;
     return;
+  }
+  /* GPU mode: the buffer is a GPU surface; the GPU worker shows it. */
+  Raster3d *renderer = s->nvdrv ? s->nvdrv->renderer : NULL;
+  if (renderer && renderer->gpu) {
+    int32_t crop[4] = {0, 0, 0, 0};
+    if (slot->crop_right > slot->crop_left && slot->crop_bottom > slot->crop_top) {
+      crop[0] = slot->crop_left < 0 ? 0 : slot->crop_left;
+      crop[1] = slot->crop_top < 0 ? 0 : slot->crop_top;
+      crop[2] = slot->crop_right - crop[0];
+      crop[3] = slot->crop_bottom - crop[1];
+    }
+    const uint32_t flags = ((slot->transform & VI_TRANSFORM_FLIP_H) ? GPU_PRESENT_FLIP_X : 0u) |
+                           ((slot->transform & VI_TRANSFORM_FLIP_V) ? GPU_PRESENT_FLIP_Y : 0u);
+    if (raster3d_gpu_present(renderer, base + slot->offset, slot->width, slot->height, crop, flags)) {
+      s->frames_presented++;
+      return;
+    }
   }
   const uint32_t bpp = bytes_per_pixel(slot->format);
   uint32_t width = slot->width, height = slot->height;
