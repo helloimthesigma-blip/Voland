@@ -50,7 +50,8 @@ void hle_svc_exit_process(HLE_Context *c, CPU_State *s) {
 static void reclaim_threads(HLE_Context *c, const Thread_Env *env, const CPU_State *running) {
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     Sched_Thread *t = &c->scheduler->threads[i];
-    if (!t->handle_closed || !t->owns_cpu_state || t->thread.cpu_state == running) continue;
+    /* on_core: still leaving run() on another host thread (parallel mode). */
+    if (!t->handle_closed || !t->owns_cpu_state || t->thread.cpu_state == running || t->on_core) continue;
     if (t->state != THREAD_STATE_DEAD && t->state != THREAD_STATE_CREATED) continue;
     thread_destroy(env, &t->thread);
     scheduler_free_thread(c->scheduler, t);
@@ -509,6 +510,14 @@ void hle_svc_set_thread_activity(HLE_Context *c, CPU_State *s) {
   }
   t->paused = activity == THREAD_ACTIVITY_PAUSED;
   r->x[0] = HLE_RESULT_SUCCESS;
+  /* Pausing a thread that runs on another core (parallel mode): like
+   * Horizon, return only once it is off that core, so a following
+   * GetThreadContext3 (a GC scanning registers) sees it stopped. */
+  Sched_Thread *self = current(c, s);
+  if (t->paused && t->on_core && self && self != t) {
+    scheduler_block(c->scheduler, self, WAIT_OFF_CORE, SCHEDULER_WAIT_FOREVER);
+    self->wait_address = (uint64_t)(t - c->scheduler->threads);
+  }
 }
 
 static void put_u64(uint8_t *p, uint64_t v) { memcpy(p, &v, sizeof(v)); }

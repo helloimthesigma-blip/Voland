@@ -13,6 +13,8 @@
  *       --sdmc DIR                   seed the emulated SD card with DIR's contents
  *       --dump-frame FILE            write the newest frame as a binary PPM (P6)
  *       --frame-skip N               rasterise and show one of every N + 1 frames
+ *       --host-cores N               run guest threads on N host threads
+ *                                    (docs/PARALLEL.md; 0 = serial, the default)
  *       --dump-frames-every N        with --dump-frame: also write FILE.<slice>.ppm
  *       --gpu-stream FILE            run the WebGPU renderer's producer (GPU mode) and record
  *                                    its stream to FILE (u32 type, u32 bytes, payload per
@@ -515,7 +517,7 @@ static int run(int argc, char **argv) {
   const CPU_Backend *backend = &CPU_BACKEND_INTERPRETER;
   uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES, dump_every = 0, snapshot_at = 0;
   const char *snapshot_dir = NULL, *gpu_stream_path = NULL;
-  uint32_t frame_skip = 0;
+  uint32_t frame_skip = 0, host_cores = 0;
   bool test_card = false, svc_stats = false, swkbd_cancel = false;
   const char *swkbd_text = NULL;
   Input_Event inputs[MAX_INPUT_EVENTS];
@@ -558,6 +560,8 @@ static int run(int argc, char **argv) {
       font_path = argv[++i];
     } else if (!strcmp(argv[i], "--frame-skip") && has_value) {
       frame_skip = (uint32_t)strtoul(argv[++i], NULL, 0);
+    } else if (!strcmp(argv[i], "--host-cores") && has_value) {
+      host_cores = (uint32_t)strtoul(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--snapshot-at") && has_value) {
       snapshot_at = strtoull(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--snapshot-dir") && has_value) {
@@ -623,6 +627,10 @@ static int run(int argc, char **argv) {
     fclose(file);
     return EXIT_LOAD_FAILED;
   }
+  if (host_cores) {
+    const uint32_t cores = emulator_set_host_cores(&emu, host_cores);
+    fprintf(stderr, "voland-cli: %u host core(s) for guest threads\n", cores);
+  }
 
   setup_call_trace(&emu);
   Emulator_Status status = EMULATOR_RUNNING;
@@ -665,8 +673,10 @@ static int run(int argc, char **argv) {
       memset(&job, 0, sizeof(job));
       job.max_slices = max_slices;
       job.trace_start = UINT64_MAX;
+      (void)emulator_set_host_cores(&emu, 0); /* fork() keeps no other thread */
       snapshot_serve(snapshot_dir, &job); /* returns in a job's child */
       raster3d_restart_workers_after_fork(&emu.renderer);
+      (void)emulator_set_host_cores(&emu, host_cores);
       max_slices = job.max_slices;
       if (job.dump_every) dump_every = job.dump_every;
       if (job.frame_path[0]) frame_path = job.frame_path;

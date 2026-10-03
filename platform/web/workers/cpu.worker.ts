@@ -94,6 +94,17 @@ let paused = false;
 let frameSkip = 0;
 /** The renderer the main thread chose (set-gpu-mode); applied to every core load. */
 let gpuMode = false;
+/** Host threads running guest threads (docs/PARALLEL.md): two by default,
+ * since the busiest titles keep two guest threads busy; ?cores=N
+ * (set-host-cores) overrides, 0 = the serial scheduler. Applied to every
+ * core load. */
+const DEFAULT_HOST_CORES = 2;
+let hostCores = DEFAULT_HOST_CORES;
+
+function applyHostCores(target: SwitchCoreExports): void {
+  const inEffect = target._emulator_set_host_cores_ffi(hostCores);
+  log("info", `guest threads on ${inEffect === 0 ? "the serial scheduler" : `${inEffect} host core(s)`}`);
+}
 
 function postRunState(state: "running" | "exited" | "crashed" | "deadlock" | "paused", detail: string): void {
   const msg: CPUToMainMessage = { type: "run-state", state, detail };
@@ -339,6 +350,7 @@ function loadGame(file: File): CPUToMainMessage {
   loadingCore._emulator_set_rtc_ffi(BigInt(Math.floor(Date.now() / 1000)));
   loadingCore._emulator_set_frame_skip_ffi(frameSkip);
   loadingCore._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
+  applyHostCores(loadingCore);
   withCString(`/${sdName(file.name)}`, (path) => loadingCore._emulator_set_program_path_ffi(path));
   const code = core._emulator_load_program_ffi(BigInt(file.size), randomAslrSeed());
 
@@ -458,6 +470,13 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     gpuMode = msg.on;
     core?._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
     log("info", `renderer: ${gpuMode ? "WebGPU (GPU worker)" : "software reference"}`);
+    return;
+  }
+
+  if (msg.type === "set-host-cores") {
+    hostCores = msg.cores;
+    /* Takes effect between slices; a running game switches at once. */
+    if (core) applyHostCores(core);
     return;
   }
 

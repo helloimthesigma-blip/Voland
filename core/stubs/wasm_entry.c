@@ -13,6 +13,7 @@
 #include "common/log.h"
 #include "emulator.h"
 #include "gpu/framebuffer.h"
+#include "hle/kernel/parallel.h"
 #include "hle/loader/byte_source.h"
 
 #include <stddef.h>
@@ -51,6 +52,7 @@ EXPORT void emulator_set_program_path_ffi(uint64_t path);
 EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
 EXPORT void emulator_set_frame_skip_ffi(uint32_t frames);
 EXPORT void emulator_set_gpu_mode_ffi(uint32_t on);
+EXPORT uint32_t emulator_set_host_cores_ffi(uint32_t cores);
 EXPORT void emulator_set_shared_font_ffi(uint64_t bytes, uint32_t size);
 EXPORT int emulator_sd_write_file_ffi(uint64_t path, uint64_t bytes, uint64_t size);
 EXPORT int emulator_sd_clear_ffi(void);
@@ -96,10 +98,25 @@ static void voland_host_guest_output(const char *text, uint64_t length)
 }
 #endif
 
+/* Host hooks reach the CPU worker's JS objects, which only exist on its
+ * own thread: with parallel guest threads (docs/PARALLEL.md) an SVC on a
+ * core thread runs them on the driver - the CPU worker - instead. */
+typedef struct Output_Call {
+  const char *text;
+  uint64_t length;
+} Output_Call;
+
+static void output_on_driver(void *ctx)
+{
+  const Output_Call *call = (const Output_Call *)ctx;
+  voland_host_guest_output(call->text, call->length);
+}
+
 static void forward_guest_output(void *userdata, const char *text, size_t length)
 {
   (void)userdata;
-  voland_host_guest_output(text, (uint64_t)length);
+  Output_Call call = {text, (uint64_t)length};
+  parallel_on_driver(output_on_driver, &call);
 }
 
 #ifdef __EMSCRIPTEN__
@@ -118,10 +135,25 @@ static int voland_host_read_game_file(uint64_t offset, void *out, uint64_t size)
 }
 #endif
 
+typedef struct Read_Call {
+  uint64_t offset;
+  void *out;
+  uint64_t size;
+  int ok;
+} Read_Call;
+
+static void read_on_driver(void *ctx)
+{
+  Read_Call *call = (Read_Call *)ctx;
+  call->ok = voland_host_read_game_file(call->offset, call->out, call->size);
+}
+
 static Error host_game_file_read(void *user, uint64_t offset, void *out, uint64_t size)
 {
   (void)user;
-  if (!voland_host_read_game_file(offset, out, size))
+  Read_Call call = {offset, out, size, 0};
+  parallel_on_driver(read_on_driver, &call);
+  if (!call.ok)
     return ERR(RESULT_IO_ERROR, "host read of the game file failed");
   return OK;
 }
@@ -286,6 +318,13 @@ EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds)
 EXPORT void emulator_set_frame_skip_ffi(uint32_t frames)
 {
   if (g_initialised) emulator_set_frame_skip(&g_emulator, frames);
+}
+
+/* Parallel guest threads (emulator_set_host_cores; 0 = serial). Returns
+ * the core count in effect. */
+EXPORT uint32_t emulator_set_host_cores_ffi(uint32_t cores)
+{
+  return g_initialised ? emulator_set_host_cores(&g_emulator, cores) : 0;
 }
 
 /* GPU mode (emulator_set_gpu_mode): the GPU worker consumes the stream. */

@@ -268,6 +268,83 @@ static uint64_t granule_of(uint64_t address) {
   return address & ~(uint64_t)(INTERP_EXCLUSIVE_GRANULE - 1u);
 }
 
+/* Compare-and-swap of `size` bytes at `host`: true if it held `expected`
+ * and now holds `desired` (both little-endian byte images). */
+static bool host_compare_and_swap(uint8_t *host, const void *expected, const void *desired, uint32_t size) {
+  switch (size) {
+  case 1: {
+    uint8_t e, d;
+    memcpy(&e, expected, 1); memcpy(&d, desired, 1);
+    return __atomic_compare_exchange_n(host, &e, d, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+  }
+  case 2: {
+    uint16_t e, d;
+    memcpy(&e, expected, 2); memcpy(&d, desired, 2);
+    return __atomic_compare_exchange_n((uint16_t *)(void *)host, &e, d, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+  }
+  case 4: {
+    uint32_t e, d;
+    memcpy(&e, expected, 4); memcpy(&d, desired, 4);
+    return __atomic_compare_exchange_n((uint32_t *)(void *)host, &e, d, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+  }
+  case 8: {
+    uint64_t e, d;
+    memcpy(&e, expected, 8); memcpy(&d, desired, 8);
+    return __atomic_compare_exchange_n((uint64_t *)(void *)host, &e, d, false, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+  }
+  default: {
+#if defined(__aarch64__) && defined(__SIZEOF_INT128__)
+    unsigned __int128 e, d;
+    memcpy(&e, expected, 16); memcpy(&d, desired, 16);
+    return __atomic_compare_exchange_n((unsigned __int128 *)(void *)host, &e, d, false, __ATOMIC_SEQ_CST,
+                                       __ATOMIC_SEQ_CST);
+#else
+    /* No 16-byte host CAS (wasm): serialize 128-bit exclusive pairs with
+     * a lock. A plain store racing into the same 16 bytes can still be
+     * lost - rare (LDXP/STXP of two X registers) and documented in
+     * docs/PARALLEL.md. */
+    static volatile int lock;
+    while (__atomic_exchange_n(&lock, 1, __ATOMIC_ACQUIRE)) {
+    }
+    const bool same = memcmp(host, expected, 16) == 0;
+    if (same) memcpy(host, desired, 16);
+    __atomic_store_n(&lock, 0, __ATOMIC_RELEASE);
+    return same;
+#endif
+  }
+  }
+}
+
+/* Store-exclusive in multicore mode (docs/PARALLEL.md): it succeeds iff
+ * this thread's monitor is set on the same address and size and memory
+ * still holds what the load-exclusive read - a host compare-and-swap, so
+ * a racing store by another host thread makes it fail instead of being
+ * lost. (ABA-tolerant, as every CAS-based monitor is.) */
+static Interp_Status store_exclusive_shared(Interp_State *s, uint64_t address, uint32_t total, uint32_t element,
+                                            bool pair, uint32_t t, uint32_t t2, uint32_t rs) {
+  bool pass = s->exclusive_valid && s->exclusive_address == address && s->exclusive_size == total;
+  VMM_Fault fault;
+  if (pass) {
+    /* Aligned to `total` (checked by the caller), so within one page. */
+    uint8_t *host = vmm_translate_inline(s->l1, address, VMM_PERM_W, &fault);
+    if (!host) {
+      s->fault_address = fault.gva;
+      return INTERP_FAULT;
+    }
+    uint8_t data[MAX_ACCESS_BYTES];
+    store_le(data, xreg(s, t), element);
+    if (pair) store_le(data + element, xreg(s, t2), element);
+    pass = host_compare_and_swap(host, s->exclusive_value, data, total);
+  } else {
+    /* Hardware still checks translation on a failing store-exclusive. */
+    uint8_t probe;
+    if (!interp_read(s, address, &probe, 1)) return INTERP_FAULT;
+  }
+  s->exclusive_valid = false;
+  set_xreg(s, rs, pass ? 0u : 1u);
+  return advance(s);
+}
+
 static Interp_Status exclusive(Interp_State *s, uint32_t insn) {
   const uint32_t size = bits(insn, 31, 30);
   const bool o2 = bit(insn, 23), load = bit(insn, 22), o1 = bit(insn, 21), o0 = bit(insn, 15);
@@ -282,6 +359,11 @@ static Interp_Status exclusive(Interp_State *s, uint32_t insn) {
       s->fault_address = address; /* alignment fault */
       return INTERP_FAULT;
     }
+    /* Acquire/release: implicit with one thread at a time; full host
+     * fences around the access in multicore mode (RCsc, so an STLR is
+     * not reordered with a later LDAR either). */
+    const bool fence = cpu_multicore();
+    if (fence) __atomic_thread_fence(__ATOMIC_SEQ_CST);
     if (load) {
       if (!interp_read(s, address, data, element)) return INTERP_FAULT;
       set_xreg(s, t, load_le(data, element));
@@ -289,6 +371,7 @@ static Interp_Status exclusive(Interp_State *s, uint32_t insn) {
       store_le(data, xreg(s, t), element);
       if (!interp_write(s, address, data, element)) return INTERP_FAULT;
     }
+    if (fence) __atomic_thread_fence(__ATOMIC_SEQ_CST);
     return advance(s);
   }
 
@@ -303,10 +386,14 @@ static Interp_Status exclusive(Interp_State *s, uint32_t insn) {
     if (!interp_read(s, address, data, total)) return INTERP_FAULT;
     s->exclusive_valid = true;
     s->exclusive_address = address;
+    s->exclusive_size = total;
+    memcpy(s->exclusive_value, data, total);
     set_xreg(s, t, load_le(data, element));
     if (o1) set_xreg(s, t2, load_le(data + element, element));
+    if (o0 && cpu_multicore()) __atomic_thread_fence(__ATOMIC_SEQ_CST); /* LDAXR: acquire */
     return advance(s);
   }
+  if (cpu_multicore()) return store_exclusive_shared(s, address, total, element, o1, t, t2, rs);
 
   /* Store-exclusive: succeeds iff this thread's monitor is set on the
    * same granule. The status register is written in either case, and the
