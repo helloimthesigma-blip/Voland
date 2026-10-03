@@ -1,5 +1,12 @@
 # Bot 1 status: parallel guest threads (branch `local/bot1`)
 
+**Summary.** All four milestones are done. Guest threads run on up to 3
+host threads in the browser by default: +39% fps at the Silksong title,
+and an estimated 1.3–1.9× in gameplay on a machine with free cores. One
+core is bit-identical to serial. Next: the JIT agent makes its code cache
+per host thread and sets `supports_multicore`, so the two speed-ups
+multiply.
+
 Owner: bot 1. The design is `docs/PARALLEL.md`.
 
 ## Milestones
@@ -32,8 +39,9 @@ Owner: bot 1. The design is `docs/PARALLEL.md`.
   (900k slices on 2 cores) and runs gameplay from a 4.75M-slice snapshot
   on 2, 3 and 4 cores with no crash or deadlock: 12 runs after the
   sync-word fix. Measurements are below.
-- [ ] 3. Web: on by default (3 cores, capped by hardwareConcurrency).
-  Browser fps measurement is in progress.
+- [x] **3. Web.** On by default (3 cores, capped at hardwareConcurrency - 2).
+  Silksong title screen in Chromium on the real GPU: 5.53 → 7.68 fps
+  (+39%). See Measurements.
 - [x] 4. Stress test: exclusives on real host threads, see milestone 1
   (`atomics.s`).
 
@@ -128,6 +136,12 @@ runs), as virtual time per wall second against serial:
 One core vs serial at gameplay: bit-identical (virtual time
 2,126,879,793 in every run).
 
-### Browser
+### Browser (real GPU, title screen)
 
-Pending (`tools/perf.mjs`, `cores=0` vs `cores=3`, title screen).
+Measured with `node tools/perf.mjs --game NCA --url-params cores=N --seconds 60`
+after the default 860k-slice warmup:
+
+| Mode | fps | Virtual ticks/s | Slices/s | SVCs/s |
+|---|---|---|---|---|
+| Serial (`cores=0`) | 5.53 | 1.77M | 6541 | 3775 |
+| 3 cores (the default) | **7.68 (+39%)** | 2.46M (+38.5%) | 8572 | 6049 |
