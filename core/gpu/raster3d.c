@@ -204,6 +204,7 @@ void raster3d_begin_submission(Raster3d *r) {
 }
 
 void raster3d_end_frame(Raster3d *r) {
+  if (r && r->ready && r->on_frame_end) r->on_frame_end(r->on_frame_end_user, r);
   if (r && r->ready) r->texture_epoch++;
 }
 
