@@ -37,11 +37,12 @@ static void collect_bases_and_sizes(const Memory_Layout *layout,
   bases[6] = layout->input_region_base;      sizes[6] = LAYOUT_INPUT_REGION_SIZE;
   bases[7] = layout->trace_buffer_base;      sizes[7] = LAYOUT_TRACE_BUFFER_SIZE;
   bases[8] = layout->breakpoint_region_base; sizes[8] = LAYOUT_BREAKPOINT_REGION_SIZE;
+  bases[9] = layout->video_region_base;      sizes[9] = LAYOUT_VIDEO_REGION_SIZE;
 }
 
 static void check_no_overlap(const Memory_Layout *layout)
 {
-  enum { REGION_COUNT = 9 };
+  enum { REGION_COUNT = 10 };
   uint64_t bases[REGION_COUNT];
   uint64_t sizes[REGION_COUNT];
   collect_bases_and_sizes(layout, bases, sizes, REGION_COUNT);

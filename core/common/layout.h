@@ -90,13 +90,18 @@
  * worker (§23). Placeholder size until the debugger protocol is designed. */
 #define LAYOUT_BREAKPOINT_REGION_SIZE ((uint64_t)4096)
 
+/* Video region: NVDEC decode requests out, decoded NV12 frames back
+ * (§13 "Video decode"; video/video_stream.h lays it out and asserts it
+ * fits): a 4 MiB request ring + six 1920x1088 NV12 frame slots. */
+#define LAYOUT_VIDEO_REGION_SIZE ((uint64_t)24 * 1024 * 1024)
+
 /* Every region except guest RAM, summed for the one arena_create() call
  * that backs all of them (layout.c). +64 covers alignment padding across
- * the individual arena_allocate() calls (8 regions x <=7 bytes each). */
+ * the individual arena_allocate() calls (9 regions x <=7 bytes each). */
 #define LAYOUT_SMALL_REGIONS_SIZE \
   (LAYOUT_PAGE_TABLE_L1_SIZE + LAYOUT_FRAMEBUFFER_REGION_SIZE + LAYOUT_AUDIO_RING_SIZE + \
    LAYOUT_GPU_RING_SIZE + LAYOUT_GPU_COMPLETION_RING_SIZE + LAYOUT_INPUT_REGION_SIZE + \
-   LAYOUT_TRACE_BUFFER_SIZE + LAYOUT_BREAKPOINT_REGION_SIZE + (uint64_t)64)
+   LAYOUT_TRACE_BUFFER_SIZE + LAYOUT_BREAKPOINT_REGION_SIZE + LAYOUT_VIDEO_REGION_SIZE + (uint64_t)72)
 
 typedef struct Memory_Layout {
   uint64_t guest_ram_base;         /* linear-memory offset of guest physical RAM */
@@ -109,6 +114,7 @@ typedef struct Memory_Layout {
   uint64_t input_region_base;      /* §18 */
   uint64_t trace_buffer_base;      /* §23 */
   uint64_t breakpoint_region_base; /* §23 */
+  uint64_t video_region_base;      /* §13: video decode requests and frames */
 } Memory_Layout;
 
 /* Reserves every region in one pass. Idempotent: calling this while a

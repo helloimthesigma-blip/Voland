@@ -15,8 +15,8 @@ function memoryWithLayoutFields(values: readonly bigint[]): WebAssembly.Memory {
   return memory;
 }
 
-test("readMemoryLayout parses all 10 fields in declared order", () => {
-  const values = Array.from({ length: 10 }, (_, i) => BigInt(i + 1));
+test("readMemoryLayout parses all 11 fields in declared order", () => {
+  const values = Array.from({ length: 11 }, (_, i) => BigInt(i + 1));
   const memory = memoryWithLayoutFields(values);
 
   const layout = readMemoryLayout(memory, 0n);
@@ -31,10 +31,11 @@ test("readMemoryLayout parses all 10 fields in declared order", () => {
   assert.equal(layout.inputRegionBase, 8n);
   assert.equal(layout.traceBufferBase, 9n);
   assert.equal(layout.breakpointRegionBase, 10n);
+  assert.equal(layout.videoRegionBase, 11n);
 });
 
 test("readMemoryLayout honors a non-zero base pointer", () => {
-  const values = Array.from({ length: 10 }, (_, i) => BigInt(100 + i));
+  const values = Array.from({ length: 11 }, (_, i) => BigInt(100 + i));
   const memory = new WebAssembly.Memory({ initial: 1, maximum: 1 });
   const offset = 256;
   const view = new DataView(memory.buffer, offset, MEMORY_LAYOUT_STRUCT_SIZE);
@@ -44,6 +45,7 @@ test("readMemoryLayout honors a non-zero base pointer", () => {
 
   assert.equal(layout.guestRamBase, 100n);
   assert.equal(layout.breakpointRegionBase, 109n);
+  assert.equal(layout.videoRegionBase, 110n);
 });
 
 test("toByteOffset narrows an in-range bigint to a Number", () => {

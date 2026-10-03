@@ -1,6 +1,7 @@
 # Parallel guest threads
 
-Status: opt-in scheduler mode, the default in the web build (two cores).
+Status: opt-in scheduler mode, the default in the web build (three cores
+where the machine has room).
 The owner is bot 1 (`docs/handoff/BOT_1.md`). This document is the design;
 measurements live in `docs/handoff/BOT_1_STATUS.md`.
 
@@ -205,12 +206,13 @@ core nothing changes.
 | `Interp_State` | Per guest thread; only its own core touches it, apart from wakes (above). |
 | Call trace (`interp_set_call_trace`) | Debug-only globals, not thread-safe: use with 0 or 1 core. |
 | Logging | `fprintf(stderr)`, natively fine. On the web it is a syscall proxied to the main runtime thread, so log lines from other threads go straight to the console with `emscripten_errn` (`log.c`). |
-| JIT backend | Its code cache is not shareable yet, so `emulator_set_host_cores` refuses a backend with `supports_jit` and stays serial. See the JIT handoff in the status file. |
+| JIT backend | Its code cache is not shareable yet, so `emulator_set_host_cores` accepts only a backend with `supports_multicore` (the interpreter, noop); the JIT stays serial until it sets the flag. See the JIT handoff in the status file. |
 
 ## Web
 
-- **Default and override.** `cpu.worker.ts` applies `DEFAULT_HOST_CORES`
-  (2) on every load. `?cores=N` on the page URL overrides it through a
+- **Default and override.** `cpu.worker.ts` applies `DEFAULT_HOST_CORES` on
+  every load: 3 (the Switch's application cores), capped at
+  `navigator.hardwareConcurrency - 2` and at least 1. `?cores=N` on the page URL overrides it through a
   `set-host-cores` message; `?cores=0` is serial.
 - **The CPU worker is Emscripten's main runtime thread.** A core's
   syscalls (stderr, anything else not marked `__proxy: none`) are proxied

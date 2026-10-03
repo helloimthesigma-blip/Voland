@@ -228,3 +228,11 @@ set_tests_properties(cli_verify_dump_nca PROPERTIES DEPENDS program_nca_fixture)
 # Not a dump at all: verify-dump must fail (exit 66).
 add_test(NAME cli_verify_dump_rejects COMMAND voland-cli verify-dump ${PROJECT_SOURCE_DIR}/CMakeLists.txt)
 set_tests_properties(cli_verify_dump_rejects PROPERTIES WILL_FAIL TRUE)
+
+# Video decode (DESIGN §13): host1x command buffers and the IOVA table.
+add_executable(host1x_test host1x_test.c)
+target_link_libraries(host1x_test PRIVATE switch_core)
+add_test(NAME host1x_test COMMAND host1x_test)
+add_executable(video_test video_test.c)
+target_link_libraries(video_test PRIVATE switch_core)
+add_test(NAME video_test COMMAND video_test)

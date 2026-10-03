@@ -403,4 +403,5 @@ const CPU_Backend CPU_BACKEND_INTERPRETER = {
     .name = "interpreter",
     .version = "0.1.0",
     .supports_jit = false,
+    .supports_multicore = true,
 };
