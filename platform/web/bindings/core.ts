@@ -85,12 +85,14 @@ export const enum CpuBackendId {
   Noop = 0,
   Interpreter = 1,
   Ballistic = 2,
+  Jit = 3,
 }
 
 export const CPU_BACKEND_DISPLAY_NAMES: Readonly<Record<number, string>> = {
   [CpuBackendId.Noop]:        "noop",
   [CpuBackendId.Interpreter]: "interpreter",
   [CpuBackendId.Ballistic]:   "ballistic",
+  [CpuBackendId.Jit]:         "jit",
 };
 
 /* CPU_ExitReason, mirrors core/cpu/cpu.h. */

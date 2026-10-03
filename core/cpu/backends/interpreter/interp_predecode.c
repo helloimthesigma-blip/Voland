@@ -737,9 +737,16 @@ static bool ends_block(uint32_t insn) {
   return op0 == 0xA || op0 == 0xB;
 }
 
-/* Is it IC/DC cache maintenance (SYS with CRn = 7)? Executing one drops
- * the cache afterwards, so code written and then synchronized is seen. */
-static bool is_cache_maintenance(uint32_t insn) { return (insn & 0xFFF8F000u) == 0xD5087000u; }
+/* Is it IC IVAU (SYS #3, C7, C5, #1, Xt)? Executing one drops the cache
+ * afterwards, so code written and then synchronized is seen. Only the
+ * instruction-cache invalidate can mean code changed: DC ZVA and the DC
+ * clean/invalidate ops touch data, and blocks only come from pages that
+ * are not writable, so any code change also needs an IC IVAU (or a
+ * mapping change). Flushing on DC ZVA too - memset's hot loop - retired
+ * every block thousands of times a frame. */
+#define IC_IVAU_MASK 0xFFFFFFE0u /* everything but Rt */
+#define IC_IVAU_ENCODING 0xD50B7520u
+static bool is_cache_maintenance(uint32_t insn) { return (insn & IC_IVAU_MASK) == IC_IVAU_ENCODING; }
 
 /* Builds the block at `pc`; NULL if the page is not cacheable. */
 static Block *build(Block *cache, const Interp_State *s, uint64_t pc, uint64_t generation) {
@@ -774,51 +781,54 @@ bool interp_predecode_enabled(void) {
   return enabled != 0;
 }
 
+bool interp_is_cache_maintenance(uint32_t insn) { return is_cache_maintenance(insn); }
+
+uint64_t interp_code_generation(void) { return current_generation(); }
+
+bool interp_predecode_run_block(Interp_State *s, uint64_t cycle_budget, uint32_t *grace, CPU_ExitReason *exit_reason) {
+  const uint64_t generation = current_generation();
+  const uint64_t pc = s->regs.pc;
+  Block *const cache = thread_blocks();
+  Block *b = NULL;
+  if (cache) { /* no memory for this thread's cache: one instruction at a time */
+    b = &cache[PREDECODE_INDEX(pc)];
+    if (b->generation != generation || b->pc != pc) b = build(cache, s, pc, generation);
+  }
+  const uint32_t count = b ? b->count : 1u;
+  for (uint32_t i = 0; i < count; i++) {
+    /* Exactly the reference loop's budget/grace rule (interpreter.c),
+     * before every instruction. */
+    if (s->cycles_consumed >= cycle_budget) {
+      if (!s->exclusive_valid || *grace >= INTERP_EXCLUSIVE_GRACE_INSTRUCTIONS) {
+        *exit_reason = CPU_EXIT_CYCLES_ELAPSED;
+        return false;
+      }
+      (*grace)++;
+    }
+    if (!b) return interp_run_one(s, exit_reason); /* uncacheable: one instruction, reference path */
+    const Op *op = &b->ops[i];
+    const uint64_t at = s->regs.pc;
+    const Interp_Status status = op->fn(s, op);
+    if (status == INTERP_CONTINUE) { /* the common case, retired inline */
+      s->cycles_consumed++;
+      s->total_cycles++;
+    } else if (!interp_retire(s, status, at, op->insn, exit_reason)) {
+      return false;
+    }
+    if (op->fn == op_reference && is_cache_maintenance(op->insn)) {
+      interp_predecode_flush();
+      return true;
+    }
+    /* Mappings only change in SVCs, which end this run (retire ->
+     * false); another core's SVC is seen at the next block. */
+  }
+  return true;
+}
+
 CPU_ExitReason interp_predecode_execute(Interp_State *s, uint64_t cycle_budget) {
   uint32_t grace = 0;
   CPU_ExitReason exit_reason = CPU_EXIT_CYCLES_ELAPSED;
-  Block *const cache = thread_blocks();
-  if (!cache) { /* no memory for this thread's cache: the reference loop */
-    for (;;) {
-      if (s->cycles_consumed >= cycle_budget) {
-        if (!s->exclusive_valid || grace >= INTERP_EXCLUSIVE_GRACE_INSTRUCTIONS) return CPU_EXIT_CYCLES_ELAPSED;
-        grace++;
-      }
-      if (!interp_run_one(s, &exit_reason)) return exit_reason;
-    }
+  while (interp_predecode_run_block(s, cycle_budget, &grace, &exit_reason)) {
   }
-  for (;;) {
-    const uint64_t generation = current_generation();
-    const uint64_t pc = s->regs.pc;
-    Block *b = &cache[PREDECODE_INDEX(pc)];
-    if (b->generation != generation || b->pc != pc) b = build(cache, s, pc, generation);
-    const uint32_t count = b ? b->count : 1u;
-    for (uint32_t i = 0; i < count; i++) {
-      /* Exactly the reference loop's budget/grace rule (interpreter.c),
-       * before every instruction. */
-      if (s->cycles_consumed >= cycle_budget) {
-        if (!s->exclusive_valid || grace >= INTERP_EXCLUSIVE_GRACE_INSTRUCTIONS) return CPU_EXIT_CYCLES_ELAPSED;
-        grace++;
-      }
-      if (!b) { /* uncacheable: one instruction through the reference path */
-        if (!interp_run_one(s, &exit_reason)) return exit_reason;
-        break;
-      }
-      const Op *op = &b->ops[i];
-      const uint64_t at = s->regs.pc;
-      const Interp_Status status = op->fn(s, op);
-      if (status == INTERP_CONTINUE) { /* the common case, retired inline */
-        s->cycles_consumed++;
-        s->total_cycles++;
-      } else if (!interp_retire(s, status, at, op->insn, &exit_reason)) {
-        return exit_reason;
-      }
-      if (op->fn == op_reference && is_cache_maintenance(op->insn)) {
-        interp_predecode_flush();
-        break;
-      }
-      /* Mappings only change in SVCs, which end this run (retire ->
-       * false); another core's SVC is seen at the next block. */
-    }
-  }
+  return exit_reason;
 }
