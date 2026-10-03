@@ -47,14 +47,13 @@ adjacent.
    empty. **Mod repos: mechanism only** — no shipped/curated repos, no CORS
    proxy, and no host-side plugin execution (JS/wasm/UI). Mods are
    guest-side data only (§19).
-10. **Off-limits until unlocked by the maintainer:**
-    `core/cpu/backends/ballistic/**`. Ballistic is a separate upstream
-    project; its WASM backend is paused and its IR API is unstable per its
-    maintainer. Do not write code against Ballistic's IR, vendor its
-    headers, implement a homegrown WASM emitter, or modify anything under
-    `recompiler/`. The web execution path is the interpreter (predecoded
-    form from Phase 5). Desktop ballistic-x86 integration unlocks
-    separately, also by the maintainer.
+10. **Ballistic stays off-limits; a homegrown JIT is unlocked (this fork).**
+    `core/cpu/backends/ballistic/**` and `recompiler/` are still not to be
+    touched, and Ballistic's IR/headers are not used. The owner of this
+    private fork lifted the rest of this rule on 2026-10-03: Voland's own
+    ARM64 -> WebAssembly JIT (`core/cpu/backends/jit/`) and a WebGPU
+    renderer are the speed path. The interpreter remains the reference
+    every JIT block is differentially tested against.
 
 ## Workflow
 
