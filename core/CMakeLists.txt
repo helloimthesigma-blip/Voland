@@ -55,6 +55,7 @@ set(SWITCH_CORE_SOURCES
   gpu/astc.c
   gpu/raster3d.c
   gpu/gpu_stream.c
+  gpu/wgsl.c
   hle/fs/ramfs.c
   hle/kernel/svc_thread.c
   hle/services/sm/sm.c

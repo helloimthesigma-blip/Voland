@@ -56,6 +56,7 @@
 #include "hle/kernel/handle_table.h"
 #include "cpu/backends/interpreter/interpreter.h"
 #include "gpu/framebuffer.h"
+#include "gpu/wgsl.h"
 #include "hle/loader/nca_parse.h"
 #include "hle/loader/nro.h"
 
@@ -212,6 +213,34 @@ static void dump_program(void *user, const Sm_Program *program) {
             in->target, (unsigned long long)in->raw);
   }
   fclose(f);
+}
+
+#define WGSL_DUMP_BYTES (2u << 20)
+
+/* VOLAND_DUMP_WGSL=DIR: every pixel program translated to WGSL with the
+ * default descriptor, as DIR/<address>-<hash>.wgsl (or .fail with the
+ * reason) - the WebGPU translator's corpus (diagnostics). */
+static void dump_wgsl(void *user, const Sm_Program *program) {
+  if (program->header.stage != SM_STAGE_PIXEL) return;
+  static Wgsl_Program_Desc desc;
+  static char text[WGSL_DUMP_BYTES];
+  wgsl_default_desc(program, &desc);
+  const Wgsl_Result r = wgsl_translate(program, &desc, text, sizeof(text));
+  char path[1024];
+  snprintf(path, sizeof(path), "%s/%llx-%08x.%s", (const char *)user, (unsigned long long)program->address,
+           program->hash, r.ok ? "wgsl" : "fail");
+  FILE *f = fopen(path, "w");
+  if (!f) return;
+  if (r.ok) fwrite(r.text, 1, r.length, f);
+  else fprintf(f, "%s\n", r.reason);
+  fclose(f);
+}
+
+/* Both decode hooks (shader and WGSL dumps) can be on at once. */
+static void program_decoded(void *user, const Sm_Program *program) {
+  (void)user;
+  if (getenv("VOLAND_DUMP_SHADERS")) dump_program(getenv("VOLAND_DUMP_SHADERS"), program);
+  if (getenv("VOLAND_DUMP_WGSL")) dump_wgsl(getenv("VOLAND_DUMP_WGSL"), program);
 }
 
 /* VOLAND_DUMP_TEXTURES=DIR: every decoded RGBA8 texture as DIR/<address>-WxH.ppm
@@ -505,9 +534,9 @@ static int run(int argc, char **argv) {
     if (!wav) fprintf(stderr, "voland-cli: cannot write %s\n", audio_path);
     else write_wav_header(wav, 0);
   }
-  if (getenv("VOLAND_DUMP_SHADERS")) {
-    emu.renderer.on_program_decoded = dump_program;
-    emu.renderer.on_program_user = getenv("VOLAND_DUMP_SHADERS");
+  if (getenv("VOLAND_DUMP_SHADERS") || getenv("VOLAND_DUMP_WGSL")) {
+    emu.renderer.on_program_decoded = program_decoded;
+    emu.renderer.on_program_user = NULL;
   }
   if (getenv("VOLAND_DUMP_TEXTURES")) {
     emu.renderer.on_texture_decoded = dump_texture;
