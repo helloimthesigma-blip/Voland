@@ -701,15 +701,16 @@ uint32_t emulator_set_host_cores(Emulator* emulator, uint32_t cores) {
     cpu_set_multicore(false);
   }
   if (cores == 0) return 0;
-  if (!parallel_supported() || emulator->cpu_backend->supports_jit) {
-    /* A JIT's code cache is not yet shareable between host threads. */
+  if (!parallel_supported() || !emulator->cpu_backend->supports_multicore) {
+    /* e.g. a JIT whose compiled code lives in one host thread's table. */
     log_warn("[emulator] parallel guest threads unavailable (%s); staying serial", emulator->cpu_backend->name);
     return 0;
   }
 #ifdef __EMSCRIPTEN__
   /* Every host thread comes from the fixed pthread pool (§24): the pixel
-   * workers give up as many as the cores take. */
-  raster3d_set_workers(&emulator->renderer, WORKERS_MAX + 1u - cores);
+   * workers give up as many as the cores take (never grow). */
+  const uint32_t pixel_workers = WORKERS_MAX + 1u - cores;
+  if (emulator->renderer.workers.count > pixel_workers) raster3d_set_workers(&emulator->renderer, pixel_workers);
 #endif
   emulator->parallel = parallel_create(&emulator->scheduler, emulator->cpu_backend, cores);
   if (!emulator->parallel) return 0;

@@ -91,6 +91,15 @@ CPU_ExitReason interp_predecode_execute(Interp_State *s, uint64_t cycle_budget);
 bool interp_predecode_enabled(void);
 /* Drops every decoded block (IC maintenance, invalidate_cache). */
 void interp_predecode_flush(void);
+/* One decoded block from regs.pc (the body of interp_predecode_execute's
+ * loop, for the JIT's mixed-mode loop): false when the run must stop,
+ * with *exit_reason set. `grace` is the run's exclusive-grace counter. */
+bool interp_predecode_run_block(Interp_State *s, uint64_t cycle_budget, uint32_t *grace, CPU_ExitReason *exit_reason);
+/* Changes whenever decoded code may be stale: any vmm mapping change or
+ * a flush (IC maintenance, invalidate_cache, clear_cache). */
+uint64_t interp_code_generation(void);
+/* IC IVAU: flushes decoded code afterwards (interp_predecode.c). */
+bool interp_is_cache_maintenance(uint32_t insn);
 
 /* Instruction groups (A64 top-level encoding, DDI 0487 C4.1). */
 Interp_Status interp_dp_immediate(Interp_State *s, uint32_t insn);

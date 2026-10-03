@@ -26,6 +26,11 @@ uint32_t parallel_core_count(const Parallel *p) {
   (void)p;
   return 0;
 }
+Parallel_Stats parallel_stats(const Parallel *p) {
+  (void)p;
+  const Parallel_Stats none = {0, 0, 0, 0};
+  return none;
+}
 #ifdef __EMSCRIPTEN__
 /* The driver is Emscripten's main runtime thread (the CPU worker), and
  * every syscall a core makes - a log line's write to stderr - is proxied
@@ -105,6 +110,10 @@ struct Parallel {
   bool slice_done;
   Host_Call *call;          /* pending host call, or NULL */
 
+  uint64_t slice_max;       /* this slice: the busiest core's cycles */
+  uint32_t slice_cores;     /* this slice: cores that ran something */
+  Parallel_Stats stats;
+
   uint32_t core_count;
   Core cores[PARALLEL_MAX_CORES];
 };
@@ -118,30 +127,40 @@ uint32_t parallel_core_count(const Parallel *p) { return p ? p->core_count : 0; 
 
 bool parallel_on_core_thread(void) { return t_core != NULL; }
 
-static void finish_slice(Parallel *p) {
+Parallel_Stats parallel_stats(const Parallel *p) { return p->stats; }
+
+/* A core is done with the slice, having run `used` cycles. */
+static void finish_slice(Parallel *p, uint64_t used) {
+  p->stats.cycles += used;
+  if (used > p->slice_max) p->slice_max = used;
+  if (used) p->slice_cores++;
   if (--p->working != 0) return;
+  p->stats.slices++;
+  p->stats.span += p->slice_max;
+  if (p->slice_cores >= 2u) p->stats.shared_slices++;
   pthread_mutex_lock(&p->channel);
   p->slice_done = true;
   pthread_cond_broadcast(&p->channel_cv);
   pthread_mutex_unlock(&p->channel);
 }
 
-/* One core's share of a slice. Called and returns with the kernel lock.
+/* One core's share of a slice; returns its cycles. Called and returns
+ * with the kernel lock.
  * A core keeps picking threads while another core is still running (it
  * would only wait otherwise) and its cycles last; alone, it makes exactly
  * one run, which is what makes one core equal serial mode. */
-static void run_slice_on_core(Parallel *p, Core *core) {
+static uint64_t run_slice_on_core(Parallel *p, Core *core) {
   Scheduler *sched = p->sched;
   const CPU_Backend *backend = p->backend;
   uint64_t used = 0;
   bool ran = false;
   for (;;) {
-    if (sched->process_crashed || sched->process_exited) return;
-    if (ran && (p->busy == 0 || used >= p->budget)) return;
+    if (sched->process_crashed || sched->process_exited) return used;
+    if (ran && (p->busy == 0 || used >= p->budget)) return used;
     scheduler_expire_timeouts(sched);
     const int32_t index = scheduler_pick(sched);
     if (index < 0) {
-      if (p->busy == 0) return; /* nothing can change until the next slice */
+      if (p->busy == 0) return used; /* nothing can change until the next slice */
       pthread_cond_wait(&p->core_cv, &p->kernel);
       continue;
     }
@@ -177,8 +196,7 @@ static void *core_main(void *arg) {
     while (p->slice == seen && !p->quit) pthread_cond_wait(&p->core_cv, &p->kernel);
     if (p->quit) break;
     seen = p->slice;
-    run_slice_on_core(p, core);
-    finish_slice(p);
+    finish_slice(p, run_slice_on_core(p, core));
   }
   pthread_mutex_unlock(&p->kernel);
   t_core = NULL;
@@ -279,6 +297,8 @@ Scheduler_Status parallel_tick(Parallel *p, uint64_t budget) {
   pthread_mutex_unlock(&p->channel);
   p->budget = budget;
   p->working = p->core_count;
+  p->slice_max = 0;
+  p->slice_cores = 0;
   p->slice++;
   pthread_cond_broadcast(&p->core_cv);
   pthread_mutex_unlock(&p->kernel);

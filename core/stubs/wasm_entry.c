@@ -234,6 +234,8 @@ EXPORT int cpu_backend_id_ffi(void)
   return 0; /* CpuBackendId.Noop, bindings/core.ts */
 #elif defined(SWITCH_CPU_BACKEND_INTERPRETER)
   return 1; /* CpuBackendId.Interpreter */
+#elif defined(SWITCH_CPU_BACKEND_JIT)
+  return 3; /* CpuBackendId.Jit */
 #else
   return -1;
 #endif

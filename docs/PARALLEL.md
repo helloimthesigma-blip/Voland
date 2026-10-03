@@ -1,6 +1,7 @@
 # Parallel guest threads
 
-Status: opt-in scheduler mode, the default in the web build (two cores).
+Status: opt-in scheduler mode, the default in the web build (three cores
+where the machine has room).
 The owner is bot 1 (`docs/handoff/BOT_1.md`). This document is the design;
 measurements live in `docs/handoff/BOT_1_STATUS.md`.
 
@@ -115,6 +116,33 @@ driver before the slice opens, when no core is running.
   - In serial mode a thread making an SVC is never `on_core` elsewhere,
     so this never blocks there.
 
+### Guest synchronization words
+
+The kernel lock serializes HLE, not guest code. A mutex word, condvar key
+or address-arbiter counter is also changed by guest LDXR/STXR on other
+cores while an SVC handles it. Two rules in `svc_thread.c` follow:
+
+- **Every kernel update of such a word is an atomic compare-and-swap**
+  (`vmm_compare_exchange32`), never a read and then a write. Example: a
+  SignalProcessWideKey that read "owned" and then wrote "owned + waiters"
+  could overwrite the owner's own release made in between, leaving a
+  mutex owned by nobody's knowledge (a deadlock).
+- **WaitProcessWideKeyAtomic marks the key before it releases the
+  mutex.** Signallers (libnx, nn::os) take the mutex, then skip the SVC
+  while the key reads 0. Released first, a signaller on another core can
+  slip in between and lose the wakeup.
+  - A two-core gameplay run once stalled with the main thread asleep on a
+    condvar. This ordering and the read-then-write above are the races
+    that can cause that.
+  - The race window is a few host instructions, too narrow for the stress
+    test to hit reliably. The test (condvar.s with key-checking
+    signallers, 20 rounds on 2 and 3 cores) guards the path. The evidence
+    is repeated Silksong runs (status file).
+
+Each swap is seq_cst, so the kernel's updates are also ordered as other
+cores see them. With one core every swap succeeds first time, exactly
+like the plain write it replaced.
+
 ## Virtual time
 
 `scheduler.ticks` stays the one global clock (19.2 MHz, backing CNTVCT,
@@ -178,12 +206,13 @@ core nothing changes.
 | `Interp_State` | Per guest thread; only its own core touches it, apart from wakes (above). |
 | Call trace (`interp_set_call_trace`) | Debug-only globals, not thread-safe: use with 0 or 1 core. |
 | Logging | `fprintf(stderr)`, natively fine. On the web it is a syscall proxied to the main runtime thread, so log lines from other threads go straight to the console with `emscripten_errn` (`log.c`). |
-| JIT backend | Its code cache is not shareable yet, so `emulator_set_host_cores` refuses a backend with `supports_jit` and stays serial. See the JIT handoff in the status file. |
+| JIT backend | Its code cache is not shareable yet, so `emulator_set_host_cores` accepts only a backend with `supports_multicore` (the interpreter, noop); the JIT stays serial until it sets the flag. See the JIT handoff in the status file. |
 
 ## Web
 
-- **Default and override.** `cpu.worker.ts` applies `DEFAULT_HOST_CORES`
-  (2) on every load. `?cores=N` on the page URL overrides it through a
+- **Default and override.** `cpu.worker.ts` applies `DEFAULT_HOST_CORES` on
+  every load: 3 (the Switch's application cores), capped at
+  `navigator.hardwareConcurrency - 2` and at least 1. `?cores=N` on the page URL overrides it through a
   `set-host-cores` message; `?cores=0` is serial.
 - **The CPU worker is Emscripten's main runtime thread.** A core's
   syscalls (stderr, anything else not marked `__proxy: none`) are proxied
@@ -218,6 +247,33 @@ core nothing changes.
   ```
   It also builds `voland-cli` for Node (`parallel-cli-node`) for measuring
   in V8.
+
+## Measuring
+
+On a busy machine, wall time says little: the cores compete with
+everything else. `voland-cli --host-cores N` therefore ends with the
+scheduler's own account:
+
+```
+voland-cli: parallel: S slices, C guest cycles over a span of P (C/P x), F% of slices on 2+ cores
+```
+
+- **C** sums every core's guest cycles.
+- **P** sums, per slice, the busiest core's cycles: the critical path if
+  the host cores were free.
+- **C / P** is the parallelism the guest actually offers. It is the
+  ceiling on the wall-time speedup (less the per-slice handoff, about 6%
+  of host instructions at a 100k-cycle budget with one core).
+
+Snapshot jobs (`--snapshot-at`) take `cores N`, so serial and parallel
+runs can start from the same game state:
+
+```
+printf 'max_slices 4850000\ncores 2\nlog /tmp/two.log\n' > DIR/job
+```
+
+In the browser, `?cores=N` selects the mode, and the homebrew e2e spec
+passes `VOLAND_PAGE_QUERY` through to the page.
 
 ## Not done / limits
 

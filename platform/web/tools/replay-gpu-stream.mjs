@@ -13,6 +13,10 @@
  * each slice multiple ended on), and OUT_PREFIX.last.ppm; prints executor
  * statistics and timings. The stream is read in chunks, so recordings far
  * larger than one ArrayBuffer (gameplay runs are gigabytes) replay too.
+ *
+ * --dump-targets P1,P2,... DIR: after those presents, every RGBA8 render
+ * target as DIR/p<P>-tex<id>-<w>x<h>.pam (RGBA), to compare with
+ * VOLAND_DUMP_SURFACES output from a software run (voland-cli).
  */
 import { chromium } from "@playwright/test";
 import { readFileSync, statSync, createReadStream, writeFileSync } from "node:fs";
@@ -29,6 +33,8 @@ if (!file || !prefix) {
   process.exit(2);
 }
 const every = args.includes("--every") ? Number(args[args.indexOf("--every") + 1]) || 0 : 0;
+const dumpTargets = args.includes("--dump-targets") ? args[args.indexOf("--dump-targets") + 1].split(",").map(Number) : [];
+const dumpDir = args.includes("--dump-targets") ? args[args.indexOf("--dump-targets") + 2] : "";
 const at = args.includes("--at") ? args[args.indexOf("--at") + 1].split(",").map(Number).filter((n) => n > 0) : [];
 const adapter = args.includes("--adapter") ? args[args.indexOf("--adapter") + 1] : "swiftshader";
 
@@ -64,6 +70,9 @@ await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
 await page.goto(`http://localhost:${server.address().port}/`);
 let lastFrame = null;
 const writeFrame = (name, w, h, b64) => writeFileSync(name, Buffer.concat([Buffer.from(`P6\n${w} ${h}\n255\n`), Buffer.from(b64, "base64")]));
+await page.exposeFunction("saveTarget", (name, w, h, b64) => {
+  writeFileSync(`${dumpDir}/${name}`, Buffer.concat([Buffer.from(`P7\nWIDTH ${w}\nHEIGHT ${h}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n`), Buffer.from(b64, "base64")]));
+});
 await page.exposeFunction("saveFrame", (index, w, h, b64, last) => {
   if (last) lastFrame = { w, h, b64 };
   else writeFrame(`${prefix}.${index}.ppm`, w, h, b64);
@@ -74,8 +83,9 @@ if (process.env.TRIVIAL_SHADERS) await page.evaluate(() => { globalThis.TRIVIAL_
 if (process.env.MEASURE) await page.evaluate(() => { globalThis.MEASURE = true; });
 if (process.env.NO_DEPTH) await page.evaluate(() => { globalThis.NO_DEPTH = true; });
 if (process.env.SKIP_TYPES) await page.evaluate((t) => { globalThis.SKIP_TYPES = t; }, process.env.SKIP_TYPES.split(",").map(Number));
-const result = await page.evaluate(async ({ every, at }) => {
+const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
   const wanted = new Set(at);
+  const targetsAt = new Set(dumpTargets);
   const a = await navigator.gpu.requestAdapter();
   const features = ["rg11b10ufloat-renderable", "depth32float-stencil8", "float32-filterable"].filter((f) => a.features.has(f));
   const device = await a.requestDevice({ requiredFeatures: features });
@@ -107,6 +117,24 @@ const result = await page.evaluate(async ({ every, at }) => {
       return window.saveFrame(index, w, h, toBase64(rgb), last);
     }));
   };
+  /* Every RGBA8 render target, as it is now. */
+  const dumpAll = (index) => {
+    for (const [id, t] of ex.textures) {
+      if (!t.renderView || t.format !== "rgba8unorm") continue;
+      const bytesPerRow = Math.ceil((t.width * 4) / 256) * 256;
+      const buffer = device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const enc = device.createCommandEncoder();
+      enc.copyTextureToBuffer({ texture: t.texture }, { buffer, bytesPerRow }, [t.width, t.height]);
+      device.queue.submit([enc.finish()]);
+      pending.push(buffer.mapAsync(GPUMapMode.READ).then(() => {
+        const src = new Uint8Array(buffer.getMappedRange());
+        const out = new Uint8Array(t.width * t.height * 4);
+        for (let y = 0; y < t.height; y++) out.set(src.subarray(y * bytesPerRow, y * bytesPerRow + t.width * 4), y * t.width * 4);
+        buffer.destroy();
+        return window.saveTarget(`p${index}-tex${id}-${t.width}x${t.height}.pam`, t.width, t.height, toBase64(out));
+      }));
+    }
+  };
   const host = {
     presentTarget(w, h) {
       if (!target || target.width !== w || target.height !== h) {
@@ -119,6 +147,7 @@ const result = await page.evaluate(async ({ every, at }) => {
     presented() {
       presents++;
       if ((every && presents % every === 0) || wanted.has(presents)) readback(presents, false);
+      if (targetsAt.has(presents)) dumpAll(presents);
     },
     log(level, message) { console.log(`${level}: ${message}`); },
   };
@@ -180,7 +209,7 @@ const result = await page.evaluate(async ({ every, at }) => {
   if (target) readback(presents, true);
   await Promise.all(pending);
   return { records, presents, elapsed, stats: ex.stats, errors, features };
-}, { every, at });
+}, { every, at, dumpTargets });
 await browser.close();
 server.close();
 

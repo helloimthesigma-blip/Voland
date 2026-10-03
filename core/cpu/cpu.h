@@ -123,6 +123,10 @@ struct CPU_Backend
   const char *name; /* "noop", "interpreter", "ballistic" */
   const char *version;
   bool supports_jit;
+  /* Safe with guest threads on several host threads at once
+   * (docs/PARALLEL.md): per-host-thread caches, and store-exclusive /
+   * barriers honoured when cpu_multicore() is set. */
+  bool supports_multicore;
 };
 
 /* ------------------------------------------------------------------ */
@@ -163,6 +167,7 @@ struct CPU_Backend
 
 extern const CPU_Backend CPU_BACKEND_NOOP;
 extern const CPU_Backend CPU_BACKEND_INTERPRETER; /* Phase 2 */
+extern const CPU_Backend CPU_BACKEND_JIT;         /* Voland's ARM64 -> wasm JIT (docs/JIT.md) */
 extern const CPU_Backend CPU_BACKEND_BALLISTIC;   /* only if -DCPU_BACKEND=ballistic */
 
 /* Returns the backend selected at configure time (see CPU_BACKEND CMake option). */

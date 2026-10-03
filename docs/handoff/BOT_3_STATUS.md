@@ -25,6 +25,13 @@
   - Executor CPU time per record type (whole replay): presents 983 → 590 ms, uploads 976 → 211 ms, copies 54 → 16 ms, draws 1,269 → 1,235 ms. That is about 0.38 ms per frame in total, so the GPU worker is not a bottleneck.
   - Upload batching was not worth doing: only 74 submits beyond one per present in 5,848 frames.
 
+- **Unsupported paths.**
+  - SHFL with register lane operands is translated (a lane outside the quad reads its own value, predicate as the reference's).
+  - Quad reads are bit-exact: 16-bit halves through derivatives. Before, they were float arithmetic, lossy for integer data.
+  - Integer-format COPY: equal formats use a texture copy, the others an integer blit.
+  - Integer clear colours are masked and sign-extended to the channel width, as `encode_color` does.
+  - New `shfl` WebGPU vector (9/9). The synthetic integer clear/copy stream replays with 0 WebGPU errors.
+
 ## Measurements
 
 | What | Value |
@@ -37,7 +44,7 @@
 
 1. Finish the gameplay frame comparison and fix any mismatch.
 2. The unsupported-path list (register SHFL, global loads, integer copies, cube/3D). Silksong's gameplay hits none of them so far.
-3. Producer: re-hashing of big textures every frame.
+3. Producer texture re-hashing: **the coordinator took it over** (texture_load, hashing, texture cache, ASTC). My unfinished attempt is in `~/WORKSPACE/bot3-runs/texture-change-detection.diff`.
 
 ## Needs from others
 

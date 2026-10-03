@@ -91,6 +91,19 @@ see "Needs".
 
 The GPU stalls cost little: no wait function shows in the profile.
 
+**Native at the same point is different.** The CLI ran from a snapshot at
+slice 4.8M (GPU mode) and `sample` took 15 s of 50k slices, about 1,600
+slices/s wall time on the loaded machine:
+
+- `texture_load` is about 4% of non-idle samples, and `ise_decode` does not
+  appear at all.
+- The likely cause is `RASTER_TEXTURE_POOL_BYTES`: 512 MB under
+  `__EMSCRIPTEN__` vs. 1 GB natively, against Silksong's decoded working
+  set of about 500 MB (the comment in `raster3d.h`). In the browser the pool
+  evicts and ASTC is re-decoded every frame.
+- The coordinator (session voland-34) took the texture-cache fix on
+  2026-10-03 and has been sent this.
+
 ### Other checks
 
 - **Native vs. browser, same span** (slices 860k → 1.41M, title screen,
@@ -120,8 +133,8 @@ The GPU stalls cost little: no wait function shows in the profile.
 
 ## Next
 
-- Native gameplay rate and profile for the texture path (snapshot server
-  at 4.8M slices), to tell whether it is wasm-specific.
+- Re-measure gameplay once the coordinator's texture fix lands on
+  `local/dev`.
 - wasm-opt / clang flag variants for the texture and hash loops.
 
 ## Needs from others

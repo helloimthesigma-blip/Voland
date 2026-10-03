@@ -31,13 +31,13 @@
     {
       "name": "web",
       "displayName": "Web (Emscripten)",
-      "description": "WASM build per docs/DESIGN.md \u00a724. Requires $EMSDK to be set - run emsdk_env.{sh,ps1,bat} first.",
+      "description": "WASM build per docs/DESIGN.md \u00a724 with the ARM64->WebAssembly JIT (docs/JIT.md), the browser default. Requires $EMSDK to be set - run emsdk_env.{sh,ps1,bat} first.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/web",
       "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
-        "CPU_BACKEND": "interpreter"
+        "CPU_BACKEND": "jit"
       }
     },
     {
@@ -46,6 +46,41 @@
       "description": "Release build of the interpreter backend: what you run real homebrew with natively.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/native-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CPU_BACKEND": "interpreter"
+      }
+    },
+    {
+      "name": "native-jit",
+      "displayName": "Native (JIT backend)",
+      "description": "CPU_BACKEND=jit natively: the interpreter plus the wasm emitter (compiled blocks only execute under Emscripten; docs/JIT.md).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/native-jit",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CPU_BACKEND": "jit"
+      }
+    },
+    {
+      "name": "web-jit",
+      "displayName": "Web (Emscripten, JIT backend)",
+      "description": "The web preset with CPU_BACKEND=jit (docs/JIT.md). Requires $EMSDK.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/web-jit",
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CPU_BACKEND": "jit"
+      }
+    },
+    {
+      "name": "web-interpreter",
+      "displayName": "Web (Emscripten, interpreter backend)",
+      "description": "The web build on the interpreter (the JIT's reference). Requires $EMSDK.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/web-interpreter",
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Release",
         "CPU_BACKEND": "interpreter"
@@ -68,6 +103,18 @@
     {
       "name": "native-release",
       "configurePreset": "native-release"
+    },
+    {
+      "name": "native-jit",
+      "configurePreset": "native-jit"
+    },
+    {
+      "name": "web-jit",
+      "configurePreset": "web-jit"
+    },
+    {
+      "name": "web-interpreter",
+      "configurePreset": "web-interpreter"
     }
   ],
   "testPresets": [
@@ -96,6 +143,28 @@
     {
       "name": "native-release",
       "configurePreset": "native-release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": true
+      }
+    },
+    {
+      "name": "native-jit",
+      "configurePreset": "native-jit",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": true
+      }
+    },
+    {
+      "name": "web-jit",
+      "configurePreset": "web-jit",
       "output": {
         "outputOnFailure": true
       },

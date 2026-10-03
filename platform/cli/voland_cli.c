@@ -4,8 +4,11 @@
  * launcher frontends. No GUI toolkit.
  *
  *   voland-cli run <file.nca|file.nro> [options]
- *       --backend interpreter|noop   CPU backend (default: interpreter)
+ *       --backend interpreter|jit|noop CPU backend (default: interpreter)
  *       --budget N                   cycles per scheduler slice (default 100000)
+ *       --jit-threshold N            jit: executions before a block is compiled
+ *       --jit-dump DIR               jit: write every compiled module to DIR
+ *       --jit-fallbacks              jit: print the commonest interpreted opcodes
  *       --max-slices N               stop after N slices (default 10000000)
  *       --test-card                  publish the core's test card before running
  *       --expect-output TEXT         exit 4 unless the guest printed TEXT
@@ -64,11 +67,18 @@
 #include "common/input_region.h"
 #include "common/layout.h"
 #include "emulator.h"
+#include "hle/kernel/parallel.h"
+#ifdef __APPLE__
+#include <libproc.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
 #ifdef VOLAND_CLI_VIDEO
 #include "video_vt.h"
 #endif
 #include "hle/kernel/handle_table.h"
 #include "cpu/backends/interpreter/interpreter.h"
+#include "cpu/backends/jit/jit.h"
 #include "gpu/framebuffer.h"
 #include "gpu/gpu_stream.h"
 #include "gpu/wgsl.h"
@@ -284,6 +294,38 @@ static void dump_texture(void *user, const Tex_Image *image, uint64_t address) {
   if (alpha) fclose(alpha);
 }
 
+/* VOLAND_DUMP_SURFACES=DIR:F1,F2,...: at the end of frames F1, F2, ...
+ * (1-based, raster3d_end_frame), every RGBA8 render surface the software
+ * renderer holds as DIR/f<F>-<address>-<w>x<h>.pam (RGBA). With
+ * replay-gpu-stream.mjs --dump-targets, finds the first render target
+ * where the WebGPU renderer departs from the reference. */
+typedef struct Surface_Dump {
+  char dir[512];
+  uint64_t frames[16];
+  uint32_t count;
+  uint64_t frame;
+} Surface_Dump;
+
+static void dump_surfaces(void *user, const Raster3d *r) {
+  Surface_Dump *d = (Surface_Dump *)user;
+  d->frame++;
+  bool wanted = false;
+  for (uint32_t i = 0; i < d->count; i++) wanted |= d->frames[i] == d->frame;
+  if (!wanted) return;
+  for (uint32_t i = 0; i < RASTER_SURFACES; i++) {
+    const Raster3d_Surface *s = &r->surfaces[i];
+    if (!s->in_use || !s->loaded || s->depth || s->bytes_per_pixel != 4u) continue;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/f%llu-%llx-%ux%u-fmt%02x.pam", d->dir, (unsigned long long)d->frame,
+             (unsigned long long)s->address, s->width, s->height, s->format);
+    FILE *f = fopen(path, "wb");
+    if (!f) continue;
+    fprintf(f, "P7\nWIDTH %u\nHEIGHT %u\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n", s->width, s->height);
+    fwrite(s->pixels, 1, (size_t)s->width * s->height * 4u, f);
+    fclose(f);
+  }
+}
+
 /* The newest frame as a P6 PPM (RGB; alpha dropped). */
 static bool dump_frame(const char *path) {
   const uint32_t published = framebuffer_published();
@@ -372,6 +414,7 @@ typedef struct Snapshot_Job {
   char snapshot_dir[512];
   Input_Event inputs[MAX_INPUT_EVENTS];
   uint32_t input_count;
+  int32_t host_cores; /* "cores N": --host-cores for this job; -1 = unchanged */
 } Snapshot_Job;
 
 static bool read_job(const char *path, Snapshot_Job *job) {
@@ -382,6 +425,7 @@ static bool read_job(const char *path, Snapshot_Job *job) {
     unsigned long long a = 0, b = 0;
     unsigned buttons = 0;
     if (sscanf(line, "max_slices %llu", &a) == 1) job->max_slices = a;
+    else if (sscanf(line, "cores %llu", &a) == 1) job->host_cores = (int32_t)a;
     else if (sscanf(line, "every %llu", &a) == 1) job->dump_every = a;
     else if (sscanf(line, "trace %llu:%llu", &a, &b) == 2) {
       job->trace_start = a;
@@ -529,7 +573,8 @@ static int run(int argc, char **argv) {
   uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES, dump_every = 0, snapshot_at = 0;
   const char *snapshot_dir = NULL, *gpu_stream_path = NULL;
   uint32_t frame_skip = 0, host_cores = 0;
-  bool test_card = false, svc_stats = false, swkbd_cancel = false;
+  bool test_card = false, svc_stats = false, swkbd_cancel = false, jit_fallbacks = false;
+  uint64_t jit_fallbacks_from = 0;
   const char *swkbd_text = NULL;
   Input_Event inputs[MAX_INPUT_EVENTS];
   uint32_t input_count = 0;
@@ -540,7 +585,18 @@ static int run(int argc, char **argv) {
       const char *name = argv[++i];
       if (!strcmp(name, "noop")) backend = &CPU_BACKEND_NOOP;
       else if (!strcmp(name, "interpreter")) backend = &CPU_BACKEND_INTERPRETER;
+      else if (!strcmp(name, "jit")) backend = &CPU_BACKEND_JIT;
       else { fprintf(stderr, "voland-cli: unknown backend %s\n", name); return EXIT_USAGE; }
+    } else if (!strcmp(argv[i], "--jit-fallbacks")) {
+      jit_set_fallback_profile(true);
+      jit_fallbacks = true;
+    } else if (!strcmp(argv[i], "--jit-fallbacks-from") && has_value) { /* profile from slice N on */
+      jit_fallbacks_from = strtoull(argv[++i], NULL, 0);
+      jit_fallbacks = true;
+    } else if (!strcmp(argv[i], "--jit-dump") && has_value) {
+      jit_set_dump_directory(argv[++i]);
+    } else if (!strcmp(argv[i], "--jit-threshold") && has_value) {
+      jit_set_hot_threshold((uint32_t)strtoul(argv[++i], NULL, 0));
     } else if (!strcmp(argv[i], "--budget") && has_value) {
       budget = strtoull(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--max-slices") && has_value) {
@@ -659,6 +715,21 @@ static int run(int argc, char **argv) {
     emu.renderer.on_program_decoded = program_decoded;
     emu.renderer.on_program_user = NULL;
   }
+  if (getenv("VOLAND_DUMP_SURFACES")) {
+    static Surface_Dump surface_dump;
+    const char *spec = getenv("VOLAND_DUMP_SURFACES");
+    const char *colon = strrchr(spec, ':');
+    if (colon && (size_t)(colon - spec) < sizeof(surface_dump.dir)) {
+      memcpy(surface_dump.dir, spec, (size_t)(colon - spec));
+      for (const char *p = colon + 1; *p && surface_dump.count < 16u;) {
+        char *end = NULL;
+        surface_dump.frames[surface_dump.count++] = strtoull(p, &end, 10);
+        p = (end && *end == ',') ? end + 1 : (end ? end : p + strlen(p));
+      }
+      emu.renderer.on_frame_end = dump_surfaces;
+      emu.renderer.on_frame_end_user = &surface_dump;
+    }
+  }
   if (getenv("VOLAND_DUMP_TEXTURES")) {
     emu.renderer.on_texture_decoded = dump_texture;
     emu.renderer.on_texture_user = getenv("VOLAND_DUMP_TEXTURES");
@@ -686,19 +757,23 @@ static int run(int argc, char **argv) {
     trace_length = (end && *end == ':') ? strtoull(end + 1, NULL, 0) : 1u;
   }
   while (slices < max_slices && (status == EMULATOR_RUNNING || status == EMULATOR_IDLE)) {
+    if (jit_fallbacks_from && slices == jit_fallbacks_from) jit_set_fallback_profile(true);
 #ifndef _WIN32
     if (snapshot_dir && snapshot_at && slices == snapshot_at) {
       static Snapshot_Job job;
       memset(&job, 0, sizeof(job));
       job.max_slices = max_slices;
       job.trace_start = UINT64_MAX;
+      job.host_cores = -1;
       (void)emulator_set_host_cores(&emu, 0); /* fork() keeps no other thread */
       snapshot_serve(snapshot_dir, &job); /* returns in a job's child */
 #ifdef VOLAND_CLI_VIDEO
       video_vt_forked(); /* Apple frameworks cannot start in a forked child */
 #endif
       raster3d_restart_workers_after_fork(&emu.renderer);
-      (void)emulator_set_host_cores(&emu, host_cores);
+      if (job.host_cores >= 0) host_cores = (uint32_t)job.host_cores;
+      if (host_cores)
+        fprintf(stderr, "voland-cli: %u host core(s) for guest threads\n", emulator_set_host_cores(&emu, host_cores));
       max_slices = job.max_slices;
       if (job.dump_every) dump_every = job.dump_every;
       if (job.frame_path[0]) frame_path = job.frame_path;
@@ -763,6 +838,30 @@ static int run(int argc, char **argv) {
             (unsigned long long)(gs->hashed_bytes >> 20));
   }
   if (pc_profile) pc_profile_print(&emu);
+#ifdef __APPLE__
+  {
+    /* Host work, independent of machine load (a forked snapshot job counts
+     * only its own): compare modes by instructions, not wall time. */
+    struct rusage_info_v4 usage;
+    struct rusage times;
+    if (proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&usage) == 0 && getrusage(RUSAGE_SELF, &times) == 0) {
+      const double cpu = (double)(times.ru_utime.tv_sec + times.ru_stime.tv_sec) +
+                         (double)(times.ru_utime.tv_usec + times.ru_stime.tv_usec) / 1e6;
+      fprintf(stderr, "voland-cli: host %.3fe9 instructions, %.3fe9 cycles, %.1fs CPU\n",
+              (double)usage.ri_instructions / 1e9, (double)usage.ri_cycles / 1e9, cpu);
+    }
+  }
+#endif
+  if (emu.parallel) {
+    /* Parallelism: guest cycles over the per-slice busiest core's. */
+    const Parallel_Stats ps = parallel_stats(emu.parallel);
+    fprintf(stderr,
+            "voland-cli: parallel: %llu slices, %llu guest cycles over a span of %llu (%.2fx), %.1f%% of slices on "
+            "2+ cores\n",
+            (unsigned long long)ps.slices, (unsigned long long)ps.cycles, (unsigned long long)ps.span,
+            ps.span ? (double)ps.cycles / (double)ps.span : 0.0,
+            ps.slices ? 100.0 * (double)ps.shared_slices / (double)ps.slices : 0.0);
+  }
   uint32_t width = 0, height = 0;
   const uint64_t frame_hash = newest_frame_hash(&width, &height);
   static const char *const k_status[] = {"running", "idle", "exited", "crashed", "deadlock", "not loaded"};
@@ -858,6 +957,27 @@ static int run(int argc, char **argv) {
               (unsigned long long)g->clears, (unsigned long long)g->draws, (unsigned long long)g->skipped_draws,
               (unsigned long long)g->triangles, (unsigned long long)g->pixels, (unsigned long long)g->shader_faults,
               (unsigned long long)g->unknown_ops, (unsigned long long)g->texture_misses);
+  }
+  if (backend == &CPU_BACKEND_JIT) {
+    const Jit_Stats *j = jit_stats();
+    fprintf(stderr,
+            "voland-cli: jit %llu regions compiled (%llu blocks; %llu failed, %llu evicted, %llu KB of modules), "
+            "%llu compiled / %llu interpreted block runs, %llu code generations (%llu blocks kept, %llu stale)\n",
+            (unsigned long long)j->blocks_compiled, (unsigned long long)j->region_blocks,
+            (unsigned long long)j->compile_failures,
+            (unsigned long long)j->evictions, (unsigned long long)(j->module_bytes / 1024u),
+            (unsigned long long)j->block_entries, (unsigned long long)j->interpreted_blocks,
+            (unsigned long long)j->generations, (unsigned long long)j->revalidations, (unsigned long long)j->stale);
+    fprintf(stderr,
+            "voland-cli: jit %llu direct SIMD&FP calls; interpreter fallbacks: %llu SIMD&FP, %llu SIMD&FP memory, "
+            "%llu exclusive/acquire-release, %llu other memory, %llu system, %llu other\n",
+            (unsigned long long)j->direct_simd, (unsigned long long)j->helper_simd_fp, (unsigned long long)j->helper_memory_simd,
+            (unsigned long long)j->helper_memory_exclusive, (unsigned long long)j->helper_memory,
+            (unsigned long long)j->helper_system, (unsigned long long)j->helper_other);
+    fprintf(stderr, "voland-cli: jit SIMD&FP direct calls with FPCR != 0: %llu (last FPCR %llx), IXC clear: %llu\n",
+            (unsigned long long)j->simd_fpcr_nonzero, (unsigned long long)j->last_fpcr,
+            (unsigned long long)j->simd_ixc_clear);
+    if (jit_fallbacks) jit_print_fallback_profile(60);
   }
   if (wav) {
     write_wav_header(wav, audio_frames);
@@ -956,7 +1076,7 @@ static int verify_dump(const char *path) {
 
 static void usage(void) {
   fprintf(stderr,
-          "usage: voland-cli run <file.nca|file.nro> [--backend interpreter|noop] [--budget N]\n"
+          "usage: voland-cli run <file.nca|file.nro> [--backend interpreter|jit|noop] [--budget N]\n"
           "                      [--max-slices N] [--test-card] [--expect-output TEXT]\n"
           "                      [--dump-frame FILE [--dump-frames-every N]]\n"
           "                      [--expect-frame-hash HEX]\n"
