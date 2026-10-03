@@ -70,7 +70,7 @@
 #define VIDEO_SLOT_OFF_PITCH 24u
 #define VIDEO_SLOT_OFF_CHROMA 28u
 
-/* A decoded NV12 frame, valid until video_release_older releases it. */
+/* A decoded NV12 frame, valid until the next video_frame_used. */
 typedef struct Video_Frame {
   uint32_t slot;
   uint32_t output, sequence, generation;
@@ -93,6 +93,7 @@ typedef struct Video_Stream {
   const Video_Backend *backend; /* NULL: the ring (web) */
   uint32_t generation;
   uint32_t sequence;
+  uint32_t shown_output[VIDEO_SLOT_COUNT]; /* the output index a slot held when it was shown (core-side) */
   uint64_t decodes, dropped; /* diagnostics */
 } Video_Stream;
 
@@ -109,9 +110,12 @@ uint32_t video_decode(Video_Stream *v, bool key, const uint8_t *data, uint32_t b
  * newest ready one (a frame late beats black). False if there is none. */
 bool video_frame_for(Video_Stream *v, uint32_t sequence, Video_Frame *out);
 
-/* Frees ready slots whose output index is below `output` (the stream
- * only moves forward). */
-void video_release_older(Video_Stream *v, uint32_t output);
+/* `frame` (from video_frame_for) was shown. Frames shown before it are
+ * freed, and so are frames the stream has moved well past without
+ * showing them; `frame` stays until a later one is shown, so showing it
+ * again still works. Frames come out of the decoder in decode order
+ * but are shown in display order: nothing is freed just for being old. */
+void video_frame_used(Video_Stream *v, const Video_Frame *frame);
 
 /* ---- The decoder's side (native backends, tests; TS mirrors it) ---- */
 

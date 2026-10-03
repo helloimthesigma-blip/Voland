@@ -50,6 +50,8 @@ typedef struct H264_Params {
  * and Main streams too) and the level (5.1: any Switch-sized stream). */
 #define H264_SYNTH_PROFILE 100u
 #define H264_SYNTH_LEVEL 51u
+/* max_num_reorder_frames the synthesized VUI declares. */
+#define H264_SYNTH_REORDER_FRAMES 2u
 
 /* Appends Annex-B SPS (id 0) and PPS (id 0) NAL units - start codes
  * included - to out. Returns the bytes written, or 0 if `capacity` is

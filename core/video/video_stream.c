@@ -35,11 +35,9 @@ void video_stream_init(Video_Stream *v, uint8_t *region, Gpu_Stream_Wait wait, c
   gpu_stream_init(&v->requests, region, region + VIDEO_RING_OFFSET, VIDEO_RING_BYTES, wait, NULL);
 }
 
-static void release_where(Video_Stream *v, bool older_generation, uint32_t below_output) {
+static void release_old_generations(Video_Stream *v) {
   for (uint32_t i = 0; i < VIDEO_SLOT_COUNT; i++) {
-    if (slot_state(v, i) != VIDEO_SLOT_READY) continue;
-    const bool stale = slot_u32(v, i, VIDEO_SLOT_OFF_GENERATION) != v->generation;
-    if ((older_generation && stale) || (!stale && slot_u32(v, i, VIDEO_SLOT_OFF_OUTPUT) < below_output)) {
+    if (slot_state(v, i) == VIDEO_SLOT_READY && slot_u32(v, i, VIDEO_SLOT_OFF_GENERATION) != v->generation) {
       set_slot_state(v, i, VIDEO_SLOT_FREE);
     }
   }
@@ -48,7 +46,7 @@ static void release_where(Video_Stream *v, bool older_generation, uint32_t below
 void video_configure(Video_Stream *v, uint32_t width, uint32_t height, const char *codec) {
   v->generation++;
   v->sequence = 0;
-  release_where(v, true, 0);
+  release_old_generations(v);
   if (v->backend) {
     v->backend->configure(v->backend->user, v->generation, width, height, codec);
     return;
@@ -120,7 +118,17 @@ bool video_frame_for(Video_Stream *v, uint32_t sequence, Video_Frame *out) {
   return true;
 }
 
-void video_release_older(Video_Stream *v, uint32_t output) { release_where(v, true, output); }
+void video_frame_used(Video_Stream *v, const Video_Frame *frame) {
+  release_old_generations(v);
+  for (uint32_t i = 0; i < VIDEO_SLOT_COUNT; i++) {
+    if (i == frame->slot || slot_state(v, i) != VIDEO_SLOT_READY) continue;
+    const uint32_t output = slot_u32(v, i, VIDEO_SLOT_OFF_OUTPUT);
+    const bool shown = v->shown_output[i] == output && output;
+    const bool skipped = slot_u32(v, i, VIDEO_SLOT_OFF_SEQUENCE) + VIDEO_SLOT_COUNT < frame->sequence;
+    if (shown || skipped) set_slot_state(v, i, VIDEO_SLOT_FREE);
+  }
+  v->shown_output[frame->slot] = frame->output;
+}
 
 int32_t video_slot_acquire(Video_Stream *v) {
   for (uint32_t i = 0; i < VIDEO_SLOT_COUNT; i++) {

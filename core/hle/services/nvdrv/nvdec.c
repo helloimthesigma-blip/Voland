@@ -395,7 +395,7 @@ static void vic_execute(Mm_Engine *e, const Mm_Context *c) {
   }
   if (ok) {
     v->conversions++;
-    video_release_older(c->video, frame.output);
+    video_frame_used(c->video, &frame);
   }
 }
 

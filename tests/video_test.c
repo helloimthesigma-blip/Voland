@@ -127,9 +127,20 @@ static void test_slots(void) {
   video_slot_publish(&v, (uint32_t)b, 2, 1, v.generation, 1280, 720, 1280, 1280 * 720);
   CHECK(video_frame_for(&v, 2, &f) && f.slot == (uint32_t)a && f.luma[0] == 0xAA && f.chroma == f.luma + 1280 * 720);
   CHECK(video_frame_for(&v, 3, &f) && f.output == 2u); /* not decoded yet: the newest stands in */
-  video_release_older(&v, 2);                          /* output 1 is done with */
-  CHECK(!video_frame_for(&v, 2, &f) || f.output == 2u);
-  CHECK(video_slot_acquire(&v) == a); /* the released slot is free again */
+  /* Shown in display order 1, 2: showing 2 frees 1; 2 stays (shown again works). */
+  CHECK(video_frame_for(&v, 1, &f) && f.slot == (uint32_t)b);
+  video_frame_used(&v, &f);
+  CHECK(video_frame_for(&v, 2, &f) && f.slot == (uint32_t)a);
+  video_frame_used(&v, &f);
+  CHECK(video_frame_for(&v, 2, &f) && f.slot == (uint32_t)a);
+  CHECK(video_slot_acquire(&v) == b); /* sequence 1's slot is free again */
+  /* A frame the stream moved well past without showing it is freed too. */
+  const int32_t c = video_slot_acquire(&v);
+  video_slot_publish(&v, (uint32_t)b, 3, 3, v.generation, 16, 16, 16, 256);
+  video_slot_publish(&v, (uint32_t)c, 4, 3 + VIDEO_SLOT_COUNT + 1u, v.generation, 16, 16, 16, 256);
+  CHECK(video_frame_for(&v, 3 + VIDEO_SLOT_COUNT + 1u, &f) && f.slot == (uint32_t)c);
+  video_frame_used(&v, &f);
+  CHECK(!video_frame_for(&v, 3, &f) || f.sequence != 3u);
   /* A new stream drops the old one's frames. */
   video_configure(&v, 1280, 720, "avc1.640033");
   CHECK(!video_frame_for(&v, 1, &f));

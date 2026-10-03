@@ -129,7 +129,10 @@ static size_t write_sps(const H264_Params *p, uint8_t *out, size_t capacity) {
   put_ue(&b, MAX_BITS_PER_MB_DENOM);
   put_ue(&b, MAX_MV_LENGTH_LOG2);
   put_ue(&b, MAX_MV_LENGTH_LOG2);
-  put_ue(&b, p->max_num_ref_frames); /* max_num_reorder_frames: no more than the DPB holds */
+  /* NVDEC never sees the stream's own value. x264 (B-pyramid) needs 2;
+   * the decoder holds that many frames back before output, so it is
+   * also the decode latency. */
+  put_ue(&b, H264_SYNTH_REORDER_FRAMES); /* max_num_reorder_frames */
   put_ue(&b, p->max_num_ref_frames); /* max_dec_frame_buffering */
   put_trailing(&b);
   return emit_nal(NAL_SPS, &b, out, capacity);
