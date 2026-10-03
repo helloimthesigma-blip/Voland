@@ -160,11 +160,90 @@ than before.
   host cores, slice counts aren't deterministic, so this may be the game
   doing something else (a load) rather than a hang. Watch for it.
 
+## Web JIT in the browser (local/dev 85d887f)
+
+- **Title fps.** `web-jit` gave 11.1–12.1 fps across five runs (13.2k–14.3k
+  slices/s), against 7.0–7.7 for the interpreter, so about 1.55×. One 7.31
+  outlier came during a load spike (load average 184).
+- **Node, same build, 200k slices from boot.**
+  - Interpreter 480 s, JIT 279 s: 1.72×.
+  - Identical virtual time and SVC count.
+- **Where the worker's time goes at the title.**
+  - JIT modules: 49%.
+  - Core wasm: 46%, of which interp_execute 9–12%, softfloat/NEON helpers
+    about 22%, jit_helper_simd 2–5% and jit_run 2.6%.
+  - Run-time compilation (Module + Instance): 2–3%.
+  - JS boundary: about 3.5%.
+- Sent to the JIT agent.
+
+## Load time (task from the coordinator, 2026-10-03)
+
+The harness gains `--phases NAME:SLICE,...`. It records a CDP profile per
+phase, plus worker time, file reads, GPU bytes and stalls, and counts of
+run-time wasm modules. The counts come from a `WebAssembly.Module`/`Instance`
+wrapper installed in the worker.
+
+**Before** (local/dev c87a499, JIT core, the BOTS.md recipe; two runs on a
+heavily loaded machine):
+
+| Phase (slices) | Worker s, run A | Worker s, run B | File reads (MiB, s), run B | wasm modules (MiB, s compiling) | GPU stalls |
+|---|---|---|---|---|---|
+| boot (0–860k) | 86 | 201 | 1,213 (334 requested, 20.5 s) | 82,931 (335, 21.2 s) | 154 |
+| title (860k–1.1M) | 24 | 34 | 1 | 10,516 (45, 2.5 s) | 106 |
+| menus (1.1M–3.0M) | 209 | 208 | 354 (91, 1.9 s) | 74,414 (278, 22.4 s) | 187 |
+| New Game → room (3.0M–4.8M) | 505 | 348 | 9 | 98,667 (387, 59.0 s) | 869 |
+| **total** | **824** | **791** | | **266,528 (1,045 MiB, 105 s)** | |
+
+The interpreter took 1,309–1,588 s to the same point.
+
+- **Biggest non-guest cost: the JIT's run-time compilation.**
+  - About 266k modules averaging about 4 KB, even at the steady title.
+    That suggests recompilation churn.
+  - In the New Game phase, "Module" is 14% self time and GC 3–4%.
+  - The JIT agent's code; sent to them with suggestions.
+- **File reads.** 1,213 synchronous 1 MiB chunk reads cover 334 MiB of
+  requests at boot. They cost 3.4 s on a quiet disk and 20.5 s under
+  contention.
+- **Negligible:** logging, `texture_load` (about 1%) and RomFS/LZ4 parsing
+  (not in the top 25).
+
+**After** (bot4 dbd7037 + this commit; JIT core, `?cores=0`, quieter
+machine; the screenshot shows the first room):
+
+| Phase (slices) | Worker s | File reads (MiB, s) | wasm modules (MiB, s compiling) | GPU stalls (wait s) |
+|---|---|---|---|---|
+| boot | 103 | 1,822 × 256 KiB (334 requested, 2.5 s) | 85,417 (357, 8.7 s) | 127 (0.0) |
+| title | 62 | 101 (22, 0.2 s) | 29,069 (123, 5.9 s) | 111 (0.1) |
+| menus | 138 | 255 (69, 0.5 s) | 62,879 (260, 13.2 s) | 196 (0.0) |
+| New Game → room | 277 | 17 (4, 0.1 s) | 105,492 (446, 42.8 s) | 719 (0.4) |
+| **total** | **580** | **3.3 s** | **282,857 (1,186 MiB, 70.6 s)** | **0.5 s** |
+
+- **File reads.** The cache is now a 128 MiB LRU of 256 KiB chunks, up
+  from 32 MiB of 1 MiB. At boot the old cache read 1,213 MiB for 334 MiB
+  of requests, because the boot re-reads the same RomFS regions and they
+  were evicted. Now it reads 371 MiB (1,486 distinct chunks), with almost
+  no re-reads. Under similar disk contention boot reads take 6.5 s, down
+  from 20.5–27.4 s; on a quiet disk, 2.5 s.
+- **Async read-ahead tried and dropped.** `Blob.arrayBuffer()` for the next
+  4 chunks after a miss made boot worse: 4,633 prefetches, more
+  synchronous reads, 27.4 s.
+- **GPU ring size stays at 4 MiB.** A new counter
+  (`emulator_stream_wait_ns`, the time spent in `gpu_stream_wait`) shows
+  only 0.5 s of waiting across the whole load, despite 1,153 stalls. The
+  coordinator said to skip the resize if stalls cost nothing.
+- **Worker time to gameplay is 580 s here vs. 791–824 s before.** Part of
+  that is the read fix, and part is a less loaded machine: JIT compile
+  time also fell, 105 → 71 s, with no JIT change.
+- **What remains is the JIT's own compile cost.** About 283k modules and
+  71 s. The JIT agent has since raised the hot threshold to 256 and reuses
+  one staging buffer (on `local/jit`); batching regions per module is next
+  on their list.
+
 ## Next
 
-- Gameplay is interpreter-bound; browser-side levers left are small.
-  Next candidates: the GPU worker and main thread under load, and repeat
-  measurements on a quieter machine.
+- Re-measure load phases once the JIT's threshold and staging changes are
+  on `local/dev`.
+- Gameplay is guest-code bound. The browser-side levers left are small.
 - wasm-opt / clang flag variants for the texture and hash loops.
 
 ## Needs from others
