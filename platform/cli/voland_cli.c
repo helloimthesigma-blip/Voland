@@ -671,6 +671,8 @@ static int run(int argc, char **argv) {
     if (getenv("VOLAND_GPU_MIPMAPS") && !strcmp(getenv("VOLAND_GPU_MIPMAPS"), "0")) emu.renderer.gpu_mipmaps = false;
   }
   const bool pc_profile = getenv("VOLAND_PC_PROFILE") != NULL;
+  /* VOLAND_PROGRESS=N: a "slice N" line every N slices (long runs). */
+  const uint64_t progress_every = getenv("VOLAND_PROGRESS") ? strtoull(getenv("VOLAND_PROGRESS"), NULL, 0) : 0;
   /* VOLAND_TRACE_DRAWS=START:LENGTH logs every draw in that slice window. */
   uint64_t trace_start = UINT64_MAX, trace_length = 0;
   if (getenv("VOLAND_TRACE_DRAWS")) {
@@ -705,6 +707,7 @@ static int run(int argc, char **argv) {
       }
     }
 #endif
+    if (progress_every && slices % progress_every == 0) fprintf(stderr, "voland-cli: slice %llu\n", (unsigned long long)slices);
     if (input_count) apply_input(inputs, input_count, slices);
     emu.renderer.trace_draws = slices >= trace_start && slices - trace_start < trace_length;
     status = emulator_run_slice(&emu, budget);

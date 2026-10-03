@@ -519,14 +519,28 @@ static uint32_t gpu_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint8_t *d) {
   }
 }
 
+/* VIC wrote into an nvmap buffer: textures over its GPU mappings are re-read. */
+static void mm_written(void *user, uint32_t handle, uint64_t offset, uint64_t bytes) {
+  Nvdrv_State *s = (Nvdrv_State *)user;
+  if (!s->renderer) return;
+  const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate};
+  for (uint32_t i = 0; i < NVDRV_MAX_GPU_MAPPINGS; i++) {
+    const Gpu_Mapping *m = &s->mappings[i];
+    if (!m->in_use || m->nvmap_handle != handle) continue;
+    const uint64_t start = offset > m->buffer_offset ? offset : m->buffer_offset;
+    const uint64_t end = offset + bytes < m->buffer_offset + m->size ? offset + bytes : m->buffer_offset + m->size;
+    if (start < end) raster3d_sync_range(s->renderer, &memory, m->gpu_va + (start - m->buffer_offset), end - start, true);
+  }
+}
+
 /* SUBMIT's command buffers ({nvmap handle, byte offset, words}) run on
  * the device's engine (nvdec.h). Relocations would patch buffer
  * addresses into the words; the multimedia stack writes IOVAs itself. */
 static void run_cmdbufs(Nvdrv_State *s, Nv_Fd *f, const uint8_t *d, uint32_t cmdbufs, uint32_t relocs) {
   Mm_Engine *engine = f->device == NV_DEVICE_NVDEC ? &s->nvdec : f->device == NV_DEVICE_VIC ? &s->vic : NULL;
   if (!engine || !s->hle) return;
-  if (relocs) log_info("[video] submit with %u relocations (not applied)", relocs);
-  const Mm_Context context = {s->hle->vmm, &s->iova};
+  (void)relocs; /* the multimedia stack writes IOVAs into its commands itself */
+  const Mm_Context context = {s->hle->vmm, &s->iova, s->video, &s->mm_video, mm_written, s};
   for (uint32_t i = 0; i < cmdbufs; i++) {
     const uint8_t *e = d + 16u + i * 12u;
     const Nvmap_Handle *h = nvmap_of(s, rd32(e));
@@ -818,6 +832,7 @@ void nvdrv_init(Nvdrv_State *state, Gpu_Channel *channels) {
   mm_iova_init(&state->iova);
   mm_engine_init(&state->nvdec, HOST1X_CLASS_NVDEC);
   mm_engine_init(&state->vic, HOST1X_CLASS_VIC);
+  mm_video_init(&state->mm_video);
   state->interface.name = "nvdrv";
   state->interface.commands = k_nvdrv_commands;
   state->interface.command_count = sizeof(k_nvdrv_commands) / sizeof(k_nvdrv_commands[0]);

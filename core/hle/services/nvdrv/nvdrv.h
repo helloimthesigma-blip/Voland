@@ -142,6 +142,7 @@ typedef struct Nvdrv_State {
   Mm_Iova iova;
   Mm_Engine nvdec;
   Mm_Engine vic;
+  Mm_Video mm_video;
   uint32_t cmdbuf[NVDRV_MAX_CMDBUF_WORDS];
 } Nvdrv_State;
 
