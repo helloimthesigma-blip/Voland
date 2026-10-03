@@ -32,8 +32,11 @@ function log(level: "debug" | "info" | "warn" | "error", message: string): void 
 
 const POLL_MS = 4;
 const STREAM_IDLE_POLL_MS = 50;
-/* Decoded frames waiting for a free slot before the oldest is dropped. */
+/* Requests stay in the ring (the core's producer waits for room) while
+ * this many decoded frames wait for a free slot, or this many chunks
+ * wait in the decoder: backpressure, never dropped frames. */
 const MAX_PENDING_FRAMES = 4;
+const MAX_DECODE_QUEUE = 8;
 
 type WaitAsync = (a: Int32Array, i: number, v: number) => { async: boolean; value: Promise<string> | string };
 const waitAsync = (Atomics as unknown as { waitAsync?: WaitAsync }).waitAsync;
@@ -59,7 +62,6 @@ class VideoBackend {
   private readonly pending: VideoFrame[] = [];
   private scratch = new Uint8Array(0);
   decoded = 0;
-  dropped = 0;
 
   constructor(private readonly region: VideoRegion) {}
 
@@ -105,11 +107,13 @@ class VideoBackend {
       return;
     }
     this.pending.push(frame);
-    while (this.pending.length > MAX_PENDING_FRAMES) {
-      this.pending.shift()?.close();
-      this.dropped++;
-    }
     this.drain();
+  }
+
+  /** True while new requests should wait in the ring. */
+  backlogged(): boolean {
+    const queued = this.stream ? this.stream.decoder.decodeQueueSize : 0;
+    return this.pending.length >= MAX_PENDING_FRAMES || queued >= MAX_DECODE_QUEUE;
   }
 
   /** Writes pending frames into free slots, oldest first. */
@@ -128,15 +132,18 @@ class VideoBackend {
   }
 
   private async write(stream: Stream, slot: number, frame: VideoFrame): Promise<void> {
-    const width = Math.min(frame.codedWidth, VIDEO_MAX_WIDTH) & ~1;
-    const height = Math.min(frame.codedHeight, VIDEO_MAX_HEIGHT) & ~1;
+    const visible = frame.visibleRect;
+    const left = visible ? visible.x & ~1 : 0;
+    const top = visible ? visible.y & ~1 : 0;
+    const width = Math.min(visible ? visible.width : frame.codedWidth, VIDEO_MAX_WIDTH) & ~1;
+    const height = Math.min(visible ? visible.height : frame.codedHeight, VIDEO_MAX_HEIGHT) & ~1;
     const format = frame.format;
     if (format !== "I420" && format !== "NV12") {
       log("warn", `video frame format ${String(format)} unsupported`);
       abandonVideoSlot(this.region, slot);
       return;
     }
-    const rect = { x: 0, y: 0, width, height };
+    const rect = { x: left, y: top, width, height };
     const size = frame.allocationSize({ rect });
     if (this.scratch.byteLength < size) this.scratch = new Uint8Array(size);
     const layout = await frame.copyTo(this.scratch, { rect });
@@ -170,7 +177,7 @@ async function consumeRequests(memory: WebAssembly.Memory, region: VideoRegion):
     const seen = Atomics.load(words, OFF_WRITE_SIGNAL / 4);
     const write = Number(Atomics.load(wide, OFF_WRITE / 8));
     let read = Number(Atomics.load(wide, OFF_READ / 8));
-    while (read < write) {
+    while (read < write && !backend.backlogged()) {
       const at = ringBase + (read % capacity);
       const head = new DataView(buffer, at, 8);
       const type = head.getUint32(0, true);
@@ -190,7 +197,8 @@ async function consumeRequests(memory: WebAssembly.Memory, region: VideoRegion):
     }
     /* Slots free up as the core's VIC consumes frames: retry pending ones. */
     backend.drain();
-    if (Number(Atomics.load(wide, OFF_WRITE / 8)) === write) {
+    if (read < write) await new Promise((resolve) => setTimeout(resolve, POLL_MS)); /* backlogged */
+    if (Number(Atomics.load(wide, OFF_WRITE / 8)) === write && read >= write) {
       await Promise.race([
         waitForChange(words, OFF_WRITE_SIGNAL / 4, seen),
         new Promise((resolve) => setTimeout(resolve, POLL_MS)),
