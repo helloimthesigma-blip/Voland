@@ -115,6 +115,33 @@ driver before the slice opens, when no core is running.
   - In serial mode a thread making an SVC is never `on_core` elsewhere,
     so this never blocks there.
 
+### Guest synchronization words
+
+The kernel lock serializes HLE, not guest code. A mutex word, condvar key
+or address-arbiter counter is also changed by guest LDXR/STXR on other
+cores while an SVC handles it. Two rules in `svc_thread.c` follow:
+
+- **Every kernel update of such a word is an atomic compare-and-swap**
+  (`vmm_compare_exchange32`), never a read and then a write. Example: a
+  SignalProcessWideKey that read "owned" and then wrote "owned + waiters"
+  could overwrite the owner's own release made in between, leaving a
+  mutex owned by nobody's knowledge (a deadlock).
+- **WaitProcessWideKeyAtomic marks the key before it releases the
+  mutex.** Signallers (libnx, nn::os) take the mutex, then skip the SVC
+  while the key reads 0. Released first, a signaller on another core can
+  slip in between and lose the wakeup.
+  - A two-core gameplay run once stalled with the main thread asleep on a
+    condvar. This ordering and the read-then-write above are the races
+    that can cause that.
+  - The race window is a few host instructions, too narrow for the stress
+    test to hit reliably. The test (condvar.s with key-checking
+    signallers, 20 rounds on 2 and 3 cores) guards the path. The evidence
+    is repeated Silksong runs (status file).
+
+Each swap is seq_cst, so the kernel's updates are also ordered as other
+cores see them. With one core every swap succeeds first time, exactly
+like the plain write it replaced.
+
 ## Virtual time
 
 `scheduler.ticks` stays the one global clock (19.2 MHz, backing CNTVCT,
