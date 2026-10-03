@@ -202,6 +202,8 @@ typedef struct Ctx {
   uint32_t index;                 /* the current instruction's index in its block */
   uint64_t pc;
   uint32_t insn;
+  uint32_t max_local;     /* highest local used (this pass) */
+  uint32_t declared_local; /* how many to declare (the analysis pass's max_local) */
 } Ctx;
 
 /* ------------------------------------------------------------------ */
@@ -217,15 +219,21 @@ static void i32c(Ctx *c, uint32_t value) {
   op(c, WASM_OP_I32_CONST);
   wasm_sleb(c->b, (int32_t)value);
 }
+static void note_local(Ctx *c, uint32_t local) {
+  if (local > c->max_local) c->max_local = local;
+}
 static void lget(Ctx *c, uint32_t local) {
+  note_local(c, local);
   op(c, WASM_OP_LOCAL_GET);
   wasm_uleb(c->b, local);
 }
 static void lset(Ctx *c, uint32_t local) {
+  note_local(c, local);
   op(c, WASM_OP_LOCAL_SET);
   wasm_uleb(c->b, local);
 }
 static void ltee(Ctx *c, uint32_t local) {
+  note_local(c, local);
   op(c, WASM_OP_LOCAL_TEE);
   wasm_uleb(c->b, local);
 }
@@ -3279,18 +3287,27 @@ static void emit_chain(Ctx *c) {
 }
 
 static void emit_function(Ctx *c) {
-  /* Locals: one run each of i64, i32, f32, f64, v128. */
-  wasm_uleb(c->b, 5);
-  wasm_uleb(c->b, I64_LOCALS);
-  wasm_u8(c->b, WASM_TYPE_I64);
-  wasm_uleb(c->b, I32_LOCALS);
-  wasm_u8(c->b, WASM_TYPE_I32);
-  wasm_uleb(c->b, F32_LOCALS);
-  wasm_u8(c->b, WASM_TYPE_F32);
-  wasm_uleb(c->b, F64_LOCALS);
-  wasm_u8(c->b, WASM_TYPE_F64);
-  wasm_uleb(c->b, V128_LOCALS);
-  wasm_u8(c->b, WASM_TYPE_V128);
+  /* Locals: runs of i64, i32, f32, f64, v128 - only as far as the
+   * analysis pass saw locals used (engines zero every declared local on
+   * each call, and tiny regions are called millions of times). */
+  static const uint32_t group_last[5] = {L_LAST_I64, L_LAST_I32, L_LAST_F32, L_LAST_F64, L_LAST_V128};
+  static const uint8_t group_type[5] = {WASM_TYPE_I64, WASM_TYPE_I32, WASM_TYPE_F32, WASM_TYPE_F64, WASM_TYPE_V128};
+  const uint32_t limit = c->discover ? L_LAST_V128 : c->declared_local;
+  uint32_t groups = 0, first = L_STATE + 1u;
+  for (uint32_t g = 0; g < 5u; g++) {
+    if (first <= limit) groups++;
+    first = group_last[g] + 1u;
+  }
+  wasm_uleb(c->b, groups);
+  first = L_STATE + 1u;
+  for (uint32_t g = 0; g < 5u; g++) {
+    if (first <= limit) {
+      const uint32_t last = group_last[g] < limit ? group_last[g] : limit;
+      wasm_uleb(c->b, last - first + 1u);
+      wasm_u8(c->b, group_type[g]);
+    }
+    first = group_last[g] + 1u;
+  }
 
   /* Prologue. The caller checked that block 0 fits the budget. */
   if (c->link->count_entries) {
@@ -3533,6 +3550,7 @@ bool jit_compile_block(uint64_t pc, const uint32_t *page_code, uint64_t memory_p
     memcpy(c.blocks, analysis.blocks, sizeof(c.blocks));
     c.block_count = analysis.block_count;
     c.uses_helper = analysis.uses_helper;
+    c.declared_local = analysis.max_local;
     c.all_used = analysis.used | analysis.written;
     c.all_written = analysis.written;
     emit_function(&c);

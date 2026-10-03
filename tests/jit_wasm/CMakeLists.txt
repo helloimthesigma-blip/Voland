@@ -23,6 +23,15 @@ target_link_options(jit_diff_test_wasm PRIVATE
 )
 set_target_properties(jit_diff_test_wasm PROPERTIES OUTPUT_NAME "jit_diff_test" SUFFIX ".js")
 
+# Micro-benchmark (not a test): node build/web-jit/tests/jit_wasm/jit_bench.js [N]
+add_executable(jit_bench_wasm EXCLUDE_FROM_ALL ../jit_bench.c)
+target_link_libraries(jit_bench_wasm PRIVATE switch_core)
+target_include_directories(jit_bench_wasm PRIVATE ..)
+target_link_options(jit_bench_wasm PRIVATE
+  -sENVIRONMENT=node,worker -sIMPORTED_MEMORY=0 -sMODULARIZE=0 -sEXPORT_ES6=0 -sEXIT_RUNTIME=1
+  -sPTHREAD_POOL_SIZE=0 -sNODERAWFS=1 "-sEXPORTED_FUNCTIONS=['_main']")
+set_target_properties(jit_bench_wasm PROPERTIES OUTPUT_NAME "jit_bench" SUFFIX ".js")
+
 add_test(NAME jit_diff_test_node
   COMMAND ${VOLAND_NODE} $<TARGET_FILE:jit_diff_test_wasm> 20000)
 
