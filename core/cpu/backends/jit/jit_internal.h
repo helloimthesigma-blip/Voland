@@ -78,6 +78,7 @@ typedef struct Jit_Link {
   uint64_t cache_address;      /* &Jit_Entry[0] */
   uint64_t generation_address; /* the uint64_t generation chained blocks must carry */
   bool count_entries;          /* prologue increments its entry's `entries` */
+  bool span_calls;             /* regions follow BL/RET and predicted PLT branches */
 } Jit_Link;
 
 typedef uint32_t (*Jit_Block_Fn)(Jit_State *state);

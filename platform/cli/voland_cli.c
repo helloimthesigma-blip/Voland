@@ -587,6 +587,8 @@ static int run(int argc, char **argv) {
     } else if (!strcmp(argv[i], "--jit-hot") && has_value) {
       jit_hot_top = (uint32_t)strtoul(argv[++i], NULL, 0);
       jit_set_hot_profile(true);
+    } else if (!strcmp(argv[i], "--jit-no-calls")) {
+      jit_set_span_calls(false);
     } else if (!strcmp(argv[i], "--jit-fallbacks")) {
       jit_set_fallback_profile(true);
       jit_fallbacks = true;

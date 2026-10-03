@@ -3264,6 +3264,11 @@ static Outcome c_branch_system(Ctx *c, uint32_t insn) {
       const uint64_t target = branch_target(c, insn, 25, 0), back = c->pc + INSN_BYTES;
       i64c(c, back);
       set_x(c, CPU_REG_X30);
+      if (!c->link->span_calls) {
+        i64c(c, target);
+        exit_to_stack(c);
+        return OUTCOME_END;
+      }
       if (c->discover && add_block(c, target) && add_block(c, back)) c->blocks[find_block(c, back)].return_site = true;
       branch_to(c, target);
       return OUTCOME_END;
@@ -3301,7 +3306,7 @@ static Outcome c_branch_system(Ctx *c, uint32_t insn) {
     }
     if (g_interp_trace_count && opc != 0) return OUTCOME_END_HELPER;
     const uint32_t rn = bits(insn, 9, 5);
-    const bool predicted = opc == 0 && rn != REG_ZR && (c->predicted_mask & (1u << rn));
+    const bool predicted = c->link->span_calls && opc == 0 && rn != REG_ZR && (c->predicted_mask & (1u << rn));
     const uint64_t prediction = predicted ? c->predicted_value[rn] : 0;
     get_x(c, rn);
     lset(c, L_NPC);
