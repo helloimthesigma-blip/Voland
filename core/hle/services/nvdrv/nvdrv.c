@@ -208,6 +208,8 @@ static uint32_t ctrl_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
   case 0x1E: { /* EVENT_WAIT_ASYNC {id, threshold, timeout, event_id} */
     const uint32_t id = rd32(d), threshold = rd32(d + 4), event_id = rd32(d + 12);
     if (id >= SYNCPOINT_COUNT || event_id >= NVDRV_MAX_EVENTS) return NV_BAD_VALUE;
+    log_debug("[nvdrv] EVENT_WAIT_ASYNC syncpoint %u threshold %u (min %u max %u) event %u timeout %d", id, threshold,
+              sp->min[id], sp->max[id], event_id, (int32_t)rd32(d + 8));
     if (syncpoint_reached(sp, id, threshold)) return NV_SUCCESS;
     s->events[event_id].waiting = true;
     s->events[event_id].syncpoint = id;
@@ -534,6 +536,8 @@ static uint32_t channel_common_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint
       if (i < fences) wr32(d + fence_at + i * 4u, value);
     }
     f->submissions++;
+    log_debug("[nvdrv] host1x submit on device %u: %u cmdbufs, %u relocs, %u incrs, %u fences", f->device, cmdbufs,
+              relocs, incrs, fences);
     return NV_SUCCESS;
   }
   case 0x02: wr32(d + 4, ensure_syncpoint(s, f)); return NV_SUCCESS; /* GET_SYNCPOINT {module; syncpt out} */
