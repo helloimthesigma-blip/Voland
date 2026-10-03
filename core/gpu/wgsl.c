@@ -1056,41 +1056,55 @@ static void emit_local(Tr *t, const Sm_Insn *in) {
 
 /* ---- quad operations ---------------------------------------------- */
 
-/* SHFL within a quad: for each quad lane q, which quad lane it reads and
- * whether the read is valid (maxwell_shader.c's SHFL with lane = q). */
+/* SHFL within a quad (maxwell_shader.c's SHFL with lane = the quad lane
+ * ql: a fragment's warp position beyond its quad is unknown here). Lane j
+ * outside the quad keeps the predicate's validity but reads the lane's own
+ * value. Immediate operands resolve per quad lane at translation;
+ * register operands at run time. */
 static void emit_shfl(Tr *t, const Sm_Insn *in) {
   const uint64_t w = in->raw;
-  if (!BIT(w, 28) || !BIT(w, 29)) {
-    fail(t, "SHFL with register lane operands");
+  const uint32_t mode = BITS(w, 30, 2);
+  const uint32_t pd = BITS(w, 48, 3);
+  if (BIT(w, 28) && BIT(w, 29)) {
+    const uint32_t bv = BITS(w, 20, 5), cv = BITS(w, 34, 13);
+    const uint32_t segmask = (cv >> 8) & 0x1fu, clamp = cv & 0x1fu;
+    uint32_t sources = 0, valid = 0;
+    for (uint32_t l = 0; l < 4u; l++) {
+      const uint32_t max_lane = (l & segmask) | (clamp & ~segmask), min_lane = l & segmask;
+      int32_t j;
+      bool ok;
+      switch (mode) {
+      case 0: j = (int32_t)(min_lane | (bv & ~segmask)); ok = (uint32_t)j <= max_lane; break;
+      case 1: j = (int32_t)l - (int32_t)bv; ok = j >= (int32_t)max_lane; break;
+      case 2: j = (int32_t)(l + bv); ok = (uint32_t)j <= max_lane; break;
+      default: j = (int32_t)(l ^ bv); ok = (uint32_t)j <= max_lane; break;
+      }
+      if (!ok || j < 0 || j >= (int32_t)SM_LANES) {
+        j = (int32_t)l;
+      } else {
+        valid |= 1u << l;
+        if (j > 3) j = (int32_t)l;
+      }
+      sources |= (uint32_t)j << (2u * l);
+    }
+    EMIT("{ let sv = quad_read_(%s, (0x%xu >> (ql * 2u)) & 3u, ql); ", reg(t, REG_A(w)).s, sources);
+    if (pd < SM_PT) EMIT("p%u = ((0x%xu >> ql) & 1u) != 0u; ", pd, valid);
+    EMIT("%s = sv; } ", reg_dst(t, REG_D(w)).s);
     return;
   }
-  const uint32_t mode = BITS(w, 30, 2), bv = BITS(w, 20, 5), cv = BITS(w, 34, 13);
-  const uint32_t segmask = (cv >> 8) & 0x1fu, clamp = cv & 0x1fu;
-  uint32_t sources = 0, valid = 0;
-  for (uint32_t l = 0; l < 4u; l++) {
-    const uint32_t max_lane = (l & segmask) | (clamp & ~segmask), min_lane = l & segmask;
-    int32_t j;
-    bool ok;
-    switch (mode) {
-    case 0: j = (int32_t)(min_lane | (bv & ~segmask)); ok = (uint32_t)j <= max_lane; break;
-    case 1: j = (int32_t)l - (int32_t)bv; ok = j >= (int32_t)max_lane; break;
-    case 2: j = (int32_t)(l + bv); ok = (uint32_t)j <= max_lane; break;
-    default: j = (int32_t)(l ^ bv); ok = (uint32_t)j <= max_lane; break;
-    }
-    if (!ok || j < 0 || j >= (int32_t)SM_LANES) {
-      j = (int32_t)l;
-    } else {
-      if (j > 3) {
-        fail(t, "SHFL across quads");
-        return;
-      }
-      valid |= 1u << l;
-    }
-    sources |= (uint32_t)j << (2u * l);
+  const Ex b = BIT(w, 28) ? ex("%uu", BITS(w, 20, 5)) : ex("(%s & 31u)", reg(t, REG_B(w)).s);
+  const Ex c = BIT(w, 29) ? ex("%uu", BITS(w, 34, 13)) : reg(t, REG_C(w));
+  EMIT("{ let bv = %s; let cv = %s; let sg = (cv >> 8u) & 31u; let mx = i32((ql & sg) | (cv & 31u & ~sg)); ", b.s, c.s);
+  switch (mode) {
+  case 0: EMIT("let j = i32((ql & sg) | (bv & ~sg)); let ok = j <= mx; "); break;
+  case 1: EMIT("let j = i32(ql) - i32(bv); let ok = j >= mx; "); break;
+  case 2: EMIT("let j = i32(ql + bv); let ok = j <= mx; "); break;
+  default: EMIT("let j = i32(ql ^ bv); let ok = j <= mx; "); break;
   }
-  EMIT("{ let sv = quad_read_(F(%s), (0x%xu >> (ql * 2u)) & 3u, ql); ", reg(t, REG_A(w)).s, sources);
-  if (BITS(w, 48, 3) < SM_PT) EMIT("p%u = ((0x%xu >> ql) & 1u) != 0u; ", BITS(w, 48, 3), valid);
-  EMIT("%s = U(sv); } ", reg_dst(t, REG_D(w)).s);
+  EMIT("let vl = ok && j >= 0 && j < %d; let sv = quad_read_(%s, select(ql, u32(j), vl && j <= 3), ql); ",
+       (int)SM_LANES, reg(t, REG_A(w)).s);
+  if (pd < SM_PT) EMIT("p%u = vl; ", pd);
+  EMIT("%s = sv; } ", reg_dst(t, REG_D(w)).s);
 }
 
 /* ---- instructions ------------------------------------------------- */
@@ -1749,9 +1763,20 @@ static void emit_io(Out *o, const Wgsl_Program_Desc *d, bool depth) {
 
 /* "fn quad_read": quad lane k's value of `v` (SHFL in a quad). */
 static const char k_quad[] =
-    "fn quad_read_(v: f32, k: u32, ql: u32) -> f32 {\n"
-    "  let dx = dpdxFine(v); let dy = dpdyFine(v);\n"
-    "  return v + dx * (f32(k & 1u) - f32(ql & 1u)) + dy * (f32(k >> 1u) - f32(ql >> 1u));\n"
+    /* Bit-exact neighbour reads: each 16-bit half is an exact small float,
+     * so its derivative is the exact difference to the neighbour. */
+    "fn quad_x_(v: u32, ql: u32) -> u32 {\n"
+    "  let lo = f32(v & 0xffffu); let hi = f32(v >> 16u); let s = select(1.0, -1.0, (ql & 1u) != 0u);\n"
+    "  return u32(lo + s * dpdxFine(lo)) | (u32(hi + s * dpdxFine(hi)) << 16u);\n"
+    "}\n"
+    "fn quad_y_(v: u32, ql: u32) -> u32 {\n"
+    "  let lo = f32(v & 0xffffu); let hi = f32(v >> 16u); let s = select(1.0, -1.0, (ql & 2u) != 0u);\n"
+    "  return u32(lo + s * dpdyFine(lo)) | (u32(hi + s * dpdyFine(hi)) << 16u);\n"
+    "}\n"
+    /* Quad lane k's value of v, read from lane ql. */
+    "fn quad_read_(v: u32, k: u32, ql: u32) -> u32 {\n"
+    "  let x = quad_x_(v, ql); let y = quad_y_(v, ql); let xy = quad_y_(x, ql); let d = k ^ ql;\n"
+    "  return select(select(v, x, d == 1u), select(y, xy, d == 3u), d >= 2u);\n"
     "}\n";
 
 static void emit_outputs(Tr *t, Out *o) {

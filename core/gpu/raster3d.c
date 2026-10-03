@@ -3450,6 +3450,19 @@ static void gpu_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, 
         Raster3d_Gpu_Surface *s = gpu_surface_get(r, &d, mem, !full);
         c.color_id = s->id;
         for (uint32_t i = 0; i < 4; i++) c.color[i] = regs[REG_CLEAR_COLOR + i];
+        /* Integer targets hold what encode_color stores: each channel's low
+         * bits (sign-extended for SINT, as sampling reads them back). */
+        const Color_Format *f = color_format(d.format);
+        if (f && (f->kind == KIND_UINT || f->kind == KIND_SINT)) {
+          for (uint32_t i = 0; i < f->count; i++) {
+            const uint32_t ch = f->channel[i], n = f->bits[i];
+            if (ch == CH_PAD || n >= 32u) continue;
+            const uint32_t mask = (1u << n) - 1u;
+            uint32_t v = c.color[ch] & mask;
+            if (f->kind == KIND_SINT && (v >> (n - 1u)) & 1u) v |= ~mask;
+            c.color[ch] = v;
+          }
+        }
         c.flags |= GPU_CLEAR_COLOR;
       }
     }

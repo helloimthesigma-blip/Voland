@@ -80,6 +80,11 @@ static uint64_t LDC(uint32_t d, uint32_t a, uint32_t slot, uint32_t off) {
   return op_top(0xef90) | GUARD | (4ull << 48) | ((uint64_t)slot << 36) | ((uint64_t)off << 20) | ra(a) | rd(d);
 }
 
+/* SHFL Rd, Ra, Rb, Rc (register lane operands), mode 0 IDX .. 3 BFLY, Pd. */
+static uint64_t SHFL_RR(uint32_t d, uint32_t a, uint32_t b, uint32_t c, uint32_t mode, uint32_t pd) {
+  return op_top(0xef10) | GUARD | ((uint64_t)pd << 48) | rc(c) | ((uint64_t)mode << 30) | rb(b) | ra(a) | rd(d);
+}
+
 typedef struct Builder {
   uint8_t bytes[SM_SPH_BYTES + 8u * 256u];
   uint32_t words;
@@ -380,6 +385,24 @@ static void vector_texture_lod(void) {
   finish(&b, "texture_lod", true);
 }
 
+/* SHFL with lane operands in registers, for the one lane the reference
+ * runs (quad lane 0): IDX 0 and BFLY 0 read the lane itself, UP 1 is out
+ * of range (own value, predicate false). */
+static void vector_shfl(void) {
+  Builder b;
+  begin(&b);
+  emit(&b, MOV32I(4, 0));            /* lane operand 0 */
+  emit(&b, MOV32I(5, 0x12345678u));  /* the value (not a float: exactness) */
+  emit(&b, MOV32I(6, 0x1f));         /* c: no segment, clamp 31 */
+  emit(&b, MOV32I(7, 1));            /* lane operand 1 */
+  emit(&b, SHFL_RR(0, 5, 4, 6, 0, 0));     /* IDX: p0 = true */
+  emit(&b, SHFL_RR(1, 5, 4, 6, 3, 1));     /* BFLY 0: p1 = true */
+  emit(&b, SHFL_RR(2, 5, 7, 6, 1, 2));     /* UP 1: lane -1, p2 = false */
+  emit(&b, SEL_R(3, 7, 4, 2));             /* r3 = p2 ? 1 : 0 */
+  emit(&b, EXIT());
+  finish(&b, "shfl", false);
+}
+
 static void vector_kill(void) {
   Builder b;
   begin(&b);
@@ -491,6 +514,7 @@ int main(int argc, char **argv) {
   vector_select_texture();
   vector_texture_hw();
   vector_texture_lod();
+  vector_shfl();
   vector_kill();
   vector_ldc();
   printf("[wgsl_test] passed (%u vectors%s%s)\n", g_vectors, g_dir ? " written to " : "", g_dir ? g_dir : "");
