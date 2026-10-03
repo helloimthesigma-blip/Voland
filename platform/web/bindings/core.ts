@@ -37,6 +37,9 @@ export interface SwitchCoreExports {
   readonly _emulator_run_slice_ffi:     (cycleBudget: bigint) => number;
   readonly _emulator_virtual_ticks_ffi: () => bigint;
   readonly _emulator_crash_pc_ffi:      () => bigint;
+  /* Perf counters (wasm_entry.c): writes up to `capacity` uint64s at
+   * `out` (ticks, SVCs, GPU stream bytes, GPU stream stalls); returns the count. */
+  readonly _emulator_perf_counters_ffi: (out: bigint, capacity: number) => number;
 
   /* Homebrew and system setup (v3.41). Strings and bytes live in memory
    * from `_malloc`; the shared font's allocation is never freed. */

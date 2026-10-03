@@ -19,6 +19,7 @@
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <string.h>
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -46,6 +47,7 @@ EXPORT uint64_t emulator_last_error_message_ffi(void);
 EXPORT uint64_t emulator_program_id_ffi(void);
 EXPORT int emulator_run_slice_ffi(uint64_t cycle_budget);
 EXPORT uint64_t emulator_virtual_ticks_ffi(void);
+EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity);
 EXPORT uint64_t emulator_crash_pc_ffi(void);
 EXPORT void emulator_set_program_path_ffi(uint64_t path);
 EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
@@ -261,6 +263,26 @@ EXPORT int emulator_run_slice_ffi(uint64_t cycle_budget)
 EXPORT uint64_t emulator_virtual_ticks_ffi(void)
 {
   return g_initialised ? g_emulator.scheduler.ticks : 0;
+}
+
+/* Perf counters for the browser harness (platform/web/tools/perf.mjs):
+ * writes up to `capacity` uint64 values at `out` and returns how many.
+ * Order: virtual ticks, SVCs, GPU stream bytes, GPU stream stalls (the
+ * producer waited for the GPU worker). */
+enum { PERF_TICKS, PERF_SVCS, PERF_GPU_BYTES, PERF_GPU_STALLS, PERF_COUNT };
+
+EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity)
+{
+  if (!g_initialised || out == 0) return 0;
+  const uint64_t values[PERF_COUNT] = {
+    [PERF_TICKS] = g_emulator.scheduler.ticks,
+    [PERF_SVCS] = g_emulator.hle.svc_call_count,
+    [PERF_GPU_BYTES] = g_emulator.gpu_stream.bytes,
+    [PERF_GPU_STALLS] = g_emulator.gpu_stream.stalls,
+  };
+  const uint32_t count = capacity < PERF_COUNT ? capacity : PERF_COUNT;
+  memcpy((void *)(uintptr_t)out, values, count * sizeof(uint64_t));
+  return count;
 }
 
 EXPORT uint64_t emulator_crash_pc_ffi(void)
