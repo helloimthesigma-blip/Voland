@@ -2903,6 +2903,21 @@ static bool c_vector_load_store(Ctx *c, uint32_t insn) {
 
 #define EXCLUSIVE_GRANULE_MASK (~(uint64_t)(INTERP_EXCLUSIVE_GRANULE - 1u))
 
+/* atomic.fence (threads proposal: 0xFE prefix, opcode 0x03, flags 0). */
+#define WASM_ATOMIC_PREFIX 0xFEu
+#define WASM_ATOMIC_FENCE 0x03u
+
+/* A full fence, emitted only into code compiled while guest threads run
+ * on several host threads (cpu_multicore(), docs/PARALLEL.md): the
+ * interpreter's ordering rules, inline. Each core compiles its own code,
+ * and the mode never changes while cores exist. */
+static void emit_multicore_fence(Ctx *c) {
+  if (!cpu_multicore()) return;
+  op(c, WASM_ATOMIC_PREFIX);
+  op(c, WASM_ATOMIC_FENCE);
+  op(c, 0);
+}
+
 static bool c_exclusive(Ctx *c, uint32_t insn) {
   const uint32_t size = bits(insn, 31, 30);
   const bool o2 = bit(insn, 23), load = bit(insn, 22), o1 = bit(insn, 21), o0 = bit(insn, 15);
@@ -2910,6 +2925,9 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
   const uint32_t element = 1u << size;
   if (o1) return false;        /* pairs (and LSE CAS): the interpreter */
   if (o2 && !o0) return false; /* LORegion: undefined */
+  /* Multicore: STXR/STLXR must be a compare-and-swap against what the
+   * LDXR read - the interpreter's (interp_load_store.c). */
+  if (!o2 && !load && cpu_multicore()) return false;
   get_xsp(c, n);
   lset(c, L_ADDR);
   if (element > 1u) { /* alignment fault: the interpreter raises it */
@@ -2922,7 +2940,8 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
     leave_via_interpreter(c);
     end_(c);
   }
-  if (o2) { /* LDAR / STLR */
+  if (o2) { /* LDAR / STLR (multicore: fenced on both sides, RCsc) */
+    emit_multicore_fence(c);
     if (load) {
       emit_load_address(c, element);
       emit_host_load(c, ACCESS_LOAD_ZERO, element, 0, L_VAL);
@@ -2931,6 +2950,7 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
     } else {
       emit_store(c, element, t, false, 0);
     }
+    emit_multicore_fence(c);
     return true;
   }
   if (load) { /* LDXR / LDAXR: arm the monitor */
@@ -2948,6 +2968,7 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
     mem(c, store_opcode(element), ALIGN_1, OFF_EXCLUSIVE_VALUE);
     lget(c, L_VAL);
     set_x(c, t);
+    if (o0) emit_multicore_fence(c); /* LDAXR: acquire */
     return true;
   }
   /* STXR / STLXR: stores iff the monitor holds this granule; the status
@@ -3034,7 +3055,10 @@ static Outcome c_system(Ctx *c, uint32_t insn) {
         mem(c, WASM_OP_I32_STORE8, ALIGN_1, OFF_EXCLUSIVE_VALID);
         return OUTCOME_NEXT;
       }
-      if (op2 >= 4 && op2 != 7) return OUTCOME_NEXT; /* DSB, DMB, ISB */
+      if (op2 >= 4 && op2 != 7) { /* DSB, DMB, ISB */
+        if (op2 != 6) emit_multicore_fence(c); /* not ISB */
+        return OUTCOME_NEXT;
+      }
     }
     return OUTCOME_END_HELPER;
   }
