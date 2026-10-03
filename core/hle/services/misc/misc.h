@@ -36,6 +36,11 @@
  *   lm     the system log: 0 OpenLogger -> ILogger {0 Log (packets
  *        accepted and dropped - titles' own logging, not Voland's), 1 Set-
  *        Destination}.
+ *   mm:u   the multimedia clock manager (nn::mm, used by the video
+ *        decoders): 4 Initialize -> a request id, 5 Finalize, 6 SetAndWait
+ *        {id, min, max}, 7 Get -> the last minimum set; 0-3 are the
+ *        id-less forms (the module stands in for the id). Nothing is
+ *        clocked; requests are accepted and remembered.
  *   pdm:qry play-history queries: Voland records no play history, so every
  *        query reports nothing (zero counts, zeroed statistics) and the
  *        update event never fires.
@@ -53,6 +58,7 @@
 #define CSRNG_SEED 0x566F6C616E645247ull
 #define CSRNG_CHUNK_BYTES 256u
 #define PDM_ZERO_WORDS 12u
+#define MM_REQUESTS 16u
 #define PM_MODULE 15u
 #define USB_MODULE 140u
 #define RO_MODULE 22u
@@ -87,6 +93,9 @@ typedef struct Misc_State {
   Service_Interface ectx_registrar;
   Service_Interface logger;
   Kernel_Event *usb_hs_event;
+  Service_Interface mm;
+  uint32_t mm_next_id;
+  uint32_t mm_rate[MM_REQUESTS]; /* by request id (or module) % MM_REQUESTS */
 } Misc_State;
 
 void misc_init(Misc_State *state);

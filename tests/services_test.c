@@ -763,6 +763,17 @@ static void test_sdk_startup_services(void) {
   const uint32_t policy = 0;
   CHECK(object(service("vi:s"), 1, &policy, sizeof(policy)) != 0);
   CHECK(object(service("vi:m"), 2, &policy, sizeof(policy)) != 0);
+  /* mm:u (the video decoders' clock manager): Initialize -> id, SetAndWait, Get. */
+  const uint32_t mm = service("mm:u");
+  const uint32_t init[3] = {2, 0, 0}; /* module, priority, event clear mode */
+  r = call(mm, 4, init, sizeof(init), NULL);
+  const uint32_t id = test_le32(r.data);
+  CHECK(r.result == 0 && id != 0);
+  const uint32_t set[3] = {id, 600000000u, 700000000u};
+  CHECK(call(mm, 6, set, sizeof(set), NULL).result == 0);
+  r = call(mm, 7, &id, sizeof(id), NULL);
+  CHECK(r.result == 0 && test_le32(r.data) == 600000000u);
+  CHECK(call(mm, 5, &id, sizeof(id), NULL).result == 0);
 }
 
 /* pctl: the SDK opens pctl and pctl:s, creates the service on each and

@@ -347,6 +347,41 @@ static const Service_Command k_ectx_registrar_commands[] = {
     {0, service_cmd_ok, "Complete"},
 };
 
+/* mm:u: clock requests are remembered, nothing is clocked. */
+static HLE_ServiceResult cmd_mm_initialize(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                           IPC_Response *res) {
+  (void)c;
+  (void)req;
+  Misc_State *s = (Misc_State *)self->interface->service_state;
+  (void)ipc_response_push_u32(res, ++s->mm_next_id);
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_mm_set(HLE_Context *c, Service_Object *self, const IPC_Request *req, IPC_Response *res) {
+  (void)c;
+  (void)res;
+  Misc_State *s = (Misc_State *)self->interface->service_state;
+  uint32_t id = 0, minimum = 0;
+  if (error_is_ok(ipc_request_read_u32(req, 0, &id)) && error_is_ok(ipc_request_read_u32(req, 4, &minimum)))
+    s->mm_rate[id % MM_REQUESTS] = minimum;
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_mm_get(HLE_Context *c, Service_Object *self, const IPC_Request *req, IPC_Response *res) {
+  (void)c;
+  Misc_State *s = (Misc_State *)self->interface->service_state;
+  uint32_t id = 0;
+  (void)ipc_request_read_u32(req, 0, &id);
+  (void)ipc_response_push_u32(res, s->mm_rate[id % MM_REQUESTS]);
+  return HLE_RESULT_SUCCESS;
+}
+
+static const Service_Command k_mm_commands[] = {
+    {0, service_cmd_ok, "InitializeOld"}, {1, service_cmd_ok, "FinalizeOld"}, {2, cmd_mm_set, "SetAndWaitOld"},
+    {3, cmd_mm_get, "GetOld"},           {4, cmd_mm_initialize, "Initialize"}, {5, service_cmd_ok, "Finalize"},
+    {6, cmd_mm_set, "SetAndWait"},        {7, cmd_mm_get, "Get"},
+};
+
 /* Parental controls: nothing is restricted. */
 static HLE_ServiceResult cmd_pctl_create(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                          IPC_Response *res) {
@@ -438,6 +473,7 @@ void misc_init(Misc_State *s) {
   s->pctl_service = SERVICE_INTERFACE("IParentalControlService", k_pctl_service_commands, 0, s);
   s->ectx_registrar = SERVICE_INTERFACE("IContextRegistrar", k_ectx_registrar_commands, 0, s);
   s->logger = SERVICE_INTERFACE("ILogger", k_logger_commands, 0, s);
+  s->mm = SERVICE_INTERFACE("mm:u", k_mm_commands, 0, s);
 }
 
 Error misc_register(Misc_State *s, SM_Registry *registry) {
@@ -452,6 +488,7 @@ Error misc_register(Misc_State *s, SM_Registry *registry) {
   if (error_is_ok(err)) err = sm_registry_add(registry, "lm", &s->lm);
   if (error_is_ok(err)) err = sm_registry_add(registry, "ectx:aw", &s->ectx);
   if (error_is_ok(err)) err = sm_registry_add(registry, "ldr:ro", &s->ldr_ro);
+  if (error_is_ok(err)) err = sm_registry_add(registry, "mm:u", &s->mm);
   for (uint32_t i = 0; i < 4u && error_is_ok(err); i++) err = sm_registry_add(registry, s->pctl[i].name, &s->pctl[i]);
   return err;
 }
