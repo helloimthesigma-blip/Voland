@@ -2244,6 +2244,15 @@ Flag spellings are pinned to what Emscripten 6.0.9 accepts without `-Wdeprecated
 
 Changes from v2: `IMPORTED_MEMORY` (the boot sequence creates the memory), memory pinned to the full layout size with growth disabled, memory64 reclassified from Switch 2 prep to a Switch 1 requirement. Changes in v3.21: flag spellings modernized (see table).
 
+### Web performance notes
+
+- **Profiling build.** `-DVOLAND_WASM_PROFILING=ON` adds `--profiling-funcs`: wasm function names in browser profiles, same optimised code. Off by default.
+- **Already on.** Emscripten 6 enables bulk memory (`memory.copy`/`memory.fill`) and non-trapping float-to-int by default, and the `Release` web preset compiles and links at `-O3 -DNDEBUG` (`ASSERTIONS=0`, no stack checks). None of these needs a flag.
+- **Logging.** The web build's default minimum log level is INFO, and each line reaches the console in one `emscripten_err` call. Emscripten's stderr goes through JS one character at a time, and Silksong's boot alone logs about 37,000 DEBUG lines, so stderr cost 1.5% of the CPU worker at the title screen. Native builds keep DEBUG.
+- **The CPU worker's run loop** (`cpu.worker.ts`) yields between 12 ms bursts through a message on a private `MessageChannel`. `setTimeout(0)` is clamped to 4 ms once timers nest, and that clamp cost 29% of the worker's time. The message carries no data; it is a scheduling signal, not §6 traffic.
+- **Game-file reads** go through a 32 MiB LRU of 1 MiB chunks in the worker heap. Each `FileReaderSync` read pays a fixed trip to the blob store, and the core reads RomFS in small, mostly sequential pieces.
+- **The perf harness** `platform/web/tools/perf.mjs` boots a game in Chromium on the real GPU and prints slices/s, virtual ticks/s, fps and the worker's time split. It can also print a CDP profile. The counters come from `emulator_perf_counters_ffi`.
+
 ### Platform build targets
 
 ```cmake

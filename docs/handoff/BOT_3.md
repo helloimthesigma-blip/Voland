@@ -30,6 +30,11 @@ Silksong's title screen matches the software reference (mean difference
 ## The task, in priority order
 
 1. **Gameplay verification.**
+   - **Already recorded:** a GPU stream to 4.75M slices with the recipe is at
+     `$SCRATCH/gp/gpu.vgs`. A software run to the same point writes
+     `$SCRATCH/gp/sw.ppm` when it finishes (`sw.log` beside it says
+     "running after 4750000 slices"). Use these instead of re-recording, and
+     delete `gpu.vgs` when done.
    - Record a GPU stream of Silksong into gameplay (the BOTS.md recipe to
      about 4.75M slices with `--gpu-stream`). It's about 2–3 GB, so delete
      it afterwards.

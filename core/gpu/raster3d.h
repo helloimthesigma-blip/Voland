@@ -51,6 +51,11 @@ struct Gpu_Stream;
 #else
 #define RASTER_TEXTURE_POOL_BYTES ((size_t)1024 * 1024 * 1024)
 #endif
+/* Texture change detection: a sampled hash each frame, the whole texture
+ * every RASTER_TEXTURE_FULL_EVERY frames. */
+#define RASTER_TEXTURE_SAMPLES 64u
+#define RASTER_TEXTURE_SAMPLE_BYTES 64u
+#define RASTER_TEXTURE_FULL_EVERY 30u
 #define RASTER_TEXTURE_RAW_BYTES ((size_t)64 * 1024 * 1024) /* a 4096x4096 RGBA8 texture */
 #define RASTER_INLINE_INDICES 0x10000u
 #define RASTER_STREAMS 32u
@@ -93,7 +98,9 @@ typedef struct Raster3d_Texture {
   bool valid;
   uint32_t tic[8];
   uint64_t raw_hash;     /* of the guest bytes it was decoded from */
-  uint32_t validated;    /* submission it was last checked against guest memory */
+  uint32_t validated;    /* epoch (frame) it was last checked against guest memory */
+  uint32_t full_epoch;   /* epoch of its last whole-texture hash (between those, a sampled hash) */
+  uint64_t sample_hash;  /* hash of RASTER_TEXTURE_SAMPLES spans of its guest bytes */
   uint64_t address;      /* guest bytes it was decoded from */
   uint64_t raw_bytes;
   size_t pool_offset;    /* its decoded texels' block in the texture pool */

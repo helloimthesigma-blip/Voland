@@ -43,6 +43,8 @@ export type MainToCPUMessage =
   /* The renderer: the GPU worker's WebGPU renderer (draws stream through the
    * gpu_ring region) or the software reference renderer. */
   | { readonly type: "set-gpu-mode"; readonly on: boolean }
+  /* Host threads for guest threads (docs/PARALLEL.md; 0 = serial). */
+  | { readonly type: "set-host-cores"; readonly cores: number }
   | { readonly type: "halt" };
 
 /** A software-keyboard prompt (§12 library applets): a title waits for
