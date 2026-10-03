@@ -46,6 +46,7 @@ struct Vt_Decoder {
 };
 
 static Vt_Decoder g_decoder;
+static bool g_forked;
 
 #define DEFAULT_FRAME_DUMP_EVERY 30u
 #define PPM_BYTES_PER_PIXEL 3u
@@ -215,7 +216,7 @@ static void vt_decode(void *user, uint32_t generation, uint32_t sequence, bool k
   (void)key;
   Vt_Decoder *d = (Vt_Decoder *)user;
   dump_access_unit(data, bytes);
-  if (generation != d->generation) return;
+  if (generation != d->generation || g_forked) return;
   bool changed = false;
   const size_t length = to_avcc(d, data, bytes, &changed);
   if (changed) drop_session(d);
@@ -244,6 +245,11 @@ const Video_Backend *video_vt_backend(Video_Stream *video) {
   g_decoder.video = video;
   backend = (Video_Backend){&g_decoder, vt_configure, vt_decode};
   return &backend;
+}
+
+void video_vt_forked(void) {
+  g_forked = true;
+  fprintf(stderr, "voland-cli: snapshot job: VideoToolbox off (fork), access units still dumped\n");
 }
 
 void video_vt_report(void) {
@@ -275,6 +281,7 @@ const Video_Backend *video_vt_backend(Video_Stream *video) {
   static const Video_Backend backend = {NULL, none_configure, none_decode};
   return &backend;
 }
+void video_vt_forked(void) {}
 void video_vt_report(void) {
   if (g_requests) fprintf(stderr, "voland-cli: video: %llu access units, not decoded\n", (unsigned long long)g_requests);
 }

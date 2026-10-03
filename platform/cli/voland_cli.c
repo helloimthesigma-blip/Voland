@@ -392,6 +392,7 @@ static bool read_job(const char *path, Snapshot_Job *job) {
   }
   fclose(f);
   if (log_path[0] && !freopen(log_path, "w", stderr)) return false;
+  setvbuf(stderr, NULL, _IOLBF, 0); /* a crashing job still leaves its log */
   return true;
 }
 
@@ -689,6 +690,9 @@ static int run(int argc, char **argv) {
       job.trace_start = UINT64_MAX;
       (void)emulator_set_host_cores(&emu, 0); /* fork() keeps no other thread */
       snapshot_serve(snapshot_dir, &job); /* returns in a job's child */
+#ifdef VOLAND_CLI_VIDEO
+      video_vt_forked(); /* Apple frameworks cannot start in a forked child */
+#endif
       raster3d_restart_workers_after_fork(&emu.renderer);
       (void)emulator_set_host_cores(&emu, host_cores);
       max_slices = job.max_slices;
