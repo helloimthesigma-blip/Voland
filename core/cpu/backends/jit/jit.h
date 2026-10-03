@@ -45,6 +45,9 @@ typedef struct Jit_Stats {
 } Jit_Stats;
 const Jit_Stats *jit_stats(void);
 
+/* Whether regions follow calls (BL/RET, predicted PLT branches). */
+void jit_set_span_calls(bool enabled);
+
 /* Interpreted executions of a block before it is compiled. */
 void jit_set_hot_threshold(uint32_t executions);
 

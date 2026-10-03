@@ -103,11 +103,13 @@ enum {
 #define FUNC_WRITE 3u
 #define FUNC_SIMD 4u
 #define FUNC_BLOCK 5u
+#define FUNC_WALK 6u /* module-local: the softmmu walk, shared by every access */
 #define TYPE_BLOCK 0u
 #define TYPE_INTERPRET 1u
 #define TYPE_READ 2u
 #define TYPE_STORE 3u
-#define TYPE_COUNT 4u
+#define TYPE_WALK 4u /* (l1, address, page offset limit, perm) -> host address or 0 */
+#define TYPE_COUNT 5u
 #define IMPORT_COUNT 7u /* table, interpret, read, store, write, simd, memory */
 
 /* Label levels (the wasm depth right after the label's block opened). */
@@ -486,6 +488,30 @@ static int32_t find_block(const Ctx *c, uint64_t pc) {
     if (c->blocks[i].pc == pc) return (int32_t)i;
   }
   return -1;
+}
+
+/* Is the code at `target` worth copying into every region that calls it?
+ * A leaf function or a PLT stub is: within its first few instructions it
+ * returns or branches away (RET/BR) without calling anything. Larger
+ * callees stay regions of their own - compiled once, not into each
+ * caller (measured: inlining every callee doubled module bytes). */
+#define JIT_SMALL_CALLEE_INSNS 16u
+#define BRANCH_REGISTER_MASK 0xFF9FFC1Fu /* BR/RET with any Rn */
+#define BR_ENCODING 0xD61F0000u
+#define RET_ENCODING 0xD65F0000u
+static bool small_callee(const Ctx *c, uint64_t target) {
+  const uint64_t page = target & ~(uint64_t)VMM_PAGE_OFFSET_MASK;
+  const uint32_t *code = c->source->page_code(c->source->context, page);
+  if (!code || (target & 3u)) return false;
+  const uint32_t first = (uint32_t)((target - page) / INSN_BYTES);
+  for (uint32_t i = first; i < first + JIT_SMALL_CALLEE_INSNS && i < VMM_PAGE_SIZE / INSN_BYTES; i++) {
+    const uint32_t insn = code[i];
+    const uint32_t masked = insn & BRANCH_REGISTER_MASK;
+    if (masked == BR_ENCODING || masked == RET_ENCODING) return true;
+    if (bits(insn, 30, 26) == 0x05 && bit(insn, 31)) return false; /* BL */
+    if ((insn & 0xFFFFFC1Fu) == 0xD63F0000u) return false;          /* BLR */
+  }
+  return false;
 }
 
 /* Adds `pc` as a region block if it can be one; true if it is one. */
@@ -1494,7 +1520,94 @@ typedef enum Access {
  * L_ADDR with `perm`: branches to `slow` if the access is out of range,
  * crosses a page, or is unmapped / not permitted; otherwise L_HOST is the
  * host address. */
+/* The walk as a module-local function (FUNC_WALK), so each access site
+ * is a call instead of ~70 bytes of inline code:
+ *   walk(l1, gva, limit, perm) = host address, or 0 if gva is out of
+ *   range, (gva & 0xFFF) > limit (the access crosses the page), unmapped
+ *   or without `perm`. */
+enum { W_L1 = 0, W_ADDR = 1, W_LIMIT = 2, W_PERM = 3, W_HOST = 4 };
+static void emit_walk_function(Wasm_Buf *b) {
+  static uint8_t scratch[1024];
+  Wasm_Buf body = wasm_buf(scratch, sizeof(scratch));
+  Ctx w;
+  memset(&w, 0, sizeof(w));
+  w.b = &body;
+  wasm_uleb(&body, 1);
+  wasm_uleb(&body, 1);
+  wasm_u8(&body, WASM_TYPE_I64); /* W_HOST */
+  open_block(&w);                /* $miss */
+  lget(&w, W_ADDR);
+  i64c(&w, VMM_ADDRESS_SPACE_SIZE);
+  op(&w, WASM_OP_I64_GE_U);
+  br_if(&w, 1);
+  lget(&w, W_ADDR);
+  i64c(&w, VMM_PAGE_OFFSET_MASK);
+  op(&w, WASM_OP_I64_AND);
+  lget(&w, W_LIMIT);
+  op(&w, WASM_OP_I64_GT_U);
+  br_if(&w, 1);
+  lget(&w, W_L1);
+  lget(&w, W_ADDR);
+  i64c(&w, WALK_L1_SHIFT);
+  op(&w, WASM_OP_I64_SHR_U);
+  i64c(&w, WALK_ENTRY_LOG2);
+  op(&w, WASM_OP_I64_SHL);
+  op(&w, WASM_OP_I64_ADD);
+  mem(&w, WASM_OP_I64_LOAD, ALIGN_8, 0);
+  ltee(&w, W_HOST);
+  op(&w, WASM_OP_I64_EQZ);
+  br_if(&w, 1);
+  lget(&w, W_HOST);
+  lget(&w, W_ADDR);
+  i64c(&w, WALK_L2_SHIFT);
+  op(&w, WASM_OP_I64_SHR_U);
+  i64c(&w, WALK_L2_MASK);
+  op(&w, WASM_OP_I64_AND);
+  op(&w, WASM_OP_I64_ADD);
+  mem(&w, WASM_OP_I64_LOAD, ALIGN_8, 0);
+  ltee(&w, W_HOST);
+  lget(&w, W_PERM);
+  op(&w, WASM_OP_I64_AND);
+  op(&w, WASM_OP_I64_EQZ);
+  br_if(&w, 1);
+  lget(&w, W_HOST);
+  i64c(&w, VMM_PTE_HOST_MASK);
+  op(&w, WASM_OP_I64_AND);
+  lget(&w, W_ADDR);
+  i64c(&w, VMM_PAGE_OFFSET_MASK);
+  op(&w, WASM_OP_I64_AND);
+  op(&w, WASM_OP_I64_OR);
+  op(&w, WASM_OP_RETURN);
+  end_(&w);
+  i64c(&w, 0);
+  op(&w, WASM_OP_END);
+  wasm_uleb(b, body.length);
+  wasm_bytes(b, scratch, body.length);
+}
+
+/* The shared walk shrinks modules (~55 bytes less per access) but V8 does
+ * not inline the call: memory-heavy loops ran 20-90% slower in
+ * tests/jit_bench.c. Inline by default; JIT_SHARED_WALK set in the
+ * environment selects the call, for experiments. */
+static bool shared_walk(void) {
+  static int choice = -1;
+  if (choice < 0) choice = getenv("JIT_SHARED_WALK") != NULL;
+  return choice != 0;
+}
+
 static void emit_walk(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) {
+  if (shared_walk()) {
+    lget(c, L_L1);
+    lget(c, L_ADDR);
+    i64c(c, VMM_PAGE_SIZE - size);
+    i64c(c, perm);
+    op(c, WASM_OP_CALL);
+    wasm_uleb(c->b, FUNC_WALK);
+    ltee(c, L_HOST);
+    op(c, WASM_OP_I64_EQZ);
+    br_if(c, slow);
+    return;
+  }
   lget(c, L_ADDR);
   i64c(c, VMM_ADDRESS_SPACE_SIZE);
   op(c, WASM_OP_I64_GE_U);
@@ -3265,6 +3378,11 @@ static Outcome c_branch_system(Ctx *c, uint32_t insn) {
       const uint64_t target = branch_target(c, insn, 25, 0), back = c->pc + INSN_BYTES;
       i64c(c, back);
       set_x(c, CPU_REG_X30);
+      if (!c->link->span_calls || (c->discover && find_block(c, target) < 0 && !small_callee(c, target))) {
+        i64c(c, target);
+        exit_to_stack(c);
+        return OUTCOME_END;
+      }
       if (c->discover && add_block(c, target) && add_block(c, back)) c->blocks[find_block(c, back)].return_site = true;
       branch_to(c, target);
       return OUTCOME_END;
@@ -3302,7 +3420,7 @@ static Outcome c_branch_system(Ctx *c, uint32_t insn) {
     }
     if (g_interp_trace_count && opc != 0) return OUTCOME_END_HELPER;
     const uint32_t rn = bits(insn, 9, 5);
-    const bool predicted = opc == 0 && rn != REG_ZR && (c->predicted_mask & (1u << rn));
+    const bool predicted = c->link->span_calls && opc == 0 && rn != REG_ZR && (c->predicted_mask & (1u << rn));
     const uint64_t prediction = predicted ? c->predicted_value[rn] : 0;
     get_x(c, rn);
     lset(c, L_NPC);
@@ -3310,7 +3428,7 @@ static Outcome c_branch_system(Ctx *c, uint32_t insn) {
       i64c(c, c->pc + INSN_BYTES);
       set_x(c, CPU_REG_X30);
     }
-    if (predicted && c->discover) (void)add_block(c, prediction);
+    if (predicted && c->discover && small_callee(c, prediction)) (void)add_block(c, prediction);
     /* Guarded internal targets: a RET to a return site in the region, a
      * BR to the predicted PLT target; anything else leaves. */
     for (uint32_t i = 0; i < c->block_count && opc != 1; i++) {
@@ -3613,6 +3731,11 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
   wasm_u8(b, WASM_TYPE_I64);
   wasm_uleb(b, 1);
   wasm_u8(b, WASM_TYPE_I32);
+  wasm_u8(b, WASM_TYPE_FUNC); /* TYPE_WALK: (i64, i64, i64, i64) -> i64 */
+  wasm_uleb(b, 4);
+  for (uint32_t i = 0; i < 4u; i++) wasm_u8(b, WASM_TYPE_I64);
+  wasm_uleb(b, 1);
+  wasm_u8(b, WASM_TYPE_I64);
   wasm_patch_size(b, size);
 
   wasm_u8(b, WASM_SECTION_IMPORT);
@@ -3654,8 +3777,9 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
 
   wasm_u8(b, WASM_SECTION_FUNCTION);
   size = wasm_reserve_size(b);
-  wasm_uleb(b, 1);
+  wasm_uleb(b, 2);
   wasm_uleb(b, TYPE_BLOCK);
+  wasm_uleb(b, TYPE_WALK);
   wasm_patch_size(b, size);
 
   wasm_u8(b, WASM_SECTION_EXPORT);
@@ -3695,7 +3819,7 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     emit_module_header(&b, memory_pages);
     wasm_u8(&b, WASM_SECTION_CODE);
     const uint32_t section = wasm_reserve_size(&b);
-    wasm_uleb(&b, 1);
+    wasm_uleb(&b, 2);
     const uint32_t body = wasm_reserve_size(&b);
     memset(&c, 0, sizeof(c));
     c.b = &b;
@@ -3713,6 +3837,7 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     c.all_written = analysis.written;
     emit_function(&c);
     wasm_patch_size(&b, body);
+    emit_walk_function(&b);
     wasm_patch_size(&b, section);
     if (!b.overflow && !scratch.overflow) {
       /* One code range per page: the span of the blocks in it. */

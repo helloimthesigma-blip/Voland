@@ -161,6 +161,8 @@ static uint32_t g_hot_threshold = JIT_DEFAULT_HOT_THRESHOLD;
 void jit_set_hot_threshold(uint32_t executions) { g_hot_threshold = executions ? executions : 1u; }
 
 static bool g_hot_profile;
+static bool g_span_calls = true;
+void jit_set_span_calls(bool enabled) { g_span_calls = enabled; }
 void jit_set_hot_profile(bool enabled) { g_hot_profile = enabled; }
 
 void jit_print_hot_regions(uint32_t top) {
@@ -484,6 +486,7 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
    * core's mapping change must stop chaining here at once (vmm.h). */
   link.generation_address = (uint64_t)(uintptr_t)&g_vmm_generation;
   link.count_entries = g_hot_profile;
+  link.span_calls = g_span_calls;
   Jit_Compiled compiled;
   compiler_lock();
   const bool built = jit_compile_block(pc, &source, memory_pages(), &link, t->module, JIT_MODULE_BYTES, &compiled);
