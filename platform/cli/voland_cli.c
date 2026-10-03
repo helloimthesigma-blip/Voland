@@ -572,11 +572,18 @@ static void dump_modules(Emulator *emu, const char *dir) {
  * mode runs one thread per slice, so per-slice deltas attribute exactly. */
 #define STATS_TOP_THREADS 8u
 #define STATS_TOP_SVCS 6u
+#define STATS_YIELD_SITES 4u
+#define SVC_SLEEP_THREAD 0x0Bu
+#define REG_LR 30u
 typedef struct Time_Stats {
   uint64_t run_ticks, idle_ticks, run_slices, idle_slices;
   uint64_t thread_ticks[SCHEDULER_MAX_THREADS];
   uint64_t thread_svcs[SCHEDULER_MAX_THREADS][HLE_SVC_COUNT];
   uint64_t last_svcs[HLE_SVC_COUNT];
+  /* Per thread: the return addresses (x30) of slices that ended in
+   * SleepThread - where a yield loop sits. */
+  uint64_t yield_lr[SCHEDULER_MAX_THREADS][STATS_YIELD_SITES];
+  uint64_t yield_hits[SCHEDULER_MAX_THREADS][STATS_YIELD_SITES];
 } Time_Stats;
 static Time_Stats g_time_stats;
 
@@ -590,7 +597,13 @@ static const Sched_Thread *last_ran(const Emulator *emu) {
   return ran;
 }
 
-static void time_stats_sample(const Emulator *emu, Emulator_Status status, uint64_t ticks_before, uint64_t run_before) {
+/* VOLAND_PC_SAMPLES=FILE (with VOLAND_STATS_FROM): the stop PC of every
+ * slice that ran out of budget - an unbiased sample of the executed
+ * instruction stream - as {u32 thread slot, u32 pad, u64 pc} records. */
+static FILE *g_pc_samples;
+
+static void time_stats_sample(const Emulator *emu, Emulator_Status status, uint64_t ticks_before, uint64_t run_before,
+                              uint64_t budget) {
   Time_Stats *t = &g_time_stats;
   const uint64_t delta = emu->scheduler.ticks - ticks_before;
   const bool ran = emu->scheduler.run_counter != run_before;
@@ -601,7 +614,22 @@ static void time_stats_sample(const Emulator *emu, Emulator_Status status, uint6
     if (th) {
       const uint32_t slot = (uint32_t)(th - emu->scheduler.threads);
       t->thread_ticks[slot] += delta;
+      if (g_pc_samples && emu->cpu_backend->get_cycles_consumed(th->thread.cpu_state) >= budget) {
+        const uint32_t head[2] = {slot, 0};
+        const uint64_t pc = emu->cpu_backend->get_pc(th->thread.cpu_state);
+        fwrite(head, sizeof(head), 1, g_pc_samples);
+        fwrite(&pc, sizeof(pc), 1, g_pc_samples);
+      }
       for (uint32_t i = 0; i < HLE_SVC_COUNT; i++) t->thread_svcs[slot][i] += emu->hle.svc_counts[i] - t->last_svcs[i];
+      if (emu->hle.svc_counts[SVC_SLEEP_THREAD] != t->last_svcs[SVC_SLEEP_THREAD]) {
+        const uint64_t lr = emu->cpu_backend->get_reg(th->thread.cpu_state, REG_LR);
+        for (uint32_t k = 0; k < STATS_YIELD_SITES; k++) {
+          if (t->yield_hits[slot][k] && t->yield_lr[slot][k] != lr) continue;
+          t->yield_lr[slot][k] = lr;
+          t->yield_hits[slot][k]++;
+          break;
+        }
+      }
     }
   } else {
     t->idle_ticks += delta;
@@ -640,6 +668,20 @@ static void time_stats_print(const Emulator *emu) {
       fprintf(stderr, " 0x%02x:%.0f", svc, (double)t->thread_svcs[best][svc] / seconds);
     }
     fprintf(stderr, "\n");
+    for (uint32_t k = 0; k < STATS_YIELD_SITES && t->yield_hits[best][k]; k++) {
+      const uint64_t lr = t->yield_lr[best][k];
+      const char *module = "?";
+      uint64_t offset = lr;
+      for (uint32_t m = 0; m < emu->process.module_count; m++) {
+        const Process_Module *mod = &emu->process.modules[m];
+        if (lr >= mod->base_gva && lr < mod->base_gva + mod->image_size) {
+          module = mod->name;
+          offset = lr - mod->base_gva;
+        }
+      }
+      fprintf(stderr, "    SleepThread returns to %s+0x%llx (%llu slices)\n", module, (unsigned long long)offset,
+              (unsigned long long)t->yield_hits[best][k]);
+    }
   }
 }
 
@@ -858,6 +900,7 @@ static int run(int argc, char **argv) {
   }
   const bool pc_profile = getenv("VOLAND_PC_PROFILE") != NULL;
   const uint64_t stats_from = getenv("VOLAND_STATS_FROM") ? strtoull(getenv("VOLAND_STATS_FROM"), NULL, 0) : 0;
+  if (stats_from && getenv("VOLAND_PC_SAMPLES")) g_pc_samples = fopen(getenv("VOLAND_PC_SAMPLES"), "wb");
   /* VOLAND_PC_PROFILE_FROM=N: sample from slice N on (a later scene only). */
   const uint64_t pc_profile_from = getenv("VOLAND_PC_PROFILE_FROM") ? strtoull(getenv("VOLAND_PC_PROFILE_FROM"), NULL, 0) : 0;
   /* VOLAND_PROGRESS=N: a "slice N" line every N slices (long runs). */
@@ -909,7 +952,7 @@ static int run(int argc, char **argv) {
     const uint64_t ticks_before = emu.scheduler.ticks, run_before = emu.scheduler.run_counter;
     status = emulator_run_slice(&emu, budget);
     if (pc_profile && slices >= pc_profile_from) pc_profile_sample(&emu);
-    if (stats_from && slices >= stats_from) time_stats_sample(&emu, status, ticks_before, run_before);
+    if (stats_from && slices >= stats_from) time_stats_sample(&emu, status, ticks_before, run_before, budget);
     else if (stats_from) memcpy(g_time_stats.last_svcs, emu.hle.svc_counts, sizeof(g_time_stats.last_svcs));
     {
       /* A software keyboard is up: answer it like a player would. */
@@ -955,6 +998,7 @@ static int run(int argc, char **argv) {
   }
   if (pc_profile) pc_profile_print(&emu);
   if (stats_from) time_stats_print(&emu);
+  if (g_pc_samples) fclose(g_pc_samples);
   if (getenv("VOLAND_DUMP_MODULES")) dump_modules(&emu, getenv("VOLAND_DUMP_MODULES"));
 #ifdef __APPLE__
   {
