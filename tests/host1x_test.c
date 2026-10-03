@@ -8,6 +8,7 @@
 
 #include "hle/services/nvdrv/nvdec.h"
 #include "video/host1x.h"
+#include "video/vic_convert.h"
 
 #include <string.h>
 
@@ -107,8 +108,36 @@ static void test_iova(void) {
   CHECK(!mm_iova_translate(&iova, a, &gva, &left));
 }
 
+static void test_vic_convert(void) {
+  /* 4x2 NV12: white, black, limited-range red (BT.601), mid grey. */
+  const uint8_t luma[8] = {235, 16, 81, 126, 235, 16, 81, 126};
+  const uint8_t chroma[4] = {128, 128, 90, 240};
+  const Vic_Nv12 src = {luma, chroma, 4, 2, 4};
+  uint8_t out[4 * 2 * 4];
+  memset(out, 0, sizeof(out));
+  const Vic_Target target = {out, 4, 2, 16, false, 0, false, 0xFF};
+  vic_convert_nv12(&src, &target, VIC_MATRIX_BT601);
+  CHECK(out[0] == 255 && out[1] == 255 && out[2] == 255 && out[3] == 0xFF); /* white */
+  CHECK(out[4] == 0 && out[5] == 0 && out[6] == 0);                         /* black */
+  CHECK(out[8] >= 250 && out[9] <= 3 && out[10] <= 3);                      /* red */
+  CHECK(out[16] == 255 && out[17] == 255);                                  /* row 1 repeats chroma row 0 */
+  /* BGRA order and 2x nearest-neighbour upscaling. */
+  uint8_t big[8 * 4 * 4];
+  const Vic_Target scaled = {big, 8, 4, 32, false, 0, true, 0x80};
+  vic_convert_nv12(&src, &scaled, VIC_MATRIX_BT601);
+  CHECK(big[0] == 255 && big[4] == 255 && big[3] == 0x80);  /* pixels 0,1 come from source pixel 0 */
+  CHECK(big[16 + 2] >= 250 && big[16 + 0] <= 3);            /* red with R in byte 2 */
+  /* Block-linear output lands where block_linear_offset says. */
+  static uint8_t tiled[4096];
+  const Vic_Target bl = {tiled, 4, 2, 0, true, 0, false, 0xFF};
+  CHECK(vic_target_bytes(&bl) == 512u);
+  vic_convert_nv12(&src, &bl, VIC_MATRIX_BT601);
+  CHECK(tiled[16] == 255 && tiled[16 + 4] == 0); /* row 1 starts at GOB byte 16 */
+}
+
 int main(void) {
   test_opcodes();
+  test_vic_convert();
   test_latch();
   test_iova();
   printf("[host1x_test] passed\n");

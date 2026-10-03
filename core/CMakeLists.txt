@@ -65,6 +65,7 @@ set(SWITCH_CORE_SOURCES
   video/host1x.c
   video/h264.c
   video/video_stream.c
+  video/vic_convert.c
   hle/loader/byte_source.c
   hle/loader/nca_parse.c
   hle/loader/nca_compressed.c
