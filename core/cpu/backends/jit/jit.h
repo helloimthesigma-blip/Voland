@@ -15,6 +15,7 @@
 
 #include "cpu/cpu.h"
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* CPU_BACKEND_JIT is declared in cpu.h. */
@@ -31,6 +32,7 @@ typedef struct Jit_Stats {
   uint64_t evictions;          /* compiled blocks dropped from the cache */
   uint64_t stale;              /* compiled blocks whose code changed or was unmapped */
   uint64_t revalidations;      /* compiled blocks kept across a generation change */
+  uint64_t direct_simd;        /* SIMD&FP instructions compiled code ran through jit_helper_simd */
   uint64_t helper_simd_fp;     /* instructions compiled code handed to the interpreter: SIMD&FP */
   uint64_t helper_memory_simd; /* ...SIMD&FP loads/stores */
   uint64_t helper_memory_exclusive; /* ...exclusive and acquire/release */
@@ -42,6 +44,11 @@ const Jit_Stats *jit_stats(void);
 
 /* Interpreted executions of a block before it is compiled. */
 void jit_set_hot_threshold(uint32_t executions);
+
+/* Diagnostics: count interpreter fallbacks per opcode (register fields
+ * masked out) and print the commonest `top` to stderr. */
+void jit_set_fallback_profile(bool enabled);
+void jit_print_fallback_profile(uint32_t top);
 
 /* Diagnostics: write every compiled module to DIR/<pc>.wasm (NULL: off). */
 void jit_set_dump_directory(const char *directory);

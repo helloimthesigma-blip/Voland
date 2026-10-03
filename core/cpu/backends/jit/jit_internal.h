@@ -88,6 +88,11 @@ uint32_t jit_helper_read(Jit_State *state, uint64_t address, uint32_t size);
 uint32_t jit_helper_store(Jit_State *state, uint64_t address, uint32_t shape, uint64_t first, uint64_t second);
 /* Writes `size` bytes of state->scratch to `address` (all or nothing). */
 uint32_t jit_helper_write(Jit_State *state, uint64_t address, uint32_t size);
+/* Executes `insn` (SIMD&FP) against the state without retiring it - the
+ * compiled code counts it - after the compiled code synchronised the
+ * general registers and NZCV it touches. 0 if it completed; otherwise
+ * nothing changed and the compiled code hands it to the interpreter. */
+uint32_t jit_helper_simd(Jit_State *state, uint32_t insn);
 
 /* ------------------------------------------------------------------ */
 /* Compiler (jit_compile.c).                                           */
@@ -106,7 +111,7 @@ typedef struct Jit_Compiled {
  * `page_code` into a complete wasm module in `out`
  * (capacity `capacity`). The module imports env.memory (memory64, shared,
  * `memory_pages` pages), env.table (the core's 64-bit function table, for
- * chaining) and env.interpret/read/store/write (the jit_helper_* functions), and
+ * chaining) and env.interpret/read/store/write/simd (the jit_helper_* functions), and
  * exports the region function as "b". Returns false if nothing could be
  * compiled (buffer too small). */
 bool jit_compile_block(uint64_t pc, const uint32_t *page_code, uint64_t memory_pages, const Jit_Link *link,

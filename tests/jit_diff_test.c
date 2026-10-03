@@ -206,6 +206,45 @@ static uint32_t gen_exclusive(void) {
          (31u << 10) | (base_reg() << 5) | reg();
 }
 
+/* SIMD&FP data processing and structure loads/stores (direct calls). */
+static uint32_t vreg(void) { return pick(32); }
+static uint32_t ftype(void) { return pick(8) == 0 ? 3u : pick(2); } /* single/double, sometimes half/undefined */
+static uint32_t gen_simd_fp(void) {
+  switch (pick(14)) {
+  case 0: return 0x1E200800u | (ftype() << 22) | (vreg() << 16) | (pick(9) << 12) | (vreg() << 5) | vreg(); /* 2-source */
+  case 1: return 0x1E204000u | (ftype() << 22) | (pick(16) << 15) | (vreg() << 5) | vreg();               /* 1-source */
+  case 2: return 0x1F000000u | (ftype() << 22) | (pick(2) << 21) | (vreg() << 16) | (pick(2) << 15) | (vreg() << 10) |
+                 (vreg() << 5) | vreg();                                                                    /* FMADD & co. */
+  case 3: return 0x1E202000u | (ftype() << 22) | (vreg() << 16) | (vreg() << 5) | (pick(4) << 3);         /* FCMP(E) */
+  case 4: return 0x1E200400u | (ftype() << 22) | (vreg() << 16) | (pick(16) << 12) | (vreg() << 5) | (pick(2) << 4) |
+                 pick(16);                                                                                  /* FCCMP(E) */
+  case 5: return 0x1E200C00u | (ftype() << 22) | (vreg() << 16) | (pick(16) << 12) | (vreg() << 5) | vreg(); /* FCSEL */
+  case 6: { /* FMOV/SCVTF/UCVTF/FCVT*S/U (general) */
+    static const uint32_t opcodes[8] = {0, 1, 2, 3, 4, 5, 6, 7};
+    return (pick(2) << 31) | 0x1E200000u | (ftype() << 22) | (pick(4) << 19) | (opcodes[pick(8)] << 16) | (reg() << 5) |
+           dst();
+  }
+  case 7: return 0x1E201000u | (ftype() << 22) | (pick(256) << 13) | vreg(); /* FMOV (immediate) */
+  case 8: return 0x0E200400u | (pick(2) << 30) | (pick(2) << 29) | (pick(4) << 22) | (vreg() << 16) | (pick(32) << 11) |
+                 (vreg() << 5) | vreg();                                                    /* three same */
+  case 9: return 0x0E201800u | (pick(2) << 30) | (pick(2) << 29) | (pick(4) << 22) | (pick(32) << 12) | (vreg() << 5) |
+                 vreg();                                                                    /* two-reg misc */
+  case 10: { /* copy: DUP/INS/SMOV/UMOV, general and element */
+    const uint32_t general = pick(2);
+    return 0x0E000400u | (pick(2) << 30) | ((general ? 0u : pick(2)) << 29) | ((1u + pick(31)) << 16) |
+           ((general ? (pick(4) * 2u + 1u) : pick(16)) << 11) | ((general ? reg() : vreg()) << 5) |
+           (general ? dst() : vreg());
+  }
+  case 11: return 0x1E220000u | (pick(2) << 31) | (pick(2) << 22) | (pick(2) << 16) | (64u - 1u - pick(32)) << 10 |
+                  (reg() << 5) | vreg();                                                    /* SCVTF (fixed) */
+  case 12: /* LD1/ST1 (multiple structures), offset or post-index */
+    return 0x0C000000u | (pick(2) << 30) | (pick(2) << 23) | (pick(2) << 22) | ((pick(2) ? 31u : 24u + pick(4)) << 16) |
+           (pick(16) << 12) | (pick(4) << 10) | (base_reg() << 5) | vreg();
+  default: /* scalar/vector by element, shifts, pairwise: anything in the space */
+    return 0x0E000000u | ((uint32_t)rnd() & 0xF0FFFFFFu & ~(1u << 31)) | (pick(2) << 28);
+  }
+}
+
 /* Flag setters and readers, for the setter-then-reader idiom (lazy flags). */
 static uint32_t gen_flag_setter(void) {
   if (pick(4) == 0) { /* SUBS/ADDS rd, rn, rn: equal operands */
@@ -230,7 +269,7 @@ static uint32_t gen_flag_reader(void) {
 }
 
 static uint32_t gen(void) {
-  switch (pick(24)) {
+  switch (pick(27)) {
   case 0: return gen_add_sub_imm();
   case 1: return gen_logical_imm();
   case 2: return gen_move_wide();
@@ -252,6 +291,7 @@ static uint32_t gen(void) {
   case 20: return gen_dp_one_source();
   case 21: return pick(2) ? gen_system() : gen_literal();
   case 22: return pick(2) ? gen_simd_ldst() : gen_exclusive();
+  case 23: case 24: case 25: return gen_simd_fp();
   default: return (uint32_t)rnd(); /* anything: the interpreter fallback, often undefined */
   }
 }
@@ -266,10 +306,13 @@ typedef struct Snapshot {
   uint32_t pstate;
   CPU_Vector_Register v[CPU_VECTOR_REGISTER_COUNT];
   uint64_t tpidr;
+  uint32_t fpsr;
   CPU_ExitReason exit;
   uint64_t fault;
   uint64_t cycles;
 } Snapshot;
+
+static uint32_t g_fpcr, g_fpsr;
 
 static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint64_t *x, uint64_t sp, uint32_t nzcv) {
   for (uint8_t i = 0; i < 31; i++) cpu->set_reg(s, i, x[i]);
@@ -280,6 +323,8 @@ static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint64_t *x, u
   cpu->set_sp(s, sp);
   cpu->set_pstate(s, nzcv);
   cpu->set_sys_reg(s, CPU_SYSREG_TPIDR_EL0, 0x1234);
+  cpu->set_sys_reg(s, CPU_SYSREG_FPCR, g_fpcr);
+  cpu->set_sys_reg(s, CPU_SYSREG_FPSR, g_fpsr);
   cpu->set_sys_reg(s, CPU_SYSREG_CNTVCT_EL0, 0);
   cpu->set_pc(s, CODE_GVA);
 }
@@ -293,6 +338,7 @@ static Snapshot snapshot(const CPU_Backend *cpu, CPU_State *s, CPU_ExitReason ex
   snap.pc = cpu->get_pc(s);
   snap.pstate = cpu->get_pstate(s);
   snap.tpidr = cpu->get_sys_reg(s, CPU_SYSREG_TPIDR_EL0);
+  snap.fpsr = (uint32_t)cpu->get_sys_reg(s, CPU_SYSREG_FPSR);
   snap.exit = exit;
   snap.fault = exit == CPU_EXIT_FAULT ? cpu->get_fault_address(s) : 0;
   snap.cycles = cycles;
@@ -332,6 +378,9 @@ static void run_case(uint32_t iteration) {
   x[28] = CODE_GVA + 4u * pick(length + 1u);                                         /* BR target */
   const uint64_t sp = (DATA_GVA + 0x1000u + pick(0x1000u)) & ~(uint64_t)15;
   const uint32_t nzcv = (uint32_t)pick(16) << 28;
+  /* FP environment: mostly the default, sometimes FZ/DN/rounding modes; FPSR flags clear or sticky-set. */
+  g_fpcr = pick(4) ? 0u : (pick(2) << 24) | (pick(2) << 25) | (pick(4) << 22);
+  g_fpsr = pick(2) ? 0u : 0x10u;
   for (uint32_t i = 0; i < DATA_BYTES; i++) g_data_init[i] = (uint8_t)rnd();
 
   /* The same budgets for both: random sizes up to the limit. */
@@ -370,7 +419,7 @@ static void run_case(uint32_t iteration) {
 
   const bool same = memcmp(ref.x, jit.x, sizeof(ref.x)) == 0 && ref.sp == jit.sp && ref.pc == jit.pc &&
                     ref.pstate == jit.pstate && ref.exit == jit.exit && ref.fault == jit.fault &&
-                    ref.cycles == jit.cycles && ref.tpidr == jit.tpidr &&
+                    ref.cycles == jit.cycles && ref.tpidr == jit.tpidr && ref.fpsr == jit.fpsr &&
                     memcmp(ref.v, jit.v, sizeof(ref.v)) == 0 && memcmp(g_data_ref, data_jit, DATA_BYTES) == 0;
   if (!same) {
     fprintf(stderr, "[jit_diff_test] MISMATCH at iteration %u (%u instructions):\n", iteration, length);
@@ -388,6 +437,7 @@ static void run_case(uint32_t iteration) {
     }
     if (memcmp(ref.v, jit.v, sizeof(ref.v)) != 0) fprintf(stderr, "  vector registers differ\n");
     if (ref.tpidr != jit.tpidr) fprintf(stderr, "  tpidr differs\n");
+    if (ref.fpsr != jit.fpsr) fprintf(stderr, "  fpsr %x / %x\n", ref.fpsr, jit.fpsr);
     if (memcmp(g_data_ref, data_jit, DATA_BYTES) != 0) fprintf(stderr, "  data differs\n");
     exit(1);
   }

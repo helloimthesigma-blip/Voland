@@ -81,13 +81,14 @@ enum {
 #define FUNC_READ 1u
 #define FUNC_STORE 2u
 #define FUNC_WRITE 3u
-#define FUNC_BLOCK 4u
+#define FUNC_SIMD 4u
+#define FUNC_BLOCK 5u
 #define TYPE_BLOCK 0u
 #define TYPE_INTERPRET 1u
 #define TYPE_READ 2u
 #define TYPE_STORE 3u
 #define TYPE_COUNT 4u
-#define IMPORT_COUNT 6u /* table, interpret, read, store, write, memory */
+#define IMPORT_COUNT 7u /* table, interpret, read, store, write, simd, memory */
 
 /* Label levels (the wasm depth right after the label's block opened). */
 #define LEVEL_LEAVE 1u    /* the instruction in L_HPC/L_HINSN through the interpreter, then return */
@@ -1656,6 +1657,103 @@ static bool c_pair(Ctx *c, uint32_t insn) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Direct interpreter calls (SIMD&FP).                                 */
+/* ------------------------------------------------------------------ */
+
+/* What an instruction executed by a direct call reads or writes besides
+ * the vector registers, FPCR and FPSR (which live in the state): those
+ * general registers (bit 31 = SP) and NZCV are synchronised around it. */
+typedef struct Sync {
+  uint64_t regs;
+  bool nzcv;
+} Sync;
+
+static void sync_x(Sync *sync, uint32_t r) {
+  if (r != REG_ZR) sync->regs |= (uint64_t)1 << r;
+}
+static void sync_xsp(Sync *sync, uint32_t r) { sync->regs |= (uint64_t)1 << r; }
+
+/* The interpreter runs this instruction against the state (jit_helper_
+ * simd): the registers in `sync` go to the state first and come back
+ * after, every other register stays in its local. The instruction
+ * counts as retired inline; one the interpreter refuses (undefined, a
+ * fault) leaves through $leave with nothing changed. */
+static void emit_direct_call(Ctx *c, const Sync *sync) {
+  for (uint32_t r = 0; r < REG_ZR; r++) {
+    if (sync->regs & ((uint64_t)1 << r)) {
+      c->used |= (uint64_t)1 << r;
+      state_store64_local(c, OFF_X(r), L_X0 + r);
+    }
+  }
+  if (sync->regs & MASK_SP) {
+    c->used |= MASK_SP;
+    state_store64_local(c, OFF_SP, L_SP);
+  }
+  if (sync->nzcv) {
+    lget(c, L_STATE);
+    load_flags(c);
+    mem(c, WASM_OP_I32_STORE, ALIGN_4, OFF_PSTATE);
+  }
+  lget(c, L_STATE);
+  i32c(c, c->insn);
+  op(c, WASM_OP_CALL);
+  wasm_uleb(c->b, FUNC_SIMD);
+  open_if(c, WASM_BLOCK_VOID);
+  leave_via_interpreter(c);
+  end_(c);
+  for (uint32_t r = 0; r < REG_ZR; r++) {
+    if (sync->regs & ((uint64_t)1 << r)) {
+      state_load64(c, OFF_X(r));
+      set_x(c, r);
+    }
+  }
+  if (sync->regs & MASK_SP) {
+    state_load64(c, OFF_SP);
+    set_xsp(c, REG_ZR);
+  }
+  if (sync->nzcv) {
+    lget(c, L_STATE);
+    mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_PSTATE);
+    store_flags(c);
+  }
+}
+
+/* SIMD&FP data processing (op0 x111): the forms that touch general
+ * registers or NZCV, mirroring interp_simd_fp's decode. */
+static void simd_fp_sync(uint32_t insn, Sync *sync) {
+  const uint32_t rn = bits(insn, 9, 5), rd = bits(insn, 4, 0);
+  if (bit(insn, 28) && !bit(insn, 30)) { /* scalar floating point (and crypto) */
+    if (bit(insn, 29) || bits(insn, 28, 24) < 0x1E) return;
+    if (!bit(insn, 24) && (!bit(insn, 21) || bits(insn, 15, 10) == 0)) { /* conversions, FMOV (general) */
+      sync_x(sync, rn);
+      sync_x(sync, rd);
+      return;
+    }
+    if (bit(insn, 31) || bit(insn, 24) || bits(insn, 14, 10) == 0x10) return;
+    if (bits(insn, 13, 10) == 0x8) { /* FCMP, FCMPE */
+      sync->nzcv = true;
+      return;
+    }
+    if (bits(insn, 12, 10) == 0x4) return;
+    if (bits(insn, 11, 10) == 1 || bits(insn, 11, 10) == 3) sync->nzcv = true; /* FCCMP, FCSEL */
+    return;
+  }
+  /* Advanced SIMD: only the copy group's general forms (DUP, INS, SMOV, UMOV). */
+  if (!bit(insn, 28) && bits(insn, 28, 24) == 0x0E && !bit(insn, 21) && bit(insn, 10) && bits(insn, 23, 21) == 0 &&
+      !bit(insn, 15) && !bit(insn, 29) && (bits(insn, 14, 11) & 1u)) {
+    sync_x(sync, rn);
+    sync_x(sync, rd);
+  }
+}
+
+static bool c_simd_fp(Ctx *c, uint32_t insn) {
+  Sync sync = {0};
+  simd_fp_sync(insn, &sync);
+  emit_direct_call(c, &sync);
+  return true;
+}
+
+/* ------------------------------------------------------------------ */
 /* SIMD&FP loads and stores (the vector registers live in the state).  */
 /* ------------------------------------------------------------------ */
 
@@ -1806,8 +1904,14 @@ static bool c_vector_load_store(Ctx *c, uint32_t insn) {
     emit_vector_transfer(c, load, bytes, t, false, 0, n, false, 0);
     return true;
   }
-  default:
-    return false; /* LD1-LD4 & co.: the interpreter */
+  default: { /* LD1-LD4 & co.: the interpreter's, called directly */
+    if (bit(insn, 31)) return false;
+    Sync sync = {0};
+    sync_xsp(&sync, n);
+    sync_x(&sync, bits(insn, 20, 16));
+    emit_direct_call(c, &sync);
+    return true;
+  }
   }
 }
 
@@ -2047,7 +2151,8 @@ static Outcome compile_instruction(Ctx *c, uint32_t insn) {
   case 0xA: case 0xB: return c_branch_system(c, insn);
   case 0x4: case 0x6: case 0xC: case 0xE: return c_load_store(c, insn) ? OUTCOME_NEXT : OUTCOME_HELPER;
   case 0x5: case 0xD: return c_dp_register(c, insn) ? OUTCOME_NEXT : OUTCOME_HELPER;
-  default: return OUTCOME_HELPER; /* SIMD&FP, undefined */
+  case 0x7: case 0xF: return c_simd_fp(c, insn) ? OUTCOME_NEXT : OUTCOME_HELPER;
+  default: return OUTCOME_END_HELPER; /* SVE, unallocated: undefined */
   }
 }
 
@@ -2310,6 +2415,10 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
   name(b, "write");
   wasm_u8(b, WASM_EXTERNAL_FUNCTION);
   wasm_uleb(b, TYPE_READ);
+  name(b, "env");
+  name(b, "simd");
+  wasm_u8(b, WASM_EXTERNAL_FUNCTION);
+  wasm_uleb(b, TYPE_INTERPRET);
   name(b, "env");
   name(b, "memory");
   wasm_u8(b, WASM_EXTERNAL_MEMORY);

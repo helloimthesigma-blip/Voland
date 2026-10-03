@@ -8,6 +8,7 @@
  *       --budget N                   cycles per scheduler slice (default 100000)
  *       --jit-threshold N            jit: executions before a block is compiled
  *       --jit-dump DIR               jit: write every compiled module to DIR
+ *       --jit-fallbacks              jit: print the commonest interpreted opcodes
  *       --max-slices N               stop after N slices (default 10000000)
  *       --test-card                  publish the core's test card before running
  *       --expect-output TEXT         exit 4 unless the guest printed TEXT
@@ -393,7 +394,7 @@ static int run(int argc, char **argv) {
   uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES, dump_every = 0, snapshot_at = 0;
   const char *snapshot_dir = NULL;
   uint32_t frame_skip = 0;
-  bool test_card = false, svc_stats = false, swkbd_cancel = false;
+  bool test_card = false, svc_stats = false, swkbd_cancel = false, jit_fallbacks = false;
   const char *swkbd_text = NULL;
   Input_Event inputs[MAX_INPUT_EVENTS];
   uint32_t input_count = 0;
@@ -406,6 +407,9 @@ static int run(int argc, char **argv) {
       else if (!strcmp(name, "interpreter")) backend = &CPU_BACKEND_INTERPRETER;
       else if (!strcmp(name, "jit")) backend = &CPU_BACKEND_JIT;
       else { fprintf(stderr, "voland-cli: unknown backend %s\n", name); return EXIT_USAGE; }
+    } else if (!strcmp(argv[i], "--jit-fallbacks")) {
+      jit_set_fallback_profile(true);
+      jit_fallbacks = true;
     } else if (!strcmp(argv[i], "--jit-dump") && has_value) {
       jit_set_dump_directory(argv[++i]);
     } else if (!strcmp(argv[i], "--jit-threshold") && has_value) {
@@ -683,11 +687,12 @@ static int run(int argc, char **argv) {
             (unsigned long long)j->block_entries, (unsigned long long)j->interpreted_blocks,
             (unsigned long long)j->generations, (unsigned long long)j->revalidations, (unsigned long long)j->stale);
     fprintf(stderr,
-            "voland-cli: jit interpreter fallbacks: %llu SIMD&FP, %llu SIMD&FP memory, %llu exclusive/acquire-release, "
-            "%llu other memory, %llu system, %llu other\n",
-            (unsigned long long)j->helper_simd_fp, (unsigned long long)j->helper_memory_simd,
+            "voland-cli: jit %llu direct SIMD&FP calls; interpreter fallbacks: %llu SIMD&FP, %llu SIMD&FP memory, "
+            "%llu exclusive/acquire-release, %llu other memory, %llu system, %llu other\n",
+            (unsigned long long)j->direct_simd, (unsigned long long)j->helper_simd_fp, (unsigned long long)j->helper_memory_simd,
             (unsigned long long)j->helper_memory_exclusive, (unsigned long long)j->helper_memory,
             (unsigned long long)j->helper_system, (unsigned long long)j->helper_other);
+    if (jit_fallbacks) jit_print_fallback_profile(60);
   }
   if (wav) {
     write_wav_header(wav, audio_frames);

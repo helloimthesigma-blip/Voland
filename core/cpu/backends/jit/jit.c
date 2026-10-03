@@ -100,7 +100,7 @@ EM_JS_DEPS(voland_jit, "$addFunction,$removeFunction")
  * thread, which is where the core runs) and returns the table index of
  * its exported block function, or 0 on failure. */
 EM_JS(int64_t, jit_js_install,
-      (const uint8_t *bytes, size_t length, void *interpret, void *read, void *store, void *write), {
+      (const uint8_t *bytes, size_t length, void *interpret, void *read, void *store, void *write, void *simd), {
   try {
     const start = Number(bytes);
     const module = new WebAssembly.Module(HEAPU8.slice(start, start + Number(length)));
@@ -112,6 +112,7 @@ EM_JS(int64_t, jit_js_install,
         read: wasmTable.get(read),
         store: wasmTable.get(store),
         write: wasmTable.get(write),
+        simd: wasmTable.get(simd),
       },
     });
     return BigInt(addFunction(instance.exports.b, 'ip'));
@@ -125,7 +126,7 @@ EM_JS(void, jit_js_remove, (int64_t index), { removeFunction(Number(index)); })
 
 static uint64_t install(const uint8_t *bytes, uint32_t length) {
   return (uint64_t)jit_js_install(bytes, length, (void *)jit_helper_interpret, (void *)jit_helper_read,
-                                  (void *)jit_helper_store, (void *)jit_helper_write);
+                                  (void *)jit_helper_store, (void *)jit_helper_write, (void *)jit_helper_simd);
 }
 static void uninstall(uint64_t function) { jit_js_remove((int64_t)function); }
 static uint64_t memory_pages(void) { return (uint64_t)emscripten_get_heap_size() / WASM_PAGE_BYTES; }
@@ -145,7 +146,40 @@ static bool can_install(void) { return false; } /* no wasm engine natively */
 /* The interpreter fallback compiled blocks import.                    */
 /* ------------------------------------------------------------------ */
 
+/* Fallback profile: open addressing over masked encodings. */
+#define FALLBACK_SLOTS 4096u
+#define FALLBACK_OPCODE_MASK 0xFFE0FC00u /* drops Rd, Rn, Rm */
+static bool g_fallback_profile;
+static uint32_t g_fallback_key[FALLBACK_SLOTS];
+static uint64_t g_fallback_count[FALLBACK_SLOTS];
+
+void jit_set_fallback_profile(bool enabled) { g_fallback_profile = enabled; }
+
+static void profile_fallback(uint32_t insn) {
+  const uint32_t key = (insn & FALLBACK_OPCODE_MASK) | 1u; /* never 0: 0 = empty slot */
+  for (uint32_t i = 0, slot = (key * 2654435761u) >> 20; i < FALLBACK_SLOTS; i++, slot = (slot + 1u) % FALLBACK_SLOTS) {
+    if (g_fallback_key[slot] == key || g_fallback_key[slot] == 0) {
+      g_fallback_key[slot] = key;
+      g_fallback_count[slot]++;
+      return;
+    }
+  }
+}
+
+void jit_print_fallback_profile(uint32_t top) {
+  for (uint32_t n = 0; n < top; n++) {
+    uint32_t best = FALLBACK_SLOTS;
+    for (uint32_t i = 0; i < FALLBACK_SLOTS; i++) {
+      if (g_fallback_count[i] && (best == FALLBACK_SLOTS || g_fallback_count[i] > g_fallback_count[best])) best = i;
+    }
+    if (best == FALLBACK_SLOTS) return;
+    fprintf(stderr, "  %12llu  %08x\n", (unsigned long long)g_fallback_count[best], g_fallback_key[best] & ~1u);
+    g_fallback_count[best] = 0;
+  }
+}
+
 static void count_helper(uint32_t insn) {
+  if (g_fallback_profile) profile_fallback(insn);
   switch (bits(insn, 28, 25)) {
   case 0x7: case 0xF: g_stats.helper_simd_fp++; break;
   case 0x4: case 0x6: case 0xC: case 0xE:
@@ -176,6 +210,12 @@ uint32_t jit_helper_interpret(Jit_State *state, uint32_t insn) {
 
 uint32_t jit_helper_read(Jit_State *state, uint64_t address, uint32_t size) {
   return interp_read(&state->interp, address, state->scratch, size) ? 1u : 0u;
+}
+
+uint32_t jit_helper_simd(Jit_State *state, uint32_t insn) {
+  if (g_fallback_profile) profile_fallback(insn);
+  g_stats.direct_simd++;
+  return interp_execute(&state->interp, insn) == INTERP_CONTINUE ? 0u : 1u;
 }
 
 uint32_t jit_helper_write(Jit_State *state, uint64_t address, uint32_t size) {
