@@ -346,6 +346,7 @@ static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint64_t *x, u
       double d = (i & 1) ? (double)small : (double)small / 3.0;
       if (((x[i] >> 40) & 3u) == 0) d = (i & 2) ? -0.0 : 0.0;
       if (((x[i] >> 42) & 7u) == 1) d *= 1e-160;
+      if (((x[i] >> 42) & 7u) == 2) d *= 1e-310; /* subnormal */
       memcpy(&v.lo, &d, sizeof(d));
     } else if (i < 16) { /* ordinary singles */
       float f = (i & 1) ? (float)small : (float)small / 7.0f;
@@ -360,6 +361,7 @@ static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint64_t *x, u
         float f = (float)((int64_t)((x[(i + k) % 31] >> (k * 8u)) & 0xFFF) - 2048) / (float)(k + 3u);
         if (((x[(i + k) % 31] >> 40) & 3u) == 0) f = (k & 1u) ? -0.0f : 0.0f; /* exact zeros: x*0, 0/x */
         if (((x[(i + k) % 31] >> 42) & 7u) == 1) f *= 1e-22f;               /* tiny: products underflow */
+        if (((x[(i + k) % 31] >> 42) & 7u) == 2) f *= 1e-40f;               /* subnormal */
         memcpy(&lanes[k], &f, sizeof(lanes[k]));
       }
       v.lo = lanes[0] | ((uint64_t)lanes[1] << 32);
