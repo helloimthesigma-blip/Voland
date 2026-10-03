@@ -190,7 +190,10 @@ int main(void) {
   wr32(d, 10);
   for (uint32_t i = 0; i < 10u; i++) wr32(d + 12 + i * 8u, handle);
   CHECK(ioctl(vic, IOWR(0x00u, 0x09u, 0x5C), d) == 0);
-  for (uint32_t i = 0; i < 10u; i++) CHECK(rd32(d + 12 + i * 8u + 4u) == (uint32_t)(stack + 0x10000));
+  /* Addresses are IOVAs (nvdec.h): one stable, nonzero, aligned IOVA per handle. */
+  const uint32_t iova = rd32(d + 16);
+  CHECK(iova != 0 && (iova & 0xFFu) == 0);
+  for (uint32_t i = 0; i < 10u; i++) CHECK(rd32(d + 12 + i * 8u + 4u) == iova);
 
   /* Characteristics: GM20B. */
   memset(d, 0, sizeof(d));

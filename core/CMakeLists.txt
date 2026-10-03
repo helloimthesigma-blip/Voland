@@ -60,6 +60,10 @@ set(SWITCH_CORE_SOURCES
   hle/kernel/svc_thread.c
   hle/services/sm/sm.c
   hle/services/nvdrv/nvdrv.c
+  hle/services/nvdrv/nvdec.c
+  video/host1x.c
+  video/h264.c
+  video/video_stream.c
   hle/loader/byte_source.c
   hle/loader/nca_parse.c
   hle/loader/nca_compressed.c

@@ -45,6 +45,7 @@
 #include "gpu/gpu_channel.h"
 #include "gpu/syncpoint.h"
 #include "hle/kernel/event.h"
+#include "hle/services/nvdrv/nvdec.h"
 #include "hle/kernel/ipc.h"
 #include "hle/services/sm/sm.h"
 
@@ -55,6 +56,7 @@
 #define NVDRV_MAX_CHANNELS 8u     /* GPU channels with command processing */
 #define NVDRV_NO_CHANNEL UINT32_MAX
 #define NVDRV_IOCTL_MAX_BYTES 0x4000u /* the 14-bit size field */
+#define NVDRV_MAX_CMDBUF_WORDS 0x4000u /* a host1x command buffer read at once (nvdec.h) */
 
 /* NvError codes (libnx result.h LibnxNvidiaError mapping). */
 #define NV_SUCCESS 0u
@@ -134,6 +136,11 @@ typedef struct Nvdrv_State {
   bool channel_used[NVDRV_MAX_CHANNELS];
   HLE_Context *hle;
   Raster3d *renderer; /* 3D reference renderer for submissions (NULL: none) */
+  /* Host1x multimedia engines (nvdec.h): buffer IOVAs and register files. */
+  Mm_Iova iova;
+  Mm_Engine nvdec;
+  Mm_Engine vic;
+  uint32_t cmdbuf[NVDRV_MAX_CMDBUF_WORDS];
 } Nvdrv_State;
 
 /* Resets the state and initializes `state->interface`. `channels`:
