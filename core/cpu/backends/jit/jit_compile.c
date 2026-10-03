@@ -137,6 +137,7 @@ enum {
 #define OFF_L1 STATE_OFFSET(interp.l1)
 #define OFF_BUDGET STATE_OFFSET(cycle_budget)
 #define OFF_SCRATCH STATE_OFFSET(scratch)
+#define OFF_THREAD_CACHE STATE_OFFSET(thread_cache)
 #define OFF_EXCLUSIVE_ADDRESS STATE_OFFSET(interp.exclusive_address)
 #define OFF_EXCLUSIVE_SIZE STATE_OFFSET(interp.exclusive_size)
 #define OFF_EXCLUSIVE_VALUE STATE_OFFSET(interp.exclusive_value)
@@ -2227,6 +2228,35 @@ static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t 
   fp_else_exact(c, &none);
 }
 
+/* FMAX/FMIN/FMAXNM/FMINNM without NaNs and with FPCR 0: the result is
+ * one operand, unchanged and unrounded, no flags; wasm's min/max order
+ * -0 below +0 as ARM does. NaNs (and FZ) take the exact path. */
+static void emit_fp_min_max(Ctx *c, bool dbl, bool min, uint32_t n, uint32_t m, uint32_t d) {
+  const uint32_t a = dbl ? L_FD2 : L_FS2, b = dbl ? L_FD3 : L_FS3, r = fp_result_local(dbl);
+  load_fp(c, n, dbl);
+  lset(c, a);
+  load_fp(c, m, dbl);
+  lset(c, b);
+  lget(c, a);
+  lget(c, b);
+  if (dbl) op(c, min ? WASM_OP_F64_MIN : WASM_OP_F64_MAX);
+  else op(c, min ? WASM_OP_F32_MIN : WASM_OP_F32_MAX);
+  lset(c, r);
+  lget(c, a);
+  lget(c, a);
+  op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
+  lget(c, b);
+  lget(c, b);
+  op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
+  op(c, WASM_OP_I32_AND);
+  emit_fpcr_default(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  store_fp_local(c, d, dbl, r);
+  Sync none = {0};
+  fp_else_exact(c, &none);
+}
+
 /* FCMP/FCMPE (and with #0.0): NZCV from an ordered compare. */
 static void emit_fp_compare(Ctx *c, bool dbl, uint32_t n, uint32_t m, bool with_zero) {
   load_fp(c, n, dbl);
@@ -2450,7 +2480,11 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
   switch (bits(insn, 11, 10)) {
   case 2: { /* two source */
     const uint32_t opcode = bits(insn, 15, 12);
-    if (opcode > 3u && opcode != 8u) return false; /* FMAX/FMIN & co.: NaN and zero rules */
+    if (opcode >= 4u && opcode <= 7u) { /* FMAX, FMIN, FMAXNM, FMINNM */
+      emit_fp_min_max(c, dbl, (opcode & 1u) != 0, rn, rm, rd);
+      return true;
+    }
+    if (opcode > 3u && opcode != 8u) return false;
     emit_fp_arith(c, dbl, opcode, true, rn, rm, rd);
     return true;
   }
@@ -2612,7 +2646,7 @@ static void emit_fused_pair(Ctx *c, bool high) {
   simd(c, WASM_SIMD_F64X2_ADD);
 }
 
-typedef enum Vector_Fp_Op { VFP_ADD, VFP_SUB, VFP_MUL, VFP_DIV, VFP_MLA, VFP_MLS } Vector_Fp_Op;
+typedef enum Vector_Fp_Op { VFP_ADD, VFP_SUB, VFP_MUL, VFP_DIV, VFP_MLA, VFP_MLS, VFP_MAX, VFP_MIN } Vector_Fp_Op;
 
 /* rd = op(rn, rm or the broadcast element) over 2 or 4 lanes. L_VB must
  * hold the second operand already. */
@@ -2654,6 +2688,27 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
     emit_all_lanes(c, q);
     lget(c, L_PASS);
     op(c, WASM_OP_I32_AND);
+  } else if (vop == VFP_MAX || vop == VFP_MIN) { /* exact without NaNs (FPCR 0) */
+    lget(c, L_VA);
+    lget(c, L_VB);
+    if (dbl) simd(c, vop == VFP_MAX ? WASM_SIMD_F64X2_MAX : WASM_SIMD_F64X2_MIN);
+    else simd(c, vop == VFP_MAX ? WASM_SIMD_F32X4_MAX : WASM_SIMD_F32X4_MIN);
+    lset(c, L_VR);
+    static const uint32_t sources[2] = {L_VA, L_VB};
+    for (uint32_t i = 0; i < 2u; i++) {
+      lget(c, sources[i]);
+      lget(c, sources[i]);
+      simd(c, dbl ? WASM_SIMD_F64X2_EQ : WASM_SIMD_F32X4_EQ);
+    }
+    simd(c, WASM_SIMD_V128_AND);
+    emit_all_lanes(c, q);
+    emit_fpcr_default(c);
+    op(c, WASM_OP_I32_AND);
+    fp_fast_arm(c);
+    store_v(c, d, L_VR, q);
+    Sync none = {0};
+    fp_else_exact(c, &none);
+    return;
   } else {
     lget(c, L_VA);
     lget(c, L_VB);
@@ -2699,6 +2754,8 @@ static bool c_vector_fp_fast(Ctx *c, uint32_t insn) {
     case 0x17: vop = VFP_DIV; break;
     case 0x01: vop = VFP_MLA; break;
     case 0x09: vop = VFP_MLS; break;
+    case 0x06: case 0x00: vop = VFP_MAX; break; /* FMAX, FMAXNM */
+    case 0x0E: case 0x08: vop = VFP_MIN; break; /* FMIN, FMINNM */
     default: return false;
     }
     if (dbl && (vop == VFP_MLA || vop == VFP_MLS)) return false; /* needs a true fused multiply-add */
@@ -3520,7 +3577,7 @@ static void emit_chain(Ctx *c) {
   op(c, WASM_OP_I64_SHR_U);
   i64c(c, sizeof(Jit_Entry));
   op(c, WASM_OP_I64_MUL);
-  i64c(c, c->link->cache_address);
+  state_load64(c, OFF_THREAD_CACHE); /* this host thread's cache */
   op(c, WASM_OP_I64_ADD);
   lset(c, L_HOST); /* the entry */
   open_block(c);
@@ -3581,9 +3638,13 @@ static void emit_function(Ctx *c) {
 
   /* Prologue. The caller checked that block 0 fits the budget. */
   if (c->link->count_entries) {
-    const uint64_t entry = c->link->cache_address + jit_cache_index(c->blocks[0].pc) * sizeof(Jit_Entry);
+    const uint64_t entry = jit_cache_index(c->blocks[0].pc) * sizeof(Jit_Entry);
+    state_load64(c, OFF_THREAD_CACHE);
     i64c(c, entry);
-    i64c(c, entry);
+    op(c, WASM_OP_I64_ADD);
+    lset(c, L_HOST);
+    lget(c, L_HOST);
+    lget(c, L_HOST);
     mem(c, WASM_OP_I64_LOAD, ALIGN_8, ENTRY_OFFSET(entries));
     i64c(c, 1);
     op(c, WASM_OP_I64_ADD);
