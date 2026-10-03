@@ -44,6 +44,25 @@ static void locked_task(void *user, uint32_t index, uint32_t count) {
   }
 }
 
+/* workers_take: every item claimed exactly once across workers. */
+#define ITEMS 5000u
+typedef struct Take_Job {
+  Workers *pool;
+  uint32_t next;
+  uint8_t claimed[ITEMS];
+} Take_Job;
+
+static void take_task(void *user, uint32_t index, uint32_t count) {
+  (void)index;
+  (void)count;
+  Take_Job *job = (Take_Job *)user;
+  for (;;) {
+    const uint32_t item = workers_take(job->pool, &job->next);
+    if (item >= ITEMS) break;
+    job->claimed[item]++;
+  }
+}
+
 static uint64_t total(const Job *job, uint32_t n) {
   uint64_t t = 0;
   for (uint32_t i = 0; i < n; i++) t += job->sums[i];
@@ -79,6 +98,12 @@ int main(void) {
   job.pool = &pool;
   workers_run(&pool, n, locked_task, &job);
   CHECK(job.shared == n * LOCKED_ADDS);
+
+  static Take_Job take;
+  memset(&take, 0, sizeof(take));
+  take.pool = &pool;
+  workers_run(&pool, n, take_task, &take);
+  for (uint32_t i = 0; i < ITEMS; i++) CHECK(take.claimed[i] == 1u);
 
   /* Stopped: serial, index 0 on the caller. */
   workers_stop(&pool);

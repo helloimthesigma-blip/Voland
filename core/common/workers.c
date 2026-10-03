@@ -36,6 +36,11 @@ void workers_run(Workers *w, uint32_t count, Workers_Task task, void *user) {
 void workers_lock(Workers *w) { (void)w; }
 void workers_unlock(Workers *w) { (void)w; }
 
+uint32_t workers_take(Workers *w, uint32_t *counter) {
+  (void)w;
+  return (*counter)++;
+}
+
 void workers_stop(Workers *w) {
   w->impl = NULL;
   w->count = 1u;
@@ -145,6 +150,11 @@ void workers_run(Workers *w, uint32_t count, Workers_Task task, void *user) {
   pthread_mutex_lock(&p->mutex);
   while (p->pending != 0) pthread_cond_wait(&p->done, &p->mutex);
   pthread_mutex_unlock(&p->mutex);
+}
+
+uint32_t workers_take(Workers *w, uint32_t *counter) {
+  if (!w->impl) return (*counter)++;
+  return __atomic_fetch_add(counter, 1u, __ATOMIC_RELAXED);
 }
 
 void workers_lock(Workers *w) {

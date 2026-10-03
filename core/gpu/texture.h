@@ -121,6 +121,12 @@ bool tex_decode(const Tex_Header *header, const uint8_t *raw, uint8_t *dst, Tex_
 
 /* Sampling. Results follow the header swizzle; integer formats return
  * raw integers, everything else floats (as bits). */
+/* Many plain samples of one texture (layer 0, no offset, no compare):
+ * out[i] = tex_sample(image, sampler, {u[i], v[i], 0}, 0, ...), with the
+ * per-image decisions made once - the shader's texture instructions,
+ * a lane at a time. */
+void tex_sample_batch(const Tex_Image *image, const Tex_Sampler *sampler, const float *u, const float *v, uint32_t count,
+                      uint32_t (*out)[4]);
 void tex_sample(const Tex_Image *image, const Tex_Sampler *sampler, const float coords[3], float layer,
                 float dref, bool shadow, const int32_t offset[3], uint32_t out[4]);
 void tex_gather(const Tex_Image *image, const Tex_Sampler *sampler, const float coords[3], float layer,

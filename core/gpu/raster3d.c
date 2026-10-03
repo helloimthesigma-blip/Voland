@@ -991,12 +991,48 @@ static void env_texture(void *user, const Sm_Tex_Request *req, uint32_t out[4]) 
 
 /* A texture instruction's lanes: the handle is resolved once per run of
  * equal handles (usually the whole instruction). */
+/* A plain 2D sample (layer 0, no offset, no compare): tex_sample_batch's. */
+static bool plain_2d_sample(const Sm_Tex_Request *req) {
+  return req->kind == SM_TEX_SAMPLE && req->dims == 2u && !req->array && !req->cube && !req->shadow && !req->has_offset;
+}
+
 static void env_texture_batch(void *user, const Sm_Tex_Request *requests, Sm_Mask lanes, uint32_t (*out)[4]) {
   Tex_Resolver *res = (Tex_Resolver *)user;
   bool have = false, ok = false;
   uint32_t handle = 0;
   Raster3d_Texture *t = NULL;
   Tex_Sampler sampler;
+  /* The common case: every lane a plain 2D sample of one texture. */
+  uint32_t first = 0;
+  while (first < SM_LANES && !((lanes >> first) & 1u)) first++;
+  if (first < SM_LANES) {
+    const uint32_t h = requests[first].handle;
+    bool uniform = true;
+    for (uint32_t l = first; l < SM_LANES && uniform; l++)
+      if ((lanes >> l) & 1u) uniform = requests[l].handle == h && plain_2d_sample(&requests[l]);
+    if (uniform) {
+      if (!resolve_texture(res, h, &t, &sampler)) {
+        for (uint32_t l = first; l < SM_LANES; l++) {
+          if (!((lanes >> l) & 1u)) continue;
+          out[l][0] = out[l][1] = out[l][2] = 0;
+          out[l][3] = u32f(1.0f);
+        }
+        return;
+      }
+      float u[SM_LANES], v[SM_LANES];
+      uint32_t lane[SM_LANES], n = 0;
+      uint32_t result[SM_LANES][4];
+      for (uint32_t l = first; l < SM_LANES; l++) {
+        if (!((lanes >> l) & 1u)) continue;
+        u[n] = requests[l].coords[0];
+        v[n] = requests[l].coords[1];
+        lane[n++] = l;
+      }
+      tex_sample_batch(&t->image, &sampler, u, v, n, result);
+      for (uint32_t i = 0; i < n; i++) memcpy(out[lane[i]], result[i], sizeof(result[i]));
+      return;
+    }
+  }
   for (uint32_t l = 0; l < SM_LANES; l++) {
     if (!((lanes >> l) & 1u)) continue;
     const Sm_Tex_Request *req = &requests[l];
@@ -2055,7 +2091,7 @@ typedef struct Band_Job {
   const Raster_State *master;
   int64_t first_row;  /* band 0's first row (BAND_ROWS-aligned) */
   uint32_t bands;
-  uint32_t next;      /* the next band to take, under the workers' lock */
+  uint32_t next;      /* the next band to take (workers_take) */
 } Band_Job;
 
 static void band_task(void *user, uint32_t index, uint32_t count) {
@@ -2068,10 +2104,7 @@ static void band_task(void *user, uint32_t index, uint32_t count) {
   w->ps_env.user = &w->resolver;
   memset(&w->stats, 0, sizeof(w->stats));
   for (;;) {
-    uint32_t band;
-    if (count > 1u) workers_lock(&r->workers);
-    band = job->next++;
-    if (count > 1u) workers_unlock(&r->workers);
+    const uint32_t band = count > 1u ? workers_take(&r->workers, &job->next) : job->next++;
     if (band >= job->bands) break;
     w->row_begin = job->first_row + (int64_t)band * BAND_ROWS;
     w->row_end = job->bands == 1u ? INT64_MAX : w->row_begin + BAND_ROWS;

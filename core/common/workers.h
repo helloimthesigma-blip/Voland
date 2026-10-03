@@ -43,6 +43,10 @@ bool workers_start(Workers *w, uint32_t count);
  * Not reentrant: one run at a time, from one thread. */
 void workers_run(Workers *w, uint32_t count, Workers_Task task, void *user);
 
+/* Atomically returns *counter and increments it: tasks taking work items
+ * in turn without the lock (which may be held for long by a task). */
+uint32_t workers_take(Workers *w, uint32_t *counter);
+
 /* A mutex for tasks to guard shared state (no-op when serial). */
 void workers_lock(Workers *w);
 void workers_unlock(Workers *w);

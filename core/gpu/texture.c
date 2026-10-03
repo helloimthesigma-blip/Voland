@@ -763,6 +763,51 @@ void tex_sample(const Tex_Image *img, const Tex_Sampler *s, const float coords[3
   apply_swizzle(img, texel, out);
 }
 
+void tex_sample_batch(const Tex_Image *img, const Tex_Sampler *s, const float *u, const float *v, uint32_t count,
+                      uint32_t (*out)[4]) {
+  const bool fast = img && img->valid && img->rgba8 && s && s->mag_filter == 2u &&
+                    !is_integer_type(img->header.data_type[0]) && img->height > 1u && img->layers > 0u &&
+                    img->header.type != TEX_TYPE_CUBE && img->header.type != TEX_TYPE_CUBE_ARRAY;
+  if (!fast) {
+    for (uint32_t i = 0; i < count; i++) {
+      const float coords[3] = {u[i], v[i], 0.0f};
+      tex_sample(img, s, coords, 0.0f, 0.0f, false, NULL, out[i]);
+    }
+    return;
+  }
+  /* tex_sample's RGBA8 bilinear interior path, hoisted; any other texel
+   * (an edge, the border) takes tex_sample itself. */
+  const float *table = unorm8_table();
+  const float sx = img->header.normalized ? (float)img->width : 1.0f, sy = img->header.normalized ? (float)img->height : 1.0f;
+  const bool scale = img->header.normalized;
+  const int32_t max_x = (int32_t)img->width - 1, max_y = (int32_t)img->height - 1;
+  const uint8_t *texels = img->texels;
+  const uint64_t row_bytes = img->row_bytes;
+  const uint8_t *sw = img->header.swizzle;
+  const bool identity = sw[0] == TEX_SOURCE_R && sw[1] == TEX_SOURCE_G && sw[2] == TEX_SOURCE_B && sw[3] == TEX_SOURCE_A;
+  for (uint32_t i = 0; i < count; i++) {
+    const float x = (scale ? u[i] * sx : u[i]) - 0.5f, y = (scale ? v[i] * sy : v[i]) - 0.5f;
+    const float fx = floorf(x), fy = floorf(y);
+    if (!(fx >= 0.0f && fy >= 0.0f && fx < (float)max_x && fy < (float)max_y)) { /* also NaN */
+      const float coords[3] = {u[i], v[i], 0.0f};
+      tex_sample(img, s, coords, 0.0f, 0.0f, false, NULL, out[i]);
+      continue;
+    }
+    const int32_t x0 = (int32_t)fx, y0 = (int32_t)fy;
+    const float ax = x - fx, ay = y - fy;
+    const uint8_t *p00 = texels + (uint64_t)y0 * row_bytes + (uint64_t)x0 * 4u;
+    const uint8_t *p01 = p00 + row_bytes;
+    uint32_t texel[4];
+    for (uint32_t c = 0; c < 4; c++) {
+      const float a = table[p00[c]], b = table[p00[4u + c]], cc = table[p01[c]], d = table[p01[4u + c]];
+      const float top = a + (b - a) * ax, bottom = cc + (d - cc) * ax;
+      texel[c] = u32f(top + (bottom - top) * ay);
+    }
+    if (identity) memcpy(out[i], texel, sizeof(texel));
+    else apply_swizzle(img, texel, out[i]);
+  }
+}
+
 void tex_gather(const Tex_Image *img, const Tex_Sampler *s, const float coords[3], float layer, uint32_t component,
                 float dref, bool shadow, const int32_t offset[3], uint32_t out[4]) {
   if (!img || !img->valid) {
