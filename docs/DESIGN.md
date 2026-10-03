@@ -2427,9 +2427,17 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.68.0*
+*Document version: 3.69.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.68 → v3.69 (summary)
+
+Silksong now goes from New Game through its prologue, the opening cinematic (skippable; it plays black) and the "Act 1 - Pharloom" card into its first gameplay scene, rendered correctly.
+
+- **NVDEC/VIC stub (§13, the black-frame tier):** host1x channels accept SET_NVMAP_FD (type 0x48); SUBMIT reads libnx's 20-byte syncpoint-increment entries and completes each entry's syncpoint with one fence threshold per entry; MAP_BUFFER's header is 12 bytes (the 16 assumed rejected the decoder's ten-entry map, and it waited on a syncpoint that never moved). The decoder's submissions and EVENT_WAIT_ASYNC waits complete at once, so videos advance (black) and can be skipped. **mm:u** (the multimedia clock manager) answers. Real decoding remains the WebCodecs plan.
+- **Reference renderer:** render targets are sampled in place (an RGBA8 texture that is exactly a held target needs no write-back / re-read / hash / decode per post-processing pass); views are allocated per draw so concurrent workers never see one rebuilt (that race crashed the host and made raster3d_test flaky).
+- **voland-cli `--snapshot-at N --snapshot-dir DIR`:** fork-based snapshots; jobs continue from slice N with their own inputs, dumps and draw traces - how the late scenes were debugged without replaying 35 minutes each time.
 
 ### Changelog v3.67 → v3.68 (summary)
 
