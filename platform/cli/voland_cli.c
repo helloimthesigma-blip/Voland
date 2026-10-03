@@ -727,12 +727,13 @@ static int run(int argc, char **argv) {
     const Raster3d_Gpu_Stats *gs = &emu.renderer.gpu_stats;
     fprintf(stderr,
             "voland-cli: GPU stream: %llu records (%llu MB); %llu draws, %llu triangles, %llu shaders, %llu untranslated "
-            "draws, %llu texture uploads (%llu MB), %llu surfaces, %llu presents, %llu copies\n",
+            "draws, %llu texture uploads (%llu MB), %llu surfaces, %llu presents, %llu copies, %llu MB re-hashed\n",
             (unsigned long long)g_gpu_records, (unsigned long long)(g_gpu_stream.bytes >> 20),
             (unsigned long long)gs->draws, (unsigned long long)gs->triangles, (unsigned long long)gs->shaders,
             (unsigned long long)gs->untranslated_draws, (unsigned long long)gs->texture_uploads,
             (unsigned long long)(gs->upload_bytes >> 20), (unsigned long long)gs->surfaces,
-            (unsigned long long)gs->presents, (unsigned long long)gs->copies);
+            (unsigned long long)gs->presents, (unsigned long long)gs->copies,
+            (unsigned long long)(gs->hashed_bytes >> 20));
   }
   if (pc_profile) pc_profile_print(&emu);
   uint32_t width = 0, height = 0;

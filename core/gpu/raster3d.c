@@ -1077,6 +1077,7 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
   /* Unchanged since it was decoded? Hashed in place: the whole texture is
    * staged only to decode it. */
   uint64_t hash = 0;
+  r->gpu_stats.hashed_bytes += raw_bytes;
   if (!guest_hash(mem, h.address, raw_bytes, &hash)) {
     texture_miss(r, &h, "unreadable");
     return NULL;

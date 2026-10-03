@@ -17,6 +17,14 @@
   - New `texture_lod` WebGPU vector, plus structural LOD checks in `wgsl_test`.
   - Silksong barely uses mip chains: one 32x32 texture at the title.
 
+- **Executor efficiency.**
+  - Full clears are deferred into the next pass's load operations.
+  - Same-format, same-size COPY records become `copyTextureToTexture`.
+  - Draw bind groups are cached, with the draw data at a dynamic offset (2 MB window).
+  - Gameplay replay: 101,972 → 78,300 render passes. All 97 captured frames are byte-identical to the old executor's.
+  - Executor CPU time per record type (whole replay): presents 983 → 590 ms, uploads 976 → 211 ms, copies 54 → 16 ms, draws 1,269 → 1,235 ms. That is about 0.38 ms per frame in total, so the GPU worker is not a bottleneck.
+  - Upload batching was not worth doing: only 74 submits beyond one per present in 5,848 frames.
+
 ## Measurements
 
 | What | Value |
@@ -28,9 +36,8 @@
 ## Next
 
 1. Finish the gameplay frame comparison and fix any mismatch.
-2. Executor: merge the clear passes into the first draw's pass; use `copyTextureToTexture` for 1:1 same-format COPY; cache bind groups; batch texture uploads (copyBufferToTexture in the encoder instead of flushing).
-3. The unsupported-path list (register SHFL, global loads, integer copies, cube/3D). Silksong's gameplay hits none of them so far.
-4. Producer: re-hashing of big textures every frame.
+2. The unsupported-path list (register SHFL, global loads, integer copies, cube/3D). Silksong's gameplay hits none of them so far.
+3. Producer: re-hashing of big textures every frame.
 
 ## Needs from others
 

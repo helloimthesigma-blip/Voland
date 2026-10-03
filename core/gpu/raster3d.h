@@ -141,6 +141,7 @@ typedef struct Raster3d_Gpu_Stats {
   uint64_t surfaces;
   uint64_t presents;
   uint64_t copies;
+  uint64_t hashed_bytes; /* guest texture bytes re-hashed to detect changes */
 } Raster3d_Gpu_Stats;
 
 typedef struct Raster3d_Stats {
