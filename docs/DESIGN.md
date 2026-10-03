@@ -1324,6 +1324,14 @@ Command records reference guest memory (vertex/index/uniform data, textures) by 
 
 This path is the correctness oracle the WebGPU translation (shaders to WGSL in the GPU Worker, as above) will be diffed against; it is not removed when that lands. It renders deko3d homebrew (ftpd's ImGui interface) today.
 
+### WebGPU renderer: stated deviations from the reference
+
+- **Mipmaps.** The reference samples level 0 only. In GPU mode, a sampled float 2D (array) texture whose header has a mip chain gets a GPU mip chain, built from level 0 with a 2x2 box filter after every upload (stream version 2, `docs/GPU_COMMAND_STREAM.md`).
+  - Pixel programs choose the level per pixel. The automatic level comes from derivatives of texel-space coordinates, but only in uniform control flow: straight-line programs, before any conditional exit, outside predicated instructions. Elsewhere it is level 0, as in the reference.
+  - Explicit LODs (LL) and LZ are honoured, as are the sampler's bias and min/max LOD clamps.
+  - The shader-side filtering path (border wraps, non-filterable formats) picks the nearest level. The hardware-sampler path honours the TSC mip filter.
+  - Why: minified textures shimmer on a real display. `VOLAND_GPU_MIPMAPS=0` (voland-cli) switches back to the reference behaviour for pixel comparisons.
+
 ### Video decode: NVDEC/VIC
 
 The Switch's NVDEC (`/dev/nvhost-nvdec`) decodes H.264/VP8/VP9 cutscene bitstreams; VIC (`/dev/nvhost-vic`) converts/scales the output. **Games wait on syncpoints for decode completion — a stub that signals its syncpoints (black output) is mandatory from Phase 4 or cutscene-bearing titles deadlock.** Real decode rides existing infrastructure:

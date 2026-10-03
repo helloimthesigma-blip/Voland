@@ -18,6 +18,8 @@ const CBUF_TABLE = DRAW_TEXTURE_PARAMS + TEX_PARAM_WORDS * MAX_TEXTURES;
 const CONSTANT_WORDS = CBUF_TABLE + 2 * 18;
 const TEXP_SCALE = 1;
 const TEXP_LINEAR = 2;
+const TEXP_MIN_LINEAR = 16;
+const TEXP_LOD_BIAS = 5; /* f32 x 3: bias, min LOD, max LOD */
 const KILLED_MARK = 0xdeadbeef;
 
 const dir = process.argv[2];
@@ -51,7 +53,11 @@ const results = await page.evaluate(
       data[tp + 0] = k.TEXP_SCALE | (v.texture.linear ? k.TEXP_LINEAR : 0);
       data[tp + 1] = v.texture.wrap;
       data[tp + 2] = 0x5432;
-      data[tp + 3] = 1;
+      data[tp + 3] = v.texture.levels ?? 1;
+      if (v.texture.lod) {
+        data[tp + 0] |= k.TEXP_MIN_LINEAR;
+        new Float32Array(data.buffer, (tp + k.TEXP_LOD_BIAS) * 4, 3).set(v.texture.lod);
+      }
       data[k.CBUF_TABLE + 2 * v.cbuf_slot] = k.CONSTANT_WORDS;
       data[k.CBUF_TABLE + 2 * v.cbuf_slot + 1] = v.cbuf.length;
       data.set(v.cbuf, k.CONSTANT_WORDS);
@@ -61,7 +67,11 @@ const results = await page.evaluate(
         size: [v.texture.width, v.texture.height, 1],
         format: "rgba8unorm",
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        mipLevelCount: v.texture.levels ?? 1,
       });
+      if (v.texture.mip1) {
+        device.queue.writeTexture({ texture: tex, mipLevel: 1 }, new Uint8Array(v.texture.mip1), { bytesPerRow: 4 }, [1, 1, 1]);
+      }
       device.queue.writeTexture(
         { texture: tex },
         new Uint8Array(v.texture.rgba8),
@@ -136,7 +146,7 @@ const results = await page.evaluate(
     }
     return out;
   },
-  { vectors, k: { CONSTANT_WORDS, CBUF_TABLE, DRAW_TEXTURE_PARAMS, TEXP_SCALE, TEXP_LINEAR, KILLED_MARK } },
+  { vectors, k: { CONSTANT_WORDS, CBUF_TABLE, DRAW_TEXTURE_PARAMS, TEXP_SCALE, TEXP_LINEAR, TEXP_MIN_LINEAR, TEXP_LOD_BIAS, KILLED_MARK } },
 );
 await browser.close();
 

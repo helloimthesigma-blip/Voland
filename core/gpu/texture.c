@@ -81,6 +81,10 @@ void tex_sampler_parse(const uint32_t words[8], Tex_Sampler *out) {
   out->compare_func = (uint8_t)((words[0] >> 10) & 7u);
   out->mag_filter = (uint8_t)(words[1] & 7u);
   out->min_filter = (uint8_t)((words[1] >> 4) & 3u);
+  out->mip_filter = (uint8_t)((words[1] >> 6) & 3u);
+  out->lod_bias = (float)((int32_t)(((words[1] >> 12) & 0x1fffu) << 19) >> 19) / 256.0f; /* signed 5.8 */
+  out->min_lod = (float)(words[2] & 0xfffu) / 256.0f;                                    /* unsigned 4.8 */
+  out->max_lod = (float)((words[2] >> 12) & 0xfffu) / 256.0f;
   for (uint32_t c = 0; c < 4; c++) out->border[c] = f32(words[4u + c]);
 }
 

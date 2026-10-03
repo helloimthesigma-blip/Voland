@@ -110,7 +110,7 @@ typedef struct Raster3d_Texture {
   /* GPU mode: the GPU texture holding it (0 = none) and what was uploaded. */
   uint32_t gpu_id;
   uint64_t gpu_hash;
-  uint32_t gpu_width, gpu_height, gpu_layers, gpu_format;
+  uint32_t gpu_width, gpu_height, gpu_layers, gpu_format, gpu_levels;
 } Raster3d_Texture;
 
 /* GPU mode: a render target that lives only on the GPU (its guest memory
@@ -148,6 +148,7 @@ typedef struct Raster3d_Gpu_Stats {
   uint64_t surfaces;
   uint64_t presents;
   uint64_t copies;
+  uint64_t hashed_bytes; /* guest texture bytes re-hashed to detect changes */
 } Raster3d_Gpu_Stats;
 
 typedef struct Raster3d_Stats {
@@ -202,6 +203,10 @@ typedef struct Raster3d {
   uint8_t *gpu_vertices;             /* the current draw's vertices */
   uint32_t *gpu_data;                /* the current draw's constants + constant buffers */
   Raster3d_Gpu_Stats gpu_stats;
+  /* GPU mode: mipmapped textures get mip chains and pixel programs pick
+   * the level from derivatives (a deliberate improvement over the
+   * reference's level 0, §13). Off: level 0 only, as the reference. */
+  bool gpu_mipmaps;
 } Raster3d;
 
 /* Bytes of backing storage raster3d_init needs (one allocation). */
