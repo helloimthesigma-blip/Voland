@@ -207,11 +207,15 @@ let paused = false;
 let frameSkip = 0;
 /** The renderer the main thread chose (set-gpu-mode); applied to every core load. */
 let gpuMode = false;
-/** Host threads running guest threads (docs/PARALLEL.md): two by default,
- * since the busiest titles keep two guest threads busy; ?cores=N
- * (set-host-cores) overrides, 0 = the serial scheduler. Applied to every
- * core load. */
-const DEFAULT_HOST_CORES = 2;
+/** Host threads running guest threads (docs/PARALLEL.md): the Switch's
+ * three application cores where the machine has room for them besides the
+ * page and the CPU and GPU workers (Silksong gameplay: 1.94x parallelism
+ * on 3, 1.35x on 2). ?cores=N (set-host-cores) overrides; 0 is the serial
+ * scheduler. Applied to every core load. */
+const MAX_DEFAULT_HOST_CORES = 3;
+const HOST_THREADS_RESERVED = 2;
+const DEFAULT_HOST_CORES = Math.max(
+  1, Math.min(MAX_DEFAULT_HOST_CORES, (self.navigator.hardwareConcurrency || 4) - HOST_THREADS_RESERVED));
 let hostCores = DEFAULT_HOST_CORES;
 
 function applyHostCores(target: SwitchCoreExports): void {

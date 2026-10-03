@@ -123,6 +123,10 @@ struct CPU_Backend
   const char *name; /* "noop", "interpreter", "ballistic" */
   const char *version;
   bool supports_jit;
+  /* Safe with guest threads on several host threads at once
+   * (docs/PARALLEL.md): per-host-thread caches, and store-exclusive /
+   * barriers honoured when cpu_multicore() is set. */
+  bool supports_multicore;
 };
 
 /* ------------------------------------------------------------------ */
