@@ -7,9 +7,13 @@
  * cutscenes stay black, as before.
  *
  * Optionally (VOLAND_DUMP_VIDEO=FILE) every access unit is appended to
- * FILE as Annex-B, for checking the reconstructed bitstream offline.
+ * FILE as Annex-B, for checking the reconstructed bitstream offline, and
+ * (VOLAND_DUMP_VIDEO_FRAMES=PREFIX[:N]) every Nth decoded frame (default
+ * 30) is written as PREFIX.<sequence>.ppm.
  */
 #include "video_vt.h"
+
+#include "video/vic_convert.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -42,6 +46,43 @@ struct Vt_Decoder {
 };
 
 static Vt_Decoder g_decoder;
+
+#define DEFAULT_FRAME_DUMP_EVERY 30u
+#define PPM_BYTES_PER_PIXEL 3u
+
+static void dump_frame(uint32_t sequence, const uint8_t *nv12, uint32_t width, uint32_t height) {
+  static const char *prefix;
+  static uint32_t every;
+  static uint8_t rgba[VIDEO_MAX_WIDTH * VIDEO_MAX_HEIGHT * 4u];
+  static char path[1024];
+  if (!every) {
+    const char *spec = getenv("VOLAND_DUMP_VIDEO_FRAMES");
+    every = DEFAULT_FRAME_DUMP_EVERY;
+    if (!spec) {
+      every = UINT32_MAX;
+      return;
+    }
+    static char copy[1024];
+    snprintf(copy, sizeof(copy), "%s", spec);
+    char *colon = strrchr(copy, ':');
+    if (colon) {
+      *colon = 0;
+      every = (uint32_t)strtoul(colon + 1, NULL, 0);
+      if (!every) every = DEFAULT_FRAME_DUMP_EVERY;
+    }
+    prefix = copy;
+  }
+  if (!prefix || sequence % every) return;
+  const Vic_Nv12 source = {nv12, nv12 + (size_t)width * height, width, height, width};
+  const Vic_Target target = {rgba, width, height, width * 4u, false, 0, false, 0xFF};
+  vic_convert_nv12(&source, &target, VIC_MATRIX_BT709);
+  snprintf(path, sizeof(path), "%s.%u.ppm", prefix, sequence);
+  FILE *f = fopen(path, "wb");
+  if (!f) return;
+  fprintf(f, "P6\n%u %u\n255\n", width, height);
+  for (uint32_t i = 0; i < width * height; i++) fwrite(rgba + (size_t)i * 4u, 1, PPM_BYTES_PER_PIXEL, f);
+  fclose(f);
+}
 
 static void drop_session(Vt_Decoder *d) {
   if (d->session) {
@@ -87,6 +128,7 @@ static void on_frame(void *user, void *source_ref, OSStatus status, VTDecodeInfo
    * output index (VIC looks frames up by sequence). */
   video_slot_publish(d->video, (uint32_t)slot, sequence, sequence, d->generation, w, h, w, w * h);
   d->decoded++;
+  dump_frame(sequence, out, w, h);
 }
 
 static bool make_session(Vt_Decoder *d) {
