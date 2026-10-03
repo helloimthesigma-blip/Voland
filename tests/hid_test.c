@@ -138,7 +138,9 @@ static uint32_t read_lifo(uint32_t index, uint32_t lifo_offset, Npad_State *out,
     const uint32_t pos = (tail + HID_LIFO_ENTRIES - i) % HID_LIFO_ENTRIES;
     const uint64_t storage = lifo + HID_LIFO_STORAGE_OFFSET + pos * HID_LIFO_STORAGE_BYTES;
     const uint64_t st = storage + HID_LIFO_STATE_OFFSET;
-    CHECK(rd64(storage) == rd64(st)); /* storage and state sampling numbers agree */
+    /* The storage sequence is even (not being written; the SDK reader spins
+     * on odd) and twice the state's sampling number. */
+    CHECK((rd64(storage) & 1u) == 0 && rd64(storage) == 2u * rd64(st));
     out[i] = (Npad_State){rd64(st), rd64(st + 8), (int32_t)rd32(st + 0x10), (int32_t)rd32(st + 0x14),
                           (int32_t)rd32(st + 0x18), (int32_t)rd32(st + 0x1C), rd32(st + 0x20)};
   }

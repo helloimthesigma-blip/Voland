@@ -206,13 +206,51 @@ core nothing changes.
 | `Interp_State` | Per guest thread; only its own core touches it, apart from wakes (above). |
 | Call trace (`interp_set_call_trace`) | Debug-only globals, not thread-safe: use with 0 or 1 core. |
 | Logging | `fprintf(stderr)`, natively fine. On the web it is a syscall proxied to the main runtime thread, so log lines from other threads go straight to the console with `emscripten_errn` (`log.c`). |
-| JIT backend | Its code cache is not shareable yet, so `emulator_set_host_cores` accepts only a backend with `supports_multicore` (the interpreter, noop); the JIT stays serial until it sets the flag. See the JIT handoff in the status file. |
+| JIT backend | Multicore-capable (`supports_multicore`); see "The JIT on several cores" below. |
+
+## The JIT on several cores
+
+Compiled functions live in the function table of the host thread that
+installed them (every wasm thread has its own table). So:
+
+- **Per-thread caches.** Each host thread has a `Jit_Thread` (`jit.c`):
+  cache, hit counters, module buffer and counters.
+  - The first thread uses the static instance; others allocate one,
+    released (functions removed) when the thread exits.
+  - `jit_stats()` sums the threads; one shared counter struct made a cache
+    line bounce between cores on every block entry.
+- **Identical bytes, shared code.** Compiled code reads its thread's cache
+  base from `Jit_State.thread_cache`, set at every `run()` entry, rather
+  than baking an address in. So a region compiles to the same module bytes
+  on every core, and V8 shares one compiled module process-wide.
+  - Without this, three cores exhausted V8's 4 GiB wasm code space in
+    Node.
+  - Once any core has compiled a region, other cores compile it on first
+    sight in multicore mode (`g_compiled_somewhere`) instead of
+    interpreting it up to the hot threshold again.
+- **One code generation.** `g_vmm_generation` (vmm.h) moves on every mapping
+  change and every code flush, and chained regions check it directly.
+  Another core's unmap or remap therefore stops chaining at once; a
+  per-thread copy of the generation let a core run stale code.
+- **One compilation at a time.** `jit_compile_block` keeps its working state
+  in statics, so a mutex in `jit.c` serializes it. Each thread has its own
+  output buffer.
+- **Code compiled in multicore mode** (each entry records the mode it was
+  compiled for; a mode change flushes):
+  - STXR/STLXR are an inline `i64.atomic.rmw*.cmpxchg` against the LDXR
+    value;
+  - DMB/DSB are `atomic.fence`;
+  - LDAR/STLR are fenced on both sides, LDAXR after.
 
 ## Web
 
 - **Default and override.** `cpu.worker.ts` applies `DEFAULT_HOST_CORES` on
   every load: 3 (the Switch's application cores), capped at
-  `navigator.hardwareConcurrency - 2` and at least 1. `?cores=N` on the page URL overrides it through a
+  `navigator.hardwareConcurrency - 2` and at least 1.
+  - **Under the JIT backend the default is serial (0) for now.** Every
+    core compiles its own JIT code cache, and in the browser 3 cores were
+    about 2.6× slower than serial with the JIT (title screen, 6.6k vs
+    17.3k slices/s). `?cores=N` still forces a count. `?cores=N` on the page URL overrides it through a
   `set-host-cores` message; `?cores=0` is serial.
 - **The CPU worker is Emscripten's main runtime thread.** A core's
   syscalls (stderr, anything else not marked `__proxy: none`) are proxied

@@ -34,6 +34,7 @@
 
 #include <stddef.h>
 
+#include "common/assert.h"
 #include "cpu/backends/interpreter/softfloat.h"
 #include "cpu/backends/jit/jit_wasm.h"
 
@@ -102,11 +103,13 @@ enum {
 #define FUNC_WRITE 3u
 #define FUNC_SIMD 4u
 #define FUNC_BLOCK 5u
+#define FUNC_WALK 6u /* module-local: the softmmu walk, shared by every access */
 #define TYPE_BLOCK 0u
 #define TYPE_INTERPRET 1u
 #define TYPE_READ 2u
 #define TYPE_STORE 3u
-#define TYPE_COUNT 4u
+#define TYPE_WALK 4u /* (l1, address, page offset limit, perm) -> host address or 0 */
+#define TYPE_COUNT 5u
 #define IMPORT_COUNT 7u /* table, interpret, read, store, write, simd, memory */
 
 /* Label levels (the wasm depth right after the label's block opened). */
@@ -134,6 +137,7 @@ enum {
 #define OFF_L1 STATE_OFFSET(interp.l1)
 #define OFF_BUDGET STATE_OFFSET(cycle_budget)
 #define OFF_SCRATCH STATE_OFFSET(scratch)
+#define OFF_THREAD_CACHE STATE_OFFSET(thread_cache)
 #define OFF_EXCLUSIVE_ADDRESS STATE_OFFSET(interp.exclusive_address)
 #define OFF_EXCLUSIVE_SIZE STATE_OFFSET(interp.exclusive_size)
 #define OFF_EXCLUSIVE_VALUE STATE_OFFSET(interp.exclusive_value)
@@ -165,7 +169,13 @@ typedef struct Region_Block {
   uint64_t pc;
   uint32_t length;  /* instructions */
   bool needs_flags; /* may observe NZCV before writing it: entering edges materialize */
+  bool return_site; /* the instruction after a BL in the region: a RET may come back here */
 } Region_Block;
+
+typedef struct Region_Page {
+  uint64_t base;
+  const uint32_t *code;
+} Region_Page;
 
 typedef enum Carry { CARRY_ZERO, CARRY_ONE, CARRY_FLAG } Carry;
 
@@ -191,8 +201,14 @@ typedef struct Ctx {
   bool discover;                  /* analysis pass: collect region blocks */
   Region_Block blocks[JIT_MAX_REGION_BLOCKS];
   uint32_t block_count, max_blocks, max_block_insns;
-  uint64_t page;                  /* the region's code page (guest address) */
-  const uint32_t *page_code;      /* its instruction words */
+  const Jit_Code_Source *source;
+  Region_Page pages[JIT_MAX_REGION_PAGES];
+  uint32_t page_count;
+  /* Within the current block: registers holding known constants (ADRP,
+   * ADD #imm) and registers predicted from guest memory at compile time
+   * (an LDR from a known address: a PLT stub's GOT slot). */
+  uint32_t known_mask, predicted_mask;
+  uint64_t known_value[31], predicted_value[31];
   uint32_t block_len;             /* the current block's length (final pass) */
   bool uses_helper;               /* some block calls the shared $helper */
   Flag_Kind flag_kind;            /* lazy flags, at this point of the block */
@@ -202,6 +218,8 @@ typedef struct Ctx {
   uint32_t index;                 /* the current instruction's index in its block */
   uint64_t pc;
   uint32_t insn;
+  uint32_t max_local;     /* highest local used (this pass) */
+  uint32_t declared_local; /* how many to declare (the analysis pass's max_local) */
 } Ctx;
 
 /* ------------------------------------------------------------------ */
@@ -217,15 +235,21 @@ static void i32c(Ctx *c, uint32_t value) {
   op(c, WASM_OP_I32_CONST);
   wasm_sleb(c->b, (int32_t)value);
 }
+static void note_local(Ctx *c, uint32_t local) {
+  if (local > c->max_local) c->max_local = local;
+}
 static void lget(Ctx *c, uint32_t local) {
+  note_local(c, local);
   op(c, WASM_OP_LOCAL_GET);
   wasm_uleb(c->b, local);
 }
 static void lset(Ctx *c, uint32_t local) {
+  note_local(c, local);
   op(c, WASM_OP_LOCAL_SET);
   wasm_uleb(c->b, local);
 }
 static void ltee(Ctx *c, uint32_t local) {
+  note_local(c, local);
   op(c, WASM_OP_LOCAL_TEE);
   wasm_uleb(c->b, local);
 }
@@ -310,6 +334,8 @@ static void set_x(Ctx *c, uint32_t r) {
     op(c, WASM_OP_DROP);
     return;
   }
+  c->known_mask &= ~(1u << r);
+  c->predicted_mask &= ~(1u << r);
   c->used |= (uint64_t)1 << r;
   c->written |= (uint64_t)1 << r;
   lset(c, L_X0 + r);
@@ -443,6 +469,20 @@ static void exit_to_stack(Ctx *c) {
   br(c, LEVEL_EXIT);
 }
 
+/* The page table index of `page`, adding it if there is room and its code
+ * may be compiled; -1 otherwise. */
+static int32_t region_page(Ctx *c, uint64_t page) {
+  for (uint32_t i = 0; i < c->page_count; i++) {
+    if (c->pages[i].base == page) return (int32_t)i;
+  }
+  if (!c->discover || c->page_count >= JIT_MAX_REGION_PAGES) return -1;
+  const uint32_t *code = c->source->page_code(c->source->context, page);
+  if (!code) return -1;
+  c->pages[c->page_count].base = page;
+  c->pages[c->page_count].code = code;
+  return (int32_t)c->page_count++;
+}
+
 static int32_t find_block(const Ctx *c, uint64_t pc) {
   for (uint32_t i = 0; i < c->block_count; i++) {
     if (c->blocks[i].pc == pc) return (int32_t)i;
@@ -450,11 +490,36 @@ static int32_t find_block(const Ctx *c, uint64_t pc) {
   return -1;
 }
 
+/* Is the code at `target` worth copying into every region that calls it?
+ * A leaf function or a PLT stub is: within its first few instructions it
+ * returns or branches away (RET/BR) without calling anything. Larger
+ * callees stay regions of their own - compiled once, not into each
+ * caller (measured: inlining every callee doubled module bytes). */
+#define JIT_SMALL_CALLEE_INSNS 16u
+#define BRANCH_REGISTER_MASK 0xFF9FFC1Fu /* BR/RET with any Rn */
+#define BR_ENCODING 0xD61F0000u
+#define RET_ENCODING 0xD65F0000u
+static bool small_callee(const Ctx *c, uint64_t target) {
+  const uint64_t page = target & ~(uint64_t)VMM_PAGE_OFFSET_MASK;
+  const uint32_t *code = c->source->page_code(c->source->context, page);
+  if (!code || (target & 3u)) return false;
+  const uint32_t first = (uint32_t)((target - page) / INSN_BYTES);
+  for (uint32_t i = first; i < first + JIT_SMALL_CALLEE_INSNS && i < VMM_PAGE_SIZE / INSN_BYTES; i++) {
+    const uint32_t insn = code[i];
+    const uint32_t masked = insn & BRANCH_REGISTER_MASK;
+    if (masked == BR_ENCODING || masked == RET_ENCODING) return true;
+    if (bits(insn, 30, 26) == 0x05 && bit(insn, 31)) return false; /* BL */
+    if ((insn & 0xFFFFFC1Fu) == 0xD63F0000u) return false;          /* BLR */
+  }
+  return false;
+}
+
 /* Adds `pc` as a region block if it can be one; true if it is one. */
 static bool add_block(Ctx *c, uint64_t pc) {
-  if ((pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK) != c->page || (pc & 3u)) return false;
+  if (pc & 3u) return false;
   if (find_block(c, pc) >= 0) return true;
   if (c->block_count >= c->max_blocks) return false;
+  if (region_page(c, pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK) < 0) return false;
   c->blocks[c->block_count].pc = pc;
   c->blocks[c->block_count++].length = 0;
   return true;
@@ -881,10 +946,18 @@ static void emit_extend(Ctx *c, uint32_t option) {
 /* Data processing - immediate.                                        */
 /* ------------------------------------------------------------------ */
 
+static void know(Ctx *c, uint32_t r, uint64_t value) {
+  if (r == REG_ZR) return;
+  c->known_mask |= 1u << r;
+  c->known_value[r] = value;
+}
+
 static bool c_pc_relative(Ctx *c, uint32_t insn) {
   const uint64_t imm = (uint64_t)sign_extend((bits(insn, 23, 5) << 2) | bits(insn, 30, 29), 21);
-  i64c(c, bit(insn, 31) ? (c->pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK) + (imm << 12) : c->pc + imm);
+  const uint64_t value = bit(insn, 31) ? (c->pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK) + (imm << 12) : c->pc + imm;
+  i64c(c, value);
   set_x(c, bits(insn, 4, 0));
+  know(c, bits(insn, 4, 0), value);
   return true;
 }
 
@@ -897,7 +970,10 @@ static bool c_add_sub_immediate(Ctx *c, uint32_t insn) {
     i64c(c, imm);
     op(c, sub ? WASM_OP_I64_SUB : WASM_OP_I64_ADD);
     width(c, sf);
+    const bool known = sf && rn != REG_ZR && (c->known_mask & (1u << rn));
+    const uint64_t value = known ? (sub ? c->known_value[rn] - imm : c->known_value[rn] + imm) : 0;
     set_xsp(c, rd);
+    if (known) know(c, rd, value);
     return true;
   }
   get_xsp(c, rn);
@@ -1444,7 +1520,94 @@ typedef enum Access {
  * L_ADDR with `perm`: branches to `slow` if the access is out of range,
  * crosses a page, or is unmapped / not permitted; otherwise L_HOST is the
  * host address. */
+/* The walk as a module-local function (FUNC_WALK), so each access site
+ * is a call instead of ~70 bytes of inline code:
+ *   walk(l1, gva, limit, perm) = host address, or 0 if gva is out of
+ *   range, (gva & 0xFFF) > limit (the access crosses the page), unmapped
+ *   or without `perm`. */
+enum { W_L1 = 0, W_ADDR = 1, W_LIMIT = 2, W_PERM = 3, W_HOST = 4 };
+static void emit_walk_function(Wasm_Buf *b) {
+  static uint8_t scratch[1024];
+  Wasm_Buf body = wasm_buf(scratch, sizeof(scratch));
+  Ctx w;
+  memset(&w, 0, sizeof(w));
+  w.b = &body;
+  wasm_uleb(&body, 1);
+  wasm_uleb(&body, 1);
+  wasm_u8(&body, WASM_TYPE_I64); /* W_HOST */
+  open_block(&w);                /* $miss */
+  lget(&w, W_ADDR);
+  i64c(&w, VMM_ADDRESS_SPACE_SIZE);
+  op(&w, WASM_OP_I64_GE_U);
+  br_if(&w, 1);
+  lget(&w, W_ADDR);
+  i64c(&w, VMM_PAGE_OFFSET_MASK);
+  op(&w, WASM_OP_I64_AND);
+  lget(&w, W_LIMIT);
+  op(&w, WASM_OP_I64_GT_U);
+  br_if(&w, 1);
+  lget(&w, W_L1);
+  lget(&w, W_ADDR);
+  i64c(&w, WALK_L1_SHIFT);
+  op(&w, WASM_OP_I64_SHR_U);
+  i64c(&w, WALK_ENTRY_LOG2);
+  op(&w, WASM_OP_I64_SHL);
+  op(&w, WASM_OP_I64_ADD);
+  mem(&w, WASM_OP_I64_LOAD, ALIGN_8, 0);
+  ltee(&w, W_HOST);
+  op(&w, WASM_OP_I64_EQZ);
+  br_if(&w, 1);
+  lget(&w, W_HOST);
+  lget(&w, W_ADDR);
+  i64c(&w, WALK_L2_SHIFT);
+  op(&w, WASM_OP_I64_SHR_U);
+  i64c(&w, WALK_L2_MASK);
+  op(&w, WASM_OP_I64_AND);
+  op(&w, WASM_OP_I64_ADD);
+  mem(&w, WASM_OP_I64_LOAD, ALIGN_8, 0);
+  ltee(&w, W_HOST);
+  lget(&w, W_PERM);
+  op(&w, WASM_OP_I64_AND);
+  op(&w, WASM_OP_I64_EQZ);
+  br_if(&w, 1);
+  lget(&w, W_HOST);
+  i64c(&w, VMM_PTE_HOST_MASK);
+  op(&w, WASM_OP_I64_AND);
+  lget(&w, W_ADDR);
+  i64c(&w, VMM_PAGE_OFFSET_MASK);
+  op(&w, WASM_OP_I64_AND);
+  op(&w, WASM_OP_I64_OR);
+  op(&w, WASM_OP_RETURN);
+  end_(&w);
+  i64c(&w, 0);
+  op(&w, WASM_OP_END);
+  wasm_uleb(b, body.length);
+  wasm_bytes(b, scratch, body.length);
+}
+
+/* The shared walk shrinks modules (~55 bytes less per access) but V8 does
+ * not inline the call: memory-heavy loops ran 20-90% slower in
+ * tests/jit_bench.c. Inline by default; JIT_SHARED_WALK set in the
+ * environment selects the call, for experiments. */
+static bool shared_walk(void) {
+  static int choice = -1;
+  if (choice < 0) choice = getenv("JIT_SHARED_WALK") != NULL;
+  return choice != 0;
+}
+
 static void emit_walk(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) {
+  if (shared_walk()) {
+    lget(c, L_L1);
+    lget(c, L_ADDR);
+    i64c(c, VMM_PAGE_SIZE - size);
+    i64c(c, perm);
+    op(c, WASM_OP_CALL);
+    wasm_uleb(c->b, FUNC_WALK);
+    ltee(c, L_HOST);
+    op(c, WASM_OP_I64_EQZ);
+    br_if(c, slow);
+    return;
+  }
   lget(c, L_ADDR);
   i64c(c, VMM_ADDRESS_SPACE_SIZE);
   op(c, WASM_OP_I64_GE_U);
@@ -1632,13 +1795,22 @@ static bool c_single_unsigned_offset(Ctx *c, uint32_t insn) {
   const uint32_t size = bits(insn, 31, 30);
   Access access;
   if (!decode_access(size, bits(insn, 23, 22), true, &access)) return false;
-  const uint32_t bytes = 1u << size, n = bits(insn, 9, 5);
+  const uint32_t bytes = 1u << size, n = bits(insn, 9, 5), t = bits(insn, 4, 0);
   if (access == ACCESS_PREFETCH) return true;
   get_xsp(c, n);
   i64c(c, (uint64_t)bits(insn, 21, 10) * bytes);
   op(c, WASM_OP_I64_ADD);
   lset(c, L_ADDR);
-  emit_transfer(c, access, bytes, bits(insn, 4, 0), n, false, 0);
+  emit_transfer(c, access, bytes, t, n, false, 0);
+  /* LDR Xt, [Xn, #imm] from a known address (a PLT stub's GOT slot):
+   * remember what is there now, to predict a BR Xt. */
+  uint64_t value;
+  if (access == ACCESS_LOAD_ZERO && bytes == sizeof(uint64_t) && n != REG_ZR && t != REG_ZR &&
+      (c->known_mask & (1u << n)) &&
+      c->source->peek64(c->source->context, c->known_value[n] + (uint64_t)bits(insn, 21, 10) * bytes, &value)) {
+    c->predicted_mask |= 1u << t;
+    c->predicted_value[t] = value;
+  }
   return true;
 }
 
@@ -2056,6 +2228,35 @@ static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t 
   fp_else_exact(c, &none);
 }
 
+/* FMAX/FMIN/FMAXNM/FMINNM without NaNs and with FPCR 0: the result is
+ * one operand, unchanged and unrounded, no flags; wasm's min/max order
+ * -0 below +0 as ARM does. NaNs (and FZ) take the exact path. */
+static void emit_fp_min_max(Ctx *c, bool dbl, bool min, uint32_t n, uint32_t m, uint32_t d) {
+  const uint32_t a = dbl ? L_FD2 : L_FS2, b = dbl ? L_FD3 : L_FS3, r = fp_result_local(dbl);
+  load_fp(c, n, dbl);
+  lset(c, a);
+  load_fp(c, m, dbl);
+  lset(c, b);
+  lget(c, a);
+  lget(c, b);
+  if (dbl) op(c, min ? WASM_OP_F64_MIN : WASM_OP_F64_MAX);
+  else op(c, min ? WASM_OP_F32_MIN : WASM_OP_F32_MAX);
+  lset(c, r);
+  lget(c, a);
+  lget(c, a);
+  op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
+  lget(c, b);
+  lget(c, b);
+  op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
+  op(c, WASM_OP_I32_AND);
+  emit_fpcr_default(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  store_fp_local(c, d, dbl, r);
+  Sync none = {0};
+  fp_else_exact(c, &none);
+}
+
 /* FCMP/FCMPE (and with #0.0): NZCV from an ordered compare. */
 static void emit_fp_compare(Ctx *c, bool dbl, uint32_t n, uint32_t m, bool with_zero) {
   load_fp(c, n, dbl);
@@ -2279,7 +2480,11 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
   switch (bits(insn, 11, 10)) {
   case 2: { /* two source */
     const uint32_t opcode = bits(insn, 15, 12);
-    if (opcode > 3u && opcode != 8u) return false; /* FMAX/FMIN & co.: NaN and zero rules */
+    if (opcode >= 4u && opcode <= 7u) { /* FMAX, FMIN, FMAXNM, FMINNM */
+      emit_fp_min_max(c, dbl, (opcode & 1u) != 0, rn, rm, rd);
+      return true;
+    }
+    if (opcode > 3u && opcode != 8u) return false;
     emit_fp_arith(c, dbl, opcode, true, rn, rm, rd);
     return true;
   }
@@ -2441,7 +2646,7 @@ static void emit_fused_pair(Ctx *c, bool high) {
   simd(c, WASM_SIMD_F64X2_ADD);
 }
 
-typedef enum Vector_Fp_Op { VFP_ADD, VFP_SUB, VFP_MUL, VFP_DIV, VFP_MLA, VFP_MLS } Vector_Fp_Op;
+typedef enum Vector_Fp_Op { VFP_ADD, VFP_SUB, VFP_MUL, VFP_DIV, VFP_MLA, VFP_MLS, VFP_MAX, VFP_MIN } Vector_Fp_Op;
 
 /* rd = op(rn, rm or the broadcast element) over 2 or 4 lanes. L_VB must
  * hold the second operand already. */
@@ -2483,6 +2688,27 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
     emit_all_lanes(c, q);
     lget(c, L_PASS);
     op(c, WASM_OP_I32_AND);
+  } else if (vop == VFP_MAX || vop == VFP_MIN) { /* exact without NaNs (FPCR 0) */
+    lget(c, L_VA);
+    lget(c, L_VB);
+    if (dbl) simd(c, vop == VFP_MAX ? WASM_SIMD_F64X2_MAX : WASM_SIMD_F64X2_MIN);
+    else simd(c, vop == VFP_MAX ? WASM_SIMD_F32X4_MAX : WASM_SIMD_F32X4_MIN);
+    lset(c, L_VR);
+    static const uint32_t sources[2] = {L_VA, L_VB};
+    for (uint32_t i = 0; i < 2u; i++) {
+      lget(c, sources[i]);
+      lget(c, sources[i]);
+      simd(c, dbl ? WASM_SIMD_F64X2_EQ : WASM_SIMD_F32X4_EQ);
+    }
+    simd(c, WASM_SIMD_V128_AND);
+    emit_all_lanes(c, q);
+    emit_fpcr_default(c);
+    op(c, WASM_OP_I32_AND);
+    fp_fast_arm(c);
+    store_v(c, d, L_VR, q);
+    Sync none = {0};
+    fp_else_exact(c, &none);
+    return;
   } else {
     lget(c, L_VA);
     lget(c, L_VB);
@@ -2528,6 +2754,8 @@ static bool c_vector_fp_fast(Ctx *c, uint32_t insn) {
     case 0x17: vop = VFP_DIV; break;
     case 0x01: vop = VFP_MLA; break;
     case 0x09: vop = VFP_MLS; break;
+    case 0x06: case 0x00: vop = VFP_MAX; break; /* FMAX, FMAXNM */
+    case 0x0E: case 0x08: vop = VFP_MIN; break; /* FMIN, FMINNM */
     default: return false;
     }
     if (dbl && (vop == VFP_MLA || vop == VFP_MLS)) return false; /* needs a true fused multiply-add */
@@ -2903,6 +3131,94 @@ static bool c_vector_load_store(Ctx *c, uint32_t insn) {
 
 #define EXCLUSIVE_GRANULE_MASK (~(uint64_t)(INTERP_EXCLUSIVE_GRANULE - 1u))
 
+/* atomic.fence (threads proposal: 0xFE prefix, opcode 0x03, flags 0). */
+#define WASM_ATOMIC_PREFIX 0xFEu
+#define WASM_ATOMIC_FENCE 0x03u
+
+/* A full fence, emitted only into code compiled while guest threads run
+ * on several host threads (cpu_multicore(), docs/PARALLEL.md): the
+ * interpreter's ordering rules, inline. Each core compiles its own code,
+ * and the mode never changes while cores exist. */
+static void emit_multicore_fence(Ctx *c) {
+  if (!cpu_multicore()) return;
+  op(c, WASM_ATOMIC_PREFIX);
+  op(c, WASM_ATOMIC_FENCE);
+  op(c, 0);
+}
+
+/* i64.atomic.rmw{8,16,32,}.cmpxchg_u (threads proposal, 0xFE prefix). */
+#define WASM_ATOMIC_I64_CMPXCHG 0x49u
+#define WASM_ATOMIC_I64_CMPXCHG8_U 0x4Cu
+#define WASM_ATOMIC_I64_CMPXCHG16_U 0x4Du
+#define WASM_ATOMIC_I64_CMPXCHG32_U 0x4Eu
+
+static uint32_t cmpxchg_opcode(uint32_t size) {
+  switch (size) {
+  case 1: return WASM_ATOMIC_I64_CMPXCHG8_U;
+  case 2: return WASM_ATOMIC_I64_CMPXCHG16_U;
+  case 4: return WASM_ATOMIC_I64_CMPXCHG32_U;
+  default: return WASM_ATOMIC_I64_CMPXCHG;
+  }
+}
+
+static uint32_t log2_size(uint32_t size) { return size == 8u ? 3u : size == 4u ? 2u : size == 2u ? 1u : 0u; }
+
+/* Multicore STXR / STLXR of one register (the interpreter's
+ * store_exclusive_shared, inline): it passes iff this thread's monitor is
+ * set on this address and size and memory still holds what the LDXR read
+ * (state->exclusive_value) - one host compare-and-swap, seq_cst, so a
+ * store by another core in between makes it fail rather than be lost.
+ * Unmapped or read-only pages leave through the interpreter, which faults
+ * precisely; a failing store still probes translation, as serially. */
+static void emit_store_exclusive_shared(Ctx *c, uint32_t element, uint32_t t, uint32_t rs) {
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD8_U, ALIGN_1, OFF_EXCLUSIVE_VALID);
+  state_load64(c, OFF_EXCLUSIVE_ADDRESS);
+  lget(c, L_ADDR);
+  op(c, WASM_OP_I64_EQ);
+  op(c, WASM_OP_I32_AND);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_EXCLUSIVE_SIZE);
+  i32c(c, element);
+  op(c, WASM_OP_I32_EQ);
+  op(c, WASM_OP_I32_AND);
+  open_if(c, WASM_BLOCK_VOID);
+  {
+    open_block(c); /* $done */
+    const uint32_t done = c->depth;
+    open_block(c); /* $slow */
+    emit_walk(c, element, VMM_PERM_W, c->depth); /* aligned: never crosses a page */
+    lget(c, L_HOST);
+    lget(c, L_STATE);
+    mem(c, load_opcode(ACCESS_LOAD_ZERO, element), ALIGN_1, OFF_EXCLUSIVE_VALUE);
+    get_x(c, t);
+    op(c, WASM_ATOMIC_PREFIX);
+    wasm_uleb(c->b, cmpxchg_opcode(element));
+    wasm_uleb(c->b, log2_size(element)); /* atomics need natural alignment */
+    wasm_uleb(c->b, 0);
+    lget(c, L_STATE);
+    mem(c, load_opcode(ACCESS_LOAD_ZERO, element), ALIGN_1, OFF_EXCLUSIVE_VALUE);
+    op(c, WASM_OP_I64_EQ);
+    lset(c, L_PASS);
+    br(c, done);
+    end_(c); /* $slow */
+    leave_via_interpreter(c);
+    end_(c); /* $done */
+  }
+  else_(c);
+  i32c(c, 0);
+  lset(c, L_PASS);
+  emit_load_address(c, 1u);
+  end_(c);
+  lget(c, L_STATE);
+  i32c(c, 0);
+  mem(c, WASM_OP_I32_STORE8, ALIGN_1, OFF_EXCLUSIVE_VALID);
+  lget(c, L_PASS);
+  op(c, WASM_OP_I32_EQZ);
+  op(c, WASM_OP_I64_EXTEND_I32_U);
+  set_x(c, rs);
+}
+
 static bool c_exclusive(Ctx *c, uint32_t insn) {
   const uint32_t size = bits(insn, 31, 30);
   const bool o2 = bit(insn, 23), load = bit(insn, 22), o1 = bit(insn, 21), o0 = bit(insn, 15);
@@ -2910,6 +3226,7 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
   const uint32_t element = 1u << size;
   if (o1) return false;        /* pairs (and LSE CAS): the interpreter */
   if (o2 && !o0) return false; /* LORegion: undefined */
+
   get_xsp(c, n);
   lset(c, L_ADDR);
   if (element > 1u) { /* alignment fault: the interpreter raises it */
@@ -2922,7 +3239,8 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
     leave_via_interpreter(c);
     end_(c);
   }
-  if (o2) { /* LDAR / STLR */
+  if (o2) { /* LDAR / STLR (multicore: fenced on both sides, RCsc) */
+    emit_multicore_fence(c);
     if (load) {
       emit_load_address(c, element);
       emit_host_load(c, ACCESS_LOAD_ZERO, element, 0, L_VAL);
@@ -2931,6 +3249,7 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
     } else {
       emit_store(c, element, t, false, 0);
     }
+    emit_multicore_fence(c);
     return true;
   }
   if (load) { /* LDXR / LDAXR: arm the monitor */
@@ -2948,6 +3267,11 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
     mem(c, store_opcode(element), ALIGN_1, OFF_EXCLUSIVE_VALUE);
     lget(c, L_VAL);
     set_x(c, t);
+    if (o0) emit_multicore_fence(c); /* LDAXR: acquire */
+    return true;
+  }
+  if (cpu_multicore()) { /* STXR / STLXR: a compare-and-swap */
+    emit_store_exclusive_shared(c, element, t, rs);
     return true;
   }
   /* STXR / STLXR: stores iff the monitor holds this granule; the status
@@ -3034,7 +3358,10 @@ static Outcome c_system(Ctx *c, uint32_t insn) {
         mem(c, WASM_OP_I32_STORE8, ALIGN_1, OFF_EXCLUSIVE_VALID);
         return OUTCOME_NEXT;
       }
-      if (op2 >= 4 && op2 != 7) return OUTCOME_NEXT; /* DSB, DMB, ISB */
+      if (op2 >= 4 && op2 != 7) { /* DSB, DMB, ISB */
+        if (op2 != 6) emit_multicore_fence(c); /* not ISB */
+        return OUTCOME_NEXT;
+      }
     }
     return OUTCOME_END_HELPER;
   }
@@ -3102,12 +3429,18 @@ static Outcome c_system(Ctx *c, uint32_t insn) {
 
 static Outcome c_branch_system(Ctx *c, uint32_t insn) {
   if (bits(insn, 30, 26) == 0x05) { /* B, BL */
-    if (bit(insn, 31)) { /* a call: leaves the region */
+    if (bit(insn, 31)) { /* BL: into the callee in the region if it can be there, back at the return site */
       if (g_interp_trace_count) return OUTCOME_END_HELPER;
-      i64c(c, c->pc + INSN_BYTES);
+      const uint64_t target = branch_target(c, insn, 25, 0), back = c->pc + INSN_BYTES;
+      i64c(c, back);
       set_x(c, CPU_REG_X30);
-      i64c(c, branch_target(c, insn, 25, 0));
-      exit_to_stack(c);
+      if (!c->link->span_calls || (c->discover && find_block(c, target) < 0 && !small_callee(c, target))) {
+        i64c(c, target);
+        exit_to_stack(c);
+        return OUTCOME_END;
+      }
+      if (c->discover && add_block(c, target) && add_block(c, back)) c->blocks[find_block(c, back)].return_site = true;
+      branch_to(c, target);
       return OUTCOME_END;
     }
     branch_to(c, branch_target(c, insn, 25, 0));
@@ -3142,11 +3475,29 @@ static Outcome c_branch_system(Ctx *c, uint32_t insn) {
       return OUTCOME_END_HELPER;
     }
     if (g_interp_trace_count && opc != 0) return OUTCOME_END_HELPER;
-    get_x(c, bits(insn, 9, 5));
+    const uint32_t rn = bits(insn, 9, 5);
+    const bool predicted = c->link->span_calls && opc == 0 && rn != REG_ZR && (c->predicted_mask & (1u << rn));
+    const uint64_t prediction = predicted ? c->predicted_value[rn] : 0;
+    get_x(c, rn);
+    lset(c, L_NPC);
     if (opc == 1) {
       i64c(c, c->pc + INSN_BYTES);
       set_x(c, CPU_REG_X30);
     }
+    if (predicted && c->discover && small_callee(c, prediction)) (void)add_block(c, prediction);
+    /* Guarded internal targets: a RET to a return site in the region, a
+     * BR to the predicted PLT target; anything else leaves. */
+    for (uint32_t i = 0; i < c->block_count && opc != 1; i++) {
+      const bool candidate = opc == 2 ? c->blocks[i].return_site : (predicted && c->blocks[i].pc == prediction);
+      if (!candidate) continue;
+      lget(c, L_NPC);
+      i64c(c, c->blocks[i].pc);
+      op(c, WASM_OP_I64_EQ);
+      open_if(c, WASM_BLOCK_VOID);
+      branch_to(c, c->blocks[i].pc);
+      end_(c);
+    }
+    lget(c, L_NPC);
     exit_to_stack(c);
     return OUTCOME_END;
   }
@@ -3171,8 +3522,16 @@ static Outcome compile_instruction(Ctx *c, uint32_t insn) {
 /* Region block `b`'s instructions; returns how many. */
 static uint32_t compile_block_code(Ctx *c, uint32_t b) {
   const uint64_t start = c->blocks[b].pc;
-  const uint32_t *code = c->page_code + ((start - c->page) / INSN_BYTES);
-  const uint32_t available = (uint32_t)((c->page + VMM_PAGE_SIZE - start) / INSN_BYTES);
+  const uint64_t page = start & ~(uint64_t)VMM_PAGE_OFFSET_MASK;
+  int32_t p = -1;
+  for (uint32_t i = 0; i < c->page_count; i++) {
+    if (c->pages[i].base == page) p = (int32_t)i;
+  }
+  SWITCH_ASSERT_ALWAYS(p >= 0, "jit: region block outside the region's pages");
+  const uint32_t *code = c->pages[p].code + ((start - page) / INSN_BYTES);
+  const uint32_t available = (uint32_t)((page + VMM_PAGE_SIZE - start) / INSN_BYTES);
+  c->known_mask = 0;
+  c->predicted_mask = 0;
   const uint32_t count = available < c->max_block_insns ? available : c->max_block_insns;
   c->block_len = c->blocks[b].length;
   c->pc = start;
@@ -3218,7 +3577,7 @@ static void emit_chain(Ctx *c) {
   op(c, WASM_OP_I64_SHR_U);
   i64c(c, sizeof(Jit_Entry));
   op(c, WASM_OP_I64_MUL);
-  i64c(c, c->link->cache_address);
+  state_load64(c, OFF_THREAD_CACHE); /* this host thread's cache */
   op(c, WASM_OP_I64_ADD);
   lset(c, L_HOST); /* the entry */
   open_block(c);
@@ -3255,20 +3614,42 @@ static void emit_chain(Ctx *c) {
 }
 
 static void emit_function(Ctx *c) {
-  /* Locals: one run each of i64, i32, f32, f64, v128. */
-  wasm_uleb(c->b, 5);
-  wasm_uleb(c->b, I64_LOCALS);
-  wasm_u8(c->b, WASM_TYPE_I64);
-  wasm_uleb(c->b, I32_LOCALS);
-  wasm_u8(c->b, WASM_TYPE_I32);
-  wasm_uleb(c->b, F32_LOCALS);
-  wasm_u8(c->b, WASM_TYPE_F32);
-  wasm_uleb(c->b, F64_LOCALS);
-  wasm_u8(c->b, WASM_TYPE_F64);
-  wasm_uleb(c->b, V128_LOCALS);
-  wasm_u8(c->b, WASM_TYPE_V128);
+  /* Locals: runs of i64, i32, f32, f64, v128 - only as far as the
+   * analysis pass saw locals used (engines zero every declared local on
+   * each call, and tiny regions are called millions of times). */
+  static const uint32_t group_last[5] = {L_LAST_I64, L_LAST_I32, L_LAST_F32, L_LAST_F64, L_LAST_V128};
+  static const uint8_t group_type[5] = {WASM_TYPE_I64, WASM_TYPE_I32, WASM_TYPE_F32, WASM_TYPE_F64, WASM_TYPE_V128};
+  const uint32_t limit = c->discover ? L_LAST_V128 : c->declared_local;
+  uint32_t groups = 0, first = L_STATE + 1u;
+  for (uint32_t g = 0; g < 5u; g++) {
+    if (first <= limit) groups++;
+    first = group_last[g] + 1u;
+  }
+  wasm_uleb(c->b, groups);
+  first = L_STATE + 1u;
+  for (uint32_t g = 0; g < 5u; g++) {
+    if (first <= limit) {
+      const uint32_t last = group_last[g] < limit ? group_last[g] : limit;
+      wasm_uleb(c->b, last - first + 1u);
+      wasm_u8(c->b, group_type[g]);
+    }
+    first = group_last[g] + 1u;
+  }
 
   /* Prologue. The caller checked that block 0 fits the budget. */
+  if (c->link->count_entries) {
+    const uint64_t entry = jit_cache_index(c->blocks[0].pc) * sizeof(Jit_Entry);
+    state_load64(c, OFF_THREAD_CACHE);
+    i64c(c, entry);
+    op(c, WASM_OP_I64_ADD);
+    lset(c, L_HOST);
+    lget(c, L_HOST);
+    lget(c, L_HOST);
+    mem(c, WASM_OP_I64_LOAD, ALIGN_8, ENTRY_OFFSET(entries));
+    i64c(c, 1);
+    op(c, WASM_OP_I64_ADD);
+    mem(c, WASM_OP_I64_STORE, ALIGN_8, ENTRY_OFFSET(entries));
+  }
   state_load64(c, OFF_L1);
   lset(c, L_L1);
   reload(c);
@@ -3406,6 +3787,11 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
   wasm_u8(b, WASM_TYPE_I64);
   wasm_uleb(b, 1);
   wasm_u8(b, WASM_TYPE_I32);
+  wasm_u8(b, WASM_TYPE_FUNC); /* TYPE_WALK: (i64, i64, i64, i64) -> i64 */
+  wasm_uleb(b, 4);
+  for (uint32_t i = 0; i < 4u; i++) wasm_u8(b, WASM_TYPE_I64);
+  wasm_uleb(b, 1);
+  wasm_u8(b, WASM_TYPE_I64);
   wasm_patch_size(b, size);
 
   wasm_u8(b, WASM_SECTION_IMPORT);
@@ -3447,8 +3833,9 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
 
   wasm_u8(b, WASM_SECTION_FUNCTION);
   size = wasm_reserve_size(b);
-  wasm_uleb(b, 1);
+  wasm_uleb(b, 2);
   wasm_uleb(b, TYPE_BLOCK);
+  wasm_uleb(b, TYPE_WALK);
   wasm_patch_size(b, size);
 
   wasm_u8(b, WASM_SECTION_EXPORT);
@@ -3464,21 +3851,21 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
 #define JIT_ANALYSIS_BYTES (256u * 1024u)
 static uint8_t g_analysis[JIT_ANALYSIS_BYTES];
 
-bool jit_compile_block(uint64_t pc, const uint32_t *page_code, uint64_t memory_pages, const Jit_Link *link,
+bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memory_pages, const Jit_Link *link,
                        uint8_t *out, uint32_t capacity, Jit_Compiled *result) {
   static Ctx analysis, c;
   uint32_t max_blocks = JIT_MAX_REGION_BLOCKS, max_block_insns = JIT_MAX_BLOCK_INSNS;
   for (;;) {
-    /* Pass 1: the region's blocks, and which registers they touch. */
+    /* Pass 1: the region's blocks and pages, and which registers they touch. */
     Wasm_Buf scratch = wasm_buf(g_analysis, JIT_ANALYSIS_BYTES);
     memset(&analysis, 0, sizeof(analysis));
     analysis.b = &scratch;
     analysis.link = link;
     analysis.discover = true;
-    analysis.page = pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK;
-    analysis.page_code = page_code;
+    analysis.source = source;
     analysis.max_blocks = max_blocks;
     analysis.max_block_insns = max_block_insns;
+    if (region_page(&analysis, pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK) < 0) return false;
     analysis.blocks[0].pc = pc;
     analysis.block_count = 1;
     emit_function(&analysis);
@@ -3488,34 +3875,43 @@ bool jit_compile_block(uint64_t pc, const uint32_t *page_code, uint64_t memory_p
     emit_module_header(&b, memory_pages);
     wasm_u8(&b, WASM_SECTION_CODE);
     const uint32_t section = wasm_reserve_size(&b);
-    wasm_uleb(&b, 1);
+    wasm_uleb(&b, 2);
     const uint32_t body = wasm_reserve_size(&b);
     memset(&c, 0, sizeof(c));
     c.b = &b;
     c.link = link;
-    c.page = analysis.page;
-    c.page_code = page_code;
+    c.source = source;
+    memcpy(c.pages, analysis.pages, sizeof(c.pages));
+    c.page_count = analysis.page_count;
     c.max_blocks = max_blocks;
     c.max_block_insns = max_block_insns;
     memcpy(c.blocks, analysis.blocks, sizeof(c.blocks));
     c.block_count = analysis.block_count;
     c.uses_helper = analysis.uses_helper;
+    c.declared_local = analysis.max_local;
     c.all_used = analysis.used | analysis.written;
     c.all_written = analysis.written;
     emit_function(&c);
     wasm_patch_size(&b, body);
+    emit_walk_function(&b);
     wasm_patch_size(&b, section);
     if (!b.overflow && !scratch.overflow) {
-      uint64_t low = pc, high = pc;
-      for (uint32_t i = 0; i < c.block_count; i++) {
-        const uint64_t start = c.blocks[i].pc, end = start + (uint64_t)c.blocks[i].length * INSN_BYTES;
-        if (start < low) low = start;
-        if (end > high) high = end;
+      /* One code range per page: the span of the blocks in it. */
+      result->range_count = c.page_count;
+      for (uint32_t p = 0; p < c.page_count; p++) {
+        uint64_t low = UINT64_MAX, high = 0;
+        for (uint32_t i = 0; i < c.block_count; i++) {
+          const uint64_t start = c.blocks[i].pc, end = start + (uint64_t)c.blocks[i].length * INSN_BYTES;
+          if ((start & ~(uint64_t)VMM_PAGE_OFFSET_MASK) != c.pages[p].base) continue;
+          if (start < low) low = start;
+          if (end > high) high = end;
+        }
+        if (low == UINT64_MAX) low = high = c.pages[p].base; /* a page with no surviving block */
+        result->ranges[p].start = low;
+        result->ranges[p].words = (uint32_t)((high - low) / INSN_BYTES);
       }
       result->instructions = c.blocks[0].length;
       result->blocks = c.block_count;
-      result->code_start = low;
-      result->code_words = (uint32_t)((high - low) / INSN_BYTES);
       result->module_bytes = b.length;
       return true;
     }

@@ -45,6 +45,9 @@ typedef struct Jit_Stats {
 } Jit_Stats;
 const Jit_Stats *jit_stats(void);
 
+/* Whether regions follow calls (BL/RET, predicted PLT branches). */
+void jit_set_span_calls(bool enabled);
+
 /* Interpreted executions of a block before it is compiled. */
 void jit_set_hot_threshold(uint32_t executions);
 
@@ -52,6 +55,11 @@ void jit_set_hot_threshold(uint32_t executions);
  * masked out) and print the commonest `top` to stderr. */
 void jit_set_fallback_profile(bool enabled);
 void jit_print_fallback_profile(uint32_t top);
+
+/* Diagnostics: count region entries; print the `top` regions by entries
+ * times entry-block length (PC, entries, instructions in the region). */
+void jit_set_hot_profile(bool enabled);
+void jit_print_hot_regions(uint32_t top);
 
 /* Diagnostics: write every compiled module to DIR/<pc>.wasm (NULL: off). */
 void jit_set_dump_directory(const char *directory);

@@ -231,9 +231,18 @@ const MAX_DEFAULT_HOST_CORES = 3;
 const HOST_THREADS_RESERVED = 2;
 const DEFAULT_HOST_CORES = Math.max(
   1, Math.min(MAX_DEFAULT_HOST_CORES, (self.navigator.hardwareConcurrency || 4) - HOST_THREADS_RESERVED));
-let hostCores = DEFAULT_HOST_CORES;
+/** Cores chosen with ?cores=N (set-host-cores); null = the default. */
+let requestedHostCores: number | null = null;
+
+/** The default for this core: serial under the JIT for now - each core
+ * compiles its own code cache, which costs more than the cores win
+ * (docs/PARALLEL.md "JIT"). */
+function defaultHostCores(target: SwitchCoreExports): number {
+  return CPU_BACKEND_DISPLAY_NAMES[target._cpu_backend_id_ffi()] === "jit" ? 0 : DEFAULT_HOST_CORES;
+}
 
 function applyHostCores(target: SwitchCoreExports): void {
+  const hostCores = requestedHostCores ?? defaultHostCores(target);
   const inEffect = target._emulator_set_host_cores_ffi(hostCores);
   log("info", `guest threads on ${inEffect === 0 ? "the serial scheduler" : `${inEffect} host core(s)`}`);
 }
@@ -621,7 +630,7 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   }
 
   if (msg.type === "set-host-cores") {
-    hostCores = msg.cores;
+    requestedHostCores = msg.cores;
     /* Takes effect between slices; a running game switches at once. */
     if (core) applyHostCores(core);
     return;

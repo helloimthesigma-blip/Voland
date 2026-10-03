@@ -154,6 +154,24 @@ static void build_state(uint8_t out[HID_NPAD_STATE_BYTES], uint64_t sampling, co
   wr32(out + 0x20, attributes);
 }
 
+/* A LIFO entry is AtomicStorage {u64 sequence; state}: the SDK's reader
+ * treats an odd sequence as "being written" and retries until it is even
+ * again (libnx only checks that it did not change). So the sequence is
+ * 2 x sampling number - odd while the state is written, even after, in
+ * that order for readers on other host threads. */
+static uint64_t storage_sequence(uint64_t sampling) { return 2u * sampling; }
+
+static void write_storage(HLE_Context *c, uint64_t entry, const uint8_t *storage, uint64_t bytes, uint64_t sampling) {
+  uint8_t word[8];
+  wr64(word, storage_sequence(sampling) - 1u);
+  (void)vmm_write_physical(c->vmm, entry, word, sizeof(word));
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+  (void)vmm_write_physical(c->vmm, entry + sizeof(word), storage + sizeof(word), bytes - sizeof(word));
+  __atomic_thread_fence(__ATOMIC_RELEASE);
+  wr64(word, storage_sequence(sampling));
+  (void)vmm_write_physical(c->vmm, entry, word, sizeof(word));
+}
+
 /* Pushes one sample into all seven LIFOs of npad `index`: the LIFO of
  * its current style gets `input`, the others an empty state. */
 static void push_sample(HLE_Context *c, Hid_State *s, uint32_t index, const Input_Controller_State *input) {
@@ -169,8 +187,8 @@ static void push_sample(HLE_Context *c, Hid_State *s, uint32_t index, const Inpu
     build_state(storage + HID_LIFO_STATE_OFFSET, s->sampling_number, live ? input : NULL,
                 live ? attributes_for(npad->style) : 0);
     const uint64_t lifo = base + k_lifo_offsets[k];
-    (void)vmm_write_physical(c->vmm, lifo + HID_LIFO_STORAGE_OFFSET + (uint64_t)tail * HID_LIFO_STORAGE_BYTES,
-                             storage, sizeof(storage));
+    write_storage(c, lifo + HID_LIFO_STORAGE_OFFSET + (uint64_t)tail * HID_LIFO_STORAGE_BYTES, storage,
+                  sizeof(storage), s->sampling_number);
     uint8_t header[0x18];
     wr64(header, HID_LIFO_ENTRIES);    /* buffer_count @0x8 */
     wr64(header + 0x8, tail);          /* tail @0x10 */
@@ -209,8 +227,8 @@ static void push_touch(HLE_Context *c, Hid_State *s, const Input_Touch_State *to
     memcpy(point + 0x1C, &diameter, 4);
   }
   s->touch_down = points;
-  (void)vmm_write_physical(c->vmm, base + HID_LIFO_STORAGE_OFFSET + (uint64_t)tail * HID_TOUCH_STORAGE_BYTES, storage,
-                           sizeof(storage));
+  write_storage(c, base + HID_LIFO_STORAGE_OFFSET + (uint64_t)tail * HID_TOUCH_STORAGE_BYTES, storage, sizeof(storage),
+                s->sampling_number);
   uint8_t header[0x18];
   wr64(header, HID_LIFO_ENTRIES);
   wr64(header + 0x8, tail);

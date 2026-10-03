@@ -1326,6 +1326,14 @@ Command records reference guest memory (vertex/index/uniform data, textures) by 
 
 This path is the correctness oracle the WebGPU translation (shaders to WGSL in the GPU Worker, as above) will be diffed against; it is not removed when that lands. It renders deko3d homebrew (ftpd's ImGui interface) today.
 
+### Reference correction: fixed-point colour clamping before blending
+
+The reference blended pixel-program colours as they came, then clamped them when encoding. Hardware, every graphics API and WebGPU clamp a fixed-point target's incoming colour to its range (UNORM/sRGB [0,1], SNORM [-1,1]) **before** blending, and clamp the blend constant the same way.
+
+Silksong's glow and lighting passes output values above 1 into RGBA8 targets. The premultiplied blend with alpha > 1 even gave the destination a negative weight. As a result, the reference's gameplay highlights were brighter than the WebGPU renderer's: mean 2.6/255, max 72.
+
+`raster3d`'s `target_color` now clamps for UNORM, sRGB and SNORM targets on every blend path (generic, RGBA8 inline, span fills), with NaN becoming 0. Float and integer targets receive the bits unchanged.
+
 ### WebGPU renderer: stated deviations from the reference
 
 - **Mipmaps.** The reference samples level 0 only. In GPU mode, a sampled float 2D (array) texture whose header has a mip chain gets a GPU mip chain, built from level 0 with a 2x2 box filter after every upload (stream version 2, `docs/GPU_COMMAND_STREAM.md`).
@@ -2446,9 +2454,26 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.71.0*
+*Document version: 3.72.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.71 → v3.72 (summary)
+
+- **The web build defaults to the JIT** (`web` preset: `CPU_BACKEND=jit`, docs/JIT.md). The new `web-interpreter` preset keeps the interpreter, which remains the JIT's differential reference.
+  - Silksong in Chromium on the real GPU, title screen: about 11–12 fps (interpreter: 7–7.7).
+  - Gameplay at slice 4.8M with the recipe: 8.0 fps (interpreter: 3.1), rendered correctly.
+  - Boot to gameplay: 609 s of worker time (interpreter: about 1,300–1,600 s).
+  - Under Node the same build is 1.72× faster with identical virtual time and SVC counts.
+  - Parallel guest threads (bot 1's `parallel.c`, 3 cores by default with the interpreter) are gated by `CPU_Backend.supports_multicore`; the JIT runs serial until its code cache is per-thread.
+- **Texture change detection:** a sampled hash each frame, the whole hash every 30 frames or after copy-engine writes. GPU mode releases decoded copies after upload. Gameplay with the interpreter went from 0.78 to 3.12 fps, because the 512 MB web texture pool no longer thrashes.
+- **Merged work from the parallel agents (docs/handoff/):**
+  - Mipmaps.
+  - Executor pass and bind-group batching.
+  - SHFL register operands.
+  - Integer copies and clears.
+  - The browser run-loop yield (title +55%).
+  - NVDEC/VIC groundwork with a WebCodecs video worker and a `video` layout region (§4).
 
 ### Changelog v3.70 → v3.71 (summary)
 
