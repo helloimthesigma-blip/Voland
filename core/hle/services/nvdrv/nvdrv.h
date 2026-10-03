@@ -46,6 +46,7 @@
 #include "gpu/syncpoint.h"
 #include "hle/kernel/event.h"
 #include "hle/services/nvdrv/nvdec.h"
+#include "video/video_stream.h"
 #include "hle/kernel/ipc.h"
 #include "hle/services/sm/sm.h"
 
@@ -137,6 +138,7 @@ typedef struct Nvdrv_State {
   HLE_Context *hle;
   Raster3d *renderer; /* 3D reference renderer for submissions (NULL: none) */
   /* Host1x multimedia engines (nvdec.h): buffer IOVAs and register files. */
+  Video_Stream *video; /* decode requests and frames (NULL: decoding off) */
   Mm_Iova iova;
   Mm_Engine nvdec;
   Mm_Engine vic;

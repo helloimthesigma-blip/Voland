@@ -61,6 +61,9 @@
 #include "common/input_region.h"
 #include "common/layout.h"
 #include "emulator.h"
+#ifdef VOLAND_CLI_VIDEO
+#include "video_vt.h"
+#endif
 #include "hle/kernel/handle_table.h"
 #include "cpu/backends/interpreter/interpreter.h"
 #include "gpu/framebuffer.h"
@@ -594,6 +597,9 @@ static int run(int argc, char **argv) {
     return EXIT_LOAD_FAILED;
   }
   emulator_set_debug_output(&emu, on_guest_output, NULL);
+#ifdef VOLAND_CLI_VIDEO
+  emulator_set_video_backend(&emu, video_vt_backend(&emu.video));
+#endif
   framebuffer_reset();
   if (test_card) (void)framebuffer_publish_test_card(TEST_CARD_WIDTH, TEST_CARD_HEIGHT);
   if (sdmc) {
@@ -848,6 +854,9 @@ static int run(int argc, char **argv) {
     fprintf(stderr, "voland-cli: audio %llu frames (%.2fs) -> %s\n", (unsigned long long)audio_frames,
             (double)audio_frames / AUDIO_RING_SAMPLE_RATE, audio_path);
   }
+#ifdef VOLAND_CLI_VIDEO
+  video_vt_report();
+#endif
   if (svc_stats) {
     for (uint32_t i = 0; i < HLE_SVC_COUNT; i++) {
       if (emu.hle.svc_counts[i]) fprintf(stderr, "voland-cli: svc 0x%02x x %llu\n", i, (unsigned long long)emu.hle.svc_counts[i]);

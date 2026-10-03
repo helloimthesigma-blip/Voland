@@ -295,10 +295,18 @@ static bool chain_load(Emulator* emulator) {
   return true;
 }
 
+static void gpu_stream_wait(void *user, volatile int32_t *word, int32_t expected);
+
 static void reset_process_services(Emulator* emulator) {
   event_pool_init(&emulator->events);
   nvdrv_init(&emulator->nvdrv, emulator->gpu_channels); /* fds, nvmap handles, syncpoints die with the process */
   emulator->nvdrv.renderer = emulator->renderer.ready ? &emulator->renderer : NULL;
+  if (!emulator->video_ready) { /* the video worker reads the region's header once: never re-laid out */
+    video_stream_init(&emulator->video, (uint8_t *)(uintptr_t)layout_get()->video_region_base, gpu_stream_wait,
+                      emulator->video.backend);
+    emulator->video_ready = true;
+  }
+  emulator->nvdrv.video = &emulator->video;
   shared_memory_pool_init(&emulator->shared_memory, &emulator->pages);
   memset(&emulator->transfer_memory, 0, sizeof(emulator->transfer_memory));
   hid_init(&emulator->hid, &emulator->shared_memory);
@@ -951,6 +959,10 @@ void emulator_set_gpu_mode(Emulator *emulator, bool on) {
     emulator->gpu_stream_ready = true;
   }
   raster3d_set_gpu(&emulator->renderer, on ? &emulator->gpu_stream : NULL);
+}
+
+void emulator_set_video_backend(Emulator *emulator, const Video_Backend *backend) {
+  if (emulator) emulator->video.backend = backend;
 }
 
 void emulator_set_frame_skip(Emulator* emulator, uint32_t n) {
