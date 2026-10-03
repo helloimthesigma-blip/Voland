@@ -133,6 +133,7 @@ typedef struct Emulator
   uint32_t content_node;    /* ramfs node of a chain-loaded NRO */
   int64_t rtc;       /* Unix seconds the next process boots at (emulator_set_rtc) */
   uint32_t frame_skip; /* emulator_set_frame_skip; survives process reloads */
+  Parallel *parallel;  /* emulator_set_host_cores; NULL = serial */
   /* GPU mode (emulator_set_gpu_mode): the renderer's stream to the GPU
    * worker, in the layout's gpu_ring region. */
   Gpu_Stream gpu_stream;
@@ -193,6 +194,15 @@ void emulator_unload_program(Emulator *emulator);
 /* One scheduler slice (§7): the highest-priority runnable guest thread
  * runs for at most `cycle_budget` cycles. */
 Emulator_Status emulator_run_slice(Emulator *emulator, uint64_t cycle_budget);
+
+/* Parallel guest threads (docs/PARALLEL.md): with `cores` >= 1, guest
+ * threads run on that many host threads during emulator_run_slice and the
+ * caller waits for the slice (serving host calls the cores need). 0 (the
+ * default) is the serial scheduler. One core is bit-identical to serial;
+ * from two on, exclusives become host compare-and-swaps and the run is
+ * no longer deterministic. Returns the core count in effect (0 when the
+ * build or the backend cannot run in parallel). Call between slices. */
+uint32_t emulator_set_host_cores(Emulator *emulator, uint32_t cores);
 
 /* Compatibility wrapper: one slice, reported as the backend's exit reason
  * (CPU_EXIT_HALT when no thread ran). With nothing loaded it runs the

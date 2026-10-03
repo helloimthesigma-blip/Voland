@@ -20,8 +20,8 @@
  * permission change drops every block, as do IC maintenance instructions
  * and the backend's invalidate_cache / clear_cache.
  *
- * The cache is module-global: there is one guest address space at a time
- * (vmm.h), and every thread's CPU_State shares its code.
+ * The cache is shared by every guest thread's CPU_State (one guest
+ * address space at a time, vmm.h) and private to each host thread.
  */
 #include "cpu/backends/interpreter/interp_internal.h"
 
@@ -56,12 +56,47 @@ typedef struct Block {
   Op ops[PREDECODE_BLOCK_OPS];
 } Block;
 
+/* The block cache is per host thread: with parallel guest threads
+ * (docs/PARALLEL.md) several host threads decode at once. The first
+ * thread to run uses the static cache; any other allocates its own once
+ * (released when that thread exits). A flush bumps one shared epoch, so
+ * it reaches every thread's cache. */
 static Block g_blocks[PREDECODE_CACHE_BLOCKS];
 static uint64_t g_flush_epoch = 1; /* folded into the generation check */
 
-void interp_predecode_flush(void) { g_flush_epoch++; }
+void interp_predecode_flush(void) { __atomic_fetch_add(&g_flush_epoch, 1u, __ATOMIC_RELAXED); }
 
-static uint64_t current_generation(void) { return vmm_generation() * 0x10000u + g_flush_epoch; }
+static uint64_t current_generation(void) {
+  return vmm_generation() * 0x10000u + __atomic_load_n(&g_flush_epoch, __ATOMIC_RELAXED);
+}
+
+#if (defined(__EMSCRIPTEN__) && !defined(__EMSCRIPTEN_PTHREADS__)) || defined(_WIN32)
+static Block *thread_blocks(void) { return g_blocks; }
+#else
+#include <pthread.h>
+
+static _Thread_local Block *t_blocks;
+static bool g_static_claimed;
+static pthread_key_t g_blocks_key;
+static pthread_once_t g_blocks_key_once = PTHREAD_ONCE_INIT;
+
+static void make_blocks_key(void) { (void)pthread_key_create(&g_blocks_key, free); }
+
+static Block *thread_blocks(void) {
+  if (t_blocks) return t_blocks;
+  if (!__atomic_exchange_n(&g_static_claimed, true, __ATOMIC_ACQ_REL)) {
+    t_blocks = g_blocks;
+    return t_blocks;
+  }
+  /* Once per extra host thread, never in the run loop's steady state. */
+  Block *blocks = (Block *)calloc(PREDECODE_CACHE_BLOCKS, sizeof(Block));
+  if (!blocks) return NULL;
+  (void)pthread_once(&g_blocks_key_once, make_blocks_key);
+  (void)pthread_setspecific(g_blocks_key, blocks);
+  t_blocks = blocks;
+  return t_blocks;
+}
+#endif
 
 /* ------------------------------------------------------------------ */
 /* Flag bits in Op.flags.                                              */
@@ -707,13 +742,13 @@ static bool ends_block(uint32_t insn) {
 static bool is_cache_maintenance(uint32_t insn) { return (insn & 0xFFF8F000u) == 0xD5087000u; }
 
 /* Builds the block at `pc`; NULL if the page is not cacheable. */
-static Block *build(const Interp_State *s, uint64_t pc, uint64_t generation) {
+static Block *build(Block *cache, const Interp_State *s, uint64_t pc, uint64_t generation) {
   const uint64_t pte = vmm_pte_inline(s->l1, pc);
   if ((pte & VMM_PERM_X) == 0 || (pte & VMM_PERM_W) != 0 || (pc & 3u)) return NULL;
   VMM_Fault fault;
   const uint8_t *host = vmm_translate_inline(s->l1, pc, VMM_PERM_X, &fault);
   if (!host) return NULL;
-  Block *b = &g_blocks[PREDECODE_INDEX(pc)];
+  Block *b = &cache[PREDECODE_INDEX(pc)];
   b->pc = pc;
   b->count = 0;
   const uint64_t page_end = (pc | VMM_PAGE_OFFSET_MASK) + 1u;
@@ -742,11 +777,21 @@ bool interp_predecode_enabled(void) {
 CPU_ExitReason interp_predecode_execute(Interp_State *s, uint64_t cycle_budget) {
   uint32_t grace = 0;
   CPU_ExitReason exit_reason = CPU_EXIT_CYCLES_ELAPSED;
+  Block *const cache = thread_blocks();
+  if (!cache) { /* no memory for this thread's cache: the reference loop */
+    for (;;) {
+      if (s->cycles_consumed >= cycle_budget) {
+        if (!s->exclusive_valid || grace >= INTERP_EXCLUSIVE_GRACE_INSTRUCTIONS) return CPU_EXIT_CYCLES_ELAPSED;
+        grace++;
+      }
+      if (!interp_run_one(s, &exit_reason)) return exit_reason;
+    }
+  }
   for (;;) {
     const uint64_t generation = current_generation();
     const uint64_t pc = s->regs.pc;
-    Block *b = &g_blocks[PREDECODE_INDEX(pc)];
-    if (b->generation != generation || b->pc != pc) b = build(s, pc, generation);
+    Block *b = &cache[PREDECODE_INDEX(pc)];
+    if (b->generation != generation || b->pc != pc) b = build(cache, s, pc, generation);
     const uint32_t count = b ? b->count : 1u;
     for (uint32_t i = 0; i < count; i++) {
       /* Exactly the reference loop's budget/grace rule (interpreter.c),
@@ -772,7 +817,8 @@ CPU_ExitReason interp_predecode_execute(Interp_State *s, uint64_t cycle_budget) 
         interp_predecode_flush();
         break;
       }
-      /* Mappings only change in SVCs, which end the run (retire -> false). */
+      /* Mappings only change in SVCs, which end this run (retire ->
+       * false); another core's SVC is seen at the next block. */
     }
   }
 }

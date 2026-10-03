@@ -64,8 +64,11 @@ enum {
 #define GPU_USAGE_SAMPLED 1u
 #define GPU_USAGE_RENDER 2u /* render attachment (also copy source / destination) */
 
+/* levels: mip levels (1 = none). The producer uploads level 0; the
+ * consumer builds the rest from it (a box filter) after each upload
+ * (version 2; a version-1 record ends after `usage`, one level). */
 typedef struct Gpu_Rec_Texture_Create {
-  uint32_t id, format, width, height, layers, usage;
+  uint32_t id, format, width, height, layers, usage, levels, reserved;
 } Gpu_Rec_Texture_Create;
 
 typedef struct Gpu_Rec_Texture_Write {
@@ -141,10 +144,13 @@ typedef struct Gpu_Rec_Draw {
 #define GPU_BIND_TEXTURE 2u /* texture_2d_array (gpu/wgsl.h); `bytes` = GPU_BIND_FILTERED when a sampler filters it */
 #define GPU_BIND_SAMPLER 3u /* filtering sampler; `texture_id` = GPU_SAMPLER_* state */
 #define GPU_BIND_FILTERED 1u
-/* Sampler state: bit 0 linear (else nearest), then 2 bits per axis u, v, w:
- * 0 repeat, 1 mirror-repeat, 2 clamp-to-edge. */
+/* Sampler state: bit 0 magnification linear (else nearest), then 2 bits per
+ * axis u, v, w: 0 repeat, 1 mirror-repeat, 2 clamp-to-edge; bit 7
+ * minification linear, bit 8 linear between mip levels (version 2). */
 #define GPU_SAMPLER_LINEAR 1u
 #define GPU_SAMPLER_WRAP_SHIFT(axis) (1u + 2u * (axis))
+#define GPU_SAMPLER_MIN_LINEAR (1u << 7)
+#define GPU_SAMPLER_MIP_LINEAR (1u << 8)
 
 typedef struct Gpu_Rec_Binding {
   uint32_t kind;

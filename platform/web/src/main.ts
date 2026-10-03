@@ -268,6 +268,11 @@ async function boot(): Promise<BootResult | null> {
         if (msg.streamRenderer && !software) {
           cpuWorker.postMessage({ type: "set-gpu-mode", on: true } satisfies MainToCPUMessage);
         }
+        /* ?cores=N: host threads for guest threads (0 = serial). */
+        const cores = new URLSearchParams(location.search).get("cores");
+        if (cores !== null && /^[0-9]+$/.test(cores)) {
+          cpuWorker.postMessage({ type: "set-host-cores", cores: Number(cores) } satisfies MainToCPUMessage);
+        }
         gpuSlot = "ready";
         updateStatus();
         resolve();

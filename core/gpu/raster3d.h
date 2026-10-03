@@ -51,6 +51,11 @@ struct Gpu_Stream;
 #else
 #define RASTER_TEXTURE_POOL_BYTES ((size_t)1024 * 1024 * 1024)
 #endif
+/* Texture change detection: a sampled hash each frame, the whole texture
+ * every RASTER_TEXTURE_FULL_EVERY frames. */
+#define RASTER_TEXTURE_SAMPLES 64u
+#define RASTER_TEXTURE_SAMPLE_BYTES 64u
+#define RASTER_TEXTURE_FULL_EVERY 30u
 #define RASTER_TEXTURE_RAW_BYTES ((size_t)64 * 1024 * 1024) /* a 4096x4096 RGBA8 texture */
 #define RASTER_INLINE_INDICES 0x10000u
 #define RASTER_STREAMS 32u
@@ -93,7 +98,9 @@ typedef struct Raster3d_Texture {
   bool valid;
   uint32_t tic[8];
   uint64_t raw_hash;     /* of the guest bytes it was decoded from */
-  uint32_t validated;    /* submission it was last checked against guest memory */
+  uint32_t validated;    /* epoch (frame) it was last checked against guest memory */
+  uint32_t full_epoch;   /* epoch of its last whole-texture hash (between those, a sampled hash) */
+  uint64_t sample_hash;  /* hash of RASTER_TEXTURE_SAMPLES spans of its guest bytes */
   uint64_t address;      /* guest bytes it was decoded from */
   uint64_t raw_bytes;
   size_t pool_offset;    /* its decoded texels' block in the texture pool */
@@ -103,7 +110,7 @@ typedef struct Raster3d_Texture {
   /* GPU mode: the GPU texture holding it (0 = none) and what was uploaded. */
   uint32_t gpu_id;
   uint64_t gpu_hash;
-  uint32_t gpu_width, gpu_height, gpu_layers, gpu_format;
+  uint32_t gpu_width, gpu_height, gpu_layers, gpu_format, gpu_levels;
 } Raster3d_Texture;
 
 /* GPU mode: a render target that lives only on the GPU (its guest memory
@@ -141,6 +148,7 @@ typedef struct Raster3d_Gpu_Stats {
   uint64_t surfaces;
   uint64_t presents;
   uint64_t copies;
+  uint64_t hashed_bytes; /* guest texture bytes re-hashed to detect changes */
 } Raster3d_Gpu_Stats;
 
 typedef struct Raster3d_Stats {
@@ -195,6 +203,10 @@ typedef struct Raster3d {
   uint8_t *gpu_vertices;             /* the current draw's vertices */
   uint32_t *gpu_data;                /* the current draw's constants + constant buffers */
   Raster3d_Gpu_Stats gpu_stats;
+  /* GPU mode: mipmapped textures get mip chains and pixel programs pick
+   * the level from derivatives (a deliberate improvement over the
+   * reference's level 0, §13). Off: level 0 only, as the reference. */
+  bool gpu_mipmaps;
 } Raster3d;
 
 /* Bytes of backing storage raster3d_init needs (one allocation). */
