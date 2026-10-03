@@ -1,0 +1,165 @@
+/**
+ * GPU stream record types and payloads (gpu_stream.h carries them).
+ * Mirrored by platform/web/workers/gpu-records.ts; docs/GPU_COMMAND_STREAM.md
+ * describes them. All fields u32 little-endian unless noted; ids are the
+ * producer's (0 = none). Bump GPU_STREAM_VERSION on any change.
+ *
+ * The producer (raster3d's GPU mode) does vertex work, assembly, clipping
+ * and the viewport transform on the CPU and sends screen-space triangles:
+ * each vertex is {x, y in WebGPU NDC, z in [0, 1], 1/w} as f32, then the
+ * pixel program's varyings (4 x u32 each, already divided by w where the
+ * program interpolates them perspective-correct - so every varying is
+ * interpolated screen-linearly, flat ones not at all). Pixel programs
+ * arrive as WGSL (gpu/wgsl.h) with a matching pass-through vertex stage.
+ */
+#ifndef SWITCH_GPU_GPU_RECORDS_H
+#define SWITCH_GPU_GPU_RECORDS_H
+
+#include <stdint.h>
+
+enum {
+  GPU_REC_TEXTURE_CREATE = 1, /* Gpu_Rec_Texture_Create */
+  GPU_REC_TEXTURE_DESTROY,    /* u32 id */
+  GPU_REC_TEXTURE_WRITE,      /* Gpu_Rec_Texture_Write + rows */
+  GPU_REC_SHADER,             /* u32 id, u32 bytes, WGSL text */
+  GPU_REC_CLEAR,              /* Gpu_Rec_Clear */
+  GPU_REC_DRAW,               /* Gpu_Rec_Draw + bindings + vertices */
+  GPU_REC_COPY,               /* Gpu_Rec_Copy */
+  GPU_REC_PRESENT,            /* Gpu_Rec_Present */
+};
+
+/* Texture formats (the WebGPU format each maps to, in gpu-records.ts). */
+enum {
+  GPU_FMT_NONE = 0,
+  GPU_FMT_RGBA8_UNORM,
+  GPU_FMT_RGBA8_SRGB,
+  GPU_FMT_BGRA8_UNORM,
+  GPU_FMT_RGBA16_FLOAT,
+  GPU_FMT_RGBA32_FLOAT,
+  GPU_FMT_R8_UNORM,
+  GPU_FMT_RG8_UNORM,
+  GPU_FMT_R16_FLOAT,
+  GPU_FMT_RG16_FLOAT,
+  GPU_FMT_R32_FLOAT,
+  GPU_FMT_RG32_FLOAT,
+  GPU_FMT_RG11B10_UFLOAT,
+  GPU_FMT_RGB10A2_UNORM,
+  GPU_FMT_R32_UINT,
+  GPU_FMT_RG32_UINT,
+  GPU_FMT_RGBA32_UINT,
+  GPU_FMT_RGBA16_UINT,
+  GPU_FMT_RGBA8_UINT,
+  GPU_FMT_DEPTH16,
+  GPU_FMT_DEPTH24_STENCIL8,
+  GPU_FMT_DEPTH32F,
+  GPU_FMT_DEPTH32F_STENCIL8,
+  GPU_FMT_COUNT,
+};
+
+#define GPU_USAGE_SAMPLED 1u
+#define GPU_USAGE_RENDER 2u /* render attachment (also copy source / destination) */
+
+typedef struct Gpu_Rec_Texture_Create {
+  uint32_t id, format, width, height, layers, usage;
+} Gpu_Rec_Texture_Create;
+
+typedef struct Gpu_Rec_Texture_Write {
+  uint32_t id, x, y, width, height, layer, bytes_per_row, data_bytes; /* then data_bytes of rows */
+} Gpu_Rec_Texture_Write;
+
+#define GPU_CLEAR_COLOR 1u
+#define GPU_CLEAR_DEPTH 2u
+#define GPU_CLEAR_STENCIL 4u
+
+typedef struct Gpu_Rec_Clear {
+  uint32_t color_id;     /* 0: no colour target */
+  uint32_t color_mask;   /* RGBA write bits */
+  uint32_t color[4];     /* f32 bits (or raw integers for integer formats) */
+  uint32_t depth_id;     /* 0: no depth target */
+  uint32_t flags;        /* GPU_CLEAR_* */
+  uint32_t depth;        /* f32 bits */
+  uint32_t stencil;
+  int32_t rect[4];       /* x, y, width, height; width 0 = whole target */
+} Gpu_Rec_Clear;
+
+/* Blend factors / ops / compare functions: WebGPU's, by index into the
+ * tables in gpu-records.ts. */
+enum {
+  GPU_BF_ZERO, GPU_BF_ONE, GPU_BF_SRC, GPU_BF_ONE_MINUS_SRC, GPU_BF_SRC_ALPHA, GPU_BF_ONE_MINUS_SRC_ALPHA,
+  GPU_BF_DST, GPU_BF_ONE_MINUS_DST, GPU_BF_DST_ALPHA, GPU_BF_ONE_MINUS_DST_ALPHA, GPU_BF_SRC_ALPHA_SATURATED,
+  GPU_BF_CONSTANT, GPU_BF_ONE_MINUS_CONSTANT,
+};
+enum { GPU_BOP_ADD, GPU_BOP_SUBTRACT, GPU_BOP_REVERSE_SUBTRACT, GPU_BOP_MIN, GPU_BOP_MAX };
+enum {
+  GPU_CMP_NEVER, GPU_CMP_LESS, GPU_CMP_EQUAL, GPU_CMP_LESS_EQUAL, GPU_CMP_GREATER, GPU_CMP_NOT_EQUAL,
+  GPU_CMP_GREATER_EQUAL, GPU_CMP_ALWAYS,
+};
+enum {
+  GPU_SOP_KEEP, GPU_SOP_ZERO, GPU_SOP_REPLACE, GPU_SOP_INVERT, GPU_SOP_INCREMENT_CLAMP, GPU_SOP_DECREMENT_CLAMP,
+  GPU_SOP_INCREMENT_WRAP, GPU_SOP_DECREMENT_WRAP,
+};
+
+#define GPU_MAX_TARGETS 8u
+
+typedef struct Gpu_Rec_Target {
+  uint32_t id;
+  uint32_t write_mask;   /* RGBA bits */
+  uint32_t blend;        /* 0 / 1 */
+  uint32_t color_op, color_src, color_dst, alpha_op, alpha_src, alpha_dst;
+} Gpu_Rec_Target;
+
+typedef struct Gpu_Rec_Stencil_Face {
+  uint32_t fail, depth_fail, pass, compare;
+} Gpu_Rec_Stencil_Face;
+
+#define GPU_VARYING_MAX 16u
+
+typedef struct Gpu_Rec_Draw {
+  uint32_t shader_id;
+  uint32_t target_count;
+  Gpu_Rec_Target targets[GPU_MAX_TARGETS];
+  uint32_t depth_id;
+  uint32_t depth_test, depth_write, depth_compare;
+  uint32_t stencil;      /* 0 / 1 */
+  Gpu_Rec_Stencil_Face stencil_front, stencil_back;
+  uint32_t stencil_read_mask, stencil_write_mask, stencil_ref;
+  uint32_t blend_constant[4]; /* f32 bits */
+  int32_t scissor[4];         /* x, y, width, height */
+  uint32_t varying_count;     /* vec4 varyings after the position and 1/w */
+  uint32_t flat_mask;         /* bit per varying: not interpolated (u32) */
+  uint32_t binding_count;     /* Gpu_Rec_Binding entries follow */
+  uint32_t vertex_count;      /* vertices (a triangle list) follow the bindings */
+} Gpu_Rec_Draw;
+
+#define GPU_BIND_CBUF 1u    /* storage buffer: Gpu_Rec_Binding, then `bytes` of data (padded to 8) */
+#define GPU_BIND_TEXTURE 2u /* texture + sampler at `binding` and `binding + 1` */
+
+typedef struct Gpu_Rec_Binding {
+  uint32_t kind;
+  uint32_t binding;
+  uint32_t bytes;        /* CBUF: data bytes that follow */
+  uint32_t texture_id;   /* TEXTURE */
+  uint32_t filter;       /* TEXTURE: 0 nearest, 1 linear */
+  uint32_t wrap[3];      /* TEXTURE: 0 repeat, 1 mirror, 2 clamp */
+  uint32_t compare;      /* TEXTURE: 0 none, else GPU_CMP_* + 1 */
+} Gpu_Rec_Binding;
+
+/* Vertex: x, y, z, 1/w (f32), then varying_count x 4 u32. */
+#define GPU_VERTEX_HEADER_WORDS 4u
+
+typedef struct Gpu_Rec_Copy {
+  uint32_t src_id, dst_id;
+  int32_t src_rect[4], dst_rect[4]; /* x, y, width, height */
+  uint32_t filter;                  /* 0 nearest, 1 linear (when scaling) */
+} Gpu_Rec_Copy;
+
+#define GPU_PRESENT_FLIP_X 1u
+#define GPU_PRESENT_FLIP_Y 2u
+
+typedef struct Gpu_Rec_Present {
+  uint32_t id;
+  int32_t rect[4];  /* the source rectangle shown */
+  uint32_t flags;   /* GPU_PRESENT_FLIP_* */
+} Gpu_Rec_Present;
+
+#endif /* SWITCH_GPU_GPU_RECORDS_H */

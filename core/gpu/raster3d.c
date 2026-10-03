@@ -790,6 +790,7 @@ static const Sm_Program *program_get(Raster3d *r, uint64_t address, const Gpu_Me
     }
   }
   sm_program_decode(r->program_bytes, extent, address, &slot->program);
+  if (r->on_program_decoded) r->on_program_decoded(r->on_program_user, &slot->program);
   slot->valid = true;
   slot->validated = r->submission;
   slot->last_used = r->tick;

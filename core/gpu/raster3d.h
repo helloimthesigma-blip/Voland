@@ -138,6 +138,9 @@ typedef struct Raster3d {
   /* Diagnostics: called with every newly decoded texture (may be NULL). */
   void (*on_texture_decoded)(void *user, const Tex_Image *image, uint64_t address);
   void *on_texture_user;
+  /* Diagnostics: called with every newly decoded shader program (may be NULL). */
+  void (*on_program_decoded)(void *user, const Sm_Program *program);
+  void *on_program_user;
 } Raster3d;
 
 /* Bytes of backing storage raster3d_init needs (one allocation). */

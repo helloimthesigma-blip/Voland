@@ -54,6 +54,7 @@ set(SWITCH_CORE_SOURCES
   gpu/texture.c
   gpu/astc.c
   gpu/raster3d.c
+  gpu/gpu_stream.c
   hle/fs/ramfs.c
   hle/kernel/svc_thread.c
   hle/services/sm/sm.c
@@ -130,6 +131,7 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   gpu/texture.h
   gpu/astc.h
   gpu/raster3d.h
+  gpu/gpu_stream.h
   emulator.h
 )
 

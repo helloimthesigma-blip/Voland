@@ -480,6 +480,9 @@ static const uint32_t *splat(uint32_t v, uint32_t tmp[SM_LANES]) {
 }
 
 /* The second (B) operand, per lane, by form. */
+/* The word sm_run is executing (texture requests carry it). */
+static _Thread_local uint32_t g_current_pc;
+
 static const uint32_t *op_b(const Sm_Insn *in, const Sm_Env *env, const Sm_Thread *t, uint32_t tmp[SM_LANES]) {
   switch (in->form) {
   case SM_FORM_REG: return t->r[REG_B(in->raw)];
@@ -980,6 +983,7 @@ static void exec_texs(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mas
   FOR_LANES(m) {
     Sm_Tex_Request *req = &reqs[l];
     memset(req, 0, sizeof(*req));
+    req->pc = g_current_pc;
     req->kind = SM_TEX_SAMPLE;
     req->handle = handle;
     uint32_t args[8] = {0};
@@ -1023,6 +1027,7 @@ static void exec_tlds(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mas
   FOR_LANES(m) {
     Sm_Tex_Request *req = &reqs[l];
     memset(req, 0, sizeof(*req));
+    req->pc = g_current_pc;
     req->kind = SM_TEX_FETCH;
     req->handle = handle;
     uint32_t args[8] = {0};
@@ -1057,6 +1062,7 @@ static void exec_tld4s(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Ma
   FOR_LANES(m) {
     Sm_Tex_Request *req = &reqs[l];
     memset(req, 0, sizeof(*req));
+    req->pc = g_current_pc;
     req->kind = SM_TEX_GATHER;
     req->handle = handle;
     req->dims = 2;
@@ -1091,6 +1097,7 @@ static void exec_tex_vector(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, 
   FOR_LANES(m) {
     Sm_Tex_Request *req = &reqs[l];
     memset(req, 0, sizeof(*req));
+    req->pc = g_current_pc;
     /* TEX.B (bindless): the handle is Rb's first register, in the same
      * {TIC index, TSC index << 20} encoding the constant buffer holds;
      * Rb's other arguments follow it. */
@@ -2297,6 +2304,7 @@ bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
         w->pc = in->next;
         break;
       default:
+        g_current_pc = w->pc;
         if (guard) execute(in, env, t, guard);
         w->pc = in->next;
         break;

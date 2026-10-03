@@ -182,6 +182,7 @@ typedef struct Sm_Tex_Request {
   float dref;
   int32_t offset[3];
   int32_t ilod;         /* FETCH / QUERY */
+  uint32_t pc;          /* the texture instruction's word index */
 } Sm_Tex_Request;
 
 /* Everything an invocation reads from outside its registers. */

@@ -197,6 +197,23 @@ static void on_guest_output(void *userdata, const char *text, size_t length) {
   }
 }
 
+/* VOLAND_DUMP_SHADERS=DIR: every decoded program as DIR/<address>.txt -
+ * index, mnemonic, form and the raw word (diagnostics). */
+static void dump_program(void *user, const Sm_Program *program) {
+  char path[1024];
+  snprintf(path, sizeof(path), "%s/%llx-%08x.txt", (const char *)user, (unsigned long long)program->address, program->hash);
+  FILE *f = fopen(path, "w");
+  if (!f) return;
+  fprintf(f, "stage %u words %u\n", program->header.stage, program->word_count);
+  for (uint32_t i = 0; i < program->word_count; i++) {
+    const Sm_Insn *in = &program->insns[i];
+    if (in->op == SM_OP_SCHED) continue;
+    fprintf(f, "%4u %-8s form %u pred %x target %d raw %016llx\n", i, sm_op_name((Sm_Op)in->op), in->form, in->pred,
+            in->target, (unsigned long long)in->raw);
+  }
+  fclose(f);
+}
+
 /* VOLAND_DUMP_TEXTURES=DIR: every decoded RGBA8 texture as DIR/<address>-WxH.ppm
  * and its alpha as DIR/<address>-WxH-a.pgm (diagnostics). */
 static void dump_texture(void *user, const Tex_Image *image, uint64_t address) {
@@ -487,6 +504,10 @@ static int run(int argc, char **argv) {
     wav = fopen(audio_path, "wb");
     if (!wav) fprintf(stderr, "voland-cli: cannot write %s\n", audio_path);
     else write_wav_header(wav, 0);
+  }
+  if (getenv("VOLAND_DUMP_SHADERS")) {
+    emu.renderer.on_program_decoded = dump_program;
+    emu.renderer.on_program_user = getenv("VOLAND_DUMP_SHADERS");
   }
   if (getenv("VOLAND_DUMP_TEXTURES")) {
     emu.renderer.on_texture_decoded = dump_texture;

@@ -16,6 +16,10 @@ add_executable(vmm_test vmm_test.c)
 target_link_libraries(vmm_test PRIVATE switch_core)
 add_test(NAME vmm_test COMMAND vmm_test)
 
+add_executable(gpu_stream_test gpu_stream_test.c)
+target_link_libraries(gpu_stream_test PRIVATE switch_core)
+add_test(NAME gpu_stream_test COMMAND gpu_stream_test)
+
 add_executable(workers_test workers_test.c)
 target_link_libraries(workers_test PRIVATE switch_core)
 add_test(NAME workers_test COMMAND workers_test)
