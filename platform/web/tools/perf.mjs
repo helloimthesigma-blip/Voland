@@ -5,7 +5,8 @@
  *
  *   node tools/perf.mjs --game FILE [--warmup-slices N] [--seconds S]
  *                       [--profile S] [--port P] [--no-build] [--software]
- *                       [--url-params "a=1&b=2"]
+ *                       [--url-params "a=1&b=2"] [--browser-arg ARG]...
+ *                       [--press SLICE:KEY:SLICES]... [--shot FILE.png]
  *
  * - Builds the app (vite build; the core must already be staged by
  *   `cmake --build --preset web`) and serves it with `vite preview` on its
@@ -21,6 +22,16 @@
  *   seconds after the measurement and prints the top functions by self
  *   time; the .cpuprofile goes to --out-dir (default: the OS temp dir).
  *   Build the core with -DVOLAND_WASM_PROFILING=ON for wasm function names.
+ *
+ * - --press holds keyboard KEY (a Playwright key name; "z" is the A
+ *   button) from scheduler slice SLICE for SLICES slices, like
+ *   voland-cli's --input. Silksong's gameplay recipe (BOTS.md) is
+ *   --press 860000:z:3000 --press 940000:z:3000 --press 1020000:z:3000
+ *   --press 3000000:z:3000 --press 3100000:z:3000 --press 3200000:z:3000
+ *   with --warmup-slices 4800000. Presses land within ~250 ms of their
+ *   slice, so a browser run is close to, not identical with, the CLI's.
+ * - --browser-arg passes a Chromium switch (repeatable), e.g.
+ *   --browser-arg=--js-flags=--no-liftoff for a V8 tiering experiment.
  *
  * Slices are deterministic for a given game and input, so the same
  * --warmup-slices reaches the same point natively:
@@ -44,7 +55,7 @@ const SOFTWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swift
 function parseArgs(argv) {
   const opts = {
     game: "", warmupSlices: 860_000, seconds: 30, profile: 0, port: 5190, debugPort: 9390,
-    build: true, software: false, urlParams: "", outDir: tmpdir(),
+    build: true, software: false, urlParams: "", outDir: tmpdir(), browserArgs: [], presses: [], shot: "",
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -59,6 +70,14 @@ function parseArgs(argv) {
     else if (a === "--software") opts.software = true;
     else if (a === "--url-params") opts.urlParams = next();
     else if (a === "--out-dir") opts.outDir = next();
+    else if (a === "--shot") opts.shot = next();
+    else if (a === "--browser-arg") opts.browserArgs.push(next());
+    else if (a.startsWith("--browser-arg=")) opts.browserArgs.push(a.slice("--browser-arg=".length));
+    else if (a === "--press") {
+      const [slice, key, hold] = next().split(":");
+      if (!key || !Number.isFinite(Number(slice)) || !Number.isFinite(Number(hold))) throw new Error("--press wants SLICE:KEY:SLICES");
+      opts.presses.push({ slice: Number(slice), key, hold: Number(hold), state: "pending" });
+    }
     else throw new Error(`unknown argument ${a}`);
   }
   if (!opts.game || !existsSync(opts.game)) throw new Error("--game FILE is required (a decrypted NCA or an NRO)");
@@ -171,7 +190,8 @@ async function main() {
   const browser = await chromium.launch({
     channel: "chromium",
     headless: true,
-    args: [...(opts.software ? SOFTWARE_GPU_ARGS : HARDWARE_GPU_ARGS), `--remote-debugging-port=${opts.debugPort}`],
+    args: [...(opts.software ? SOFTWARE_GPU_ARGS : HARDWARE_GPU_ARGS), `--remote-debugging-port=${opts.debugPort}`,
+           ...opts.browserArgs],
   });
   try {
     await waitForUrl(baseUrl, 60_000);
@@ -198,6 +218,20 @@ async function main() {
       fps: await page.evaluate(() => window.__VOLAND_STATS__?.fps ?? 0),
     });
 
+    /* Scripted input: press and release keys at slice counts. */
+    const servicePresses = async (slices) => {
+      for (const press of opts.presses) {
+        if (press.state === "pending" && slices >= press.slice) {
+          await page.keyboard.down(press.key);
+          press.state = "down";
+          console.log(`press ${press.key} at slice ${slices}`);
+        } else if (press.state === "down" && slices >= press.slice + press.hold) {
+          await page.keyboard.up(press.key);
+          press.state = "done";
+        }
+      }
+    };
+
     /* Warm up to a known slice count. */
     let s = await sample();
     let lastPrint = 0;
@@ -208,7 +242,8 @@ async function main() {
         lastPrint = s.at;
         console.log(`warmup: ${s.perf.slices} slices, ${(s.perf.ticks / TICKS_PER_SECOND).toFixed(1)} s virtual`);
       }
-      await sleep(1000);
+      await servicePresses(s.perf.slices);
+      await sleep(250);
       s = await sample();
     }
     const warm = s;
@@ -218,10 +253,17 @@ async function main() {
 
     const fpsSamples = [];
     for (let t = 0; t < opts.seconds; t++) {
-      await sleep(1000);
+      for (let q = 0; q < 4; q++) {
+        await sleep(250);
+        if (opts.presses.length) await servicePresses((await sample()).perf.slices);
+      }
       fpsSamples.push(await page.evaluate(() => window.__VOLAND_STATS__?.fps ?? 0));
     }
     const end = await sample();
+    if (opts.shot) {
+      const box = await page.getByTestId("screen").boundingBox();
+      if (box) await page.screenshot({ clip: box, path: opts.shot });
+    }
     const d = (k) => end.perf[k] - warm.perf[k];
     const wallMs = end.at - warm.at;
     const wallS = wallMs / 1000;
