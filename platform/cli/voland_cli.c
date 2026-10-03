@@ -287,6 +287,38 @@ static void dump_texture(void *user, const Tex_Image *image, uint64_t address) {
   if (alpha) fclose(alpha);
 }
 
+/* VOLAND_DUMP_SURFACES=DIR:F1,F2,...: at the end of frames F1, F2, ...
+ * (1-based, raster3d_end_frame), every RGBA8 render surface the software
+ * renderer holds as DIR/f<F>-<address>-<w>x<h>.pam (RGBA). With
+ * replay-gpu-stream.mjs --dump-targets, finds the first render target
+ * where the WebGPU renderer departs from the reference. */
+typedef struct Surface_Dump {
+  char dir[512];
+  uint64_t frames[16];
+  uint32_t count;
+  uint64_t frame;
+} Surface_Dump;
+
+static void dump_surfaces(void *user, const Raster3d *r) {
+  Surface_Dump *d = (Surface_Dump *)user;
+  d->frame++;
+  bool wanted = false;
+  for (uint32_t i = 0; i < d->count; i++) wanted |= d->frames[i] == d->frame;
+  if (!wanted) return;
+  for (uint32_t i = 0; i < RASTER_SURFACES; i++) {
+    const Raster3d_Surface *s = &r->surfaces[i];
+    if (!s->in_use || !s->loaded || s->depth || s->bytes_per_pixel != 4u) continue;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/f%llu-%llx-%ux%u-fmt%02x.pam", d->dir, (unsigned long long)d->frame,
+             (unsigned long long)s->address, s->width, s->height, s->format);
+    FILE *f = fopen(path, "wb");
+    if (!f) continue;
+    fprintf(f, "P7\nWIDTH %u\nHEIGHT %u\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n", s->width, s->height);
+    fwrite(s->pixels, 1, (size_t)s->width * s->height * 4u, f);
+    fclose(f);
+  }
+}
+
 /* The newest frame as a P6 PPM (RGB; alpha dropped). */
 static bool dump_frame(const char *path) {
   const uint32_t published = framebuffer_published();
@@ -671,6 +703,21 @@ static int run(int argc, char **argv) {
   if (getenv("VOLAND_DUMP_SHADERS") || getenv("VOLAND_DUMP_WGSL")) {
     emu.renderer.on_program_decoded = program_decoded;
     emu.renderer.on_program_user = NULL;
+  }
+  if (getenv("VOLAND_DUMP_SURFACES")) {
+    static Surface_Dump surface_dump;
+    const char *spec = getenv("VOLAND_DUMP_SURFACES");
+    const char *colon = strrchr(spec, ':');
+    if (colon && (size_t)(colon - spec) < sizeof(surface_dump.dir)) {
+      memcpy(surface_dump.dir, spec, (size_t)(colon - spec));
+      for (const char *p = colon + 1; *p && surface_dump.count < 16u;) {
+        char *end = NULL;
+        surface_dump.frames[surface_dump.count++] = strtoull(p, &end, 10);
+        p = (end && *end == ',') ? end + 1 : (end ? end : p + strlen(p));
+      }
+      emu.renderer.on_frame_end = dump_surfaces;
+      emu.renderer.on_frame_end_user = &surface_dump;
+    }
   }
   if (getenv("VOLAND_DUMP_TEXTURES")) {
     emu.renderer.on_texture_decoded = dump_texture;
