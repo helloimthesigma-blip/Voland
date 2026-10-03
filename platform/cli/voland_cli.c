@@ -6,6 +6,8 @@
  *   voland-cli run <file.nca|file.nro> [options]
  *       --backend interpreter|jit|noop CPU backend (default: interpreter)
  *       --budget N                   cycles per scheduler slice (default 100000)
+ *       --jit-threshold N            jit: executions before a block is compiled
+ *       --jit-dump DIR               jit: write every compiled module to DIR
  *       --max-slices N               stop after N slices (default 10000000)
  *       --test-card                  publish the core's test card before running
  *       --expect-output TEXT         exit 4 unless the guest printed TEXT
@@ -404,6 +406,10 @@ static int run(int argc, char **argv) {
       else if (!strcmp(name, "interpreter")) backend = &CPU_BACKEND_INTERPRETER;
       else if (!strcmp(name, "jit")) backend = &CPU_BACKEND_JIT;
       else { fprintf(stderr, "voland-cli: unknown backend %s\n", name); return EXIT_USAGE; }
+    } else if (!strcmp(argv[i], "--jit-dump") && has_value) {
+      jit_set_dump_directory(argv[++i]);
+    } else if (!strcmp(argv[i], "--jit-threshold") && has_value) {
+      jit_set_hot_threshold((uint32_t)strtoul(argv[++i], NULL, 0));
     } else if (!strcmp(argv[i], "--budget") && has_value) {
       budget = strtoull(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--max-slices") && has_value) {

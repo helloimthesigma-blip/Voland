@@ -34,4 +34,10 @@ typedef struct Jit_Stats {
 } Jit_Stats;
 const Jit_Stats *jit_stats(void);
 
+/* Interpreted executions of a block before it is compiled. */
+void jit_set_hot_threshold(uint32_t executions);
+
+/* Diagnostics: write every compiled module to DIR/<pc>.wasm (NULL: off). */
+void jit_set_dump_directory(const char *directory);
+
 #endif /* SWITCH_CPU_BACKENDS_JIT_JIT_H */

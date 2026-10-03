@@ -27,6 +27,7 @@
  */
 #include "cpu/backends/jit/jit.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 
 #include "common/assert.h"
@@ -73,6 +74,19 @@ static uint32_t g_hot_threshold = JIT_DEFAULT_HOT_THRESHOLD;
 static Jit_Stats g_stats;
 
 void jit_set_hot_threshold(uint32_t executions) { g_hot_threshold = executions ? executions : 1u; }
+
+static const char *g_dump_directory;
+void jit_set_dump_directory(const char *directory) { g_dump_directory = directory; }
+
+#define DUMP_PATH_BYTES 512u
+static void dump_module(uint64_t pc, const uint8_t *bytes, uint32_t length) {
+  char path[DUMP_PATH_BYTES];
+  snprintf(path, sizeof(path), "%s/%010llx.wasm", g_dump_directory, (unsigned long long)pc);
+  FILE *f = fopen(path, "wb");
+  if (!f) return;
+  fwrite(bytes, 1, length, f);
+  fclose(f);
+}
 const Jit_Stats *jit_stats(void) { return &g_stats; }
 
 /* ------------------------------------------------------------------ */
@@ -181,6 +195,7 @@ static void compile(const Interp_State *s, uint64_t pc, uint64_t generation) {
     g_stats.compile_failures++;
     return;
   }
+  if (g_dump_directory) dump_module(pc, g_module, compiled.module_bytes);
   const uint64_t function = install(g_module, compiled.module_bytes);
   if (!function) {
     g_stats.compile_failures++;

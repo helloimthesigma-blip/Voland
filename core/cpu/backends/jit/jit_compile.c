@@ -61,13 +61,16 @@ enum {
   L_HREST = 47, /* ...the instructions pre-counted in L_CYC but not run, from it on */
   L_HNEXT = 48, /* $helper: the PC to resume at */
   L_HNEXTLEN = 49, /* ...and that region block's length */
-  L_LAST_I64 = 49,
-  L_NZCV = 50,
-  L_STATUS = 51,
-  L_IDX = 52,    /* the region target to dispatch to */
-  L_HINSN = 53,  /* the handlers' instruction word */
-  L_RESUME = 54, /* $helper: the region block to resume in */
-  L_LAST_I32 = 54,
+  L_FA = 50,   /* lazy flags: AddWithCarry's operands and result, width-masked */
+  L_FB = 51,
+  L_FR = 52,
+  L_LAST_I64 = 52,
+  L_NZCV = 53,
+  L_STATUS = 54,
+  L_IDX = 55,    /* the region target to dispatch to */
+  L_HINSN = 56,  /* the handlers' instruction word */
+  L_RESUME = 57, /* $helper: the region block to resume in */
+  L_LAST_I32 = 57,
 };
 #define I64_LOCALS (L_LAST_I64 - L_STATE)
 #define I32_LOCALS (L_LAST_I32 - L_LAST_I64)
@@ -133,8 +136,24 @@ enum {
 
 typedef struct Region_Block {
   uint64_t pc;
-  uint32_t length; /* instructions */
+  uint32_t length;  /* instructions */
+  bool needs_flags; /* may observe NZCV before writing it: entering edges materialize */
 } Region_Block;
+
+typedef enum Carry { CARRY_ZERO, CARRY_ONE, CARRY_FLAG } Carry;
+
+/* Lazy flags: after ADDS/SUBS/ANDS & co. only the operands are kept
+ * (L_FA/L_FB/L_FR); readers right after them test the operands directly
+ * (CMP + B.cond is two compares, not a 40-op NZCV build), and NZCV is
+ * built only where it can be observed - exits, the interpreter, and
+ * edges into region blocks that may read it before writing it. */
+typedef enum Flag_Kind {
+  FLAGS_LIVE,  /* L_NZCV holds the flags */
+  FLAGS_ADD,   /* AddWithCarry(L_FA, L_FB, flag_carry) = L_FR */
+  FLAGS_LOGIC, /* N and Z of L_FR; C = V = 0 */
+} Flag_Kind;
+
+typedef enum Flag_Event { FLAG_EVENT_NONE, FLAG_EVENT_READ, FLAG_EVENT_WRITE } Flag_Event;
 
 typedef struct Ctx {
   Wasm_Buf *b;
@@ -149,6 +168,10 @@ typedef struct Ctx {
   const uint32_t *page_code;      /* its instruction words */
   uint32_t block_len;             /* the current block's length (final pass) */
   bool uses_helper;               /* some block calls the shared $helper */
+  Flag_Kind flag_kind;            /* lazy flags, at this point of the block */
+  bool flag_sf;
+  Carry flag_carry;
+  Flag_Event flag_event;          /* the block's first flags access */
   uint32_t index;                 /* the current instruction's index in its block */
   uint64_t pc;
   uint32_t insn;
@@ -273,13 +296,29 @@ static void set_xsp(Ctx *c, uint32_t r) {
   c->written |= MASK_SP;
   lset(c, L_SP);
 }
+static void flags_observed(Ctx *c) {
+  if (c->flag_event == FLAG_EVENT_NONE) c->flag_event = FLAG_EVENT_READ;
+}
+static void flags_written(Ctx *c) {
+  if (c->flag_event == FLAG_EVENT_NONE) c->flag_event = FLAG_EVENT_WRITE;
+  c->used |= MASK_NZCV;
+  c->written |= MASK_NZCV;
+}
+static void emit_materialize(Ctx *c);
+static void materialize(Ctx *c) {
+  emit_materialize(c);
+  c->flag_kind = FLAGS_LIVE;
+}
+/* NZCV as an i32 (materialized first if lazy). */
 static void load_flags(Ctx *c) {
+  flags_observed(c);
+  if (c->flag_kind != FLAGS_LIVE) materialize(c);
   c->used |= MASK_NZCV;
   lget(c, L_NZCV);
 }
 static void store_flags(Ctx *c) {
-  c->used |= MASK_NZCV;
-  c->written |= MASK_NZCV;
+  flags_written(c);
+  c->flag_kind = FLAGS_LIVE;
   lset(c, L_NZCV);
 }
 
@@ -358,6 +397,8 @@ static void call_interpreter(Ctx *c) {
  * accesses the inline softmmu and the memory helpers cannot complete -
  * there the interpreter raises the fault exactly as it would have. */
 static void leave_via_interpreter(Ctx *c) {
+  flags_observed(c);
+  emit_materialize(c);
   i64c(c, c->pc);
   lset(c, L_HPC);
   i32c(c, c->insn);
@@ -370,6 +411,8 @@ static void leave_via_interpreter(Ctx *c) {
 /* Leave the function for the PC on the stack (computed targets, calls). */
 static void exit_to_stack(Ctx *c) {
   lset(c, L_NPC);
+  flags_observed(c);
+  emit_materialize(c);
   br(c, LEVEL_EXIT);
 }
 
@@ -404,6 +447,8 @@ static void helper_and_continue(Ctx *c) {
     leave_via_interpreter(c);
     return;
   }
+  flags_observed(c);
+  emit_materialize(c);
   i64c(c, c->pc);
   lset(c, L_HPC);
   i32c(c, c->insn);
@@ -422,7 +467,10 @@ static void helper_and_continue(Ctx *c) {
 /* Control goes to `target`, a direct branch: within the region if it is
  * a region block and its instructions fit the budget, else out. */
 static void branch_to(Ctx *c, uint64_t target) {
-  if (c->discover) (void)add_block(c, target);
+  if (c->discover) {
+    (void)add_block(c, target);
+    flags_observed(c); /* conservatively: the target may read them */
+  }
   const int32_t m = c->discover ? -1 : find_block(c, target);
   if (m < 0) {
     i64c(c, target);
@@ -446,6 +494,7 @@ static void branch_to(Ctx *c, uint64_t target) {
     i32c(c, (uint32_t)m);
     lset(c, L_IDX);
   }
+  if (c->blocks[m].needs_flags) emit_materialize(c);
   br(c, LEVEL_DISPATCH);
 }
 
@@ -453,17 +502,87 @@ static void branch_to(Ctx *c, uint64_t target) {
 /* Flags and conditions.                                               */
 /* ------------------------------------------------------------------ */
 
-typedef enum Carry { CARRY_ZERO, CARRY_ONE, CARRY_FLAG } Carry;
-
 #define NZCV_SHIFT_N 31u
 #define NZCV_SHIFT_Z 30u
 #define NZCV_SHIFT_C 29u
 #define NZCV_SHIFT_V 28u
 
+static uint64_t msb_of(bool sf) { return sf ? 63u : 31u; }
+
+/* (L_FR >> msb) as an i32: N. */
+static void emit_flag_n(Ctx *c) {
+  lget(c, L_FR);
+  i64c(c, msb_of(c->flag_sf));
+  op(c, WASM_OP_I64_SHR_U);
+  op(c, WASM_OP_I32_WRAP_I64);
+}
+/* ((a ^ r) & (y ^ r)) >> msb as an i32: V of AddWithCarry. */
+static void emit_flag_v(Ctx *c) {
+  lget(c, L_FA);
+  lget(c, L_FR);
+  op(c, WASM_OP_I64_XOR);
+  lget(c, L_FB);
+  lget(c, L_FR);
+  op(c, WASM_OP_I64_XOR);
+  op(c, WASM_OP_I64_AND);
+  i64c(c, msb_of(c->flag_sf));
+  op(c, WASM_OP_I64_SHR_U);
+  op(c, WASM_OP_I32_WRAP_I64);
+}
+/* C of AddWithCarry(L_FA, L_FB, flag_carry) as an i32. */
+static void emit_flag_c(Ctx *c) {
+  if (!c->flag_sf) { /* the 33-bit sum's bit 32 */
+    lget(c, L_FA);
+    lget(c, L_FB);
+    op(c, WASM_OP_I64_ADD);
+    if (c->flag_carry == CARRY_ONE) {
+      i64c(c, 1);
+      op(c, WASM_OP_I64_ADD);
+    }
+    i64c(c, 32);
+    op(c, WASM_OP_I64_SHR_U);
+    op(c, WASM_OP_I32_WRAP_I64);
+    return;
+  }
+  lget(c, L_FR);
+  lget(c, L_FA);
+  op(c, c->flag_carry == CARRY_ONE ? WASM_OP_I64_LE_U : WASM_OP_I64_LT_U);
+}
+
+/* L_NZCV from the lazy flags (no change to the compile-time state, so it
+ * can sit on one arm of a branch). */
+static void emit_materialize(Ctx *c) {
+  if (c->flag_kind == FLAGS_LIVE) return;
+  emit_flag_n(c);
+  i32c(c, NZCV_SHIFT_N);
+  op(c, WASM_OP_I32_SHL);
+  lget(c, L_FR);
+  op(c, WASM_OP_I64_EQZ);
+  i32c(c, NZCV_SHIFT_Z);
+  op(c, WASM_OP_I32_SHL);
+  op(c, WASM_OP_I32_OR);
+  if (c->flag_kind == FLAGS_ADD) {
+    emit_flag_c(c);
+    i32c(c, NZCV_SHIFT_C);
+    op(c, WASM_OP_I32_SHL);
+    op(c, WASM_OP_I32_OR);
+    emit_flag_v(c);
+    i32c(c, NZCV_SHIFT_V);
+    op(c, WASM_OP_I32_SHL);
+    op(c, WASM_OP_I32_OR);
+  }
+  lset(c, L_NZCV);
+}
+
+typedef enum Flags_Set {
+  FLAGS_UNCHANGED,
+  FLAGS_SET_LAZY,  /* record the operands (the usual case) */
+  FLAGS_SET_EAGER, /* build NZCV now (on one arm of a branch; carry-in from NZCV) */
+} Flags_Set;
+
 /* AddWithCarry(T0, T1, carry): T0 and T1 hold width-masked operands; the
- * width-masked result goes to T2, and NZCV is set when `set_flags`. */
-static void emit_add_with_carry(Ctx *c, bool sf, Carry carry, bool set_flags) {
-  const uint64_t msb = sf ? 63u : 31u;
+ * width-masked result goes to T2. */
+static void emit_add_with_carry(Ctx *c, bool sf, Carry carry, Flags_Set flags) {
   lget(c, L_T0);
   lget(c, L_T1);
   op(c, WASM_OP_I64_ADD);
@@ -486,88 +605,85 @@ static void emit_add_with_carry(Ctx *c, bool sf, Carry carry, bool set_flags) {
     mask32(c);
     lset(c, L_T2);
   }
-  if (!set_flags) return;
-
-  /* C */
-  if (!sf) {
-    lget(c, L_T3);
-    i64c(c, 32);
+  if (flags == FLAGS_UNCHANGED) return;
+  if (carry == CARRY_FLAG) {
+    /* ADCS/SBCS: C = carry out of a + y + C_in, which the lazy form
+     * cannot recompute after NZCV changes - build NZCV here. */
+    const uint64_t msb = msb_of(sf);
+    if (!sf) {
+      lget(c, L_T3);
+      i64c(c, 32);
+      op(c, WASM_OP_I64_SHR_U);
+      op(c, WASM_OP_I32_WRAP_I64);
+    } else {
+      lget(c, L_T2);
+      lget(c, L_T0);
+      op(c, WASM_OP_I64_LT_U);
+      load_flags(c);
+      i32c(c, NZCV_SHIFT_C);
+      op(c, WASM_OP_I32_SHR_U);
+      lget(c, L_T2);
+      lget(c, L_T0);
+      op(c, WASM_OP_I64_EQ);
+      op(c, WASM_OP_I32_AND);
+      op(c, WASM_OP_I32_OR);
+      i32c(c, 1);
+      op(c, WASM_OP_I32_AND);
+    }
+    i32c(c, NZCV_SHIFT_C);
+    op(c, WASM_OP_I32_SHL);
+    lget(c, L_T0);
+    lget(c, L_T2);
+    op(c, WASM_OP_I64_XOR);
+    lget(c, L_T1);
+    lget(c, L_T2);
+    op(c, WASM_OP_I64_XOR);
+    op(c, WASM_OP_I64_AND);
+    i64c(c, msb);
     op(c, WASM_OP_I64_SHR_U);
     op(c, WASM_OP_I32_WRAP_I64);
-  } else if (carry == CARRY_ZERO) {
-    lget(c, L_T2);
-    lget(c, L_T0);
-    op(c, WASM_OP_I64_LT_U);
-  } else if (carry == CARRY_ONE) {
-    lget(c, L_T2);
-    lget(c, L_T0);
-    op(c, WASM_OP_I64_LE_U);
-  } else {
-    lget(c, L_T2);
-    lget(c, L_T0);
-    op(c, WASM_OP_I64_LT_U);
-    load_flags(c);
-    i32c(c, NZCV_SHIFT_C);
-    op(c, WASM_OP_I32_SHR_U);
-    lget(c, L_T2);
-    lget(c, L_T0);
-    op(c, WASM_OP_I64_EQ);
-    op(c, WASM_OP_I32_AND);
+    i32c(c, NZCV_SHIFT_V);
+    op(c, WASM_OP_I32_SHL);
     op(c, WASM_OP_I32_OR);
-    i32c(c, 1);
-    op(c, WASM_OP_I32_AND);
+    lget(c, L_T2);
+    i64c(c, msb);
+    op(c, WASM_OP_I64_SHR_U);
+    op(c, WASM_OP_I32_WRAP_I64);
+    i32c(c, NZCV_SHIFT_N);
+    op(c, WASM_OP_I32_SHL);
+    op(c, WASM_OP_I32_OR);
+    lget(c, L_T2);
+    op(c, WASM_OP_I64_EQZ);
+    i32c(c, NZCV_SHIFT_Z);
+    op(c, WASM_OP_I32_SHL);
+    op(c, WASM_OP_I32_OR);
+    store_flags(c);
+    return;
   }
-  i32c(c, NZCV_SHIFT_C);
-  op(c, WASM_OP_I32_SHL);
-  /* V = ((a ^ r) & (y ^ r)) >> msb */
   lget(c, L_T0);
-  lget(c, L_T2);
-  op(c, WASM_OP_I64_XOR);
+  lset(c, L_FA);
   lget(c, L_T1);
+  lset(c, L_FB);
   lget(c, L_T2);
-  op(c, WASM_OP_I64_XOR);
-  op(c, WASM_OP_I64_AND);
-  i64c(c, msb);
-  op(c, WASM_OP_I64_SHR_U);
-  op(c, WASM_OP_I32_WRAP_I64);
-  i32c(c, NZCV_SHIFT_V);
-  op(c, WASM_OP_I32_SHL);
-  op(c, WASM_OP_I32_OR);
-  /* N */
-  lget(c, L_T2);
-  i64c(c, msb);
-  op(c, WASM_OP_I64_SHR_U);
-  op(c, WASM_OP_I32_WRAP_I64);
-  i32c(c, NZCV_SHIFT_N);
-  op(c, WASM_OP_I32_SHL);
-  op(c, WASM_OP_I32_OR);
-  /* Z */
-  lget(c, L_T2);
-  op(c, WASM_OP_I64_EQZ);
-  i32c(c, NZCV_SHIFT_Z);
-  op(c, WASM_OP_I32_SHL);
-  op(c, WASM_OP_I32_OR);
-  store_flags(c);
+  lset(c, L_FR);
+  flags_written(c);
+  c->flag_kind = FLAGS_ADD;
+  c->flag_sf = sf;
+  c->flag_carry = carry;
+  if (flags == FLAGS_SET_EAGER) materialize(c);
 }
 
 /* Logical-op flags from the width-masked result in T2: N, Z; C = V = 0. */
-static void emit_logic_flags(Ctx *c, bool sf) {
+static void set_logic_flags(Ctx *c, bool sf) {
   lget(c, L_T2);
-  i64c(c, sf ? 63u : 31u);
-  op(c, WASM_OP_I64_SHR_U);
-  op(c, WASM_OP_I32_WRAP_I64);
-  i32c(c, NZCV_SHIFT_N);
-  op(c, WASM_OP_I32_SHL);
-  lget(c, L_T2);
-  op(c, WASM_OP_I64_EQZ);
-  i32c(c, NZCV_SHIFT_Z);
-  op(c, WASM_OP_I32_SHL);
-  op(c, WASM_OP_I32_OR);
-  store_flags(c);
+  lset(c, L_FR);
+  flags_written(c);
+  c->flag_kind = FLAGS_LOGIC;
+  c->flag_sf = sf;
 }
 
-/* ConditionHolds(cond) as a truthy i32 (non-zero = holds). */
-static void emit_condition(Ctx *c, uint32_t cond) {
+/* NZCV-based ConditionHolds(cond) as a truthy i32, before inversion. */
+static void emit_condition_nzcv(Ctx *c, uint32_t cond) {
   switch (cond >> 1) {
   case 0: /* EQ: Z */
     load_flags(c);
@@ -596,8 +712,7 @@ static void emit_condition(Ctx *c, uint32_t cond) {
     i32c(c, CPU_PSTATE_C);
     op(c, WASM_OP_I32_EQ);
     break;
-  case 5: /* GE: N == V, i.e. ((nzcv << 3) ^ nzcv) has bit 31 clear */
-  case 6: /* GT: N == V && !Z */
+  default: /* GE: N == V, i.e. ((nzcv << 3) ^ nzcv) has bit 31 clear; GT: also !Z */
     load_flags(c);
     i32c(c, NZCV_SHIFT_N - NZCV_SHIFT_V);
     op(c, WASM_OP_I32_SHL);
@@ -613,10 +728,66 @@ static void emit_condition(Ctx *c, uint32_t cond) {
     }
     op(c, WASM_OP_I32_EQZ);
     break;
-  default: /* AL, NV */
+  }
+}
+
+/* L_FA, then b = ~L_FB (the subtrahend), signed in the width if `sign`. */
+static void emit_sub_operands(Ctx *c, bool sign) {
+  lget(c, L_FA);
+  if (sign && !c->flag_sf) op(c, WASM_OP_I64_EXTEND32_S);
+  lget(c, L_FB);
+  i64c(c, width_mask_of(c->flag_sf));
+  op(c, WASM_OP_I64_XOR);
+  if (sign && !c->flag_sf) op(c, WASM_OP_I64_EXTEND32_S);
+}
+
+/* L_FR as a signed value in the width. */
+static void emit_result_signed(Ctx *c) {
+  lget(c, L_FR);
+  if (!c->flag_sf) op(c, WASM_OP_I64_EXTEND32_S);
+}
+
+/* ConditionHolds(cond) straight from lazy SUBS/CMP operands; false if
+ * this kind cannot. Before inversion. */
+static bool emit_condition_fused(Ctx *c, uint32_t cond) {
+  const uint32_t base = cond >> 1;
+  if (c->flag_kind == FLAGS_ADD && c->flag_carry == CARRY_ONE) { /* SUBS: a - b */
+    switch (base) {
+    case 0: lget(c, L_FR); op(c, WASM_OP_I64_EQZ); return true;                      /* EQ */
+    case 1: emit_sub_operands(c, false); op(c, WASM_OP_I64_GE_U); return true;       /* CS: a >= b */
+    case 2: emit_flag_n(c); return true;                                              /* MI */
+    case 3: emit_flag_v(c); return true;                                              /* VS */
+    case 4: emit_sub_operands(c, false); op(c, WASM_OP_I64_GT_U); return true;       /* HI: a > b */
+    case 5: emit_sub_operands(c, true); op(c, WASM_OP_I64_GE_S); return true;        /* GE */
+    default: emit_sub_operands(c, true); op(c, WASM_OP_I64_GT_S); return true;       /* GT */
+    }
+  }
+  if (c->flag_kind == FLAGS_LOGIC) { /* C = V = 0 */
+    switch (base) {
+    case 0: lget(c, L_FR); op(c, WASM_OP_I64_EQZ); return true; /* EQ */
+    case 1: case 3: case 4: i32c(c, 0); return true;            /* CS, VS, HI */
+    case 2: emit_flag_n(c); return true;                         /* MI */
+    case 5: emit_flag_n(c); op(c, WASM_OP_I32_EQZ); return true; /* GE: !N */
+    default: emit_result_signed(c); i64c(c, 0); op(c, WASM_OP_I64_GT_S); return true; /* GT: r > 0 */
+    }
+  }
+  if (c->flag_kind == FLAGS_ADD) { /* ADDS/CMN: only the result's own flags */
+    switch (base) {
+    case 0: lget(c, L_FR); op(c, WASM_OP_I64_EQZ); return true;
+    case 2: emit_flag_n(c); return true;
+    default: return false;
+    }
+  }
+  return false;
+}
+
+/* ConditionHolds(cond) as a truthy i32 (non-zero = holds). */
+static void emit_condition(Ctx *c, uint32_t cond) {
+  if ((cond >> 1) == 7) { /* AL, NV */
     i32c(c, 1);
     return;
   }
+  if (!emit_condition_fused(c, cond)) emit_condition_nzcv(c, cond);
   if (cond & 1u) op(c, WASM_OP_I32_EQZ);
 }
 
@@ -707,7 +878,7 @@ static bool c_add_sub_immediate(Ctx *c, uint32_t insn) {
   lset(c, L_T0);
   i64c(c, sub ? (~imm & width_mask_of(sf)) : imm);
   lset(c, L_T1);
-  emit_add_with_carry(c, sf, sub ? CARRY_ONE : CARRY_ZERO, true);
+  emit_add_with_carry(c, sf, sub ? CARRY_ONE : CARRY_ZERO, FLAGS_SET_LAZY);
   lget(c, L_T2);
   set_x(c, rd);
   return true;
@@ -725,7 +896,7 @@ static bool c_logical_immediate(Ctx *c, uint32_t insn) {
   op(c, ops[opc]);
   width(c, sf);
   lset(c, L_T2);
-  if (opc == 3) emit_logic_flags(c, sf);
+  if (opc == 3) set_logic_flags(c, sf);
   lget(c, L_T2);
   if (opc == 3) set_x(c, bits(insn, 4, 0));
   else set_xsp(c, bits(insn, 4, 0));
@@ -849,7 +1020,7 @@ static bool c_logical_shifted(Ctx *c, uint32_t insn) {
   }
   op(c, ops[opc]);
   lset(c, L_T2);
-  if (opc == 3) emit_logic_flags(c, sf);
+  if (opc == 3) set_logic_flags(c, sf);
   lget(c, L_T2);
   set_x(c, bits(insn, 4, 0));
   return true;
@@ -867,7 +1038,7 @@ static bool c_add_sub_shifted(Ctx *c, uint32_t insn) {
     op(c, WASM_OP_I64_XOR);
   }
   lset(c, L_T1);
-  emit_add_with_carry(c, sf, sub ? CARRY_ONE : CARRY_ZERO, set_flags);
+  emit_add_with_carry(c, sf, sub ? CARRY_ONE : CARRY_ZERO, set_flags ? FLAGS_SET_LAZY : FLAGS_UNCHANGED);
   lget(c, L_T2);
   set_x(c, bits(insn, 4, 0));
   return true;
@@ -892,7 +1063,7 @@ static bool c_add_sub_extended(Ctx *c, uint32_t insn) {
     op(c, WASM_OP_I64_XOR);
   }
   lset(c, L_T1);
-  emit_add_with_carry(c, sf, sub ? CARRY_ONE : CARRY_ZERO, set_flags);
+  emit_add_with_carry(c, sf, sub ? CARRY_ONE : CARRY_ZERO, set_flags ? FLAGS_SET_LAZY : FLAGS_UNCHANGED);
   lget(c, L_T2);
   if (set_flags) set_x(c, bits(insn, 4, 0));
   else set_xsp(c, bits(insn, 4, 0));
@@ -910,7 +1081,7 @@ static bool c_add_sub_carry(Ctx *c, uint32_t insn) {
     op(c, WASM_OP_I64_XOR);
   }
   lset(c, L_T1);
-  emit_add_with_carry(c, sf, CARRY_FLAG, set_flags);
+  emit_add_with_carry(c, sf, CARRY_FLAG, set_flags ? FLAGS_SET_EAGER : FLAGS_UNCHANGED);
   lget(c, L_T2);
   set_x(c, bits(insn, 4, 0));
   return true;
@@ -930,7 +1101,7 @@ static bool c_conditional_compare(Ctx *c, uint32_t insn) {
     op(c, WASM_OP_I64_XOR);
   }
   lset(c, L_T1);
-  emit_add_with_carry(c, sf, sub ? CARRY_ONE : CARRY_ZERO, true);
+  emit_add_with_carry(c, sf, sub ? CARRY_ONE : CARRY_ZERO, FLAGS_SET_EAGER);
   else_(c);
   i32c(c, bits(insn, 3, 0) << NZCV_SHIFT_V);
   store_flags(c);
@@ -1652,6 +1823,8 @@ static uint32_t compile_block_code(Ctx *c, uint32_t b) {
   const uint32_t count = available < c->max_block_insns ? available : c->max_block_insns;
   c->block_len = c->blocks[b].length;
   c->pc = start;
+  c->flag_kind = FLAGS_LIVE; /* entering edges materialized them, or the block writes them first */
+  c->flag_event = FLAG_EVENT_NONE;
   for (uint32_t i = 0; i < count; i++, c->pc += INSN_BYTES) {
     c->insn = code[i];
     c->index = i;
@@ -1765,12 +1938,17 @@ static void emit_function(Ctx *c) {
   for (uint32_t b = 0; b < c->block_count; b++) {
     if (targets > 1u) end_(c);
     const uint32_t length = compile_block_code(c, b);
-    if (c->discover) c->blocks[b].length = length;
+    if (c->discover) {
+      c->blocks[b].length = length;
+      c->blocks[b].needs_flags = c->flag_event != FLAG_EVENT_WRITE;
+    }
   }
   if (helper) {
     /* $helper: the instruction in L_HPC/L_HINSN (its block's last,
-     * pre-counted) through the interpreter, then on to L_RESUME. */
+     * pre-counted) through the interpreter, then on to L_RESUME. Every
+     * call site materialized the flags, and the reload brings them back. */
     end_(c);
+    c->flag_kind = FLAGS_LIVE;
     spill(c);
     i64c(c, 1);
     flush_cycles(c);

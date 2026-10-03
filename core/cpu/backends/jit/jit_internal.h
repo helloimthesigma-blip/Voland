@@ -110,7 +110,5 @@ typedef struct Jit_Compiled {
 bool jit_compile_block(uint64_t pc, const uint32_t *page_code, uint64_t memory_pages, const Jit_Link *link,
                        uint8_t *out, uint32_t capacity, Jit_Compiled *result);
 
-/* Tunables (jit.c); statistics are in jit.h. */
-void jit_set_hot_threshold(uint32_t executions);
 
 #endif /* SWITCH_CPU_BACKENDS_JIT_JIT_INTERNAL_H */

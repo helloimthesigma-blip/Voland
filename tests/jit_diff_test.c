@@ -184,6 +184,29 @@ static uint32_t gen_simd_ldst(void) {
          pick(32);
 }
 
+/* Flag setters and readers, for the setter-then-reader idiom (lazy flags). */
+static uint32_t gen_flag_setter(void) {
+  if (pick(4) == 0) { /* SUBS/ADDS rd, rn, rn: equal operands */
+    const uint32_t r = reg();
+    return (pick(2) << 31) | (pick(2) << 30) | (1u << 29) | (0x0Bu << 24) | (r << 16) | (r << 5) | dst();
+  }
+  switch (pick(4)) {
+  case 0: return (gen_add_sub_imm() | (1u << 29));                      /* ADDS/SUBS imm */
+  case 1: return (gen_add_sub_shifted() | (1u << 29)) & ~(3u << 22);    /* ADDS/SUBS reg, LSL */
+  case 2: return gen_logical_shifted() | (3u << 29);                     /* ANDS/BICS */
+  default: return (gen_add_sub_extended() | (1u << 29)) & ~(3u << 22);  /* ADDS/SUBS ext */
+  }
+}
+static uint32_t gen_flag_reader(void) {
+  switch (pick(6)) {
+  case 0: case 1: return (0x54u << 24) | (((uint32_t)small_branch() & 0x7FFFFu) << 5) | pick(16); /* B.cond */
+  case 2: return gen_cond_select() & ~(1u << 29);
+  case 3: return gen_cond_compare() | (1u << 29);
+  case 4: return gen_add_sub_carry();
+  default: return 0xD53B4200u | dst(); /* MRS xN, NZCV */
+  }
+}
+
 static uint32_t gen(void) {
   switch (pick(24)) {
   case 0: return gen_add_sub_imm();
@@ -259,14 +282,21 @@ static void run_case(uint32_t iteration) {
   static uint32_t code[VMM_PAGE_SIZE / 4];
   for (uint32_t i = 0; i < VMM_PAGE_SIZE / 4; i++) code[i] = SVC_ZERO;
   const uint32_t length = 1u + pick(STREAM_MAX);
-  for (uint32_t i = 0; i < length; i++) code[i] = gen();
+  for (uint32_t i = 0; i < length; i++) {
+    if (i + 1u < length && pick(4) == 0) {
+      code[i++] = gen_flag_setter();
+      code[i] = gen_flag_reader();
+    } else {
+      code[i] = gen();
+    }
+  }
   /* Some streams loop: a backward branch at the end makes blocks hot. */
   if (pick(2)) code[length] = (0x05u << 26) | ((uint32_t)(-(int32_t)pick(length + 1u)) & 0x3FFFFFFu);
   CHECK_OK(vmm_write_physical(g_vmm, CODE_PA, code, sizeof(code)));
   g_jit_cpu->clear_cache(g_jit);
 
   uint64_t x[31];
-  for (int i = 0; i < 31; i++) x[i] = pick(4) == 0 ? rnd() : rnd() & 0xFFFF;
+  for (int i = 0; i < 31; i++) x[i] = pick(4) == 0 ? rnd() : pick(2) ? rnd() & 0xFFFF : pick(4); /* small: equalities */
   for (int i = 20; i < 24; i++) x[i] = DATA_GVA + 0x200u + pick(DATA_BYTES - 0x400u); /* bases */
   for (int i = 24; i < 28; i++) x[i] = pick(64) - 16u;                                 /* indexes */
   x[28] = CODE_GVA + 4u * pick(length + 1u);                                         /* BR target */
