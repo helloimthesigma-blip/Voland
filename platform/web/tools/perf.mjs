@@ -182,6 +182,29 @@ function summariseProfile(profile, top) {
     .map(([name, us]) => `${((100 * us) / total).toFixed(1).padStart(5)}%  ${(us / 1000).toFixed(0).padStart(7)} ms  ${name}`);
 }
 
+/* Self time by kind of code: the core module, wasm compiled at run time
+ * (the JIT's modules), JS, and V8's own buckets. */
+function categoriseProfile(profile) {
+  const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+  const totals = new Map();
+  let total = 0;
+  for (let i = 0; i < profile.samples.length; i++) {
+    const frame = byId.get(profile.samples[i])?.callFrame;
+    const us = profile.timeDeltas[i] ?? 0;
+    const name = frame?.functionName ?? "";
+    const url = frame?.url ?? "";
+    const kind = /^\((idle|program|garbage collector)\)$/.test(name) ? name
+      : url.endsWith("switch_core.wasm") ? "core wasm"
+      : url.startsWith("wasm://") || (url === "" && /^(\$|wasm-function)/.test(name)) ? "run-time wasm (JIT modules)"
+      : url.endsWith("switch_core.js") ? "core JS glue"
+      : "other JS";
+    totals.set(kind, (totals.get(kind) ?? 0) + us);
+    total += us;
+  }
+  return [...totals.entries()].sort((a, b) => b[1] - a[1])
+    .map(([kind, us]) => `${((100 * us) / total).toFixed(1).padStart(5)}%  ${kind}`);
+}
+
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
   if (opts.build) await run("npx", ["vite", "build", "--logLevel", "warn"]);
@@ -294,6 +317,8 @@ async function main() {
         const file = join(opts.outDir, `cpu-worker-${Date.now()}.cpuprofile`);
         writeFileSync(file, JSON.stringify(profile));
         console.log(`\nCPU worker profile (${opts.profile} s, self time), saved to ${file}:`);
+        for (const line of categoriseProfile(profile)) console.log(`  ${line}`);
+        console.log("");
         for (const line of summariseProfile(profile, 30)) console.log(`  ${line}`);
       } finally {
         cdp.close();
