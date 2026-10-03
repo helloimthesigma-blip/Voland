@@ -19,6 +19,8 @@ const HARDWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-angle=metal", "--ena
 
 export default defineConfig({
   testDir: "./e2e",
+  /* Needs the dev server's harness page: playwright.video.config.ts runs it. */
+  testIgnore: /video\.spec\.ts/,
   timeout: 30_000,
   fullyParallel: true,
   forbidOnly: !!process.env.CI,

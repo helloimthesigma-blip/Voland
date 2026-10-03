@@ -1,4 +1,5 @@
 #include "cpu/cpu.h"
+#include "cpu/backends/interpreter/interp_internal.h"
 #include "common/log.h"
 
 const CPU_Backend* cpu_get_active_backend(void) {
@@ -15,5 +16,10 @@ const CPU_Backend* cpu_get_active_backend(void) {
 
 static bool g_multicore;
 
-void cpu_set_multicore(bool on) { g_multicore = on; }
+/* Code compiled for one mode must not run in the other (the JIT's
+ * exclusives and fences): a mode change retires decoded/compiled code. */
+void cpu_set_multicore(bool on) {
+  if (on != g_multicore) interp_predecode_flush();
+  g_multicore = on;
+}
 bool cpu_multicore(void) { return g_multicore; }

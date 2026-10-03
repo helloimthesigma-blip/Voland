@@ -29,8 +29,10 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "common/assert.h"
+#include "common/log.h"
 #include "cpu/backends/jit/jit_internal.h"
 #include "cpu/backends/jit/jit_wasm.h"
 
@@ -41,8 +43,13 @@
 
 #define JIT_CACHE_ENTRIES (1u << JIT_CACHE_BITS)
 #define JIT_HIT_COUNTERS (1u << 16)
-#define JIT_DEFAULT_HOT_THRESHOLD 16u
+/* Interpreted executions before a block is compiled. Measured on
+ * Silksong (docs/handoff/JIT_STATUS.md): 16 compiled ~2.5x the modules of
+ * 256 for the same guest speed, and module compilation is the JIT's
+ * largest overhead while games load. */
+#define JIT_DEFAULT_HOT_THRESHOLD 256u
 #define JIT_MODULE_BYTES (512u * 1024u)
+#define JIT_RECENT_BLOCKS 64u
 
 #define CODE_HASH_OFFSET 0xCBF29CE484222325ull /* FNV-1a 64 */
 #define CODE_HASH_PRIME 0x100000001B3ull
@@ -79,13 +86,73 @@ typedef struct Jit_Thread {
    * entries validated in it (jit_compile.c, emit_chain). */
   uint64_t generation;
   uint8_t module[JIT_MODULE_BYTES];
+  /* The dispatcher's last block starts (bit 63: a compiled region was
+   * entered), for the crash report. */
+  uint64_t recent[JIT_RECENT_BLOCKS];
+  uint32_t recent_next;
 } Jit_Thread;
+
+#define JIT_RECENT_COMPILED (1ull << 63)
+
+static void note_block(Jit_Thread *t, uint64_t pc_and_flag) {
+  t->recent[t->recent_next] = pc_and_flag;
+  t->recent_next = (t->recent_next + 1u) % JIT_RECENT_BLOCKS;
+}
+
+/* A run ended in a fault or breakpoint: the registers and how the
+ * dispatcher got there (chained regions do not pass through it, so a
+ * compiled entry may have run through several regions). */
+static void report_stop(const Jit_Thread *t, const Interp_State *s, CPU_ExitReason reason) {
+  log_error("[jit] %s at pc=0x%010llx (fault address 0x%010llx), sp=0x%010llx nzcv=%x",
+            reason == CPU_EXIT_FAULT ? "fault" : "breakpoint", (unsigned long long)s->regs.pc,
+            (unsigned long long)s->fault_address, (unsigned long long)s->regs.sp, s->regs.pstate >> 28);
+  for (uint32_t r = 0; r < 31u; r += 4u) {
+    log_error("[jit]   x%-2u %016llx %016llx %016llx %016llx", r, (unsigned long long)s->regs.x[r],
+              (unsigned long long)(r + 1u < 31u ? s->regs.x[r + 1u] : 0), (unsigned long long)(r + 2u < 31u ? s->regs.x[r + 2u] : 0),
+              (unsigned long long)(r + 3u < 31u ? s->regs.x[r + 3u] : 0));
+  }
+  char line[JIT_RECENT_BLOCKS * 24u];
+  uint32_t used = 0;
+  for (uint32_t i = 0; i < JIT_RECENT_BLOCKS; i++) {
+    const uint64_t v = t->recent[(t->recent_next + i) % JIT_RECENT_BLOCKS];
+    if (!v) continue;
+    used += (uint32_t)snprintf(line + used, sizeof(line) - used, " %s%llx", (v & JIT_RECENT_COMPILED) ? "*" : "",
+                               (unsigned long long)(v & ~JIT_RECENT_COMPILED));
+    if (used >= sizeof(line)) break;
+  }
+  log_error("[jit] recent block starts (oldest first, * = compiled region entered):%s", line);
+}
 
 static Jit_Thread g_main_thread;
 static uint32_t g_hot_threshold = JIT_DEFAULT_HOT_THRESHOLD;
 static Jit_Stats g_stats;
 
 void jit_set_hot_threshold(uint32_t executions) { g_hot_threshold = executions ? executions : 1u; }
+
+static bool g_hot_profile;
+void jit_set_hot_profile(bool enabled) { g_hot_profile = enabled; }
+
+void jit_print_hot_regions(uint32_t top) {
+  const Jit_Entry *g_cache = g_main_thread.cache; /* the first core's (the CLI runs one) */
+  static bool printed[JIT_CACHE_ENTRIES];
+  memset(printed, 0, sizeof(printed));
+  for (uint32_t n = 0; n < top; n++) {
+    uint32_t best = JIT_CACHE_ENTRIES;
+    uint64_t best_weight = 0;
+    for (uint32_t i = 0; i < JIT_CACHE_ENTRIES; i++) {
+      const uint64_t weight = g_cache[i].entries * g_cache[i].length;
+      if (g_cache[i].function && !printed[i] && weight > best_weight) {
+        best = i;
+        best_weight = weight;
+      }
+    }
+    if (best == JIT_CACHE_ENTRIES) return;
+    printed[best] = true;
+    fprintf(stderr, "  %010llx  %12llu entries  entry block %3u insns  region %4u words\n",
+            (unsigned long long)g_cache[best].pc, (unsigned long long)g_cache[best].entries, g_cache[best].length,
+            g_cache[best].code_words);
+  }
+}
 
 static const char *g_dump_directory;
 void jit_set_dump_directory(const char *directory) { g_dump_directory = directory; }
@@ -101,6 +168,21 @@ static void dump_module(uint64_t pc, const uint8_t *bytes, uint32_t length) {
 }
 const Jit_Stats *jit_stats(void) { return &g_stats; }
 
+/* The guest code a region was compiled from: DIR/<pc>.s, for an
+ * assembler + disassembler (".word" per instruction, the address in a
+ * comment). */
+static void dump_code(uint64_t pc, uint64_t start, const uint32_t *words, uint32_t count) {
+  char path[DUMP_PATH_BYTES];
+  snprintf(path, sizeof(path), "%s/%010llx.s", g_dump_directory, (unsigned long long)pc);
+  FILE *f = fopen(path, "w");
+  if (!f) return;
+  fprintf(f, "// region %llx, code from %llx\n", (unsigned long long)pc, (unsigned long long)start);
+  for (uint32_t i = 0; i < count; i++) {
+    fprintf(f, ".word 0x%08x // %llx\n", words[i], (unsigned long long)(start + 4u * i));
+  }
+  fclose(f);
+}
+
 /* ------------------------------------------------------------------ */
 /* Installing modules.                                                 */
 /* ------------------------------------------------------------------ */
@@ -114,8 +196,15 @@ EM_JS_DEPS(voland_jit, "$addFunction,$removeFunction")
 EM_JS(int64_t, jit_js_install,
       (const uint8_t *bytes, size_t length, void *interpret, void *read, void *store, void *write, void *simd), {
   try {
-    const start = Number(bytes);
-    const module = new WebAssembly.Module(HEAPU8.slice(start, start + Number(length)));
+    /* WebAssembly.Module refuses views of shared memory: copy into one
+     * reused, growing, non-shared buffer rather than a new one per module. */
+    const start = Number(bytes), size = Number(length);
+    if (!globalThis.volandJitBytes || globalThis.volandJitBytes.length < size) {
+      globalThis.volandJitBytes = new Uint8Array(Math.max(size, 65536) * 2);
+    }
+    const staging = globalThis.volandJitBytes.subarray(0, size);
+    staging.set(HEAPU8.subarray(start, start + size));
+    const module = new WebAssembly.Module(staging);
     const instance = new WebAssembly.Instance(module, {
       env: {
         memory: wasmMemory,
@@ -315,6 +404,7 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
   Jit_Link link;
   link.cache_address = (uint64_t)(uintptr_t)t->cache;
   link.generation_address = (uint64_t)(uintptr_t)&t->generation;
+  link.count_entries = g_hot_profile;
   Jit_Compiled compiled;
   compiler_lock();
   const bool built = jit_compile_block(pc, page_code, memory_pages(), &link, t->module, JIT_MODULE_BYTES, &compiled);
@@ -323,7 +413,11 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
     g_stats.compile_failures++;
     return;
   }
-  if (g_dump_directory) dump_module(pc, t->module, compiled.module_bytes);
+  if (g_dump_directory) {
+    dump_module(pc, t->module, compiled.module_bytes);
+    dump_code(pc, compiled.code_start, page_code + (compiled.code_start & VMM_PAGE_OFFSET_MASK) / sizeof(uint32_t),
+              compiled.code_words);
+  }
   const uint64_t function = install(t->module, compiled.module_bytes);
   if (!function) {
     g_stats.compile_failures++;
@@ -340,6 +434,8 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
   e->length = compiled.instructions;
   e->code_start = compiled.code_start;
   e->code_words = compiled.code_words;
+  e->entries = 0;
+  e->multicore = cpu_multicore();
   e->code_hash = code_hash(page_code + (compiled.code_start & VMM_PAGE_OFFSET_MASK) / sizeof(uint32_t),
                            compiled.code_words);
   g_stats.blocks_compiled++;
@@ -353,12 +449,14 @@ static Jit_Entry *find(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64
   Jit_Entry *e = &t->cache[jit_cache_index(pc)];
   if (e->pc != pc || !e->function) return NULL;
   if (e->generation == generation) return e;
+  if (e->multicore != cpu_multicore()) goto stale; /* exclusives/fences were compiled for the other mode */
   const uint32_t *code = block_code(s, e->code_start);
   if (code && code_hash(code, e->code_words) == e->code_hash) {
     e->generation = generation;
     g_stats.revalidations++;
     return e;
   }
+stale:
   g_stats.stale++;
   uninstall(e->function);
   e->function = 0;
@@ -398,8 +496,12 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
     if (e) {
       if (s->cycles_consumed + e->length <= cycle_budget) {
         g_stats.block_entries++;
+        note_block(t, pc | JIT_RECENT_COMPILED);
         const Jit_Block_Fn fn = (Jit_Block_Fn)(uintptr_t)e->function;
-        if (fn(j) == JIT_BLOCK_STOP) return j->exit_reason;
+        if (fn(j) == JIT_BLOCK_STOP) {
+          if (j->exit_reason == CPU_EXIT_FAULT || j->exit_reason == CPU_EXIT_BREAKPOINT) report_stop(t, s, j->exit_reason);
+          return j->exit_reason;
+        }
         continue;
       }
     } else {
@@ -411,7 +513,11 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
       }
     }
     g_stats.interpreted_blocks++;
-    if (!interp_predecode_run_block(s, cycle_budget, &grace, &exit_reason)) return exit_reason;
+    note_block(t, pc);
+    if (!interp_predecode_run_block(s, cycle_budget, &grace, &exit_reason)) {
+      if (exit_reason == CPU_EXIT_FAULT || exit_reason == CPU_EXIT_BREAKPOINT) report_stop(t, s, exit_reason);
+      return exit_reason;
+    }
   }
 }
 

@@ -3293,6 +3293,15 @@ static void emit_function(Ctx *c) {
   wasm_u8(c->b, WASM_TYPE_V128);
 
   /* Prologue. The caller checked that block 0 fits the budget. */
+  if (c->link->count_entries) {
+    const uint64_t entry = c->link->cache_address + jit_cache_index(c->blocks[0].pc) * sizeof(Jit_Entry);
+    i64c(c, entry);
+    i64c(c, entry);
+    mem(c, WASM_OP_I64_LOAD, ALIGN_8, ENTRY_OFFSET(entries));
+    i64c(c, 1);
+    op(c, WASM_OP_I64_ADD);
+    mem(c, WASM_OP_I64_STORE, ALIGN_8, ENTRY_OFFSET(entries));
+  }
   state_load64(c, OFF_L1);
   lset(c, L_L1);
   reload(c);

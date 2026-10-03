@@ -6,6 +6,7 @@
 
 #include "common/log.h"
 #include "hle/hle.h"
+#include "video/host1x.h"
 
 #include <string.h>
 
@@ -518,6 +519,39 @@ static uint32_t gpu_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint8_t *d) {
   }
 }
 
+/* VIC wrote into an nvmap buffer: textures over its GPU mappings are re-read. */
+static void mm_written(void *user, uint32_t handle, uint64_t offset, uint64_t bytes) {
+  Nvdrv_State *s = (Nvdrv_State *)user;
+  if (!s->renderer) return;
+  const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate};
+  for (uint32_t i = 0; i < NVDRV_MAX_GPU_MAPPINGS; i++) {
+    const Gpu_Mapping *m = &s->mappings[i];
+    if (!m->in_use || m->nvmap_handle != handle) continue;
+    const uint64_t start = offset > m->buffer_offset ? offset : m->buffer_offset;
+    const uint64_t end = offset + bytes < m->buffer_offset + m->size ? offset + bytes : m->buffer_offset + m->size;
+    if (start < end) raster3d_sync_range(s->renderer, &memory, m->gpu_va + (start - m->buffer_offset), end - start, true);
+  }
+}
+
+/* SUBMIT's command buffers ({nvmap handle, byte offset, words}) run on
+ * the device's engine (nvdec.h). Relocations would patch buffer
+ * addresses into the words; the multimedia stack writes IOVAs itself. */
+static void run_cmdbufs(Nvdrv_State *s, Nv_Fd *f, const uint8_t *d, uint32_t cmdbufs, uint32_t relocs) {
+  Mm_Engine *engine = f->device == NV_DEVICE_NVDEC ? &s->nvdec : f->device == NV_DEVICE_VIC ? &s->vic : NULL;
+  if (!engine || !s->hle) return;
+  (void)relocs; /* the multimedia stack writes IOVAs into its commands itself */
+  const Mm_Context context = {s->hle->vmm, &s->iova, s->video, &s->mm_video, mm_written, s};
+  for (uint32_t i = 0; i < cmdbufs; i++) {
+    const uint8_t *e = d + 16u + i * 12u;
+    const Nvmap_Handle *h = nvmap_of(s, rd32(e));
+    uint32_t words = rd32(e + 8);
+    if (!h || !h->allocated) continue;
+    if (words > NVDRV_MAX_CMDBUF_WORDS) words = NVDRV_MAX_CMDBUF_WORDS;
+    if (!error_is_ok(vmm_read_block(s->hle->vmm, h->address + rd32(e + 4), s->cmdbuf, (uint64_t)words * 4u))) continue;
+    mm_engine_submit(engine, &context, s->cmdbuf, words);
+  }
+}
+
 /* host1x channel-common ioctls (type 0x00 on nvdec/vic/nvjpg/gpu). */
 static uint32_t channel_common_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint8_t *d, uint32_t size) {
   switch (nr) {
@@ -531,6 +565,7 @@ static uint32_t channel_common_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint
     const uint64_t incr_at = 16u + (uint64_t)cmdbufs * 12u + (uint64_t)relocs * 20u;
     const uint64_t fence_at = incr_at + (uint64_t)incrs * SUBMIT_INCR_BYTES;
     if (fence_at + (uint64_t)fences * 4u > size) return NV_BAD_PARAMETER;
+    run_cmdbufs(s, f, d, cmdbufs, relocs);
     const uint32_t own = ensure_syncpoint(s, f);
     for (uint32_t i = 0; i < incrs; i++) {
       const uint8_t *e = d + incr_at + i * SUBMIT_INCR_BYTES;
@@ -554,8 +589,9 @@ static uint32_t channel_common_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint
     const uint32_t count = rd32(d);
     if (MAP_BUFFER_HEADER_BYTES + (uint64_t)count * 8u > size) return NV_BAD_PARAMETER;
     for (uint32_t i = 0; i < count; i++) {
-      Nvmap_Handle *h = nvmap_of(s, rd32(d + 12 + i * 8u));
-      wr32(d + 12 + i * 8u + 4u, h ? (uint32_t)h->address : 0u);
+      const uint32_t handle = rd32(d + 12 + i * 8u);
+      Nvmap_Handle *h = nvmap_of(s, handle);
+      wr32(d + 12 + i * 8u + 4u, h && h->allocated ? mm_iova_map(&s->iova, handle, h->address, h->size) : 0u);
     }
     return NV_SUCCESS;
   }
@@ -793,6 +829,10 @@ void nvdrv_init(Nvdrv_State *state, Gpu_Channel *channels) {
   state->channels = channels;
   syncpoints_init(&state->syncpoints);
   state->next_gpu_va = GPU_VA_BASE;
+  mm_iova_init(&state->iova);
+  mm_engine_init(&state->nvdec, HOST1X_CLASS_NVDEC);
+  mm_engine_init(&state->vic, HOST1X_CLASS_VIC);
+  mm_video_init(&state->mm_video);
   state->interface.name = "nvdrv";
   state->interface.commands = k_nvdrv_commands;
   state->interface.command_count = sizeof(k_nvdrv_commands) / sizeof(k_nvdrv_commands[0]);

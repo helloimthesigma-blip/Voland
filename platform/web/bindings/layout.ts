@@ -21,10 +21,11 @@ export interface MemoryLayout {
   readonly inputRegionBase: bigint;
   readonly traceBufferBase: bigint;
   readonly breakpointRegionBase: bigint;
+  readonly videoRegionBase: bigint;
 }
 
 /* Field order and width must match Memory_Layout in core/common/layout.h. */
-const FIELD_COUNT = 10;
+const FIELD_COUNT = 11;
 const FIELD_BYTES = 8;
 export const MEMORY_LAYOUT_STRUCT_SIZE = FIELD_COUNT * FIELD_BYTES;
 
@@ -46,6 +47,7 @@ export function readMemoryLayout(memory: WebAssembly.Memory, layoutPtr: bigint):
     inputRegionBase:       view.getBigUint64(7 * FIELD_BYTES, little),
     traceBufferBase:       view.getBigUint64(8 * FIELD_BYTES, little),
     breakpointRegionBase:  view.getBigUint64(9 * FIELD_BYTES, little),
+    videoRegionBase:       view.getBigUint64(10 * FIELD_BYTES, little),
   };
 }
 

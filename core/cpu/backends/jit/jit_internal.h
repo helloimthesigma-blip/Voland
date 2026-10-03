@@ -51,6 +51,8 @@ typedef struct Jit_Entry {
   uint64_t code_start; /* where those words start (same page) */
   uint32_t length;     /* guest instructions in the entry block: the budget needed */
   uint32_t code_words;
+  uint64_t entries;    /* times entered (only counted with jit_set_hot_profile) */
+  bool multicore;      /* compiled under cpu_multicore() (exclusives, fences) */
 } Jit_Entry;
 
 #define JIT_CACHE_BITS 18u
@@ -66,6 +68,7 @@ static inline uint64_t jit_cache_index(uint64_t pc) {
 typedef struct Jit_Link {
   uint64_t cache_address;      /* &Jit_Entry[0] */
   uint64_t generation_address; /* the uint64_t generation chained blocks must carry */
+  bool count_entries;          /* prologue increments its entry's `entries` */
 } Jit_Link;
 
 typedef uint32_t (*Jit_Block_Fn)(Jit_State *state);

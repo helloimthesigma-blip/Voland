@@ -53,6 +53,11 @@ void jit_set_hot_threshold(uint32_t executions);
 void jit_set_fallback_profile(bool enabled);
 void jit_print_fallback_profile(uint32_t top);
 
+/* Diagnostics: count region entries; print the `top` regions by entries
+ * times entry-block length (PC, entries, instructions in the region). */
+void jit_set_hot_profile(bool enabled);
+void jit_print_hot_regions(uint32_t top);
+
 /* Diagnostics: write every compiled module to DIR/<pc>.wasm (NULL: off). */
 void jit_set_dump_directory(const char *directory);
 
