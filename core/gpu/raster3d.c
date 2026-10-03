@@ -135,7 +135,8 @@ static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); 
 #define PROGRAMS_OFFSET (RASTER_MAX_SURFACE_BYTES * (1u + RASTER_SURFACES))
 #define PROGRAM_BYTES_OFFSET (PROGRAMS_OFFSET + sizeof(Raster3d_Program) * RASTER_PROGRAMS)
 #define TEXTURE_POOL_OFFSET (PROGRAM_BYTES_OFFSET + RASTER_PROGRAM_READ_BYTES)
-#define CBUF_OFFSET (TEXTURE_POOL_OFFSET + RASTER_TEXTURE_POOL_BYTES)
+#define TEXTURE_RAW_OFFSET (TEXTURE_POOL_OFFSET + RASTER_TEXTURE_POOL_BYTES)
+#define CBUF_OFFSET (TEXTURE_RAW_OFFSET + RASTER_TEXTURE_RAW_BYTES)
 #define CBUF_BYTES ((size_t)2 * SM_CBUF_SLOTS * CBUF_SLOT_BYTES)
 #define THREAD_OFFSET (CBUF_OFFSET + CBUF_BYTES)
 #define THREAD_BYTES ((sizeof(Sm_Thread) + 63u) & ~(size_t)63u)
@@ -155,6 +156,7 @@ void raster3d_init(Raster3d *r, uint8_t *storage, size_t bytes) {
   for (uint32_t i = 0; i < RASTER_PROGRAMS; i++) r->programs[i].valid = false;
   r->program_bytes = s + PROGRAM_BYTES_OFFSET;
   r->texture_pool = s + TEXTURE_POOL_OFFSET;
+  r->texture_raw = s + TEXTURE_RAW_OFFSET;
   r->cbuf_data = s + CBUF_OFFSET;
   for (uint32_t i = 0; i < WORKERS_MAX; i++) r->band_threads[i] = (Sm_Thread *)(void *)(s + THREAD_OFFSET + THREAD_BYTES * i);
   r->thread = r->band_threads[0];
@@ -181,13 +183,7 @@ void raster3d_restart_workers_after_fork(Raster3d *r) {
 
 void raster3d_begin_submission(Raster3d *r) {
   if (!r->ready) return;
-  r->submission++;
-  /* Decoded textures survive submissions (each is re-hashed against guest
-   * memory on first use in a submission); start over when space runs low. */
-  if (r->texture_count >= RASTER_TEXTURES * 3u / 4u || r->texture_pool_used >= RASTER_TEXTURE_POOL_BYTES / 2u) {
-    r->texture_count = 0;
-    r->texture_pool_used = 0;
-  }
+  r->submission++; /* decoded textures survive; each re-validates on first use in a submission */
 }
 
 /* ---- colour formats ----------------------------------------------- */
@@ -552,7 +548,7 @@ static void surface_load(Raster3d *r, Raster3d_Surface *s, const Gpu_Memory *mem
  * draw into is re-checked against guest memory at its next use, even
  * within the submission that already validated it. */
 static void textures_invalidate(Raster3d *r, uint64_t address, uint64_t bytes) {
-  for (uint32_t i = 0; i < r->texture_count; i++) {
+  for (uint32_t i = 0; i < RASTER_TEXTURES; i++) {
     Raster3d_Texture *t = &r->textures[i];
     if (t->valid && t->address < address + bytes && address < t->address + t->raw_bytes) t->validated = r->submission - 1u;
   }
@@ -897,30 +893,81 @@ static Raster3d_Texture *surface_view(Raster3d *r, const uint32_t tic[8]) {
   return NULL;
 }
 
+/* ---- texture cache ------------------------------------------------ */
+
+/* The least recently used texture the current draw has not touched (its
+ * workers may be sampling every texture it has), or NULL. */
+static Raster3d_Texture *texture_victim(Raster3d *r) {
+  Raster3d_Texture *victim = NULL;
+  for (uint32_t i = 0; i < RASTER_TEXTURES; i++) {
+    Raster3d_Texture *t = &r->textures[i];
+    if (t->valid && t->last_used != r->draw_serial && (!victim || t->last_used < victim->last_used)) victim = t;
+  }
+  return victim;
+}
+
+/* First-fit block of `bytes` in the pool, evicting least recently used
+ * textures until one exists. SIZE_MAX: none (the current draw holds the
+ * rest). */
+static size_t pool_allocate(Raster3d *r, size_t bytes) {
+  if (bytes > RASTER_TEXTURE_POOL_BYTES) return SIZE_MAX;
+  for (;;) {
+    /* Blocks in use, by offset (insertion sort; at most RASTER_TEXTURES). */
+    size_t start[RASTER_TEXTURES], size[RASTER_TEXTURES];
+    uint32_t n = 0;
+    for (uint32_t i = 0; i < RASTER_TEXTURES; i++) {
+      const Raster3d_Texture *t = &r->textures[i];
+      if (!t->valid) continue;
+      uint32_t k = n++;
+      for (; k > 0 && start[k - 1u] > t->pool_offset; k--) {
+        start[k] = start[k - 1u];
+        size[k] = size[k - 1u];
+      }
+      start[k] = t->pool_offset;
+      size[k] = t->pool_bytes;
+    }
+    size_t cursor = 0;
+    for (uint32_t k = 0; k <= n; k++) {
+      const size_t next = k < n ? start[k] : RASTER_TEXTURE_POOL_BYTES;
+      if (next >= cursor && next - cursor >= bytes) return cursor;
+      if (k < n && start[k] + size[k] > cursor) cursor = start[k] + size[k];
+    }
+    Raster3d_Texture *victim = texture_victim(r);
+    if (!victim) return SIZE_MAX;
+    victim->valid = false;
+  }
+}
+
+static void texture_miss(Raster3d *r, const Tex_Header *h, const char *why) {
+  if (!r->stats.texture_misses)
+    log_warn("[gpu] texture %ux%u format 0x%02x layout %u type %u at %llx: %s", h->width, h->height, h->format, h->layout,
+             h->type, (unsigned long long)h->address, why);
+  r->stats.texture_misses++;
+}
+
 static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const Gpu_Memory *mem) {
   Raster3d_Texture *view = surface_view(r, tic);
   if (view) return view;
   Raster3d_Texture *t = NULL;
-  for (uint32_t i = 0; i < r->texture_count; i++) {
+  for (uint32_t i = 0; i < RASTER_TEXTURES; i++) {
     if (r->textures[i].valid && memcmp(r->textures[i].tic, tic, sizeof(r->textures[i].tic)) == 0) {
       t = &r->textures[i];
       break;
     }
   }
+  if (t) t->last_used = r->draw_serial;
   if (t && t->validated == r->submission) return t;
   Tex_Header h;
   tex_header_parse(tic, &h);
   const uint64_t raw_bytes = tex_read_bytes(&h);
   const uint64_t decoded = tex_decoded_bytes(&h);
   const size_t decoded_aligned = (size_t)((decoded + 63u) & ~63ull);
-  /* Raw bytes are staged past the pool's high-water mark. */
-  const size_t need = (t ? 0u : decoded_aligned) + (size_t)raw_bytes;
-  if (!raw_bytes || !decoded || (!t && r->texture_count >= RASTER_TEXTURES) ||
-      r->texture_pool_used + need > RASTER_TEXTURE_POOL_BYTES) {
-    if (!r->stats.texture_misses)
-      log_warn("[gpu] texture %ux%u format 0x%02x layout %u type %u: %s", h.width, h.height, h.format, h.layout, h.type,
-               (!raw_bytes || !decoded) ? "unsupported format" : "texture pool full");
-    r->stats.texture_misses++;
+  if (!raw_bytes || !decoded) {
+    texture_miss(r, &h, "unsupported format");
+    return NULL;
+  }
+  if (raw_bytes > RASTER_TEXTURE_RAW_BYTES || decoded_aligned > RASTER_TEXTURE_POOL_BYTES) {
+    texture_miss(r, &h, "larger than the texture cache");
     return NULL;
   }
   /* A texture the GPU just rendered: write those pixels back first. */
@@ -929,13 +976,9 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     if (s->in_use && s->dirty && s->address < h.address + raw_bytes && h.address < s->address + s->guest_bytes)
       surface_write_back(r, s, mem);
   }
-  uint8_t *dst = t ? (uint8_t *)(uintptr_t)t->image.texels : r->texture_pool + r->texture_pool_used;
-  uint8_t *raw = r->texture_pool + r->texture_pool_used + (t ? 0u : decoded_aligned);
+  uint8_t *raw = r->texture_raw;
   if (!mem->read(mem->user, h.address, raw, raw_bytes)) {
-    if (!r->stats.texture_misses)
-      log_warn("[gpu] texture %ux%u format 0x%02x at %llx: unreadable (%llu bytes)", h.width, h.height, h.format,
-               (unsigned long long)h.address, (unsigned long long)raw_bytes);
-    r->stats.texture_misses++;
+    texture_miss(r, &h, "unreadable");
     return NULL;
   }
   const uint64_t hash = content_hash(raw, raw_bytes);
@@ -943,26 +986,42 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     t->validated = r->submission;
     return t;
   }
-  Raster3d_Texture *slot = t ? t : &r->textures[r->texture_count];
-  if (!tex_decode(&h, raw, dst, &slot->image)) {
+  /* A changed texture decodes into its own block (same descriptor, same
+   * size); a new one takes a free slot and block, evicting as needed. */
+  if (!t) {
+    for (uint32_t i = 0; i < RASTER_TEXTURES && !t; i++)
+      if (!r->textures[i].valid) t = &r->textures[i];
+    if (!t) t = texture_victim(r);
+    if (!t) {
+      texture_miss(r, &h, "every cached texture is in use");
+      return NULL;
+    }
+    t->valid = false;
+    const size_t offset = pool_allocate(r, decoded_aligned);
+    if (offset == SIZE_MAX) {
+      texture_miss(r, &h, "texture cache full");
+      return NULL;
+    }
+    t->pool_offset = offset;
+    t->pool_bytes = decoded_aligned;
+  }
+  if (!tex_decode(&h, raw, r->texture_pool + t->pool_offset, &t->image)) {
+    t->valid = false;
     r->stats.texture_misses++;
     return NULL;
   }
   log_debug("[gpu] texture %ux%u fmt 0x%02x types %u%u%u%u swizzle %u%u%u%u layout %u type %u srgb %d @%llx",
             h.width, h.height, h.format, h.data_type[0], h.data_type[1], h.data_type[2], h.data_type[3], h.swizzle[0],
             h.swizzle[1], h.swizzle[2], h.swizzle[3], h.layout, h.type, h.srgb, (unsigned long long)h.address);
-  memcpy(slot->tic, tic, sizeof(slot->tic));
-  slot->address = h.address;
-  slot->raw_bytes = raw_bytes;
-  slot->raw_hash = hash;
-  slot->validated = r->submission;
-  slot->valid = true;
-  if (r->on_texture_decoded) r->on_texture_decoded(r->on_texture_user, &slot->image, h.address);
-  if (!t) {
-    r->texture_count++;
-    r->texture_pool_used += decoded_aligned; /* the raw staging after it is reusable */
-  }
-  return slot;
+  memcpy(t->tic, tic, sizeof(t->tic));
+  t->address = h.address;
+  t->raw_bytes = raw_bytes;
+  t->raw_hash = hash;
+  t->validated = r->submission;
+  t->last_used = r->draw_serial;
+  t->valid = true;
+  if (r->on_texture_decoded) r->on_texture_decoded(r->on_texture_user, &t->image, h.address);
+  return t;
 }
 
 /* Finds `handle`'s texture and sampler; caches it in `res`. A full cache
@@ -2428,6 +2487,7 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
   if (!(regs[REG_RASTER_ENABLE] & 1u) && regs[REG_RASTER_ENABLE] != 0) return;
   r->stats.draws++;
   r->surface_view_count = 0; /* no worker holds last draw's views */
+  r->draw_serial++;          /* textures this draw touches are not evicted during it */
   Draw_Context *ctx = &g_draw_context;
   ctx->r = r;
   ctx->regs = regs;

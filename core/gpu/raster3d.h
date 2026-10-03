@@ -41,6 +41,7 @@ struct Gpu_Memory;
 #define RASTER_TEXTURES 256u
 #define RASTER_SURFACE_VIEWS 32u
 #define RASTER_TEXTURE_POOL_BYTES ((size_t)256 * 1024 * 1024)
+#define RASTER_TEXTURE_RAW_BYTES ((size_t)64 * 1024 * 1024) /* a 4096x4096 RGBA8 texture */
 #define RASTER_INLINE_INDICES 0x10000u
 #define RASTER_STREAMS 32u
 #define RASTER_STREAM_WINDOW 0x1000u
@@ -82,6 +83,9 @@ typedef struct Raster3d_Texture {
   uint32_t validated;    /* submission it was last checked against guest memory */
   uint64_t address;      /* guest bytes it was decoded from */
   uint64_t raw_bytes;
+  size_t pool_offset;    /* its decoded texels' block in the texture pool */
+  size_t pool_bytes;
+  uint32_t last_used;    /* draw serial; the current draw's textures are never evicted */
   Tex_Image image;
 } Raster3d_Texture;
 
@@ -109,9 +113,9 @@ typedef struct Raster3d {
    * per draw and never rewritten while the draw's workers may read them. */
   Raster3d_Texture surface_views[RASTER_SURFACE_VIEWS];
   uint32_t surface_view_count;
-  uint32_t texture_count;
-  uint8_t *texture_pool;    /* RASTER_TEXTURE_POOL_BYTES */
-  size_t texture_pool_used;
+  uint8_t *texture_pool;    /* RASTER_TEXTURE_POOL_BYTES: decoded texels, LRU-evicted blocks */
+  uint8_t *texture_raw;     /* RASTER_TEXTURE_RAW_BYTES: one texture's guest bytes while it decodes */
+  uint32_t draw_serial;
   uint8_t *cbuf_data;       /* 2 stages x SM_CBUF_SLOTS x 64 KiB */
   Sm_Thread *thread;        /* one invocation's state (vertex work; band 0) */
   /* Pixel work runs in parallel over interleaved row bands (§13): one
