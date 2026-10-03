@@ -43,7 +43,11 @@
 
 #define JIT_CACHE_ENTRIES (1u << JIT_CACHE_BITS)
 #define JIT_HIT_COUNTERS (1u << 16)
-#define JIT_DEFAULT_HOT_THRESHOLD 16u
+/* Interpreted executions before a block is compiled. Measured on
+ * Silksong (docs/handoff/JIT_STATUS.md): 16 compiled ~2.5x the modules of
+ * 256 for the same guest speed, and module compilation is the JIT's
+ * largest overhead while games load. */
+#define JIT_DEFAULT_HOT_THRESHOLD 256u
 #define JIT_MODULE_BYTES (512u * 1024u)
 #define JIT_RECENT_BLOCKS 64u
 
@@ -192,8 +196,15 @@ EM_JS_DEPS(voland_jit, "$addFunction,$removeFunction")
 EM_JS(int64_t, jit_js_install,
       (const uint8_t *bytes, size_t length, void *interpret, void *read, void *store, void *write, void *simd), {
   try {
-    const start = Number(bytes);
-    const module = new WebAssembly.Module(HEAPU8.slice(start, start + Number(length)));
+    /* WebAssembly.Module refuses views of shared memory: copy into one
+     * reused, growing, non-shared buffer rather than a new one per module. */
+    const start = Number(bytes), size = Number(length);
+    if (!globalThis.volandJitBytes || globalThis.volandJitBytes.length < size) {
+      globalThis.volandJitBytes = new Uint8Array(Math.max(size, 65536) * 2);
+    }
+    const staging = globalThis.volandJitBytes.subarray(0, size);
+    staging.set(HEAPU8.subarray(start, start + size));
+    const module = new WebAssembly.Module(staging);
     const instance = new WebAssembly.Instance(module, {
       env: {
         memory: wasmMemory,
