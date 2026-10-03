@@ -180,6 +180,7 @@ void raster3d_init(Raster3d *r, uint8_t *storage, size_t bytes) {
   tex_init_tables(); /* before any worker samples */
   workers_start(&r->workers, workers_default_count());
   log_info("[gpu] reference renderer: %u pixel worker(s)", r->workers.count);
+  r->gpu_mipmaps = true;
   r->ready = true;
 }
 
@@ -2719,8 +2720,8 @@ static void gpu_destroy(Raster3d *r, uint32_t id) {
 }
 
 static void gpu_create(Raster3d *r, uint32_t id, uint32_t format, uint32_t width, uint32_t height, uint32_t layers,
-                       uint32_t usage) {
-  const Gpu_Rec_Texture_Create c = {id, format, width, height, layers, usage};
+                       uint32_t usage, uint32_t levels) {
+  const Gpu_Rec_Texture_Create c = {id, format, width, height, layers, usage, levels, 0};
   gpu_stream_write(r->gpu, GPU_REC_TEXTURE_CREATE, &c, sizeof(c));
 }
 
@@ -2813,7 +2814,7 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
   victim->last_used = r->tick;
   bool direct = false;
   victim->gpu_format = d->depth ? gpu_zeta_format(d->format) : gpu_color_format(d->format, &direct);
-  gpu_create(r, victim->id, victim->gpu_format, d->width, d->height, 1, GPU_USAGE_SAMPLED | GPU_USAGE_RENDER);
+  gpu_create(r, victim->id, victim->gpu_format, d->width, d->height, 1, GPU_USAGE_SAMPLED | GPU_USAGE_RENDER, 1);
   r->gpu_stats.surfaces++;
   log_debug("[gpu] GPU surface %u: %ux%u fmt 0x%02x%s @%llx", victim->id, d->width, d->height, d->format,
             d->depth ? " (zeta)" : "", (unsigned long long)d->address);
@@ -2829,6 +2830,18 @@ static Raster3d_Gpu_Surface *gpu_surface_at(Raster3d *r, uint64_t address, uint3
   return NULL;
 }
 
+/* Mip levels for a texture's GPU copy: the guest's count, within the
+ * full chain, for float 2D (array) textures - the consumer builds them
+ * from level 0 (gpu_records.h). Integer, cube and 3D textures: level 0. */
+static uint32_t gpu_texture_levels(const Raster3d *r, const Tex_Image *img, bool is_int) {
+  const Tex_Type type = img->header.type;
+  if (!r->gpu_mipmaps || is_int || img->header.levels <= 1u || (type != TEX_TYPE_2D && type != TEX_TYPE_2D_ARRAY))
+    return 1u;
+  uint32_t full = 1;
+  for (uint32_t size = img->width > img->height ? img->width : img->height; size > 1u; size >>= 1) full++;
+  return img->header.levels < full ? img->header.levels : full;
+}
+
 /* A decoded texture's GPU copy: RGBA8 as it is, anything else as the
  * 32-bit RGBA texels sampling sees (tex_texel). */
 static uint32_t gpu_texture(Raster3d *r, Raster3d_Texture *t) {
@@ -2839,18 +2852,19 @@ static uint32_t gpu_texture(Raster3d *r, Raster3d_Texture *t) {
                           : !is_int ? GPU_FMT_RGBA32_FLOAT
                           : img->header.data_type[0] == TEX_DATA_UINT ? GPU_FMT_RGBA32_UINT
                                                                      : GPU_FMT_RGBA32_SINT;
-  if (t->gpu_id && t->gpu_hash == t->raw_hash && t->gpu_width == img->width && t->gpu_height == img->height &&
-      t->gpu_layers == layers && t->gpu_format == format)
-    return t->gpu_id;
-  if (!t->gpu_id || t->gpu_width != img->width || t->gpu_height != img->height || t->gpu_layers != layers ||
-      t->gpu_format != format) {
+  const uint32_t levels = gpu_texture_levels(r, img, is_int);
+  const bool same = t->gpu_id && t->gpu_width == img->width && t->gpu_height == img->height && t->gpu_layers == layers &&
+                    t->gpu_format == format && t->gpu_levels == levels;
+  if (same && t->gpu_hash == t->raw_hash) return t->gpu_id;
+  if (!same) {
     gpu_destroy(r, t->gpu_id);
     t->gpu_id = gpu_new_id(r);
-    gpu_create(r, t->gpu_id, format, img->width, img->height, layers, GPU_USAGE_SAMPLED);
+    gpu_create(r, t->gpu_id, format, img->width, img->height, layers, GPU_USAGE_SAMPLED, levels);
     t->gpu_width = img->width;
     t->gpu_height = img->height;
     t->gpu_layers = layers;
     t->gpu_format = format;
+    t->gpu_levels = levels;
   }
   for (uint32_t l = 0; l < layers; l++) {
     if (img->rgba8) {
@@ -3020,6 +3034,14 @@ static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs) {
   return true;
 }
 
+/* Mip levels of the GPU texture `id` (a render target has one). */
+static uint32_t gpu_texture_levels_of(const Raster3d *r, const Raster3d_Gpu_Surface *surface, uint32_t id) {
+  if (surface || !id) return 1u;
+  for (uint32_t i = 0; i < RASTER_TEXTURES; i++)
+    if (r->textures[i].valid && r->textures[i].gpu_id == id) return r->textures[i].gpu_levels;
+  return 1u;
+}
+
 /* Runs the pixel program once (one lane, at a vertex) to learn which
  * texture handle each texture instruction uses - bindless handles come
  * from registers - then builds the WGSL descriptor, the shader and the
@@ -3096,7 +3118,12 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
       if (sample_type == WGSL_SAMPLE_FLOAT && !cube_map && gpu_format_filterable(gpu_format) && s.wrap[0] <= 2u &&
           s.wrap[1] <= 2u) {
         desc->hw_sample_mask |= 1u << b;
-        g->sampler_state[b] = (s.mag_filter == 2u ? GPU_SAMPLER_LINEAR : 0u) |
+        /* Minification follows magnification on one level (the
+         * reference's single filter); mip chains use the TSC's own. */
+        const bool mips = gpu_texture_levels_of(r, surf, id) > 1u;
+        const bool min_linear = mips ? s.min_filter == 2u : s.mag_filter == 2u;
+        g->sampler_state[b] = (s.mag_filter == 2u ? GPU_SAMPLER_LINEAR : 0u) | (min_linear ? GPU_SAMPLER_MIN_LINEAR : 0u) |
+                              (s.mip_filter == TEX_MIP_LINEAR ? GPU_SAMPLER_MIP_LINEAR : 0u) |
                               ((uint32_t)s.wrap[0] << GPU_SAMPLER_WRAP_SHIFT(0)) |
                               ((uint32_t)s.wrap[1] << GPU_SAMPLER_WRAP_SHIFT(1)) |
                               ((uint32_t)(s.wrap[2] <= 2u ? s.wrap[2] : 2u) << GPU_SAMPLER_WRAP_SHIFT(2));
@@ -3114,6 +3141,12 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
                              ((uint32_t)h.swizzle[3] << 12);
       p[WGSL_TEXP_LEVELS] = h.levels;
       p[WGSL_TEXP_COMPARE] = s.compare_func;
+      /* Level selection (textures with a mip chain only; the shader
+       * clamps to the levels the GPU texture has). */
+      if (s.mip_filter > TEX_MIP_NONE && s.min_filter == 2u) p[WGSL_TEXP_FLAGS] |= WGSL_TEXP_MIN_LINEAR;
+      p[WGSL_TEXP_LOD_BIAS] = u32f(s.lod_bias);
+      p[WGSL_TEXP_MIN_LOD] = u32f(s.mip_filter > TEX_MIP_NONE ? s.min_lod : 0.0f);
+      p[WGSL_TEXP_MAX_LOD] = u32f(s.mip_filter > TEX_MIP_NONE ? s.max_lod : 0.0f);
       for (uint32_t c = 0; c < 4; c++) p[WGSL_TEXP_BORDER + c] = u32f(s.border[c]);
       desc->texture_count++;
     }

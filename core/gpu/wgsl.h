@@ -41,7 +41,8 @@
  *   WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEX_PARAM_WORDS * i: texture i's sampler
  *   state - flags (WGSL_TEXP_*), wrap (TSC modes, 4 bits each: u, v, p),
  *   swizzle (TEX_SOURCE_* 4 bits each: x, y, z, w), mip levels, compare
- *   function (0 NEVER .. 7 ALWAYS: ref OP texel), 3 reserved, border (f32 x 4).
+ *   function (0 NEVER .. 7 ALWAYS: ref OP texel), LOD bias, min LOD, max LOD
+ *   (f32), border (f32 x 4).
  *   WGSL_DRAW_CBUF_TABLE + 2 * slot: constant buffer `slot`'s first word in
  *   this buffer and its size in words (0: unbound, reads 0).
  */
@@ -77,11 +78,15 @@
 #define WGSL_TEXP_SWIZZLE 2u
 #define WGSL_TEXP_LEVELS 3u
 #define WGSL_TEXP_COMPARE 4u
+#define WGSL_TEXP_LOD_BIAS 5u /* f32: the sampler's bias, in levels */
+#define WGSL_TEXP_MIN_LOD 6u  /* f32: the sampler's level clamps (0, 0: level 0 only) */
+#define WGSL_TEXP_MAX_LOD 7u
 #define WGSL_TEXP_BORDER 8u
 #define WGSL_TEXP_SCALE 1u   /* coordinates are normalized (scale by the size) */
 #define WGSL_TEXP_LINEAR 2u  /* bilinear (float formats only) */
 #define WGSL_TEXP_CUBE 4u    /* cube map: direction -> face layer */
 #define WGSL_TEXP_DEPTH_COMPARE 8u /* the sampler compares (shadow instructions) */
+#define WGSL_TEXP_MIN_LINEAR 16u   /* bilinear below level 0 (minified, with a mip chain) */
 
 typedef enum Wgsl_Sample_Type {
   WGSL_SAMPLE_FLOAT,

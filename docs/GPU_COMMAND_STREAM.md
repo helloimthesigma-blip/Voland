@@ -1,4 +1,4 @@
-# GPU command stream (version 1)
+# GPU command stream (version 2)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -33,7 +33,7 @@ the header is at its base and the ring starts at +64. In `voland-cli
 | Offset | Field |
 |---|---|
 | +0 | u32 magic `VGPU` (0x55504756) |
-| +4 | u32 version (1) |
+| +4 | u32 version (2) |
 | +8 | u64 ring base (linear-memory offset) |
 | +16 | u64 ring capacity |
 | +24 | u64 write position (monotonic bytes; release-stored on publish) |
@@ -62,7 +62,7 @@ means none.
 
 | Type | Name | Payload |
 |---|---|---|
-| 1 | TEXTURE_CREATE | id, format (`GPU_FMT_*`), width, height, layers, usage (1 sampled, 2 render target) |
+| 1 | TEXTURE_CREATE | id, format (`GPU_FMT_*`), width, height, layers, usage (1 sampled, 2 render target), mip levels, reserved |
 | 2 | TEXTURE_DESTROY | id |
 | 3 | TEXTURE_WRITE | id, x, y, width, height, layer, bytes per row, data bytes; then the rows |
 | 4 | SHADER | id, byte count, WGSL text (padded) |
@@ -94,6 +94,27 @@ Bindings follow the header:
 - **TEXTURE** (kind 2, binding 1 + i): texture id. The pixel program reads
   it with `textureLoad` and does wrap, border, filtering, depth compare
   and swizzle itself, from the draw constants.
+- **SAMPLER** (kind 3, binding 17 + i): a hardware sampler for texture i
+  where that gives the reference's result; its state word is bit 0
+  magnification linear, 2 bits per axis u, v, w (0 repeat, 1 mirror, 2
+  clamp to edge) from bit 1, bit 7 minification linear and bit 8 linear
+  between mip levels.
+
+### Mip levels (version 2)
+
+A sampled texture whose guest header has a mip chain is created with
+`levels` > 1 (float 2D and 2D-array textures only). The producer uploads
+level 0. The consumer rebuilds the other levels from it with a 2x2 box
+filter, before the next draw that samples a texture written since. Pixel
+programs choose the level per pixel: from derivatives of the texel-space
+coordinates in uniform control flow, from the instruction's explicit LOD
+(LL), or level 0 (LZ, and wherever derivatives are undefined). They then
+apply the sampler's bias and its min/max LOD clamps (draw constants,
+`wgsl.h`). A one-level texture samples exactly as in version 1.
+`VOLAND_GPU_MIPMAPS=0 voland-cli ...` records level 0 only, which matches
+the software reference.
+
+Version 1 streams still replay: a 24-byte TEXTURE_CREATE has one level.
 
 Vertices form a triangle list. Each vertex is x, y in WebGPU NDC, z, 1/w
 (f32), then `varying_count` × 4 u32. Varyings are already divided by w

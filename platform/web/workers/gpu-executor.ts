@@ -12,6 +12,10 @@
  * rotate (BUFFER_SETS) so that write does not stall on in-flight work.
  * Anything that must happen on the queue timeline
  * between draws (texture uploads) flushes the batch first.
+ *
+ * Mipmapped textures (TEXTURE_CREATE levels > 1) receive level 0 only;
+ * the rest of the chain is rebuilt from it (2x2 box filter, render passes
+ * in the encoder) before the next draw samples a texture written since.
  */
 
 import {
@@ -43,6 +47,8 @@ import {
   REC_TEXTURE_DESTROY,
   REC_TEXTURE_WRITE,
   SAMPLER_LINEAR,
+  SAMPLER_MIN_LINEAR,
+  SAMPLER_MIP_LINEAR,
   SAMPLER_WRAPS,
   STENCIL_OPS,
   TEXTURE_WRITE_BYTES,
@@ -85,6 +91,7 @@ interface Tex {
   readonly width: number;
   readonly height: number;
   readonly layers: number;
+  readonly levels: number;
   readonly sampleType: GPUTextureSampleType;
   readonly sampleView: GPUTextureView; /* 2d-array, depth aspect for depth formats */
   readonly renderView: GPUTextureView | null;
@@ -148,6 +155,17 @@ function clearShader(type: "f32" | "u32" | "i32"): string {
 @fragment fn fs() -> @location(0) vec4<${type}> { return bitcast<vec4<${type}>>(vec4<u32>(P[0], P[1], P[2], P[3])); }`;
 }
 
+/* One mip level from the one above: the 2x2 box (edge texels repeat for
+ * odd sizes). */
+const MIP_SHADER = `${FULLSCREEN_VS}
+@group(0) @binding(0) var S: texture_2d<f32>;
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  let m = vec2<i32>(textureDimensions(S)) - 1;
+  let p = vec2<i32>(floor(pos.xy)) * 2;
+  return 0.25 * (textureLoad(S, min(p, m), 0) + textureLoad(S, min(p + vec2<i32>(1, 0), m), 0) +
+                 textureLoad(S, min(p + vec2<i32>(0, 1), m), 0) + textureLoad(S, min(p + vec2<i32>(1, 1), m), 0));
+}`;
+
 const DEPTH_CLEAR_SHADER = `${FULLSCREEN_VS}
 @group(0) @binding(0) var<storage, read> P: array<u32>;
 struct O { @builtin(frag_depth) depth: f32 }
@@ -209,6 +227,7 @@ export class GpuExecutor {
   private passKey = "";
   private passSize: readonly [number, number] = [0, 0];
   private pendingDestroy: GPUTexture[] = [];
+  private readonly mipsStale = new Set<GPUTexture>(); /* level 0 written since the chain was built */
   private readonly warned = new Set<string>();
 
   constructor(private readonly device: GPUDevice, private readonly host: ExecutorHost) {
@@ -267,16 +286,43 @@ export class GpuExecutor {
   /* ---- resources ---- */
 
   private makeTex(format: GPUTextureFormat, width: number, height: number, layers: number, render: boolean,
-                  fallback: boolean): Tex {
+                  fallback: boolean, levels = 1): Tex {
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC |
-      (render ? GPUTextureUsage.RENDER_ATTACHMENT : 0);
-    const texture = this.device.createTexture({ size: [width, height, layers], format, usage });
+      (render || levels > 1 ? GPUTextureUsage.RENDER_ATTACHMENT : 0);
+    const texture = this.device.createTexture({ size: [width, height, layers], format, usage, mipLevelCount: levels });
     const aspect: GPUTextureAspect = hasDepth(format) && hasStencil(format) ? "depth-only" : "all";
     return {
-      texture, format, width, height, layers, sampleType: sampleTypeOf(format), fallback,
+      texture, format, width, height, layers, levels, sampleType: sampleTypeOf(format), fallback,
       sampleView: texture.createView({ dimension: "2d-array", aspect }),
-      renderView: render ? texture.createView({ dimension: "2d", baseArrayLayer: 0, arrayLayerCount: 1 }) : null,
+      renderView: render
+        ? texture.createView({ dimension: "2d", baseArrayLayer: 0, arrayLayerCount: 1, baseMipLevel: 0, mipLevelCount: 1 })
+        : null,
     };
+  }
+
+  /** Rebuilds `t`'s mip chain from level 0, in the encoder (after earlier
+   * passes, before later ones). */
+  private buildMips(t: Tex): void {
+    this.mipsStale.delete(t.texture);
+    this.endPass();
+    const entries: GPUBindGroupLayoutEntry[] = [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
+    ];
+    const { pipeline, layout } = this.simplePipeline("mip", MIP_SHADER, t.format, 0xf, null, entries);
+    const encoder = this.ensureEncoder();
+    for (let layer = 0; layer < t.layers; layer++) {
+      for (let level = 1; level < t.levels; level++) {
+        const view = (mip: number): GPUTextureView => t.texture.createView({
+          dimension: "2d", baseMipLevel: mip, mipLevelCount: 1, baseArrayLayer: layer, arrayLayerCount: 1,
+        });
+        const pass = encoder.beginRenderPass({ colorAttachments: [{ view: view(level), loadOp: "clear", storeOp: "store" }] });
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, this.device.createBindGroup({ layout, entries: [{ binding: 0, resource: view(level - 1) }] }));
+        pass.draw(3);
+        pass.end();
+        this.stats.passes++;
+      }
+    }
   }
 
   private textureCreate(v: DataView): void {
@@ -296,15 +342,25 @@ export class GpuExecutor {
       fallback = true;
     }
     const old = this.textures.get(c.id);
-    if (old) this.pendingDestroy.push(old.texture);
-    this.textures.set(c.id, this.makeTex(format, Math.max(1, c.width), Math.max(1, c.height), Math.max(1, c.layers),
-      (c.usage & USAGE_RENDER) !== 0, fallback));
+    if (old) {
+      this.pendingDestroy.push(old.texture);
+      this.mipsStale.delete(old.texture);
+    }
+    const width = Math.max(1, c.width), height = Math.max(1, c.height);
+    /* Mip chains: float formats the box filter can render (the producer
+     * asks for them on sampled float textures only). */
+    const full = Math.floor(Math.log2(Math.max(width, height))) + 1;
+    const levels = (c.usage & USAGE_RENDER) === 0 && shaderType(format) === "f32" && !isDepthFormat(format)
+      ? Math.min(c.levels, full) : 1;
+    this.textures.set(c.id, this.makeTex(format, width, height, Math.max(1, c.layers), (c.usage & USAGE_RENDER) !== 0,
+      fallback, levels));
   }
 
   private textureDestroy(id: number): void {
     const t = this.textures.get(id);
     if (!t) return;
     this.textures.delete(id);
+    this.mipsStale.delete(t.texture);
     this.pendingDestroy.push(t.texture);
   }
 
@@ -319,6 +375,7 @@ export class GpuExecutor {
       { bytesPerRow: w.bytesPerRow, rowsPerImage: w.height },
       { width: w.width, height: w.height, depthOrArrayLayers: 1 },
     );
+    if (t.levels > 1) this.mipsStale.add(t.texture);
   }
 
   private shader(v: DataView, payload: Uint8Array): void {
@@ -424,9 +481,12 @@ export class GpuExecutor {
   private sampler(state: number): GPUSampler {
     let s = this.samplers.get(state);
     if (!s) {
-      const filter: GPUFilterMode = state & SAMPLER_LINEAR ? "linear" : "nearest";
+      const filter = (bit: number): GPUFilterMode => (state & bit ? "linear" : "nearest");
       const wrap = (axis: number): GPUAddressMode => SAMPLER_WRAPS[(state >> (1 + 2 * axis)) & 3] ?? "clamp-to-edge";
-      s = this.device.createSampler({ magFilter: filter, minFilter: filter, addressModeU: wrap(0), addressModeV: wrap(1), addressModeW: wrap(2) });
+      s = this.device.createSampler({
+        magFilter: filter(SAMPLER_LINEAR), minFilter: filter(SAMPLER_MIN_LINEAR), mipmapFilter: filter(SAMPLER_MIP_LINEAR),
+        addressModeU: wrap(0), addressModeV: wrap(1), addressModeW: wrap(2),
+      });
       this.samplers.set(state, s);
     }
     return s;
@@ -586,6 +646,7 @@ export class GpuExecutor {
         this.warnOnce(`texture ${id}`, `draw samples unknown texture ${id}`);
         return;
       }
+      if (this.mipsStale.has(t.texture)) this.buildMips(t);
       textures.push(attached.has(id) ? this.shadowOf(t) : t);
     }
     const colorFormats = colorIds.map((id) => (id ? this.textures.get(id)?.format ?? null : null));
