@@ -15,8 +15,20 @@ import {
   type PublishedFrame,
   newestFrame,
 } from "@bindings/framebuffer";
+import {
+  GPU_STREAM_MAGIC,
+  OFF_CAPACITY,
+  OFF_MAGIC,
+  OFF_READ,
+  OFF_READ_SIGNAL,
+  OFF_RING_BASE,
+  OFF_WRITE,
+  OFF_WRITE_SIGNAL,
+  REC_PAD,
+} from "@bindings/gpu-records";
 import { type MemoryLayout, toByteOffset } from "@bindings/layout";
 import type { GPUToMainMessage, MainToGPUMessage } from "@bindings/protocol";
+import { GpuExecutor } from "./gpu-executor";
 
 const self: DedicatedWorkerGlobalScope =
   globalThis as unknown as DedicatedWorkerGlobalScope;
@@ -50,9 +62,75 @@ struct VertexOut {
 
 /* Fallback poll interval where Atomics.waitAsync is missing. */
 const POLL_MS = 4;
+/* Until the core turns GPU mode on, the stream header is all zeroes. */
+const STREAM_IDLE_POLL_MS = 50;
+const OPTIONAL_FEATURES: readonly GPUFeatureName[] = ["rg11b10ufloat-renderable", "depth32float-stencil8", "float32-filterable"];
+
+type WaitAsync = (a: Int32Array, i: number, v: number) => { async: boolean; value: Promise<string> | string };
+const waitAsync = (Atomics as unknown as { waitAsync?: WaitAsync }).waitAsync;
+
+async function waitForChange(word: Int32Array, index: number, seen: number): Promise<void> {
+  if (waitAsync) {
+    const waited = waitAsync(word, index, seen);
+    if (waited.async) await waited.value;
+  } else {
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+  }
+}
+
+/**
+ * The GPU stream (core/gpu/gpu_stream.h): GPU mode's draws, clears, copies
+ * and presents, executed as they are published. Records are read in place
+ * from the ring; the read position advances after each one (waking a
+ * producer waiting for room).
+ */
+async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, headerBase: number): Promise<void> {
+  const buffer = memory.buffer;
+  const words = new Int32Array(buffer, headerBase, 12);
+  const wide = new BigInt64Array(buffer, headerBase, 6);
+  while (Atomics.load(words, OFF_MAGIC / 4) !== GPU_STREAM_MAGIC) {
+    await new Promise((resolve) => setTimeout(resolve, STREAM_IDLE_POLL_MS));
+  }
+  const ringBase = Number(Atomics.load(wide, OFF_RING_BASE / 8));
+  const capacity = Number(Atomics.load(wide, OFF_CAPACITY / 8));
+  log("info", `GPU stream: ring 0x${ringBase.toString(16)} (${capacity >> 10} KiB)`);
+  let presented = 0;
+  const executor = new GpuExecutor(renderer.device, {
+    presentTarget: (width, height) => {
+      if (renderer.canvas.width !== width || renderer.canvas.height !== height) {
+        renderer.canvas.width = width;
+        renderer.canvas.height = height;
+      }
+      return { view: renderer.context.getCurrentTexture().createView(), format: renderer.format, width, height };
+    },
+    presented: (width, height) => {
+      if (++presented === 1) log("info", `first WebGPU frame presented: ${width}x${height}`);
+    },
+    log,
+  });
+  for (;;) {
+    const seen = Atomics.load(words, OFF_WRITE_SIGNAL / 4);
+    const write = Number(Atomics.load(wide, OFF_WRITE / 8));
+    let read = Number(Atomics.load(wide, OFF_READ / 8));
+    while (read < write) {
+      const at = ringBase + (read % capacity);
+      const head = new DataView(buffer, at, 8);
+      const type = head.getUint32(0, true);
+      const size = head.getUint32(4, true);
+      if (type !== REC_PAD) executor.execute(type, new Uint8Array(buffer, at + 8, size - 8));
+      read += size;
+      Atomics.store(wide, OFF_READ / 8, BigInt(read));
+      Atomics.add(words, OFF_READ_SIGNAL / 4, 1);
+      Atomics.notify(words, OFF_READ_SIGNAL / 4);
+    }
+    executor.flush();
+    if (Number(Atomics.load(wide, OFF_WRITE / 8)) === write) await waitForChange(words, OFF_WRITE_SIGNAL / 4, seen);
+  }
+}
 
 interface Renderer {
   readonly device: GPUDevice;
+  readonly format: GPUTextureFormat;
   readonly context: GPUCanvasContext;
   readonly canvas: OffscreenCanvas;
   readonly pipeline: GPURenderPipeline;
@@ -144,7 +222,11 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
     self.postMessage(err);
     return;
   }
-  const device = await adapter.requestDevice();
+  const requiredFeatures = OPTIONAL_FEATURES.filter((f) => adapter.features.has(f));
+  const device = await adapter.requestDevice({ requiredFeatures });
+  device.addEventListener("uncapturederror", (e: Event) => {
+    log("error", `WebGPU: ${(e as GPUUncapturedErrorEvent).error.message.split("\n")[0] ?? ""}`);
+  });
   const context = canvas.getContext("webgpu") as GPUCanvasContext | null;
   if (!context) {
     const err: GPUToMainMessage = { type: "error", message: "getContext('webgpu') returned null" };
@@ -162,17 +244,21 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
     primitive: { topology: "triangle-list" },
   });
   const sampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
-  const renderer: Renderer = { device, context, canvas, pipeline, sampler, texture: null, bindGroup: null };
+  const renderer: Renderer = { device, format, context, canvas, pipeline, sampler, texture: null, bindGroup: null };
 
   log("info", `WebGPU ready, format=${format}`);
   const ready: GPUToMainMessage = {
     type: "ready",
     adapterName: ((adapter as unknown as { info?: { vendor?: string } }).info?.vendor) ?? null,
+    streamRenderer: true,
   };
   self.postMessage(ready);
 
   consumeFrames(renderer, memory, regionBase).catch((e: unknown) => {
     log("error", `frame consumer stopped: ${e instanceof Error ? e.message : String(e)}`);
+  });
+  consumeStream(renderer, memory, toByteOffset(layout.gpuRingBase)).catch((e: unknown) => {
+    log("error", `GPU stream consumer stopped: ${e instanceof Error ? e.stack ?? e.message : String(e)}`);
   });
 }
 

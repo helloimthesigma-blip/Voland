@@ -31,6 +31,7 @@
 #define GPU_STREAM_HEADER_BYTES 48u
 #define GPU_STREAM_RECORD_HEADER_BYTES 8u
 #define GPU_STREAM_ALIGN 8u
+#define GPU_STREAM_RING_OFFSET 64u /* where the ring starts when it shares a region with its header */
 
 #define GPU_STREAM_OFF_MAGIC 0u
 #define GPU_STREAM_OFF_VERSION 4u

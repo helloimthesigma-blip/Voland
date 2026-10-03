@@ -262,6 +262,11 @@ async function boot(): Promise<BootResult | null> {
       if (msg.type === "ready") {
         adapterLabel = msg.adapterName ?? "Software/Unknown";
         appendLogLine("info", `gpu adapter: ${adapterLabel}`);
+        /* WebGPU renderer unless ?renderer=software asks for the reference. */
+        const software = new URLSearchParams(location.search).get("renderer") === "software";
+        if (msg.streamRenderer && !software) {
+          cpuWorker.postMessage({ type: "set-gpu-mode", on: true } satisfies MainToCPUMessage);
+        }
         gpuSlot = "ready";
         updateStatus();
         resolve();

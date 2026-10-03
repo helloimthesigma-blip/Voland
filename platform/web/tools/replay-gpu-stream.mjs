@@ -38,7 +38,7 @@ const bundle = `${transpile("bindings/gpu-records.ts")}\n${transpile("workers/gp
 
 const stream = readFileSync(file);
 const launchArgs = ["--enable-unsafe-webgpu", "--enable-features=Vulkan"];
-if (adapter === "swiftshader") launchArgs.push("--use-webgpu-adapter=swiftshader");
+launchArgs.push(adapter === "swiftshader" ? "--use-webgpu-adapter=swiftshader" : "--use-angle=metal");
 const browser = await chromium.launch({ args: launchArgs });
 const page = await browser.newPage();
 page.on("console", (m) => console.log(`[page] ${m.text()}`));
@@ -111,16 +111,22 @@ const result = await page.evaluate(async ({ every }) => {
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const t0 = performance.now();
   let records = 0;
+  const byType = {};
   for (let at = 0; at + 8 <= bytes.byteLength;) {
     const type = view.getUint32(at, true), size = view.getUint32(at + 4, true);
     if (globalThis.TRACE_RECORDS) console.log(`record ${records} type ${type} size ${size}`);
+    const r0 = performance.now();
     ex.execute(type, bytes.subarray(at + 8, at + 8 + size));
+    const e = (byType[type] ??= { n: 0, ms: 0, bytes: 0 });
+    e.n++; e.ms += performance.now() - r0; e.bytes += size;
     at += 8 + size;
     records++;
   }
+  const cpuMs = performance.now() - t0;
   ex.flush();
   await device.queue.onSubmittedWorkDone();
   const elapsed = performance.now() - t0;
+  console.log(`CPU side ${cpuMs.toFixed(0)} ms; by record type ${JSON.stringify(Object.fromEntries(Object.entries(byType).map(([k, v]) => [k, { n: v.n, ms: Math.round(v.ms), MB: +(v.bytes / 1048576).toFixed(1) }])))}`);
   if (target && !(every && presents % every === 0)) readback(presents);
   const out = await Promise.all(pending);
   return { records, presents, elapsed, stats: ex.stats, errors, frames: out, features };

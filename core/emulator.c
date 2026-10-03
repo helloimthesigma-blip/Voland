@@ -893,6 +893,31 @@ void emulator_set_shared_font(Emulator* emulator, const uint8_t* ttf, uint32_t s
   }
 }
 
+/* The ring is full: wait for the GPU worker to consume (bounded, so a
+ * stalled consumer shows up as slowness rather than a hang in one wait). */
+#define GPU_STREAM_WAIT_NS 20000000ll
+static void gpu_stream_wait(void *user, volatile int32_t *word, int32_t expected) {
+  (void)user;
+#ifdef __EMSCRIPTEN__
+  (void)__builtin_wasm_memory_atomic_wait32((int32_t *)word, expected, GPU_STREAM_WAIT_NS);
+#else
+  (void)word;
+  (void)expected;
+#endif
+}
+
+void emulator_set_gpu_mode(Emulator *emulator, bool on) {
+  if (!emulator) return;
+  if (on && !emulator->gpu_stream_ready) {
+    const Memory_Layout *layout = layout_get();
+    uint8_t *header = (uint8_t *)(uintptr_t)layout->gpu_ring_base;
+    gpu_stream_init(&emulator->gpu_stream, header, header + GPU_STREAM_RING_OFFSET,
+                    LAYOUT_GPU_RING_SIZE - GPU_STREAM_RING_OFFSET, gpu_stream_wait, NULL);
+    emulator->gpu_stream_ready = true;
+  }
+  raster3d_set_gpu(&emulator->renderer, on ? &emulator->gpu_stream : NULL);
+}
+
 void emulator_set_frame_skip(Emulator* emulator, uint32_t n) {
   if (!emulator) return;
   emulator->frame_skip = n > EMULATOR_MAX_FRAME_SKIP ? EMULATOR_MAX_FRAME_SKIP : n;

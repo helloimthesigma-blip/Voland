@@ -50,6 +50,7 @@ EXPORT uint64_t emulator_crash_pc_ffi(void);
 EXPORT void emulator_set_program_path_ffi(uint64_t path);
 EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
 EXPORT void emulator_set_frame_skip_ffi(uint32_t frames);
+EXPORT void emulator_set_gpu_mode_ffi(uint32_t on);
 EXPORT void emulator_set_shared_font_ffi(uint64_t bytes, uint32_t size);
 EXPORT int emulator_sd_write_file_ffi(uint64_t path, uint64_t bytes, uint64_t size);
 EXPORT int emulator_sd_clear_ffi(void);
@@ -285,6 +286,12 @@ EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds)
 EXPORT void emulator_set_frame_skip_ffi(uint32_t frames)
 {
   if (g_initialised) emulator_set_frame_skip(&g_emulator, frames);
+}
+
+/* GPU mode (emulator_set_gpu_mode): the GPU worker consumes the stream. */
+EXPORT void emulator_set_gpu_mode_ffi(uint32_t on)
+{
+  if (g_initialised) emulator_set_gpu_mode(&g_emulator, on != 0);
 }
 
 /* pl:u's font (§1.6: a font the platform may ship, never Nintendo's).

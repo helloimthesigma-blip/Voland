@@ -92,6 +92,8 @@ let running = false;
 let paused = false;
 /** The user's frame skip (set-frame-skip); applied to every core load. */
 let frameSkip = 0;
+/** The renderer the main thread chose (set-gpu-mode); applied to every core load. */
+let gpuMode = false;
 
 function postRunState(state: "running" | "exited" | "crashed" | "deadlock" | "paused", detail: string): void {
   const msg: CPUToMainMessage = { type: "run-state", state, detail };
@@ -336,6 +338,7 @@ function loadGame(file: File): CPUToMainMessage {
   const loadingCore = core;
   loadingCore._emulator_set_rtc_ffi(BigInt(Math.floor(Date.now() / 1000)));
   loadingCore._emulator_set_frame_skip_ffi(frameSkip);
+  loadingCore._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
   withCString(`/${sdName(file.name)}`, (path) => loadingCore._emulator_set_program_path_ffi(path));
   const code = core._emulator_load_program_ffi(BigInt(file.size), randomAslrSeed());
 
@@ -448,6 +451,13 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
       withCString(msg.text, (pointer) => sdCore._emulator_text_respond_ffi(pointer, msg.accepted ? 1 : 0));
     }
     textRequestShown = false;
+    return;
+  }
+
+  if (msg.type === "set-gpu-mode") {
+    gpuMode = msg.on;
+    core?._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
+    log("info", `renderer: ${gpuMode ? "WebGPU (GPU worker)" : "software reference"}`);
     return;
   }
 

@@ -13,6 +13,7 @@
 #include "common/result.h"
 #include "common/vmm.h"
 #include "cpu/cpu.h"
+#include "gpu/gpu_stream.h"
 #include "hle/hle.h"
 #include "hle/kernel/page_allocator.h"
 #include "hle/kernel/process.h"
@@ -132,6 +133,10 @@ typedef struct Emulator
   uint32_t content_node;    /* ramfs node of a chain-loaded NRO */
   int64_t rtc;       /* Unix seconds the next process boots at (emulator_set_rtc) */
   uint32_t frame_skip; /* emulator_set_frame_skip; survives process reloads */
+  /* GPU mode (emulator_set_gpu_mode): the renderer's stream to the GPU
+   * worker, in the layout's gpu_ring region. */
+  Gpu_Stream gpu_stream;
+  bool gpu_stream_ready;
 } Emulator;
 
 /* What one emulator_run_slice() did (§7 scheduler status). */
@@ -206,6 +211,13 @@ void emulator_set_rtc(Emulator *emulator, int64_t unix_seconds);
  * missing until the game draws it again. Capped at EMULATOR_MAX_FRAME_SKIP. */
 #define EMULATOR_MAX_FRAME_SKIP 5u
 void emulator_set_frame_skip(Emulator *emulator, uint32_t n);
+
+/* GPU mode (§13): draws, clears, copies and presents of GPU-rendered
+ * frames stream to the GPU worker's WebGPU renderer through the layout's
+ * gpu_ring region (gpu/gpu_stream.h) instead of being rasterised here.
+ * The platform turns it on once a consumer exists (the producer waits for
+ * room in the ring). Off: the software reference renderer. */
+void emulator_set_gpu_mode(Emulator *emulator, bool on);
 
 /* Seeds the emulated SD card (§15): creates `path` (absolute, '/'-
  * separated; missing parent directories are created) holding `size`
