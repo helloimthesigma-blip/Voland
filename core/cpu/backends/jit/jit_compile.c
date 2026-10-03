@@ -79,11 +79,19 @@ enum {
   L_FD = 61,     /* ...f64 */
   L_FD2 = 62,
   L_LAST_F64 = 62,
+  L_VA = 63,     /* vector FP fast paths: v128 */
+  L_VB = 64,
+  L_VD = 65,
+  L_VR = 66,
+  L_VR2 = 67,
+  L_VT = 68,
+  L_LAST_V128 = 68,
 };
 #define I64_LOCALS (L_LAST_I64 - L_STATE)
 #define I32_LOCALS (L_LAST_I32 - L_LAST_I64)
 #define F32_LOCALS (L_LAST_F32 - L_LAST_I32)
 #define F64_LOCALS (L_LAST_F64 - L_LAST_F32)
+#define V128_LOCALS (L_LAST_V128 - L_LAST_F64)
 
 /* Imported function indices, then the block function. */
 #define FUNC_INTERPRET 0u
@@ -2230,8 +2238,221 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Vector floating point: SIMD128 fast paths.                          */
+/* ------------------------------------------------------------------ */
+/*
+ * The scalar rules (see "Scalar floating point" above) lane by lane:
+ * every active lane's result normal and finite, FPCR 0, FPSR.IXC set;
+ * otherwise the exact direct call, which has not changed anything yet.
+ */
+
+#define SIMD_LANE_BYTES 16u
+
+static void simd(Ctx *c, uint32_t opcode) {
+  op(c, WASM_OP_SIMD_PREFIX);
+  wasm_uleb(c->b, opcode);
+}
+static void v128_const(Ctx *c, uint64_t low, uint64_t high) {
+  simd(c, WASM_SIMD_V128_CONST);
+  uint8_t raw[SIMD_LANE_BYTES];
+  for (uint32_t i = 0; i < sizeof(uint64_t); i++) {
+    raw[i] = (uint8_t)(low >> (8u * i));
+    raw[sizeof(uint64_t) + i] = (uint8_t)(high >> (8u * i));
+  }
+  wasm_bytes(c->b, raw, sizeof(raw));
+}
+static void v128_shuffle(Ctx *c, const uint8_t lanes[SIMD_LANE_BYTES]) {
+  simd(c, WASM_SIMD_I8X16_SHUFFLE);
+  wasm_bytes(c->b, lanes, SIMD_LANE_BYTES);
+}
+static void load_v(Ctx *c, uint32_t r) {
+  lget(c, L_STATE);
+  simd(c, WASM_SIMD_V128_LOAD);
+  wasm_uleb(c->b, ALIGN_8);
+  wasm_uleb(c->b, OFF_V(r));
+}
+/* The upper two f32 lanes moved down (for promote_low). */
+static void v128_high_to_low(Ctx *c) {
+  static const uint8_t lanes[SIMD_LANE_BYTES] = {8, 9, 10, 11, 12, 13, 14, 15, 8, 9, 10, 11, 12, 13, 14, 15};
+  lget(c, L_VT); /* both operands the same vector */
+  lget(c, L_VT);
+  v128_shuffle(c, lanes);
+}
+
+/* i32: every active lane of the v128 in `local` normal and finite. */
+static void emit_lanes_normal(Ctx *c, uint32_t local, bool dbl, bool q) {
+  lget(c, local);
+  simd(c, dbl ? WASM_SIMD_F64X2_ABS : WASM_SIMD_F32X4_ABS);
+  lset(c, L_VT);
+  lget(c, L_VT);
+  if (dbl) f64c(c, FP_MIN_NORMAL_D);
+  else f32c(c, FP_MIN_NORMAL_S);
+  simd(c, dbl ? WASM_SIMD_F64X2_SPLAT : WASM_SIMD_F32X4_SPLAT);
+  simd(c, dbl ? WASM_SIMD_F64X2_GT : WASM_SIMD_F32X4_GT);
+  lget(c, L_VT);
+  if (dbl) f64c(c, FP_INFINITY_D);
+  else f32c(c, FP_INFINITY_S);
+  simd(c, dbl ? WASM_SIMD_F64X2_SPLAT : WASM_SIMD_F32X4_SPLAT);
+  simd(c, dbl ? WASM_SIMD_F64X2_LT : WASM_SIMD_F32X4_LT);
+  simd(c, WASM_SIMD_V128_AND);
+  if (!q) { /* the upper half is not part of a 64-bit vector */
+    v128_const(c, 0, ~(uint64_t)0);
+    simd(c, WASM_SIMD_V128_OR);
+  }
+  simd(c, WASM_SIMD_I32X4_ALL_TRUE);
+}
+
+/* V[d] = the v128 in `local` (only the low 64 bits for a 64-bit vector). */
+static void store_v(Ctx *c, uint32_t d, uint32_t local, bool q) {
+  if (q) {
+    lget(c, L_STATE);
+    lget(c, local);
+    simd(c, WASM_SIMD_V128_STORE);
+    wasm_uleb(c->b, ALIGN_8);
+    wasm_uleb(c->b, OFF_V(d));
+    return;
+  }
+  lget(c, L_STATE);
+  lget(c, local);
+  simd(c, WASM_SIMD_I64X2_EXTRACT_LANE);
+  wasm_u8(c->b, 0);
+  mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_V(d));
+  lget(c, L_STATE);
+  i64c(c, 0);
+  mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_V(d) + V_HIGH_HALF);
+}
+
+/* i32: no lane of the f64x2 in `local` sits exactly on an f32 midpoint. */
+static void emit_off_midpoints(Ctx *c, uint32_t local) {
+  lget(c, local);
+  v128_const(c, (1ull << F32_EXTRA_BITS) - 1u, (1ull << F32_EXTRA_BITS) - 1u);
+  simd(c, WASM_SIMD_V128_AND);
+  v128_const(c, F32_MIDPOINT, F32_MIDPOINT);
+  simd(c, WASM_SIMD_I64X2_NE);
+  simd(c, WASM_SIMD_I64X2_ALL_TRUE);
+}
+
+/* f64x2 of D + A*B for the two f32 lanes promote_low picks from L_VA,
+ * L_VB, L_VD (or from their upper halves when `high`). */
+static void emit_fused_pair(Ctx *c, bool high) {
+  static const uint32_t sources[3] = {L_VD, L_VA, L_VB};
+  for (uint32_t i = 0; i < 3u; i++) {
+    lget(c, sources[i]);
+    if (high) {
+      lset(c, L_VT);
+      v128_high_to_low(c);
+    }
+    simd(c, WASM_SIMD_F64X2_PROMOTE_LOW_F32X4);
+  }
+  simd(c, WASM_SIMD_F64X2_MUL);
+  simd(c, WASM_SIMD_F64X2_ADD);
+}
+
+typedef enum Vector_Fp_Op { VFP_ADD, VFP_SUB, VFP_MUL, VFP_DIV, VFP_MLA, VFP_MLS } Vector_Fp_Op;
+
+/* rd = op(rn, rm or the broadcast element) over 2 or 4 lanes. L_VB must
+ * hold the second operand already. */
+static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t n, uint32_t d) {
+  static const uint32_t ops32[4] = {WASM_SIMD_F32X4_ADD, WASM_SIMD_F32X4_SUB, WASM_SIMD_F32X4_MUL, WASM_SIMD_F32X4_DIV};
+  static const uint32_t ops64[4] = {WASM_SIMD_F64X2_ADD, WASM_SIMD_F64X2_SUB, WASM_SIMD_F64X2_MUL, WASM_SIMD_F64X2_DIV};
+  load_v(c, n);
+  lset(c, L_VA);
+  if (vop == VFP_MLA || vop == VFP_MLS) { /* single precision only */
+    if (vop == VFP_MLS) {
+      lget(c, L_VA);
+      simd(c, WASM_SIMD_F32X4_NEG);
+      lset(c, L_VA);
+    }
+    load_v(c, d);
+    lset(c, L_VD);
+    emit_fused_pair(c, false);
+    lset(c, L_VR);
+    emit_fused_pair(c, true);
+    lset(c, L_VR2);
+    emit_off_midpoints(c, L_VR);
+    if (q) {
+      emit_off_midpoints(c, L_VR2);
+      op(c, WASM_OP_I32_AND);
+    }
+    lset(c, L_PASS);
+    static const uint8_t join[SIMD_LANE_BYTES] = {0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23};
+    lget(c, L_VR);
+    simd(c, WASM_SIMD_F32X4_DEMOTE_F64X2_ZERO);
+    lget(c, L_VR2);
+    simd(c, WASM_SIMD_F32X4_DEMOTE_F64X2_ZERO);
+    v128_shuffle(c, join);
+    lset(c, L_VR);
+    emit_lanes_normal(c, L_VR, false, q);
+    lget(c, L_PASS);
+    op(c, WASM_OP_I32_AND);
+  } else {
+    lget(c, L_VA);
+    lget(c, L_VB);
+    simd(c, dbl ? ops64[vop] : ops32[vop]);
+    lset(c, L_VR);
+    emit_lanes_normal(c, L_VR, dbl, q);
+  }
+  emit_fp_env_ok(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  store_v(c, d, L_VR, q);
+  Sync none = {0};
+  fp_else_exact(c, &none);
+}
+
+/* Advanced SIMD FP with a fast path; false: not one of these forms. */
+static bool c_vector_fp_fast(Ctx *c, uint32_t insn) {
+  if (bit(insn, 31)) return false;
+  const bool q = bit(insn, 30), u = bit(insn, 29);
+  const uint32_t rn = bits(insn, 9, 5), rd = bits(insn, 4, 0);
+  if (bits(insn, 28, 24) == 0x0E && bit(insn, 21) && bit(insn, 10) && (bits(insn, 15, 11) >> 3) == 3u) {
+    /* three same, floating point */
+    const bool dbl = bit(insn, 22), a1 = bit(insn, 23);
+    if (dbl && !q) return false;
+    Vector_Fp_Op vop;
+    switch (((uint32_t)u << 4) | ((uint32_t)a1 << 3) | bits(insn, 13, 11)) {
+    case 0x02: vop = VFP_ADD; break;
+    case 0x0A: vop = VFP_SUB; break;
+    case 0x13: vop = VFP_MUL; break;
+    case 0x17: vop = VFP_DIV; break;
+    case 0x01: vop = VFP_MLA; break;
+    case 0x09: vop = VFP_MLS; break;
+    default: return false;
+    }
+    if (dbl && (vop == VFP_MLA || vop == VFP_MLS)) return false; /* needs a true fused multiply-add */
+    load_v(c, bits(insn, 20, 16));
+    lset(c, L_VB);
+    emit_vector_fp(c, vop, dbl, q, rn, rd);
+    return true;
+  }
+  if (bits(insn, 28, 24) == 0x0F && !bit(insn, 10) && bit(insn, 23)) { /* by element, floating point */
+    const uint32_t opcode = bits(insn, 15, 12);
+    const bool dbl = bit(insn, 22);
+    Vector_Fp_Op vop;
+    if (opcode == 0x9 && !u) vop = VFP_MUL;
+    else if (opcode == 0x1 && !u) vop = VFP_MLA;
+    else if (opcode == 0x5 && !u) vop = VFP_MLS;
+    else return false;
+    if (dbl && (!q || bit(insn, 21) || vop != VFP_MUL)) return false;
+    const uint32_t index = dbl ? bit(insn, 11) : ((bit(insn, 11) << 1) | bit(insn, 21));
+    const uint32_t rm = bits(insn, 20, 16);
+    /* A scalar load and a splat, not v128.load32/64_splat: V8's Liftoff
+     * (Node 24 / V8 13) returns zeros for those at memory64 addresses
+     * past 4 GiB, where the state lives (docs/JIT.md, "V8 quirks"). */
+    lget(c, L_STATE);
+    mem(c, dbl ? WASM_OP_F64_LOAD : WASM_OP_F32_LOAD, dbl ? ALIGN_8 : ALIGN_4,
+        OFF_V(rm) + index * (dbl ? sizeof(uint64_t) : sizeof(uint32_t)));
+    simd(c, dbl ? WASM_SIMD_F64X2_SPLAT : WASM_SIMD_F32X4_SPLAT);
+    lset(c, L_VB);
+    emit_vector_fp(c, vop, dbl, q, rn, rd);
+    return true;
+  }
+  return false;
+}
+
 static bool c_simd_fp(Ctx *c, uint32_t insn) {
-  if (c_scalar_fp_fast(c, insn)) return true;
+  if (c_scalar_fp_fast(c, insn) || c_vector_fp_fast(c, insn)) return true;
   Sync sync = {0};
   simd_fp_sync(insn, &sync);
   emit_direct_call(c, &sync);
@@ -2758,8 +2979,8 @@ static void emit_chain(Ctx *c) {
 }
 
 static void emit_function(Ctx *c) {
-  /* Locals: one run each of i64, i32, f32, f64. */
-  wasm_uleb(c->b, 4);
+  /* Locals: one run each of i64, i32, f32, f64, v128. */
+  wasm_uleb(c->b, 5);
   wasm_uleb(c->b, I64_LOCALS);
   wasm_u8(c->b, WASM_TYPE_I64);
   wasm_uleb(c->b, I32_LOCALS);
@@ -2768,6 +2989,8 @@ static void emit_function(Ctx *c) {
   wasm_u8(c->b, WASM_TYPE_F32);
   wasm_uleb(c->b, F64_LOCALS);
   wasm_u8(c->b, WASM_TYPE_F64);
+  wasm_uleb(c->b, V128_LOCALS);
+  wasm_u8(c->b, WASM_TYPE_V128);
 
   /* Prologue. The caller checked that block 0 fits the budget. */
   state_load64(c, OFF_L1);

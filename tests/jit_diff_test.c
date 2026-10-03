@@ -210,7 +210,7 @@ static uint32_t gen_exclusive(void) {
 static uint32_t vreg(void) { return pick(32); }
 static uint32_t ftype(void) { return pick(8) == 0 ? 3u : pick(2); } /* single/double, sometimes half/undefined */
 static uint32_t gen_simd_fp(void) {
-  switch (pick(14)) {
+  switch (pick(16)) {
   case 0: return 0x1E200800u | (ftype() << 22) | (vreg() << 16) | (pick(9) << 12) | (vreg() << 5) | vreg(); /* 2-source */
   case 1: return 0x1E204000u | (ftype() << 22) | (pick(16) << 15) | (vreg() << 5) | vreg();               /* 1-source */
   case 2: return 0x1F000000u | (ftype() << 22) | (pick(2) << 21) | (vreg() << 16) | (pick(2) << 15) | (vreg() << 10) |
@@ -240,6 +240,16 @@ static uint32_t gen_simd_fp(void) {
   case 12: /* LD1/ST1 (multiple structures), offset or post-index */
     return 0x0C000000u | (pick(2) << 30) | (pick(2) << 23) | (pick(2) << 22) | ((pick(2) ? 31u : 24u + pick(4)) << 16) |
            (pick(16) << 12) | (pick(4) << 10) | (base_reg() << 5) | vreg();
+  case 13: { /* vector FP three same (FADD/FSUB/FMUL/FDIV/FMLA/FMLS & co.) and by element */
+    const uint32_t v_rd = 16u + pick(16), v_rn = 16u + pick(16), v_rm = 16u + pick(16);
+    if (pick(2)) {
+      return 0x0E20C400u | (pick(4) ? 1u << 30 : 0) | (pick(2) << 29) | (pick(2) << 23) | (pick(3) == 0 ? 1u << 22 : 0) |
+             (v_rm << 16) | ((0x18u + pick(8)) << 11) | (v_rn << 5) | v_rd;
+    }
+    static const uint32_t ops[3] = {0x1, 0x5, 0x9};
+    return 0x0F800000u | (pick(4) ? 1u << 30 : 0) | (pick(8) == 0 ? 1u << 29 : 0) | (pick(3) == 0 ? 1u << 22 : 0) |
+           (pick(2) << 21) | (v_rm << 16) | (ops[pick(3)] << 12) | (pick(2) << 11) | (v_rn << 5) | v_rd;
+  }
   default: /* scalar/vector by element, shifts, pairwise: anything in the space */
     return 0x0E000000u | ((uint32_t)rnd() & 0xF0FFFFFFu & ~(1u << 31)) | (pick(2) << 28);
   }
@@ -313,6 +323,7 @@ typedef struct Snapshot {
 } Snapshot;
 
 static uint32_t g_fpcr, g_fpsr;
+static CPU_Vector_Register g_v_init[CPU_VECTOR_REGISTER_COUNT];
 
 static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint64_t *x, uint64_t sp, uint32_t nzcv) {
   for (uint8_t i = 0; i < 31; i++) cpu->set_reg(s, i, x[i]);
@@ -327,8 +338,21 @@ static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint64_t *x, u
       uint32_t bits32;
       memcpy(&bits32, &f, sizeof(bits32));
       v.lo = bits32;
+    } else if (i < 24) { /* vectors of four ordinary singles */
+      uint32_t lanes[4];
+      for (uint32_t k = 0; k < 4u; k++) {
+        const float f = (float)((int64_t)((x[(i + k) % 31] >> (k * 8u)) & 0xFFF) - 2048) / (float)(k + 3u);
+        memcpy(&lanes[k], &f, sizeof(lanes[k]));
+      }
+      v.lo = lanes[0] | ((uint64_t)lanes[1] << 32);
+      v.hi = lanes[2] | ((uint64_t)lanes[3] << 32);
+    } else if (i < 28) { /* vectors of two ordinary doubles */
+      const double d0 = (double)small / 9.0, d1 = (double)((int64_t)(x[i - 1] & 0xFFF) - 2048);
+      memcpy(&v.lo, &d0, sizeof(d0));
+      memcpy(&v.hi, &d1, sizeof(d1));
     }
     cpu->set_vector_reg(s, i, v);
+    g_v_init[i] = v;
   }
   cpu->set_sp(s, sp);
   cpu->set_pstate(s, nzcv);
@@ -412,6 +436,12 @@ static void run_case(uint32_t iteration) {
   const Snapshot ref = snapshot(g_ref_cpu, g_ref, ref_exit, ref_cycles);
   CHECK_OK(vmm_read_physical(g_vmm, DATA_PA, g_data_ref, DATA_BYTES));
 
+  /* Debugging: JIT_ONLY=N skips the JIT (and the comparison) for every
+   * other iteration - the random sequence is unchanged - and traces N. */
+  static int only = -2;
+  if (only == -2) only = getenv("JIT_ONLY") ? atoi(getenv("JIT_ONLY")) : -1;
+  if (only >= 0 && (int)iteration != only) return;
+
   /* JIT: run() with the same budgets. */
   CHECK_OK(vmm_write_physical(g_vmm, DATA_PA, g_data_init, DATA_BYTES));
   set_state(g_jit_cpu, g_jit, x, sp, nzcv);
@@ -419,8 +449,25 @@ static void run_case(uint32_t iteration) {
   uint64_t jit_cycles = 0;
   for (uint32_t i = 0; jit_cycles < STEP_LIMIT; i++) {
     const uint64_t budget = budgets[i] < STEP_LIMIT - jit_cycles ? budgets[i] : STEP_LIMIT - jit_cycles;
+    const uint64_t from = g_jit_cpu->get_pc(g_jit);
+    const uint64_t simd_before = jit_stats()->direct_simd;
+    if (only >= 0) {
+      fprintf(stderr, "  fpsr %llx fpcr %llx\n", (unsigned long long)g_jit_cpu->get_sys_reg(g_jit, CPU_SYSREG_FPSR),
+              (unsigned long long)g_jit_cpu->get_sys_reg(g_jit, CPU_SYSREG_FPCR));
+      for (uint8_t k = 16; k < 28; k += 11) {
+        const CPU_Vector_Register v = g_jit_cpu->get_vector_reg(g_jit, k);
+        fprintf(stderr, "  v%u %016llx:%016llx\n", k, (unsigned long long)v.hi, (unsigned long long)v.lo);
+      }
+    }
     jit_exit = g_jit_cpu->run(g_jit, budget);
     jit_cycles += g_jit_cpu->get_cycles_consumed(g_jit);
+    if (only >= 0) {
+      const CPU_Vector_Register v19 = g_jit_cpu->get_vector_reg(g_jit, 19);
+      fprintf(stderr, "  direct simd calls %llu\n", (unsigned long long)(jit_stats()->direct_simd - simd_before));
+      fprintf(stderr, "  run %llx budget %llu -> pc %llx cycles %llu exit %d v19 %016llx:%016llx\n",
+              (unsigned long long)from, (unsigned long long)budget, (unsigned long long)g_jit_cpu->get_pc(g_jit),
+              (unsigned long long)jit_cycles, jit_exit, (unsigned long long)v19.hi, (unsigned long long)v19.lo);
+    }
     if (jit_exit != CPU_EXIT_CYCLES_ELAPSED) break;
   }
   const Snapshot jit = snapshot(g_jit_cpu, g_jit, jit_exit, jit_cycles);
@@ -445,7 +492,19 @@ static void run_case(uint32_t iteration) {
                 (unsigned long long)jit.x[i], (unsigned long long)x[i]);
       }
     }
-    if (memcmp(ref.v, jit.v, sizeof(ref.v)) != 0) fprintf(stderr, "  vector registers differ\n");
+    for (int i = 0; i < (int)CPU_VECTOR_REGISTER_COUNT; i++) {
+      if (memcmp(&ref.v[i], &jit.v[i], sizeof(ref.v[i])) != 0) {
+        fprintf(stderr, "  v%d %016llx:%016llx / %016llx:%016llx (initial %016llx:%016llx)\n", i,
+                (unsigned long long)ref.v[i].hi, (unsigned long long)ref.v[i].lo, (unsigned long long)jit.v[i].hi,
+                (unsigned long long)jit.v[i].lo, (unsigned long long)g_v_init[i].hi,
+                (unsigned long long)g_v_init[i].lo);
+      }
+    }
+    for (int i = 16; i < 28; i++) {
+      fprintf(stderr, "  initial v%d %016llx:%016llx\n", i, (unsigned long long)g_v_init[i].hi,
+              (unsigned long long)g_v_init[i].lo);
+    }
+    fprintf(stderr, "  fpcr %x fpsr %x\n", g_fpcr, g_fpsr);
     if (ref.tpidr != jit.tpidr) fprintf(stderr, "  tpidr differs\n");
     if (ref.fpsr != jit.fpsr) fprintf(stderr, "  fpsr %x / %x\n", ref.fpsr, jit.fpsr);
     if (memcmp(g_data_ref, data_jit, DATA_BYTES) != 0) fprintf(stderr, "  data differs\n");
@@ -465,6 +524,7 @@ int main(int argc, char **argv) {
   g_ref_cpu = &CPU_BACKEND_INTERPRETER;
   g_jit_cpu = &CPU_BACKEND_JIT;
   jit_set_hot_threshold(1);
+  if (getenv("JIT_DUMP")) jit_set_dump_directory(getenv("JIT_DUMP"));
   g_ref = g_ref_cpu->create(g_vmm, NULL);
   g_jit = g_jit_cpu->create(g_vmm, NULL);
   CHECK(g_ref && g_jit);

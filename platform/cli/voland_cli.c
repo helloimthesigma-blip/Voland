@@ -534,6 +534,7 @@ static int run(int argc, char **argv) {
   const char *snapshot_dir = NULL, *gpu_stream_path = NULL;
   uint32_t frame_skip = 0, host_cores = 0;
   bool test_card = false, svc_stats = false, swkbd_cancel = false, jit_fallbacks = false;
+  uint64_t jit_fallbacks_from = 0;
   const char *swkbd_text = NULL;
   Input_Event inputs[MAX_INPUT_EVENTS];
   uint32_t input_count = 0;
@@ -548,6 +549,9 @@ static int run(int argc, char **argv) {
       else { fprintf(stderr, "voland-cli: unknown backend %s\n", name); return EXIT_USAGE; }
     } else if (!strcmp(argv[i], "--jit-fallbacks")) {
       jit_set_fallback_profile(true);
+      jit_fallbacks = true;
+    } else if (!strcmp(argv[i], "--jit-fallbacks-from") && has_value) { /* profile from slice N on */
+      jit_fallbacks_from = strtoull(argv[++i], NULL, 0);
       jit_fallbacks = true;
     } else if (!strcmp(argv[i], "--jit-dump") && has_value) {
       jit_set_dump_directory(argv[++i]);
@@ -693,6 +697,7 @@ static int run(int argc, char **argv) {
     trace_length = (end && *end == ':') ? strtoull(end + 1, NULL, 0) : 1u;
   }
   while (slices < max_slices && (status == EMULATOR_RUNNING || status == EMULATOR_IDLE)) {
+    if (jit_fallbacks_from && slices == jit_fallbacks_from) jit_set_fallback_profile(true);
 #ifndef _WIN32
     if (snapshot_dir && snapshot_at && slices == snapshot_at) {
       static Snapshot_Job job;
