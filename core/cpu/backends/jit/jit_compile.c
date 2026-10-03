@@ -2976,6 +2976,79 @@ static void emit_multicore_fence(Ctx *c) {
   op(c, 0);
 }
 
+/* i64.atomic.rmw{8,16,32,}.cmpxchg_u (threads proposal, 0xFE prefix). */
+#define WASM_ATOMIC_I64_CMPXCHG 0x49u
+#define WASM_ATOMIC_I64_CMPXCHG8_U 0x4Cu
+#define WASM_ATOMIC_I64_CMPXCHG16_U 0x4Du
+#define WASM_ATOMIC_I64_CMPXCHG32_U 0x4Eu
+
+static uint32_t cmpxchg_opcode(uint32_t size) {
+  switch (size) {
+  case 1: return WASM_ATOMIC_I64_CMPXCHG8_U;
+  case 2: return WASM_ATOMIC_I64_CMPXCHG16_U;
+  case 4: return WASM_ATOMIC_I64_CMPXCHG32_U;
+  default: return WASM_ATOMIC_I64_CMPXCHG;
+  }
+}
+
+static uint32_t log2_size(uint32_t size) { return size == 8u ? 3u : size == 4u ? 2u : size == 2u ? 1u : 0u; }
+
+/* Multicore STXR / STLXR of one register (the interpreter's
+ * store_exclusive_shared, inline): it passes iff this thread's monitor is
+ * set on this address and size and memory still holds what the LDXR read
+ * (state->exclusive_value) - one host compare-and-swap, seq_cst, so a
+ * store by another core in between makes it fail rather than be lost.
+ * Unmapped or read-only pages leave through the interpreter, which faults
+ * precisely; a failing store still probes translation, as serially. */
+static void emit_store_exclusive_shared(Ctx *c, uint32_t element, uint32_t t, uint32_t rs) {
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD8_U, ALIGN_1, OFF_EXCLUSIVE_VALID);
+  state_load64(c, OFF_EXCLUSIVE_ADDRESS);
+  lget(c, L_ADDR);
+  op(c, WASM_OP_I64_EQ);
+  op(c, WASM_OP_I32_AND);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_EXCLUSIVE_SIZE);
+  i32c(c, element);
+  op(c, WASM_OP_I32_EQ);
+  op(c, WASM_OP_I32_AND);
+  open_if(c, WASM_BLOCK_VOID);
+  {
+    open_block(c); /* $done */
+    const uint32_t done = c->depth;
+    open_block(c); /* $slow */
+    emit_walk(c, element, VMM_PERM_W, c->depth); /* aligned: never crosses a page */
+    lget(c, L_HOST);
+    lget(c, L_STATE);
+    mem(c, load_opcode(ACCESS_LOAD_ZERO, element), ALIGN_1, OFF_EXCLUSIVE_VALUE);
+    get_x(c, t);
+    op(c, WASM_ATOMIC_PREFIX);
+    wasm_uleb(c->b, cmpxchg_opcode(element));
+    wasm_uleb(c->b, log2_size(element)); /* atomics need natural alignment */
+    wasm_uleb(c->b, 0);
+    lget(c, L_STATE);
+    mem(c, load_opcode(ACCESS_LOAD_ZERO, element), ALIGN_1, OFF_EXCLUSIVE_VALUE);
+    op(c, WASM_OP_I64_EQ);
+    lset(c, L_PASS);
+    br(c, done);
+    end_(c); /* $slow */
+    leave_via_interpreter(c);
+    end_(c); /* $done */
+  }
+  else_(c);
+  i32c(c, 0);
+  lset(c, L_PASS);
+  emit_load_address(c, 1u);
+  end_(c);
+  lget(c, L_STATE);
+  i32c(c, 0);
+  mem(c, WASM_OP_I32_STORE8, ALIGN_1, OFF_EXCLUSIVE_VALID);
+  lget(c, L_PASS);
+  op(c, WASM_OP_I32_EQZ);
+  op(c, WASM_OP_I64_EXTEND_I32_U);
+  set_x(c, rs);
+}
+
 static bool c_exclusive(Ctx *c, uint32_t insn) {
   const uint32_t size = bits(insn, 31, 30);
   const bool o2 = bit(insn, 23), load = bit(insn, 22), o1 = bit(insn, 21), o0 = bit(insn, 15);
@@ -2983,9 +3056,7 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
   const uint32_t element = 1u << size;
   if (o1) return false;        /* pairs (and LSE CAS): the interpreter */
   if (o2 && !o0) return false; /* LORegion: undefined */
-  /* Multicore: STXR/STLXR must be a compare-and-swap against what the
-   * LDXR read - the interpreter's (interp_load_store.c). */
-  if (!o2 && !load && cpu_multicore()) return false;
+
   get_xsp(c, n);
   lset(c, L_ADDR);
   if (element > 1u) { /* alignment fault: the interpreter raises it */
@@ -3027,6 +3098,10 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
     lget(c, L_VAL);
     set_x(c, t);
     if (o0) emit_multicore_fence(c); /* LDAXR: acquire */
+    return true;
+  }
+  if (cpu_multicore()) { /* STXR / STLXR: a compare-and-swap */
+    emit_store_exclusive_shared(c, element, t, rs);
     return true;
   }
   /* STXR / STLXR: stores iff the monitor holds this granule; the status
