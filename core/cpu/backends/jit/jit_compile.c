@@ -1310,11 +1310,78 @@ static bool c_dp_two_source(Ctx *c, uint32_t insn) {
   return true;
 }
 
+/* T0 = ((T0 >> k) & mask) | ((T0 & mask) << k): swaps adjacent k-bit fields. */
+static void emit_swap_fields(Ctx *c, uint32_t k, uint64_t mask) {
+  lget(c, L_T0);
+  i64c(c, k);
+  op(c, WASM_OP_I64_SHR_U);
+  i64c(c, mask);
+  op(c, WASM_OP_I64_AND);
+  lget(c, L_T0);
+  i64c(c, mask);
+  op(c, WASM_OP_I64_AND);
+  i64c(c, k);
+  op(c, WASM_OP_I64_SHL);
+  op(c, WASM_OP_I64_OR);
+  lset(c, L_T0);
+}
+
+/* RBIT/REV16/REV32/REV: field swaps from `first_k` up to the width. */
+static void emit_reverse(Ctx *c, uint32_t rn, uint32_t rd, bool sf, uint32_t first_k, uint32_t last_k) {
+  static const uint64_t masks[6] = {0x5555555555555555ull, 0x3333333333333333ull, 0x0F0F0F0F0F0F0F0Full,
+                                    0x00FF00FF00FF00FFull, 0x0000FFFF0000FFFFull, 0x00000000FFFFFFFFull};
+  get_xw(c, rn, sf);
+  lset(c, L_T0);
+  for (uint32_t i = 0, k = 1; i < 6u; i++, k *= 2u) {
+    if (k >= first_k && k <= last_k) emit_swap_fields(c, k, masks[i] & width_mask_of(sf));
+  }
+  lget(c, L_T0);
+  set_x(c, rd);
+}
+
 static bool c_dp_one_source(Ctx *c, uint32_t insn) {
   if (bit(insn, 29) || bits(insn, 20, 16) != 0) return false;
   const bool sf = bit(insn, 31);
-  if (bits(insn, 15, 10) != 4u) return false; /* only CLZ inline so far */
-  get_x(c, bits(insn, 9, 5));
+  const uint32_t rn = bits(insn, 9, 5), rd = bits(insn, 4, 0), width_bits = sf ? 64u : 32u;
+  switch (bits(insn, 15, 10)) {
+  case 0: emit_reverse(c, rn, rd, sf, 1u, width_bits / 2u); return true;   /* RBIT */
+  case 1: emit_reverse(c, rn, rd, sf, 8u, 8u); return true;                 /* REV16 */
+  case 2: emit_reverse(c, rn, rd, sf, 8u, 16u); return true;                /* REV32 / REV (W) */
+  case 3:                                                                    /* REV (X) */
+    if (!sf) return false;
+    emit_reverse(c, rn, rd, sf, 8u, 32u);
+    return true;
+  case 5: /* CLS: CLZ(x ^ (x >> width-1, arithmetic)) - 1 */
+    get_x(c, rn);
+    if (sf) {
+      ltee(c, L_T0);
+      lget(c, L_T0);
+      i64c(c, 63);
+      op(c, WASM_OP_I64_SHR_S);
+      op(c, WASM_OP_I64_XOR);
+      op(c, WASM_OP_I64_CLZ);
+    } else {
+      op(c, WASM_OP_I32_WRAP_I64);
+      op(c, WASM_OP_I64_EXTEND_I32_U);
+      op(c, WASM_OP_I64_EXTEND32_S);
+      ltee(c, L_T0);
+      lget(c, L_T0);
+      i64c(c, 63);
+      op(c, WASM_OP_I64_SHR_S);
+      op(c, WASM_OP_I64_XOR);
+      mask32(c);
+      op(c, WASM_OP_I32_WRAP_I64);
+      op(c, WASM_OP_I32_CLZ);
+      op(c, WASM_OP_I64_EXTEND_I32_U);
+    }
+    i64c(c, 1);
+    op(c, WASM_OP_I64_SUB);
+    set_x(c, rd);
+    return true;
+  case 4: break; /* CLZ, below */
+  default: return false;
+  }
+  get_x(c, rn);
   if (sf) {
     op(c, WASM_OP_I64_CLZ);
   } else {
@@ -2037,6 +2104,8 @@ static void exit_conditional(Ctx *c, uint64_t target) {
 }
 
 #define SYSREG_FIELD_MASK (0xFFFFu << 5)
+#define DC_ZVA_ENCODING 0xD50B7420u /* SYS #3, C7, C4, #1 with Rt = 0 */
+#define DC_ZVA_BYTES 64u
 
 static Outcome c_system(Ctx *c, uint32_t insn) {
   const bool read = bit(insn, 21);
@@ -2056,7 +2125,29 @@ static Outcome c_system(Ctx *c, uint32_t insn) {
     }
     return OUTCOME_END_HELPER;
   }
-  if (op0 == 1) return OUTCOME_END_HELPER; /* SYS: cache maintenance, DC ZVA */
+  if (op0 == 1) {
+    if ((insn & ~(uint32_t)REG_ZR) == DC_ZVA_ENCODING) { /* zero the 64-byte block (DCZID_EL0.BS = 4) */
+      get_x(c, rt);
+      i64c(c, ~(uint64_t)(DC_ZVA_BYTES - 1u));
+      op(c, WASM_OP_I64_AND);
+      lset(c, L_ADDR);
+      open_block(c); /* $done */
+      const uint32_t done = c->depth;
+      open_block(c); /* $slow: aligned, so only a fault - the interpreter raises it */
+      emit_walk(c, DC_ZVA_BYTES, VMM_PERM_W, c->depth);
+      for (uint32_t i = 0; i < DC_ZVA_BYTES; i += (uint32_t)sizeof(uint64_t)) {
+        lget(c, L_HOST);
+        i64c(c, 0);
+        mem(c, WASM_OP_I64_STORE, ALIGN_1, i);
+      }
+      br(c, done);
+      end_(c);
+      leave_via_interpreter(c);
+      end_(c);
+      return OUTCOME_NEXT;
+    }
+    return OUTCOME_END_HELPER; /* SYS: IC IVAU (flushes code), other cache maintenance */
+  }
   const uint32_t reg = insn & SYSREG_FIELD_MASK;
   if (read) {
     switch (reg) {

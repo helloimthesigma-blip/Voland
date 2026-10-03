@@ -154,7 +154,7 @@ static uint32_t gen_system(void) {
   case 3: return 0xD53B4200u | dst();                           /* MRS xN, NZCV */
   case 4: return 0xD51B4200u | reg();                           /* MSR NZCV, xN */
   case 5: return 0xD53BD040u | dst();                           /* MRS xN, TPIDR_EL0 */
-  case 6: return 0xD53BE040u | dst();                           /* MRS xN, CNTVCT_EL0 */
+  case 6: return pick(2) ? 0xD53BE040u | dst() : 0xD50B7420u | (pick(4) ? 20u + pick(4) : reg()); /* MRS CNTVCT / DC ZVA */
   default: return 0xD51BD040u | reg();                          /* MSR TPIDR_EL0, xN */
   }
 }
