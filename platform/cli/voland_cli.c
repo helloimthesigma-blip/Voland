@@ -540,6 +540,32 @@ static void pc_profile_print(Emulator *emu) {
   }
 }
 
+/* VOLAND_DUMP_MODULES=DIR: at exit, each module's .text as DIR/<name>.text
+ * plus DIR/modules.txt (name, base, text start, size) - for disassembling
+ * the PC profile's hot blocks offline. */
+#define MODULE_DUMP_CHUNK ((uint64_t)1 << 20)
+static void dump_modules(Emulator *emu, const char *dir) {
+  static uint8_t chunk[MODULE_DUMP_CHUNK];
+  char path[1024];
+  snprintf(path, sizeof(path), "%s/modules.txt", dir);
+  FILE *index = fopen(path, "w");
+  if (!index) return;
+  for (uint32_t m = 0; m < emu->process.module_count; m++) {
+    const Process_Module *mod = &emu->process.modules[m];
+    fprintf(index, "%s 0x%llx 0x%llx 0x%llx\n", mod->name, (unsigned long long)mod->base_gva,
+            (unsigned long long)mod->text.base, (unsigned long long)mod->text.size);
+    snprintf(path, sizeof(path), "%s/%s.text", dir, mod->name);
+    FILE *out = fopen(path, "wb");
+    for (uint64_t at = 0; out && at < mod->text.size; at += MODULE_DUMP_CHUNK) {
+      const uint64_t n = mod->text.size - at < MODULE_DUMP_CHUNK ? mod->text.size - at : MODULE_DUMP_CHUNK;
+      if (!error_is_ok(vmm_read_block(emu->vmm, mod->text.base + at, chunk, n))) break;
+      fwrite(chunk, 1, (size_t)n, out);
+    }
+    if (out) fclose(out);
+  }
+  fclose(index);
+}
+
 /* --gpu-stream: the ring the GPU-mode producer writes, drained into a file
  * whenever it fills and after every slice. */
 #define CLI_GPU_RING_BYTES ((uint64_t)4 * 1024 * 1024)
@@ -752,6 +778,8 @@ static int run(int argc, char **argv) {
     if (getenv("VOLAND_GPU_MIPMAPS") && !strcmp(getenv("VOLAND_GPU_MIPMAPS"), "0")) emu.renderer.gpu_mipmaps = false;
   }
   const bool pc_profile = getenv("VOLAND_PC_PROFILE") != NULL;
+  /* VOLAND_PC_PROFILE_FROM=N: sample from slice N on (a later scene only). */
+  const uint64_t pc_profile_from = getenv("VOLAND_PC_PROFILE_FROM") ? strtoull(getenv("VOLAND_PC_PROFILE_FROM"), NULL, 0) : 0;
   /* VOLAND_PROGRESS=N: a "slice N" line every N slices (long runs). */
   const uint64_t progress_every = getenv("VOLAND_PROGRESS") ? strtoull(getenv("VOLAND_PROGRESS"), NULL, 0) : 0;
   /* VOLAND_TRACE_DRAWS=START:LENGTH logs every draw in that slice window. */
@@ -799,7 +827,7 @@ static int run(int argc, char **argv) {
     if (input_count) apply_input(inputs, input_count, slices);
     emu.renderer.trace_draws = slices >= trace_start && slices - trace_start < trace_length;
     status = emulator_run_slice(&emu, budget);
-    if (pc_profile) pc_profile_sample(&emu);
+    if (pc_profile && slices >= pc_profile_from) pc_profile_sample(&emu);
     {
       /* A software keyboard is up: answer it like a player would. */
       static Am_Text_Request request;
@@ -843,6 +871,7 @@ static int run(int argc, char **argv) {
             (unsigned long long)(gs->hashed_bytes >> 20));
   }
   if (pc_profile) pc_profile_print(&emu);
+  if (getenv("VOLAND_DUMP_MODULES")) dump_modules(&emu, getenv("VOLAND_DUMP_MODULES"));
 #ifdef __APPLE__
   {
     /* Host work, independent of machine load (a forked snapshot job counts
