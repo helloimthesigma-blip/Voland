@@ -157,13 +157,14 @@ static void report_stop(const Jit_Thread *t, const Interp_State *s, CPU_ExitReas
 
 static Jit_Thread g_main_thread;
 static uint32_t g_hot_threshold = JIT_DEFAULT_HOT_THRESHOLD;
-/* Hashed like the per-thread hit counters: set once any host thread has
- * compiled a region there. Another core then compiles it on first sight
+/* Hashed like the per-thread hit counters: the PC of the last region any
+ * host thread compiled there (exact, so an alias never skips the
+ * threshold - that compiled cold code and thrashed the cache). Another core then compiles it on first sight
  * instead of interpreting it up to the threshold again - cheap, since the
  * module bytes are identical and the engine shares the compiled code
  * (docs/PARALLEL.md). Consulted in multicore mode only, so serial runs
  * keep the threshold for recompiling evicted code too. */
-static uint8_t g_compiled_somewhere[JIT_HIT_COUNTERS];
+static uint64_t g_compiled_somewhere[JIT_HIT_COUNTERS]; /* the exact PC, 0 = none */
 
 void jit_set_hot_threshold(uint32_t executions) { g_hot_threshold = executions ? executions : 1u; }
 
@@ -603,11 +604,11 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
       const uint32_t slot = (uint32_t)(jit_cache_index(pc) & (JIT_HIT_COUNTERS - 1u));
       uint16_t *hits = &t->hits[slot];
       if (++*hits >= g_hot_threshold ||
-          (cpu_multicore() && __atomic_load_n(&g_compiled_somewhere[slot], __ATOMIC_RELAXED))) {
+          (cpu_multicore() && __atomic_load_n(&g_compiled_somewhere[slot], __ATOMIC_RELAXED) == pc)) {
         *hits = 0;
         compile(t, s, pc, generation);
         if (find(t, s, pc, generation)) {
-          __atomic_store_n(&g_compiled_somewhere[slot], 1u, __ATOMIC_RELAXED);
+          __atomic_store_n(&g_compiled_somewhere[slot], pc, __ATOMIC_RELAXED);
           continue;
         }
       }
