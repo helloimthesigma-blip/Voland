@@ -90,7 +90,10 @@ static Interp_Status system(Interp_State *s, uint32_t insn) {
     if (crn == 3 && rt == 31) {                   /* barriers */
       if (op2 == 2) s->exclusive_valid = false;   /* CLREX */
       else if (op2 < 4 || op2 == 7) return INTERP_UNDEFINED;
-      return advance(s);                          /* DSB, DMB, ISB: single-threaded, no-ops */
+      /* DSB, DMB: no-ops while one guest thread runs at a time; host
+       * fences when threads run on several host threads. ISB: no-op. */
+      else if (op2 != 6 && cpu_multicore()) __atomic_thread_fence(__ATOMIC_SEQ_CST);
+      return advance(s);
     }
     return INTERP_UNDEFINED; /* MSR (immediate) to PSTATE fields: EL1+ on ARMv8.0 */
   }

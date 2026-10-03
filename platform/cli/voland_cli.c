@@ -13,11 +13,16 @@
  *       --sdmc DIR                   seed the emulated SD card with DIR's contents
  *       --dump-frame FILE            write the newest frame as a binary PPM (P6)
  *       --frame-skip N               rasterise and show one of every N + 1 frames
+ *       --host-cores N               run guest threads on N host threads
+ *                                    (docs/PARALLEL.md; 0 = serial, the default)
  *       --dump-frames-every N        with --dump-frame: also write FILE.<slice>.ppm
  *       --gpu-stream FILE            run the WebGPU renderer's producer (GPU mode) and record
  *                                    its stream to FILE (u32 type, u32 bytes, payload per
  *                                    record) - replayed by platform/web/tools/replay-gpu-stream.mjs
- *                                    every N slices (watching a long run progress)
+ *                                    every N slices (watching a long run progress); with
+ *                                    --dump-frames-every, logs the present each multiple
+ *                                    ended on (replay --at). VOLAND_GPU_MIPMAPS=0: no mip
+ *                                    chains (level 0, as the software reference)
  *       --snapshot-at N --snapshot-dir DIR
  *                                    (POSIX) at slice N, stop and serve jobs: each
  *                                    DIR/job file forks a copy-on-write child that
@@ -515,7 +520,7 @@ static int run(int argc, char **argv) {
   const CPU_Backend *backend = &CPU_BACKEND_INTERPRETER;
   uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES, dump_every = 0, snapshot_at = 0;
   const char *snapshot_dir = NULL, *gpu_stream_path = NULL;
-  uint32_t frame_skip = 0;
+  uint32_t frame_skip = 0, host_cores = 0;
   bool test_card = false, svc_stats = false, swkbd_cancel = false;
   const char *swkbd_text = NULL;
   Input_Event inputs[MAX_INPUT_EVENTS];
@@ -558,6 +563,8 @@ static int run(int argc, char **argv) {
       font_path = argv[++i];
     } else if (!strcmp(argv[i], "--frame-skip") && has_value) {
       frame_skip = (uint32_t)strtoul(argv[++i], NULL, 0);
+    } else if (!strcmp(argv[i], "--host-cores") && has_value) {
+      host_cores = (uint32_t)strtoul(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--snapshot-at") && has_value) {
       snapshot_at = strtoull(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--snapshot-dir") && has_value) {
@@ -623,6 +630,10 @@ static int run(int argc, char **argv) {
     fclose(file);
     return EXIT_LOAD_FAILED;
   }
+  if (host_cores) {
+    const uint32_t cores = emulator_set_host_cores(&emu, host_cores);
+    fprintf(stderr, "voland-cli: %u host core(s) for guest threads\n", cores);
+  }
 
   setup_call_trace(&emu);
   Emulator_Status status = EMULATOR_RUNNING;
@@ -649,6 +660,9 @@ static int run(int argc, char **argv) {
     }
     gpu_stream_init(&g_gpu_stream, g_gpu_header, g_gpu_ring, CLI_GPU_RING_BYTES, gpu_stream_wait, NULL);
     raster3d_set_gpu(&emu.renderer, &g_gpu_stream);
+    /* VOLAND_GPU_MIPMAPS=0: level 0 only, as the software reference (for
+     * comparing replays with --dump-frame output pixel for pixel). */
+    if (getenv("VOLAND_GPU_MIPMAPS") && !strcmp(getenv("VOLAND_GPU_MIPMAPS"), "0")) emu.renderer.gpu_mipmaps = false;
   }
   const bool pc_profile = getenv("VOLAND_PC_PROFILE") != NULL;
   /* VOLAND_TRACE_DRAWS=START:LENGTH logs every draw in that slice window. */
@@ -665,8 +679,10 @@ static int run(int argc, char **argv) {
       memset(&job, 0, sizeof(job));
       job.max_slices = max_slices;
       job.trace_start = UINT64_MAX;
+      (void)emulator_set_host_cores(&emu, 0); /* fork() keeps no other thread */
       snapshot_serve(snapshot_dir, &job); /* returns in a job's child */
       raster3d_restart_workers_after_fork(&emu.renderer);
+      (void)emulator_set_host_cores(&emu, host_cores);
       max_slices = job.max_slices;
       if (job.dump_every) dump_every = job.dump_every;
       if (job.frame_path[0]) frame_path = job.frame_path;
@@ -701,6 +717,12 @@ static int run(int argc, char **argv) {
     if (g_gpu_file) gpu_stream_drain();
     audio_frames += drain_audio(wav); /* and plays (or discards) every sample */
     slices++;
+    if (g_gpu_file && dump_every && slices % dump_every == 0) {
+      /* GPU mode rasterises nothing CPU-side: name the present a replay
+       * (replay-gpu-stream.mjs --at) captures for this slice instead. */
+      fprintf(stderr, "voland-cli: gpu-stream slice %llu present %llu\n", (unsigned long long)slices,
+              (unsigned long long)emu.renderer.gpu_stats.presents);
+    }
     if (frame_path && dump_every && slices % dump_every == 0) {
       char numbered[1024];
       snprintf(numbered, sizeof(numbered), "%s.%llu.ppm", frame_path, (unsigned long long)slices);
@@ -715,12 +737,13 @@ static int run(int argc, char **argv) {
     const Raster3d_Gpu_Stats *gs = &emu.renderer.gpu_stats;
     fprintf(stderr,
             "voland-cli: GPU stream: %llu records (%llu MB); %llu draws, %llu triangles, %llu shaders, %llu untranslated "
-            "draws, %llu texture uploads (%llu MB), %llu surfaces, %llu presents, %llu copies\n",
+            "draws, %llu texture uploads (%llu MB), %llu surfaces, %llu presents, %llu copies, %llu MB re-hashed\n",
             (unsigned long long)g_gpu_records, (unsigned long long)(g_gpu_stream.bytes >> 20),
             (unsigned long long)gs->draws, (unsigned long long)gs->triangles, (unsigned long long)gs->shaders,
             (unsigned long long)gs->untranslated_draws, (unsigned long long)gs->texture_uploads,
             (unsigned long long)(gs->upload_bytes >> 20), (unsigned long long)gs->surfaces,
-            (unsigned long long)gs->presents, (unsigned long long)gs->copies);
+            (unsigned long long)gs->presents, (unsigned long long)gs->copies,
+            (unsigned long long)(gs->hashed_bytes >> 20));
   }
   if (pc_profile) pc_profile_print(&emu);
   uint32_t width = 0, height = 0;

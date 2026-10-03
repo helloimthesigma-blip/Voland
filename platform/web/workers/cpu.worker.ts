@@ -60,16 +60,68 @@ const fileReader = new FileReaderSync();
 
 /** byte_source.h `read` realized over FileReaderSync + `blob.slice()`
  * (§15): synchronous, exact-length, straight into linear memory. */
+/* Game-file read-ahead. Each FileReaderSync read costs a fixed trip to
+ * the browser's blob store (most of a small read's time), and the core
+ * reads RomFS in small, mostly sequential pieces, so reads go through
+ * READ_CHUNK_BYTES-aligned chunks kept in a small LRU (plain worker-heap
+ * ArrayBuffers the core never sees; bytes are copied into linear memory). */
+const READ_CHUNK_BYTES = 1 << 20;
+const READ_CACHE_CHUNKS = 32;
+/** Reads bigger than this skip the cache (one direct read). */
+const READ_DIRECT_BYTES = 4 * READ_CHUNK_BYTES;
+/** Chunk index -> bytes, in least- to most-recently used order. */
+const readCache = new Map<number, Uint8Array>();
+
+function readChunk(file: File, index: number): Uint8Array {
+  const cached = readCache.get(index);
+  if (cached) {
+    readCache.delete(index);
+    readCache.set(index, cached);
+    return cached;
+  }
+  const start = index * READ_CHUNK_BYTES;
+  const bytes = new Uint8Array(fileReader.readAsArrayBuffer(file.slice(start, Math.min(file.size, start + READ_CHUNK_BYTES))));
+  perf.fileReads++;
+  readCache.set(index, bytes);
+  if (readCache.size > READ_CACHE_CHUNKS) {
+    const oldest = readCache.keys().next();
+    if (!oldest.done) readCache.delete(oldest.value);
+  }
+  return bytes;
+}
+
 const readGameFile: GameFileReadHook = (offset, destination, size) => {
   if (!activeGameFile || !coreMemory) return false;
+  const file = activeGameFile;
+  const started = performance.now();
   try {
-    const bytes = fileReader.readAsArrayBuffer(activeGameFile.slice(offset, offset + size));
-    if (bytes.byteLength !== size) return false;
-    new Uint8Array(coreMemory.buffer, destination, size).set(new Uint8Array(bytes));
+    if (offset + size > file.size) return false;
+    const target = new Uint8Array(coreMemory.buffer, destination, size);
+    if (size > READ_DIRECT_BYTES) {
+      const bytes = fileReader.readAsArrayBuffer(file.slice(offset, offset + size));
+      perf.fileReads++;
+      if (bytes.byteLength !== size) return false;
+      target.set(new Uint8Array(bytes));
+      return true;
+    }
+    let done = 0;
+    while (done < size) {
+      const at = offset + done;
+      const index = Math.floor(at / READ_CHUNK_BYTES);
+      const chunk = readChunk(file, index);
+      const within = at - index * READ_CHUNK_BYTES;
+      const take = Math.min(size - done, chunk.byteLength - within);
+      if (take <= 0) return false;
+      target.set(chunk.subarray(within, within + take), done);
+      done += take;
+    }
     return true;
   } catch (e) {
     log("warn", `game file read failed at offset ${offset}: ${e instanceof Error ? e.message : String(e)}`);
     return false;
+  } finally {
+    perf.fileReadBytes += size;
+    perf.fileReadMs += performance.now() - started;
   }
 };
 
@@ -87,6 +139,67 @@ const guestOutput: GuestOutputHook = (address, length) => {
 /* ------------------------------------------------------------------ */
 
 const SLICE_CYCLES = 200_000n;
+
+/** Run-loop counters, read by the perf harness (platform/web/tools/perf.mjs)
+ * through the worker's global scope; nothing posts them. */
+interface CpuPerf {
+  /** performance.now() when the current game started running. */
+  startedMs: number;
+  slices: number;
+  /** Time inside emulator_run_slice (includes file reads). */
+  sliceMs: number;
+  /** Time between bursts: the event loop, timers, messages. */
+  yieldMs: number;
+  bursts: number;
+  fileReads: number;
+  fileReadBytes: number;
+  fileReadMs: number;
+  /** Core counters (emulator_perf_counters_ffi), refreshed every burst. */
+  ticks: number;
+  svcs: number;
+  gpuBytes: number;
+  gpuStalls: number;
+}
+const perf: CpuPerf = {
+  startedMs: 0, slices: 0, sliceMs: 0, yieldMs: 0, bursts: 0,
+  fileReads: 0, fileReadBytes: 0, fileReadMs: 0, ticks: 0, svcs: 0, gpuBytes: 0, gpuStalls: 0,
+};
+(globalThis as unknown as { __VOLAND_CPU_PERF__: CpuPerf }).__VOLAND_CPU_PERF__ = perf;
+const PERF_COUNTERS = 4;
+let perfBuffer = 0;
+let lastBurstEnd = 0;
+
+/* Yielding between bursts: setTimeout(0) is clamped to 4 ms once timers
+ * nest (HTML timer rules), which cost a quarter of the worker's time
+ * against 12 ms bursts. A message to ourselves on a private channel runs
+ * as the next task with no clamp, and still lets lifecycle messages and
+ * timers in between. It carries no data (§6: a scheduling signal only). */
+const yieldChannel = new MessageChannel();
+/** One burst at a time, however often load/resume ask for one. */
+let burstPending = false;
+yieldChannel.port1.onmessage = () => {
+  burstPending = false;
+  runBurst();
+};
+function scheduleBurst(): void {
+  if (burstPending) return;
+  burstPending = true;
+  yieldChannel.port2.postMessage(null);
+}
+
+function refreshCorePerf(): void {
+  if (!core || !coreMemory) return;
+  if (perfBuffer === 0) perfBuffer = core._malloc(PERF_COUNTERS * 8);
+  if (perfBuffer === 0) return;
+  const count = core._emulator_perf_counters_ffi(BigInt(perfBuffer), PERF_COUNTERS);
+  const values = new BigUint64Array(coreMemory.buffer, perfBuffer, PERF_COUNTERS);
+  if (count >= PERF_COUNTERS) {
+    perf.ticks = Number(values[0] ?? 0n);
+    perf.svcs = Number(values[1] ?? 0n);
+    perf.gpuBytes = Number(values[2] ?? 0n);
+    perf.gpuStalls = Number(values[3] ?? 0n);
+  }
+}
 const BURST_MS = 12;
 let running = false;
 let paused = false;
@@ -94,6 +207,17 @@ let paused = false;
 let frameSkip = 0;
 /** The renderer the main thread chose (set-gpu-mode); applied to every core load. */
 let gpuMode = false;
+/** Host threads running guest threads (docs/PARALLEL.md): two by default,
+ * since the busiest titles keep two guest threads busy; ?cores=N
+ * (set-host-cores) overrides, 0 = the serial scheduler. Applied to every
+ * core load. */
+const DEFAULT_HOST_CORES = 2;
+let hostCores = DEFAULT_HOST_CORES;
+
+function applyHostCores(target: SwitchCoreExports): void {
+  const inEffect = target._emulator_set_host_cores_ffi(hostCores);
+  log("info", `guest threads on ${inEffect === 0 ? "the serial scheduler" : `${inEffect} host core(s)`}`);
+}
 
 function postRunState(state: "running" | "exited" | "crashed" | "deadlock" | "paused", detail: string): void {
   const msg: CPUToMainMessage = { type: "run-state", state, detail };
@@ -125,9 +249,17 @@ function pollTextInput(): void {
 
 function runBurst(): void {
   if (!core || !running || paused) return;
-  const deadline = performance.now() + BURST_MS;
-  while (performance.now() < deadline) {
+  const burstStart = performance.now();
+  if (lastBurstEnd > 0) perf.yieldMs += burstStart - lastBurstEnd;
+  perf.bursts++;
+  const deadline = burstStart + BURST_MS;
+  let now = burstStart;
+  while (now < deadline) {
     const status = core._emulator_run_slice_ffi(SLICE_CYCLES);
+    const after = performance.now();
+    perf.slices++;
+    perf.sliceMs += after - now;
+    now = after;
     const finished = runStateAfterSlice(status);
     if (finished) {
       running = false;
@@ -140,14 +272,19 @@ function runBurst(): void {
     }
   }
   pollTextInput();
-  setTimeout(runBurst, 0);
+  refreshCorePerf();
+  lastBurstEnd = performance.now();
+  scheduleBurst();
 }
 
 function startRunning(): void {
+  Object.assign(perf, { startedMs: performance.now(), slices: 0, sliceMs: 0, yieldMs: 0, bursts: 0,
+                        fileReads: 0, fileReadBytes: 0, fileReadMs: 0 });
+  lastBurstEnd = 0;
   running = true;
   paused = false;
   postRunState("running", "");
-  setTimeout(runBurst, 0);
+  scheduleBurst();
 }
 
 async function loadCoreModule(memory: WebAssembly.Memory): Promise<SwitchCoreExports> {
@@ -335,10 +472,12 @@ function loadGame(file: File): CPUToMainMessage {
   core._emulator_unload_program_ffi();
 
   activeGameFile = file;
+  readCache.clear();
   const loadingCore = core;
   loadingCore._emulator_set_rtc_ffi(BigInt(Math.floor(Date.now() / 1000)));
   loadingCore._emulator_set_frame_skip_ffi(frameSkip);
   loadingCore._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
+  applyHostCores(loadingCore);
   withCString(`/${sdName(file.name)}`, (path) => loadingCore._emulator_set_program_path_ffi(path));
   const code = core._emulator_load_program_ffi(BigInt(file.size), randomAslrSeed());
 
@@ -461,6 +600,13 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     return;
   }
 
+  if (msg.type === "set-host-cores") {
+    hostCores = msg.cores;
+    /* Takes effect between slices; a running game switches at once. */
+    if (core) applyHostCores(core);
+    return;
+  }
+
   if (msg.type === "set-frame-skip") {
     frameSkip = msg.frames;
     core?._emulator_set_frame_skip_ffi(frameSkip);
@@ -476,7 +622,7 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     if (paused && running) {
       paused = false;
       postRunState("running", "");
-      setTimeout(runBurst, 0);
+      scheduleBurst();
     }
     paused = false;
     return;

@@ -5,7 +5,7 @@
  */
 
 export const GPU_STREAM_MAGIC = 0x55504756;
-export const GPU_STREAM_VERSION = 1;
+export const GPU_STREAM_VERSION = 2;
 export const GPU_STREAM_HEADER_BYTES = 56;
 export const GPU_STREAM_RECORD_HEADER_BYTES = 8;
 export const OFF_MAGIC = 0;
@@ -82,6 +82,8 @@ export const BIND_TEXTURE = 2;
 export const BIND_SAMPLER = 3;
 export const BIND_FILTERED = 1;
 export const SAMPLER_LINEAR = 1;
+export const SAMPLER_MIN_LINEAR = 1 << 7;
+export const SAMPLER_MIP_LINEAR = 1 << 8;
 export const SAMPLER_WRAPS: readonly GPUAddressMode[] = ["repeat", "mirror-repeat", "clamp-to-edge"];
 export const PRESENT_FLIP_X = 1;
 export const PRESENT_FLIP_Y = 2;
@@ -89,7 +91,7 @@ export const MAX_TARGETS = 8;
 export const VERTEX_HEADER_BYTES = 16;
 
 /* Byte sizes of the fixed parts. */
-export const TEXTURE_CREATE_BYTES = 24;
+export const TEXTURE_CREATE_BYTES = 32; /* version 1: 24 (no levels) */
 export const TEXTURE_WRITE_BYTES = 32;
 export const CLEAR_BYTES = 60;
 export const TARGET_BYTES = 36;
@@ -106,6 +108,7 @@ export interface TextureCreate {
   readonly height: number;
   readonly layers: number;
   readonly usage: number;
+  readonly levels: number;
 }
 
 export interface TextureWrite {
@@ -191,7 +194,10 @@ const u32s = (v: DataView, at: number, n: number): number[] => Array.from({ leng
 const i32s = (v: DataView, at: number, n: number): number[] => Array.from({ length: n }, (_, i) => i32(v, at + 4 * i));
 
 export function parseTextureCreate(v: DataView): TextureCreate {
-  return { id: u32(v, 0), format: u32(v, 4), width: u32(v, 8), height: u32(v, 12), layers: u32(v, 16), usage: u32(v, 20) };
+  return {
+    id: u32(v, 0), format: u32(v, 4), width: u32(v, 8), height: u32(v, 12), layers: u32(v, 16), usage: u32(v, 20),
+    levels: v.byteLength >= 28 ? Math.max(1, u32(v, 24)) : 1,
+  };
 }
 
 export function parseTextureWrite(v: DataView): TextureWrite {
