@@ -19,7 +19,8 @@
  *                                    DIR/job file forks a copy-on-write child that
  *                                    continues from slice N with the job's lines
  *                                    (max_slices N, input S:HEX:L, frame PATH,
- *                                    every N, trace S:L, log PATH); the result is
+ *                                    every N, trace S:L, log PATH, snapshot N DIR -
+ *                                    a nested snapshot server); the result is
  *                                    DIR/job.done.<pid>. DIR/quit ends the server.
  *                                    Iterating on a late scene without replaying.
  *       --font FILE                  the TTF/OTF pl:u serves as the system font
@@ -303,8 +304,9 @@ static int import_sdmc(Emulator *emu, const char *host, const char *guest) {
 
 /* A snapshot job's settings (see --snapshot-at). */
 typedef struct Snapshot_Job {
-  uint64_t max_slices, dump_every, trace_start, trace_length;
+  uint64_t max_slices, dump_every, trace_start, trace_length, snapshot_at;
   char frame_path[512];
+  char snapshot_dir[512];
   Input_Event inputs[MAX_INPUT_EVENTS];
   uint32_t input_count;
 } Snapshot_Job;
@@ -323,6 +325,8 @@ static bool read_job(const char *path, Snapshot_Job *job) {
       job->trace_length = b;
     } else if (sscanf(line, "input %llu:%x:%llu", &a, &buttons, &b) == 3 && job->input_count < MAX_INPUT_EVENTS) {
       job->inputs[job->input_count++] = (Input_Event){a, buttons, b};
+    } else if (sscanf(line, "snapshot %llu %511s", &a, job->snapshot_dir) == 2) {
+      job->snapshot_at = a;
     } else if (sscanf(line, "frame %511s", job->frame_path) == 1) {
     } else if (sscanf(line, "log %511s", log_path) == 1) {
     }
@@ -507,6 +511,10 @@ static int run(int argc, char **argv) {
         trace_length = job.trace_length;
       }
       for (uint32_t k = 0; k < job.input_count && input_count < MAX_INPUT_EVENTS; k++) inputs[input_count++] = job.inputs[k];
+      if (job.snapshot_at > slices) {
+        snapshot_at = job.snapshot_at;
+        snapshot_dir = job.snapshot_dir;
+      }
     }
 #endif
     if (input_count) apply_input(inputs, input_count, slices);
