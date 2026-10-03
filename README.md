@@ -4,7 +4,7 @@ A Nintendo Switch emulator targeting the web as a primary platform, with native 
 
 Play Switch games in your browser. No installation. No setup beyond providing your own keys and games.
 
-> **Status:** Early development — **Phase 4 (First Boot)** of [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Real libnx homebrew runs in the browser with input, audio and persistent SD/save data. A first commercial title (Hollow Knight: Silksong, from the user's own decrypted NCA) boots, renders its menus and reaches gameplay through a WebGPU renderer that translates Maxwell pixel shaders to WGSL and matches the software reference; guest threads run on up to 3 host cores. It is still well below real time in the browser (about 8 fps at the title screen, about 3 in gameplay): ARM code is interpreted, while an ARM64→WebAssembly JIT and hardware-decoded cutscenes (WebCodecs) are in progress.
+> **Status:** Early development — **Phase 4 (First Boot)** of [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Real libnx homebrew runs in the browser with input, audio and persistent SD/save data. A first commercial title (Hollow Knight: Silksong, from the user's own decrypted NCA) boots, renders its menus and reaches gameplay through a WebGPU renderer that translates Maxwell pixel shaders to WGSL and matches the software reference; guest threads run on up to 3 host cores. ARM code runs through an ARM64→WebAssembly JIT. It is still below real time in the browser (about 12 fps at the title screen, about 8 in gameplay), and hardware-decoded cutscenes (WebCodecs) are in progress.
 
 ---
 
