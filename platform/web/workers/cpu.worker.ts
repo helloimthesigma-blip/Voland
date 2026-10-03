@@ -65,12 +65,24 @@ const fileReader = new FileReaderSync();
  * reads RomFS in small, mostly sequential pieces, so reads go through
  * READ_CHUNK_BYTES-aligned chunks kept in a small LRU (plain worker-heap
  * ArrayBuffers the core never sees; bytes are copied into linear memory). */
-const READ_CHUNK_BYTES = 1 << 20;
-const READ_CACHE_CHUNKS = 32;
+const READ_CHUNK_BYTES = 256 * 1024;
+const READ_CACHE_CHUNKS = 512;
 /** Reads bigger than this skip the cache (one direct read). */
-const READ_DIRECT_BYTES = 4 * READ_CHUNK_BYTES;
+const READ_DIRECT_BYTES = 4 * 1024 * 1024;
 /** Chunk index -> bytes, in least- to most-recently used order. */
 const readCache = new Map<number, Uint8Array>();
+
+/** Chunks read at least once since the load (read amplification). */
+const chunksSeen = new Set<number>();
+
+function cacheChunk(index: number, bytes: Uint8Array): void {
+  readCache.delete(index);
+  readCache.set(index, bytes);
+  if (readCache.size > READ_CACHE_CHUNKS) {
+    const oldest = readCache.keys().next();
+    if (!oldest.done) readCache.delete(oldest.value);
+  }
+}
 
 function readChunk(file: File, index: number): Uint8Array {
   const cached = readCache.get(index);
@@ -82,11 +94,9 @@ function readChunk(file: File, index: number): Uint8Array {
   const start = index * READ_CHUNK_BYTES;
   const bytes = new Uint8Array(fileReader.readAsArrayBuffer(file.slice(start, Math.min(file.size, start + READ_CHUNK_BYTES))));
   perf.fileReads++;
-  readCache.set(index, bytes);
-  if (readCache.size > READ_CACHE_CHUNKS) {
-    const oldest = readCache.keys().next();
-    if (!oldest.done) readCache.delete(oldest.value);
-  }
+  chunksSeen.add(index);
+  perf.fileChunks = chunksSeen.size;
+  cacheChunk(index, bytes);
   return bytes;
 }
 
@@ -154,18 +164,22 @@ interface CpuPerf {
   fileReads: number;
   fileReadBytes: number;
   fileReadMs: number;
+  /** Distinct chunks read (more reads than this are re-reads of evicted chunks). */
+  fileChunks: number;
   /** Core counters (emulator_perf_counters_ffi), refreshed every burst. */
   ticks: number;
   svcs: number;
   gpuBytes: number;
   gpuStalls: number;
+  /** Time the core waited for the GPU/video worker to drain a full ring. */
+  streamWaitMs: number;
 }
 const perf: CpuPerf = {
   startedMs: 0, slices: 0, sliceMs: 0, yieldMs: 0, bursts: 0,
-  fileReads: 0, fileReadBytes: 0, fileReadMs: 0, ticks: 0, svcs: 0, gpuBytes: 0, gpuStalls: 0,
+  fileReads: 0, fileReadBytes: 0, fileReadMs: 0, fileChunks: 0, ticks: 0, svcs: 0, gpuBytes: 0, gpuStalls: 0, streamWaitMs: 0,
 };
 (globalThis as unknown as { __VOLAND_CPU_PERF__: CpuPerf }).__VOLAND_CPU_PERF__ = perf;
-const PERF_COUNTERS = 4;
+const PERF_COUNTERS = 5;
 let perfBuffer = 0;
 let lastBurstEnd = 0;
 
@@ -198,6 +212,7 @@ function refreshCorePerf(): void {
     perf.svcs = Number(values[1] ?? 0n);
     perf.gpuBytes = Number(values[2] ?? 0n);
     perf.gpuStalls = Number(values[3] ?? 0n);
+    perf.streamWaitMs = Number(values[4] ?? 0n) / 1e6;
   }
 }
 const BURST_MS = 12;
@@ -292,7 +307,7 @@ function runBurst(): void {
 
 function startRunning(): void {
   Object.assign(perf, { startedMs: performance.now(), slices: 0, sliceMs: 0, yieldMs: 0, bursts: 0,
-                        fileReads: 0, fileReadBytes: 0, fileReadMs: 0 });
+                        fileReads: 0, fileReadBytes: 0, fileReadMs: 0, fileChunks: 0 });
   lastBurstEnd = 0;
   running = true;
   paused = false;
@@ -486,6 +501,7 @@ function loadGame(file: File): CPUToMainMessage {
 
   activeGameFile = file;
   readCache.clear();
+  chunksSeen.clear();
   const loadingCore = core;
   loadingCore._emulator_set_rtc_ffi(BigInt(Math.floor(Date.now() / 1000)));
   loadingCore._emulator_set_frame_skip_ffi(frameSkip);
