@@ -14,6 +14,7 @@
 import type { CPUToMainMessage, GPUToMainMessage, MainToCPUMessage, MainToGPUMessage } from "@bindings/protocol";
 import { AUDIO_RING_CAPACITY_FRAMES, type MemoryLayout, toByteOffset } from "@bindings/layout";
 import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
+import type { MainToVideoMessage, VideoToMainMessage } from "@bindings/video";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
 import { PUBLISH_INDEX } from "@bindings/framebuffer";
@@ -126,6 +127,16 @@ function attachWorkerLogRelay<TMessage extends { type: string }>(
   });
 }
 
+/* Video decode (§13): a WebCodecs worker reading the core's NVDEC
+ * requests from the video region; lifecycle-only messages. */
+function startVideoWorker(memory: WebAssembly.Memory, layout: MemoryLayout): void {
+  const videoWorker = new Worker(new URL("../workers/video.worker.ts", import.meta.url), { type: "module" });
+  attachWorkerLogRelay<VideoToMainMessage>("video", videoWorker, msg => {
+    if (msg.type === "ready") appendLogLine("info", `video: WebCodecs ${msg.webCodecs ? "available" : "unavailable"}`);
+  }, () => undefined);
+  videoWorker.postMessage({ type: "init", memory, layout } satisfies MainToVideoMessage);
+}
+
 interface BootResult {
   readonly adapterLabel: string;
   readonly cpuBackend:   string;
@@ -225,6 +236,7 @@ async function boot(): Promise<BootResult | null> {
           { type: "init", canvas: offscreen, memory, layout } satisfies MainToGPUMessage,
           [offscreen],
         );
+        startVideoWorker(memory, layout);
         return;
       }
       if (msg.type === "ready") {

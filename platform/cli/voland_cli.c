@@ -70,6 +70,9 @@
 #include <sys/resource.h>
 #include <unistd.h>
 #endif
+#ifdef VOLAND_CLI_VIDEO
+#include "video_vt.h"
+#endif
 #include "hle/kernel/handle_table.h"
 #include "cpu/backends/interpreter/interpreter.h"
 #include "cpu/backends/jit/jit.h"
@@ -650,6 +653,9 @@ static int run(int argc, char **argv) {
     return EXIT_LOAD_FAILED;
   }
   emulator_set_debug_output(&emu, on_guest_output, NULL);
+#ifdef VOLAND_CLI_VIDEO
+  emulator_set_video_backend(&emu, video_vt_backend(&emu.video));
+#endif
   framebuffer_reset();
   if (test_card) (void)framebuffer_publish_test_card(TEST_CARD_WIDTH, TEST_CARD_HEIGHT);
   if (sdmc) {
@@ -736,6 +742,8 @@ static int run(int argc, char **argv) {
     if (getenv("VOLAND_GPU_MIPMAPS") && !strcmp(getenv("VOLAND_GPU_MIPMAPS"), "0")) emu.renderer.gpu_mipmaps = false;
   }
   const bool pc_profile = getenv("VOLAND_PC_PROFILE") != NULL;
+  /* VOLAND_PROGRESS=N: a "slice N" line every N slices (long runs). */
+  const uint64_t progress_every = getenv("VOLAND_PROGRESS") ? strtoull(getenv("VOLAND_PROGRESS"), NULL, 0) : 0;
   /* VOLAND_TRACE_DRAWS=START:LENGTH logs every draw in that slice window. */
   uint64_t trace_start = UINT64_MAX, trace_length = 0;
   if (getenv("VOLAND_TRACE_DRAWS")) {
@@ -774,6 +782,7 @@ static int run(int argc, char **argv) {
       }
     }
 #endif
+    if (progress_every && slices % progress_every == 0) fprintf(stderr, "voland-cli: slice %llu\n", (unsigned long long)slices);
     if (input_count) apply_input(inputs, input_count, slices);
     emu.renderer.trace_draws = slices >= trace_start && slices - trace_start < trace_length;
     status = emulator_run_slice(&emu, budget);
@@ -965,6 +974,9 @@ static int run(int argc, char **argv) {
     fprintf(stderr, "voland-cli: audio %llu frames (%.2fs) -> %s\n", (unsigned long long)audio_frames,
             (double)audio_frames / AUDIO_RING_SAMPLE_RATE, audio_path);
   }
+#ifdef VOLAND_CLI_VIDEO
+  video_vt_report();
+#endif
   if (svc_stats) {
     for (uint32_t i = 0; i < HLE_SVC_COUNT; i++) {
       if (emu.hle.svc_counts[i]) fprintf(stderr, "voland-cli: svc 0x%02x x %llu\n", i, (unsigned long long)emu.hle.svc_counts[i]);
