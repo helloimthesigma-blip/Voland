@@ -352,6 +352,14 @@ void sm_program_decode(const uint8_t *bytes, uint32_t size, uint64_t address, Sm
       if (addr == SM_ATTR_POSITION + 8u) out->reads_fragcoord_z = true;
     }
   }
+  /* Fall-through successors skip what does nothing here: scheduling
+   * words, NOP, and the barriers (DEPBAR / BAR / MEMBAR). */
+  uint32_t following = out->word_count;
+  for (uint32_t i = out->word_count; i-- > 0;) {
+    out->insns[i].next = (uint16_t)following;
+    const uint16_t op = out->insns[i].op;
+    if (op != SM_OP_SCHED && op != SM_OP_NOP && op != SM_OP_BARRIER) following = i;
+  }
 }
 
 /* ---- execution helpers -------------------------------------------- */
@@ -479,6 +487,20 @@ static const uint32_t *op_b(const Sm_Insn *in, const Sm_Env *env, const Sm_Threa
   case SM_FORM_REG_CBUF: return t->r[REG_C(in->raw)];
   default: return splat(in->imm, tmp);
   }
+}
+
+/* Whether B is one value for every lane (a constant or an immediate),
+ * and that value: arithmetic can then skip splatting it. */
+static bool op_b_scalar(const Sm_Insn *in, const Sm_Env *env, uint32_t *value) {
+  if (in->form == SM_FORM_CBUF) {
+    *value = cbuf_read(env, in->cbuf, in->imm);
+    return true;
+  }
+  if (in->form == SM_FORM_IMM) {
+    *value = in->imm;
+    return true;
+  }
+  return false;
 }
 
 /* The third (C) operand of three-source ops. */
@@ -1265,10 +1287,22 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
 
   /* ---- float ---- */
   case SM_OP_FADD: {
-    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    const uint32_t *a = t->r[REG_A(w)];
     uint32_t *d = dst_row(t, REG_D(w));
     const uint32_t aa = BIT(w, 46), na = BIT(w, 48), ab = BIT(w, 49), nb = BIT(w, 45), sat = BIT(w, 50);
     uint32_t res[SM_LANES];
+    uint32_t bs;
+    if (op_b_scalar(in, env, &bs)) {
+      const float bv = fmod_abs_neg(f32(bs), ab, nb);
+      FOR_ALL_LANES {
+        float r = fmod_abs_neg(f32(a[l]), aa, na) + bv;
+        if (sat) r = saturate(r);
+        res[l] = u32f(r);
+      }
+      store_masked(d, res, m);
+      return;
+    }
+    const uint32_t *b = op_b(in, env, t, tb);
     FOR_ALL_LANES {
       float r = fmod_abs_neg(f32(a[l]), aa, na) + fmod_abs_neg(f32(b[l]), ab, nb);
       if (sat) r = saturate(r);
@@ -1290,11 +1324,23 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
   case SM_OP_FMUL: {
     /* @41: 1-3 divide by 2^n, 4-6 multiply by 8, 4, 2. */
     static const float scale[8] = {1.0f, 0.5f, 0.25f, 0.125f, 8.0f, 4.0f, 2.0f, 1.0f};
-    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    const uint32_t *a = t->r[REG_A(w)];
     uint32_t *d = dst_row(t, REG_D(w));
     const float k = scale[BITS(w, 41, 3)] * (BIT(w, 48) ? -1.0f : 1.0f);
     const uint32_t sat = BIT(w, 50);
     uint32_t res[SM_LANES];
+    uint32_t bs;
+    if (op_b_scalar(in, env, &bs)) {
+      const float bv = f32(bs);
+      FOR_ALL_LANES {
+        float r = f32(a[l]) * bv * k;
+        if (sat) r = saturate(r);
+        res[l] = u32f(r);
+      }
+      store_masked(d, res, m);
+      return;
+    }
+    const uint32_t *b = op_b(in, env, t, tb);
     FOR_ALL_LANES {
       float r = f32(a[l]) * f32(b[l]) * k;
       if (sat) r = saturate(r);
@@ -1318,11 +1364,23 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     return;
   }
   case SM_OP_FFMA: {
-    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb), *c = op_c(in, env, t, tc);
+    const uint32_t *a = t->r[REG_A(w)], *c = op_c(in, env, t, tc);
     uint32_t *d = dst_row(t, REG_D(w));
     const float nab = BIT(w, 48) ? -1.0f : 1.0f, nc = BIT(w, 49) ? -1.0f : 1.0f;
     const uint32_t sat = BIT(w, 50);
     uint32_t res[SM_LANES];
+    uint32_t bs;
+    if (op_b_scalar(in, env, &bs)) {
+      const float bv = f32(bs);
+      FOR_ALL_LANES {
+        float r = f32(a[l]) * bv * nab + f32(c[l]) * nc;
+        if (sat) r = saturate(r);
+        res[l] = u32f(r);
+      }
+      store_masked(d, res, m);
+      return;
+    }
+    const uint32_t *b = op_b(in, env, t, tb);
     FOR_ALL_LANES {
       float r = f32(a[l]) * f32(b[l]) * nab + f32(c[l]) * nc;
       if (sat) r = saturate(r);
@@ -2180,7 +2238,7 @@ bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
       switch ((Sm_Op)in->op) {
       case SM_OP_BRA:
         if (!guard) {
-          w->pc++;
+          w->pc = in->next;
           break;
         }
         if (in->target < 0) {
@@ -2195,14 +2253,14 @@ bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
       case SM_OP_PCNT: {
         const uint32_t kind = in->op == SM_OP_SSY ? STACK_SSY : (in->op == SM_OP_PBK ? STACK_PBK : STACK_PCNT);
         if (!flow_push(w, kind, in->target)) { t->faulted = true; return false; }
-        w->pc++;
+        w->pc = in->next;
         break;
       }
       case SM_OP_SYNC:
       case SM_OP_BRK:
       case SM_OP_CONT: {
         if (!guard) {
-          w->pc++;
+          w->pc = in->next;
           break;
         }
         if (!split(warps, &count, w, (Sm_Mask)(w->mask & ~guard))) { t->faulted = true; return false; }
@@ -2214,12 +2272,12 @@ bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
       }
       case SM_OP_CAL:
         if (in->target < 0 || w->call_depth >= SM_STACK_DEPTH) { t->faulted = true; return false; }
-        w->calls[w->call_depth++] = w->pc + 1u;
+        w->calls[w->call_depth++] = in->next;
         w->pc = (uint32_t)in->target;
         break;
       case SM_OP_RET:
         if (!guard) {
-          w->pc++;
+          w->pc = in->next;
           break;
         }
         if (!split(warps, &count, w, (Sm_Mask)(w->mask & ~guard))) { t->faulted = true; return false; }
@@ -2231,16 +2289,16 @@ bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
         break;
       case SM_OP_EXIT:
         w->mask &= (Sm_Mask)~guard;
-        w->pc++;
+        w->pc = in->next;
         break;
       case SM_OP_KIL:
         t->killed |= guard;
         w->mask &= (Sm_Mask)~guard;
-        w->pc++;
+        w->pc = in->next;
         break;
       default:
         if (guard) execute(in, env, t, guard);
-        w->pc++;
+        w->pc = in->next;
         break;
       }
       if (!w->mask) done = true;

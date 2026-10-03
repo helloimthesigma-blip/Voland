@@ -1887,7 +1887,7 @@ static void to_screen(const Raster_State *rs, const Vertex *v, Screen_Vertex *ou
  * even-aligned, so a 2x2 quad never straddles two bands; a band runs
  * every queued triangle in order, so each pixel still sees the draw's
  * triangles in order - the result does not depend on the worker count. */
-#define BAND_ROWS 16
+#define BAND_ROWS 8
 
 static bool row_owned(const Raster_State *rs, int64_t y) { return y >= rs->row_begin && y < rs->row_end; }
 

@@ -108,6 +108,7 @@ typedef struct Sm_Insn {
   uint8_t form;     /* Sm_Form */
   uint8_t pred;     /* bits 0-2 predicate, bit 3 negate; 7 = always */
   uint8_t cbuf;     /* constant buffer slot for SM_FORM_CBUF / REG_CBUF */
+  uint16_t next;    /* word to run after this one falls through (scheduling words and no-ops skipped) */
   uint32_t imm;     /* immediate value, or constant-buffer byte offset */
   int32_t target;   /* branch / stack target word index, -1 none */
 } Sm_Insn;
