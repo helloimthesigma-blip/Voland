@@ -40,7 +40,16 @@ struct Gpu_Memory;
 #define RASTER_PROGRAMS 64u
 #define RASTER_TEXTURES 256u
 #define RASTER_SURFACE_VIEWS 32u
-#define RASTER_TEXTURE_POOL_BYTES ((size_t)256 * 1024 * 1024)
+/* Decoded textures. A commercial scene's working set reaches ~500MB
+ * (Silksong's first room: 29 textures, one a 64MB 4096x4096 atlas) - a
+ * smaller pool re-decodes it every frame. The web heap is what remains of
+ * the fixed linear memory beside guest RAM (§4), so it gets the most that
+ * leaves the rest headroom. */
+#ifdef __EMSCRIPTEN__
+#define RASTER_TEXTURE_POOL_BYTES ((size_t)512 * 1024 * 1024)
+#else
+#define RASTER_TEXTURE_POOL_BYTES ((size_t)1024 * 1024 * 1024)
+#endif
 #define RASTER_TEXTURE_RAW_BYTES ((size_t)64 * 1024 * 1024) /* a 4096x4096 RGBA8 texture */
 #define RASTER_INLINE_INDICES 0x10000u
 #define RASTER_STREAMS 32u
