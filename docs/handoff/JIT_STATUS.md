@@ -99,6 +99,24 @@ exclusives were inlined:
 The first two classes are now inlined, so SIMD&FP arithmetic is the next
 target.
 
+## Browser (perf.mjs, Silksong title screen, 20 s)
+
+| core | fps | slices/s |
+|---|---|---|
+| interpreter (bot 4's figure) | 7.73 | 9,122 |
+| JIT, before vector FP | 7.63 | 9,034 |
+| JIT + vector FP / integer NEON fast paths | 9.55 | 11,273 |
+| JIT + exact-zero-aware FP guards | **11.90** | **14,034** |
+
+- The title screen is dominated by vector NEON FP (FMUL/FADD/FMLA .4S,
+  by element).
+- Native wasm f32/f64/SIMD128 now run it under exactness guards: FPCR == 0,
+  FPSR.IXC already set, results finite and normal, or an exact zero.
+  Everything else goes to the interpreter's softfloat.
+- **V8 bug:** in Liftoff, `v128.load32_splat` and `v128.load64_splat` return
+  zeros at memory64 addresses ≥ 4 GiB, where the CPU state lives. The JIT
+  never emits them.
+
 ## Merge status (for the coordinator)
 
 - `local/dev` 8d4eb35 (parallel guest threads) is merged into `local/jit`.

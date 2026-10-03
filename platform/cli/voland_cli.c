@@ -9,6 +9,7 @@
  *       --jit-threshold N            jit: executions before a block is compiled
  *       --jit-dump DIR               jit: write every compiled module to DIR
  *       --jit-fallbacks              jit: print the commonest interpreted opcodes
+ *       --jit-hot N                  jit: count region entries, print the hottest N
  *       --max-slices N               stop after N slices (default 10000000)
  *       --test-card                  publish the core's test card before running
  *       --expect-output TEXT         exit 4 unless the guest printed TEXT
@@ -575,6 +576,7 @@ static int run(int argc, char **argv) {
   uint32_t frame_skip = 0, host_cores = 0;
   bool test_card = false, svc_stats = false, swkbd_cancel = false, jit_fallbacks = false;
   uint64_t jit_fallbacks_from = 0;
+  uint32_t jit_hot_top = 0;
   const char *swkbd_text = NULL;
   Input_Event inputs[MAX_INPUT_EVENTS];
   uint32_t input_count = 0;
@@ -587,6 +589,9 @@ static int run(int argc, char **argv) {
       else if (!strcmp(name, "interpreter")) backend = &CPU_BACKEND_INTERPRETER;
       else if (!strcmp(name, "jit")) backend = &CPU_BACKEND_JIT;
       else { fprintf(stderr, "voland-cli: unknown backend %s\n", name); return EXIT_USAGE; }
+    } else if (!strcmp(argv[i], "--jit-hot") && has_value) {
+      jit_hot_top = (uint32_t)strtoul(argv[++i], NULL, 0);
+      jit_set_hot_profile(true);
     } else if (!strcmp(argv[i], "--jit-fallbacks")) {
       jit_set_fallback_profile(true);
       jit_fallbacks = true;
@@ -978,6 +983,7 @@ static int run(int argc, char **argv) {
             (unsigned long long)j->simd_fpcr_nonzero, (unsigned long long)j->last_fpcr,
             (unsigned long long)j->simd_ixc_clear);
     if (jit_fallbacks) jit_print_fallback_profile(60);
+    if (jit_hot_top) jit_print_hot_regions(jit_hot_top);
   }
   if (wav) {
     write_wav_header(wav, audio_frames);
