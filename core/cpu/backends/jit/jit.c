@@ -29,6 +29,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 #include "common/assert.h"
 #include "cpu/backends/jit/jit_internal.h"
@@ -74,6 +75,30 @@ static uint32_t g_hot_threshold = JIT_DEFAULT_HOT_THRESHOLD;
 static Jit_Stats g_stats;
 
 void jit_set_hot_threshold(uint32_t executions) { g_hot_threshold = executions ? executions : 1u; }
+
+static bool g_hot_profile;
+void jit_set_hot_profile(bool enabled) { g_hot_profile = enabled; }
+
+void jit_print_hot_regions(uint32_t top) {
+  static bool printed[JIT_CACHE_ENTRIES];
+  memset(printed, 0, sizeof(printed));
+  for (uint32_t n = 0; n < top; n++) {
+    uint32_t best = JIT_CACHE_ENTRIES;
+    uint64_t best_weight = 0;
+    for (uint32_t i = 0; i < JIT_CACHE_ENTRIES; i++) {
+      const uint64_t weight = g_cache[i].entries * g_cache[i].length;
+      if (g_cache[i].function && !printed[i] && weight > best_weight) {
+        best = i;
+        best_weight = weight;
+      }
+    }
+    if (best == JIT_CACHE_ENTRIES) return;
+    printed[best] = true;
+    fprintf(stderr, "  %010llx  %12llu entries  entry block %3u insns  region %4u words\n",
+            (unsigned long long)g_cache[best].pc, (unsigned long long)g_cache[best].entries, g_cache[best].length,
+            g_cache[best].code_words);
+  }
+}
 
 static const char *g_dump_directory;
 void jit_set_dump_directory(const char *directory) { g_dump_directory = directory; }
@@ -253,6 +278,7 @@ static void compile(const Interp_State *s, uint64_t pc, uint64_t generation) {
   static Jit_Link link;
   link.cache_address = (uint64_t)(uintptr_t)g_cache;
   link.generation_address = (uint64_t)(uintptr_t)&g_generation;
+  link.count_entries = g_hot_profile;
   Jit_Compiled compiled;
   if (!jit_compile_block(pc, page_code, memory_pages(), &link, g_module, JIT_MODULE_BYTES, &compiled)) {
     g_stats.compile_failures++;
@@ -275,6 +301,7 @@ static void compile(const Interp_State *s, uint64_t pc, uint64_t generation) {
   e->length = compiled.instructions;
   e->code_start = compiled.code_start;
   e->code_words = compiled.code_words;
+  e->entries = 0;
   e->code_hash = code_hash(page_code + (compiled.code_start & VMM_PAGE_OFFSET_MASK) / sizeof(uint32_t),
                            compiled.code_words);
   g_stats.blocks_compiled++;
