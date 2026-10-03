@@ -137,6 +137,7 @@ enum {
 #define OFF_L1 STATE_OFFSET(interp.l1)
 #define OFF_BUDGET STATE_OFFSET(cycle_budget)
 #define OFF_SCRATCH STATE_OFFSET(scratch)
+#define OFF_THREAD_CACHE STATE_OFFSET(thread_cache)
 #define OFF_EXCLUSIVE_ADDRESS STATE_OFFSET(interp.exclusive_address)
 #define OFF_EXCLUSIVE_SIZE STATE_OFFSET(interp.exclusive_size)
 #define OFF_EXCLUSIVE_VALUE STATE_OFFSET(interp.exclusive_value)
@@ -3520,7 +3521,7 @@ static void emit_chain(Ctx *c) {
   op(c, WASM_OP_I64_SHR_U);
   i64c(c, sizeof(Jit_Entry));
   op(c, WASM_OP_I64_MUL);
-  i64c(c, c->link->cache_address);
+  state_load64(c, OFF_THREAD_CACHE); /* this host thread's cache */
   op(c, WASM_OP_I64_ADD);
   lset(c, L_HOST); /* the entry */
   open_block(c);
@@ -3581,9 +3582,13 @@ static void emit_function(Ctx *c) {
 
   /* Prologue. The caller checked that block 0 fits the budget. */
   if (c->link->count_entries) {
-    const uint64_t entry = c->link->cache_address + jit_cache_index(c->blocks[0].pc) * sizeof(Jit_Entry);
+    const uint64_t entry = jit_cache_index(c->blocks[0].pc) * sizeof(Jit_Entry);
+    state_load64(c, OFF_THREAD_CACHE);
     i64c(c, entry);
-    i64c(c, entry);
+    op(c, WASM_OP_I64_ADD);
+    lset(c, L_HOST);
+    lget(c, L_HOST);
+    lget(c, L_HOST);
     mem(c, WASM_OP_I64_LOAD, ALIGN_8, ENTRY_OFFSET(entries));
     i64c(c, 1);
     op(c, WASM_OP_I64_ADD);
