@@ -24,6 +24,7 @@
 #define NV_TYPE_GPU 0x48u
 #define NV_CHANNEL_SET_NVMAP_FD 0x01u /* type 0x48, every channel */
 #define SUBMIT_INCR_BYTES 20u
+#define MAP_BUFFER_HEADER_BYTES 12u /* libnx: num_maps, reserved, u8 is_compressed (+ pad) */
 
 #define NVMAP_PARAM_SIZE 1u
 #define NVMAP_PARAM_ALIGNMENT 2u
@@ -544,9 +545,9 @@ static uint32_t channel_common_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint
   case 0x03: wr32(d + 4, 0); return NV_SUCCESS;                      /* GET_WAITBASE */
   case 0x07: case 0x08: return NV_SUCCESS;                           /* SET_SUBMIT_TIMEOUT, SET_MODULE_CLOCK_RATE */
   case 0x14: case 0x23: wr32(d, 0); return NV_SUCCESS;               /* GET_MODULE_CLOCK_RATE {rate out, module} */
-  case 0x09: { /* MAP_BUFFER {num, reserved, u8 compressed, pad, maps[]{handle, address out}} */
+  case 0x09: { /* MAP_BUFFER {num, reserved, u8 compressed, pad, maps[]{handle, address out}} (header 12 bytes) */
     const uint32_t count = rd32(d);
-    if (16u + (uint64_t)count * 8u > size) return NV_BAD_PARAMETER;
+    if (MAP_BUFFER_HEADER_BYTES + (uint64_t)count * 8u > size) return NV_BAD_PARAMETER;
     for (uint32_t i = 0; i < count; i++) {
       Nvmap_Handle *h = nvmap_of(s, rd32(d + 12 + i * 8u));
       wr32(d + 12 + i * 8u + 4u, h ? (uint32_t)h->address : 0u);

@@ -184,6 +184,13 @@ int main(void) {
   CHECK(ioctl(vic, IOWR(0x00u, 0x01u, 40), d) == 0 && rd32(d + 36) == 2);
   memset(d, 0, sizeof(d));
   CHECK(ioctl(vic, IOWR(0x00u, 0x02u, 8), d) == 0 && rd32(d + 4) != 0 && rd32(d + 4) != syncpoint);
+  /* MAP_BUFFER: a 12-byte header, then {handle, address out} - ten maps in
+   * 0x5C bytes, as the SDK's video decoder sends them. */
+  memset(d, 0, sizeof(d));
+  wr32(d, 10);
+  for (uint32_t i = 0; i < 10u; i++) wr32(d + 12 + i * 8u, handle);
+  CHECK(ioctl(vic, IOWR(0x00u, 0x09u, 0x5C), d) == 0);
+  for (uint32_t i = 0; i < 10u; i++) CHECK(rd32(d + 12 + i * 8u + 4u) == (uint32_t)(stack + 0x10000));
 
   /* Characteristics: GM20B. */
   memset(d, 0, sizeof(d));
