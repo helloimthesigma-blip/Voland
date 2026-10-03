@@ -17,6 +17,7 @@ import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
 import { PUBLISH_INDEX } from "@bindings/framebuffer";
+import { GPU_STREAM_HEADER_BYTES, OFF_PRESENTS } from "@bindings/gpu-records";
 import { appendGuestOutput, resetGuestConsole, setGuestFps, setGuestRunState } from "./guest-console";
 import { clearTextInput, showTextInput } from "./text-input-store";
 import { startAudioOutput } from "./audio/audio-output";
@@ -262,6 +263,16 @@ async function boot(): Promise<BootResult | null> {
       if (msg.type === "ready") {
         adapterLabel = msg.adapterName ?? "Software/Unknown";
         appendLogLine("info", `gpu adapter: ${adapterLabel}`);
+        /* WebGPU renderer unless ?renderer=software asks for the reference. */
+        const software = new URLSearchParams(location.search).get("renderer") === "software";
+        if (msg.streamRenderer && !software) {
+          cpuWorker.postMessage({ type: "set-gpu-mode", on: true } satisfies MainToCPUMessage);
+        }
+        /* ?cores=N: host threads for guest threads (0 = serial). */
+        const cores = new URLSearchParams(location.search).get("cores");
+        if (cores !== null && /^[0-9]+$/.test(cores)) {
+          cpuWorker.postMessage({ type: "set-host-cores", cores: Number(cores) } satisfies MainToCPUMessage);
+        }
         gpuSlot = "ready";
         updateStatus();
         resolve();
@@ -320,7 +331,9 @@ async function boot(): Promise<BootResult | null> {
     const current = layout as MemoryLayout | null;
     if (!current) return;
     const counters = new Int32Array(memory.buffer, toByteOffset(current.framebufferSlotBase), 2);
-    const published = Atomics.load(counters, PUBLISH_INDEX);
+    /* Frames the WebGPU renderer presented count too (the GPU stream's counter). */
+    const stream = new Int32Array(memory.buffer, toByteOffset(current.gpuRingBase), GPU_STREAM_HEADER_BYTES / 4);
+    const published = (Atomics.load(counters, PUBLISH_INDEX) + Atomics.load(stream, OFF_PRESENTS / 4)) | 0;
     const fps = lastPublished < 0 ? 0 : (published - lastPublished) | 0;
     lastPublished = published;
     setGuestFps(fps);

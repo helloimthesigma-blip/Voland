@@ -116,6 +116,8 @@ enum {
 #define OFF_BUDGET STATE_OFFSET(cycle_budget)
 #define OFF_SCRATCH STATE_OFFSET(scratch)
 #define OFF_EXCLUSIVE_ADDRESS STATE_OFFSET(interp.exclusive_address)
+#define OFF_EXCLUSIVE_SIZE STATE_OFFSET(interp.exclusive_size)
+#define OFF_EXCLUSIVE_VALUE STATE_OFFSET(interp.exclusive_value)
 #define OFF_V(t) (STATE_OFFSET(interp.v) + (uint64_t)(t) * sizeof(CPU_Vector_Register))
 #define V_HIGH_HALF 8u /* CPU_Vector_Register.hi */
 
@@ -1958,6 +1960,12 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
     i32c(c, 1);
     mem(c, WASM_OP_I32_STORE8, ALIGN_1, OFF_EXCLUSIVE_VALID);
     state_store64_local(c, OFF_EXCLUSIVE_ADDRESS, L_ADDR);
+    lget(c, L_STATE); /* what was read, for the multicore store-exclusive's compare-and-swap */
+    i32c(c, element);
+    mem(c, WASM_OP_I32_STORE, ALIGN_4, OFF_EXCLUSIVE_SIZE);
+    lget(c, L_STATE);
+    lget(c, L_VAL);
+    mem(c, store_opcode(element), ALIGN_1, OFF_EXCLUSIVE_VALUE);
     lget(c, L_VAL);
     set_x(c, t);
     return true;

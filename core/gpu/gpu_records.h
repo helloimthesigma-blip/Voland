@@ -53,14 +53,22 @@ enum {
   GPU_FMT_DEPTH24_STENCIL8,
   GPU_FMT_DEPTH32F,
   GPU_FMT_DEPTH32F_STENCIL8,
+  GPU_FMT_BGRA8_SRGB,
+  GPU_FMT_STENCIL8,
+  GPU_FMT_RGBA16_SINT,
+  GPU_FMT_RGBA32_SINT,
+  GPU_FMT_R32_SINT,
   GPU_FMT_COUNT,
 };
 
 #define GPU_USAGE_SAMPLED 1u
 #define GPU_USAGE_RENDER 2u /* render attachment (also copy source / destination) */
 
+/* levels: mip levels (1 = none). The producer uploads level 0; the
+ * consumer builds the rest from it (a box filter) after each upload
+ * (version 2; a version-1 record ends after `usage`, one level). */
 typedef struct Gpu_Rec_Texture_Create {
-  uint32_t id, format, width, height, layers, usage;
+  uint32_t id, format, width, height, layers, usage, levels, reserved;
 } Gpu_Rec_Texture_Create;
 
 typedef struct Gpu_Rec_Texture_Write {
@@ -79,7 +87,8 @@ typedef struct Gpu_Rec_Clear {
   uint32_t flags;        /* GPU_CLEAR_* */
   uint32_t depth;        /* f32 bits */
   uint32_t stencil;
-  int32_t rect[4];       /* x, y, width, height; width 0 = whole target */
+  uint32_t stencil_mask; /* bits of the stencil value written */
+  int32_t rect[4];       /* x, y, width, height */
 } Gpu_Rec_Clear;
 
 /* Blend factors / ops / compare functions: WebGPU's, by index into the
@@ -131,20 +140,29 @@ typedef struct Gpu_Rec_Draw {
   uint32_t vertex_count;      /* vertices (a triangle list) follow the bindings */
 } Gpu_Rec_Draw;
 
-#define GPU_BIND_CBUF 1u    /* storage buffer: Gpu_Rec_Binding, then `bytes` of data (padded to 8) */
-#define GPU_BIND_TEXTURE 2u /* texture + sampler at `binding` and `binding + 1` */
+#define GPU_BIND_DATA 1u    /* read-only storage buffer: Gpu_Rec_Binding, then `bytes` of data (a multiple of 8) */
+#define GPU_BIND_TEXTURE 2u /* texture_2d_array (gpu/wgsl.h); `bytes` = GPU_BIND_FILTERED when a sampler filters it */
+#define GPU_BIND_SAMPLER 3u /* filtering sampler; `texture_id` = GPU_SAMPLER_* state */
+#define GPU_BIND_FILTERED 1u
+/* Sampler state: bit 0 magnification linear (else nearest), then 2 bits per
+ * axis u, v, w: 0 repeat, 1 mirror-repeat, 2 clamp-to-edge; bit 7
+ * minification linear, bit 8 linear between mip levels (version 2). */
+#define GPU_SAMPLER_LINEAR 1u
+#define GPU_SAMPLER_WRAP_SHIFT(axis) (1u + 2u * (axis))
+#define GPU_SAMPLER_MIN_LINEAR (1u << 7)
+#define GPU_SAMPLER_MIP_LINEAR (1u << 8)
 
 typedef struct Gpu_Rec_Binding {
   uint32_t kind;
   uint32_t binding;
-  uint32_t bytes;        /* CBUF: data bytes that follow */
-  uint32_t texture_id;   /* TEXTURE */
-  uint32_t filter;       /* TEXTURE: 0 nearest, 1 linear */
-  uint32_t wrap[3];      /* TEXTURE: 0 repeat, 1 mirror, 2 clamp */
-  uint32_t compare;      /* TEXTURE: 0 none, else GPU_CMP_* + 1 */
+  uint32_t bytes;        /* DATA: data bytes that follow; TEXTURE: GPU_BIND_FILTERED or 0 */
+  uint32_t texture_id;   /* TEXTURE: the texture; SAMPLER: its state */
 } Gpu_Rec_Binding;
 
-/* Vertex: x, y, z, 1/w (f32), then varying_count x 4 u32. */
+/* Vertex: x, y (WebGPU NDC), z, 1/w (f32), then varying_count x 4 u32.
+ * Front-facing triangles wind counter-clockwise in NDC (y up), back-facing
+ * ones clockwise: the producer has culled already (cullMode none), the
+ * winding only feeds @builtin(front_facing). */
 #define GPU_VERTEX_HEADER_WORDS 4u
 
 typedef struct Gpu_Rec_Copy {

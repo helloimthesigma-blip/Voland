@@ -13,6 +13,9 @@ import { defineConfig, devices } from "@playwright/test";
  * dev-server run catches that class of bug.
  */
 const WEBGPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"];
+/* The host's real GPU (headless Chromium otherwise falls back to
+ * SwiftShader): for measuring the WebGPU renderer's speed, not for CI. */
+const HARDWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"];
 
 export default defineConfig({
   testDir: "./e2e",
@@ -45,5 +48,6 @@ export default defineConfig({
   projects: [
     { name: "chromium",     use: { ...devices["Desktop Chrome"], baseURL: "http://localhost:5174", launchOptions: { args: WEBGPU_ARGS }, channel: "chromium" } },
     { name: "chromium-dev", use: { ...devices["Desktop Chrome"], baseURL: "http://localhost:5173", launchOptions: { args: WEBGPU_ARGS }, channel: "chromium" } },
+    { name: "chromium-gpu", testMatch: /homebrew\.spec\.ts/, use: { ...devices["Desktop Chrome"], baseURL: "http://localhost:5174", launchOptions: { args: HARDWARE_GPU_ARGS }, channel: "chromium" } },
   ],
 });

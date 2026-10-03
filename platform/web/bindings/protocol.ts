@@ -40,6 +40,11 @@ export type MainToCPUMessage =
   | { readonly type: "text-input-response"; readonly text: string; readonly accepted: boolean }
   /* Frame skip, a user setting: rasterise one of every frames + 1 frames. */
   | { readonly type: "set-frame-skip"; readonly frames: number }
+  /* The renderer: the GPU worker's WebGPU renderer (draws stream through the
+   * gpu_ring region) or the software reference renderer. */
+  | { readonly type: "set-gpu-mode"; readonly on: boolean }
+  /* Host threads for guest threads (docs/PARALLEL.md; 0 = serial). */
+  | { readonly type: "set-host-cores"; readonly cores: number }
   | { readonly type: "halt" };
 
 /** A software-keyboard prompt (§12 library applets): a title waits for
@@ -79,6 +84,6 @@ export type MainToGPUMessage =
   | { readonly type: "resize"; readonly width: number; readonly height: number };
 
 export type GPUToMainMessage =
-  | { readonly type: "ready"; readonly adapterName: string | null }
+  | { readonly type: "ready"; readonly adapterName: string | null; readonly streamRenderer: boolean }
   | { readonly type: "log"; readonly level: LogLevel; readonly message: string }
   | { readonly type: "error"; readonly message: string };

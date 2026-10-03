@@ -447,6 +447,11 @@ static bool gpu_write(void *user, uint64_t gpu_va, const void *src, uint64_t siz
   return gpu_access(user, gpu_va, (void *)(uintptr_t)src, size, true);
 }
 
+static bool gpu_translate(void *user, uint64_t gpu_va, uint64_t *guest_va) {
+  uint64_t contiguous = 0;
+  return nvdrv_gpu_translate((const Nvdrv_State *)user, gpu_va, guest_va, &contiguous);
+}
+
 static void gpu_syncpoint_increment(void *user, uint32_t id) {
   Nvdrv_State *s = (Nvdrv_State *)user;
   if (id == 0 || id >= SYNCPOINT_COUNT) return;
@@ -480,7 +485,7 @@ static void run_gpfifo(Nvdrv_State *s, Nv_Fd *f, const uint8_t *d) {
   if (count > GPFIFO_MAX_ENTRIES) count = GPFIFO_MAX_ENTRIES;
   uint64_t entries[GPFIFO_MAX_ENTRIES];
   memcpy(entries, d + GPFIFO_HEADER_BYTES, (size_t)count * 8u);
-  const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer};
+  const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate};
   gpu_channel_submit(channel, &memory, entries, count);
 }
 

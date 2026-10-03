@@ -36,7 +36,7 @@ static void fake_syncpoint(void *user, uint32_t id) {
   (void)user;
   if (id < 8) g_syncpoint_increments[id]++;
 }
-static const Gpu_Memory k_mem = {NULL, fake_read, fake_write, fake_syncpoint, NULL};
+static const Gpu_Memory k_mem = {NULL, fake_read, fake_write, fake_syncpoint, NULL, NULL};
 
 /* Pushbuffer builder. */
 static uint32_t g_pb[0x400];

@@ -306,7 +306,12 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
   Jit_State *j = (Jit_State *)state;
   Interp_State *s = &j->interp;
   SWITCH_ASSERT_ALWAYS(s->l1 != NULL, "jit run() without a vmm");
-  if (!interp_predecode_enabled() || !can_install()) return CPU_BACKEND_INTERPRETER.run(state, cycle_budget);
+  /* Multicore (docs/PARALLEL.md): compiled functions live in one host
+   * thread's table and inline exclusives assume one thread at a time -
+   * the interpreter runs every core until the JIT is made thread-aware. */
+  if (!interp_predecode_enabled() || !can_install() || cpu_multicore()) {
+    return CPU_BACKEND_INTERPRETER.run(state, cycle_budget);
+  }
   s->cycles_consumed = 0;
   s->exclusive_valid = false; /* a potential context switch (§7) */
   j->cycle_budget = cycle_budget;

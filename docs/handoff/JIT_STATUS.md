@@ -41,8 +41,12 @@ SVC count are identical to the interpreter's.
     core's table64).
   - Blocks survive vmm mapping changes through a code hash.
   - Slow paths are shared per function.
-- [ ] **5. FP/NEON arithmetic** (next), then the whole-game frame-hash match
-  over the full gameplay recipe.
+- [~] **5. FP/NEON.** Every SIMD&FP instruction (and LD1-LD4) now runs
+  inside compiled code as a direct call into the interpreter's executor.
+  Only the general registers or NZCV it touches are synced, so the
+  instruction stays exact and avoids a full spill. Native wasm fast paths
+  for the hottest FP ops are next. The full gameplay recipe has not been
+  checked yet.
 
 ## How it is tested
 
@@ -94,6 +98,23 @@ exclusives were inlined:
 
 The first two classes are now inlined, so SIMD&FP arithmetic is the next
 target.
+
+## Merge status (for the coordinator)
+
+- `local/dev` 8d4eb35 (parallel guest threads) is merged into `local/jit`.
+  - Conflicts: `interp_predecode.c`, where `run_block` now uses the
+    per-thread block cache, and `voland_cli.c`.
+  - Tests: 48/48 native tests pass, and the Node diff test passes.
+  - Silksong, 20,000 slices: the JIT matches the interpreter's frame hash
+    `d395e456e4e72325`, at 14.8 s wall time against 27.8 s.
+- **Multicore mode:** `cpu_multicore()` makes the JIT run the interpreter.
+  Compiled functions live in one host thread's function table, and the
+  inline exclusives assume one guest thread at a time.
+  - Inline LDXR records `exclusive_size` and `exclusive_value` like the
+    interpreter does.
+- **Web build:** the `web-jit` preset (`CPU_BACKEND=jit`) gives the JIT.
+  - It has not been run in the browser.
+  - It has not been run through the full gameplay recipe.
 
 ## Files touched outside the JIT's own
 

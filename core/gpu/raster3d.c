@@ -12,6 +12,9 @@
 #include "common/log.h"
 #include "gpu/block_linear.h"
 #include "gpu/gpu_channel.h"
+#include "gpu/gpu_records.h"
+#include "gpu/gpu_stream.h"
+#include "gpu/wgsl.h"
 
 /* ---- B197 register words ------------------------------------------ */
 
@@ -140,7 +143,15 @@ static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); 
 #define CBUF_BYTES ((size_t)2 * SM_CBUF_SLOTS * CBUF_SLOT_BYTES)
 #define THREAD_OFFSET (CBUF_OFFSET + CBUF_BYTES)
 #define THREAD_BYTES ((sizeof(Sm_Thread) + 63u) & ~(size_t)63u)
-#define STORAGE_BYTES (THREAD_OFFSET + THREAD_BYTES * WORKERS_MAX + 64u)
+#define GPU_SHADERS_OFFSET (THREAD_OFFSET + THREAD_BYTES * WORKERS_MAX)
+#define GPU_SHADERS_BYTES (((sizeof(Raster3d_Gpu_Shader) * RASTER_GPU_SHADERS) + 63u) & ~(size_t)63u)
+#define GPU_WGSL_OFFSET (GPU_SHADERS_OFFSET + GPU_SHADERS_BYTES)
+#define GPU_WGSL_STORAGE ((size_t)1 << 20)
+#define GPU_VERTICES_OFFSET (GPU_WGSL_OFFSET + GPU_WGSL_STORAGE)
+#define GPU_VERTICES_STORAGE ((size_t)768 * 1024)
+#define GPU_DATA_OFFSET (GPU_VERTICES_OFFSET + GPU_VERTICES_STORAGE)
+#define GPU_DATA_STORAGE (((size_t)WGSL_DRAW_CONSTANT_WORDS + (size_t)SM_CBUF_SLOTS * (CBUF_SLOT_BYTES / 4u) + 2u) * 4u)
+#define STORAGE_BYTES (GPU_DATA_OFFSET + GPU_DATA_STORAGE + 64u)
 
 size_t raster3d_storage_bytes(void) { return STORAGE_BYTES; }
 
@@ -160,10 +171,16 @@ void raster3d_init(Raster3d *r, uint8_t *storage, size_t bytes) {
   r->cbuf_data = s + CBUF_OFFSET;
   for (uint32_t i = 0; i < WORKERS_MAX; i++) r->band_threads[i] = (Sm_Thread *)(void *)(s + THREAD_OFFSET + THREAD_BYTES * i);
   r->thread = r->band_threads[0];
+  r->gpu_shaders = (Raster3d_Gpu_Shader *)(void *)(s + GPU_SHADERS_OFFSET);
+  memset(r->gpu_shaders, 0, GPU_SHADERS_BYTES);
+  r->gpu_wgsl = (char *)(s + GPU_WGSL_OFFSET);
+  r->gpu_vertices = s + GPU_VERTICES_OFFSET;
+  r->gpu_data = (uint32_t *)(void *)(s + GPU_DATA_OFFSET);
   for (uint32_t i = 0; i < 256u; i++) g_unorm8[i] = (float)i / 255.0f;
   tex_init_tables(); /* before any worker samples */
   workers_start(&r->workers, workers_default_count());
   log_info("[gpu] reference renderer: %u pixel worker(s)", r->workers.count);
+  r->gpu_mipmaps = true;
   r->ready = true;
 }
 
@@ -554,14 +571,20 @@ static void surface_load(Raster3d *r, Raster3d_Surface *s, const Gpu_Memory *mem
 static void textures_invalidate(Raster3d *r, uint64_t address, uint64_t bytes) {
   for (uint32_t i = 0; i < RASTER_TEXTURES; i++) {
     Raster3d_Texture *t = &r->textures[i];
-    if (t->valid && t->address < address + bytes && address < t->address + t->raw_bytes) t->validated = r->texture_epoch - 1u;
+    if (t->valid && t->address < address + bytes && address < t->address + t->raw_bytes) {
+      t->validated = r->texture_epoch - 1u;
+      t->full_epoch = r->texture_epoch - RASTER_TEXTURE_FULL_EVERY; /* a whole hash next time */
+    }
   }
 }
 
 /* Finds or creates the cached copy of a surface, which the caller then
  * draws into. `load`: fetch guest contents now (false when the caller
  * overwrites all of it). */
+static Raster3d_Surface g_gpu_placeholder; /* GPU mode: setup_state's targets (present, never rasterised here) */
+
 static Raster3d_Surface *surface_get(Raster3d *r, const Surface_Desc *d, const Gpu_Memory *mem, bool load) {
+  if (r->gpu) return &g_gpu_placeholder;
   Raster3d_Surface *victim = NULL;
   r->tick++;
   textures_invalidate(r, d->address, surface_guest_bytes(d));
@@ -608,6 +631,10 @@ static Raster3d_Surface *surface_get(Raster3d *r, const Surface_Desc *d, const G
 
 void raster3d_flush(Raster3d *r, const Gpu_Memory *mem) {
   if (!r || !r->ready) return;
+  if (r->gpu) {
+    gpu_stream_publish(r->gpu);
+    return;
+  }
   for (uint32_t i = 0; i < RASTER_SURFACES; i++) surface_write_back(r, &r->surfaces[i], mem);
   /* The guest may change these before the next submission. */
   for (uint32_t i = 0; i < RASTER_SURFACES; i++) r->surfaces[i].loaded = r->surfaces[i].in_use ? false : r->surfaces[i].loaded;
@@ -615,6 +642,17 @@ void raster3d_flush(Raster3d *r, const Gpu_Memory *mem) {
 
 void raster3d_sync_range(Raster3d *r, const Gpu_Memory *mem, uint64_t address, uint64_t bytes, bool write) {
   if (!r || !r->ready || !bytes) return;
+  if (r->gpu) {
+    /* GPU surfaces cannot be read back; written ones re-upload at their
+     * next use. */
+    if (!write) return;
+    for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
+      Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
+      if (s->in_use && s->address < address + bytes && address < s->address + s->guest_bytes) s->stale = true;
+    }
+    textures_invalidate(r, address, bytes);
+    return;
+  }
   for (uint32_t i = 0; i < RASTER_SURFACES; i++) {
     Raster3d_Surface *s = &r->surfaces[i];
     if (!s->in_use || s->address >= address + bytes || address >= s->address + s->guest_bytes) continue;
@@ -652,9 +690,15 @@ static void rect_viewport_clip(Rect *rect, const uint32_t *regs) {
 
 /* ---- clears ------------------------------------------------------- */
 
+static void gpu_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, uint32_t clear);
+
 void raster3d_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, uint32_t clear) {
   if (!r || !r->ready || r->skip_draws) return;
   r->stats.clears++;
+  if (r->gpu) {
+    gpu_clear(r, regs, mem, clear);
+    return;
+  }
   const uint32_t control = regs[REG_CLEAR_CONTROL];
   const bool color = (clear & 0x3cu) != 0;
   const bool depth = (clear & 1u) != 0;
@@ -890,6 +934,27 @@ static uint64_t content_hash_end(const Content_Hash *h) {
 
 /* Hashes guest GPU memory [va, va + n) in chunks (callers hold the pool
  * lock, so one chunk buffer serves). */
+/* A cheap per-frame check: RASTER_TEXTURE_SAMPLES spans spread over the
+ * texture's guest bytes. A change it misses is caught by the whole-texture
+ * hash every RASTER_TEXTURE_FULL_EVERY frames; copy-engine writes force one
+ * at once (textures_invalidate). */
+static bool guest_sample_hash(const Gpu_Memory *mem, uint64_t va, uint64_t n, uint64_t *out) {
+  uint8_t span[RASTER_TEXTURE_SAMPLE_BYTES];
+  Content_Hash h;
+  content_hash_begin(&h, n);
+  if (n <= (uint64_t)RASTER_TEXTURE_SAMPLES * RASTER_TEXTURE_SAMPLE_BYTES) {
+    *out = 0;
+    return false; /* small: the whole hash is as cheap */
+  }
+  const uint64_t step = n / RASTER_TEXTURE_SAMPLES;
+  for (uint32_t i = 0; i < RASTER_TEXTURE_SAMPLES; i++) {
+    if (!mem->read(mem->user, va + (uint64_t)i * step, span, sizeof(span))) return false;
+    content_hash_update(&h, span, sizeof(span));
+  }
+  *out = content_hash_end(&h);
+  return true;
+}
+
 static bool guest_hash(const Gpu_Memory *mem, uint64_t va, uint64_t n, uint64_t *out) {
   static uint8_t chunk[HASH_CHUNK_BYTES];
   Content_Hash h;
@@ -1002,7 +1067,9 @@ static void texture_miss(Raster3d *r, const Tex_Header *h, const char *why) {
   r->stats.texture_misses++;
 }
 
-static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const Gpu_Memory *mem) {
+/* `texels`: the caller samples on the CPU (GPU mode releases decoded
+ * copies once uploaded; this decodes again where needed). */
+static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const Gpu_Memory *mem, bool texels) {
   Raster3d_Texture *view = surface_view(r, tic);
   if (view) return view;
   Raster3d_Texture *t = NULL;
@@ -1013,7 +1080,8 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     }
   }
   if (t) t->last_used = r->draw_serial;
-  if (t && t->validated == r->texture_epoch) return t;
+  const bool usable = t && (!texels || t->image.texels);
+  if (usable && t->validated == r->texture_epoch) return t;
   Tex_Header h;
   tex_header_parse(tic, &h);
   const uint64_t raw_bytes = tex_read_bytes(&h);
@@ -1033,15 +1101,26 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     if (s->in_use && s->dirty && s->address < h.address + raw_bytes && h.address < s->address + s->guest_bytes)
       surface_write_back(r, s, mem);
   }
-  /* Unchanged since it was decoded? Hashed in place: the whole texture is
-   * staged only to decode it. */
+  /* Unchanged since it was decoded? Between whole hashes, a sampled one
+   * decides (most frames); a sample that differs, or none, falls through. */
+  uint64_t sample = 0;
+  const bool sampled = guest_sample_hash(mem, h.address, raw_bytes, &sample);
+  if (usable && sampled && t->raw_bytes == raw_bytes && t->sample_hash == sample &&
+      r->texture_epoch - t->full_epoch < RASTER_TEXTURE_FULL_EVERY) {
+    t->validated = r->texture_epoch;
+    return t;
+  }
+  /* Hashed in place: the whole texture is staged only to decode it. */
   uint64_t hash = 0;
+  r->gpu_stats.hashed_bytes += raw_bytes;
   if (!guest_hash(mem, h.address, raw_bytes, &hash)) {
     texture_miss(r, &h, "unreadable");
     return NULL;
   }
-  if (t && t->raw_hash == hash) {
+  if (usable && t->raw_hash == hash) {
     t->validated = r->texture_epoch;
+    t->full_epoch = r->texture_epoch;
+    t->sample_hash = sample;
     return t;
   }
   uint8_t *raw = r->texture_raw;
@@ -1050,7 +1129,17 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     return NULL;
   }
   /* A changed texture decodes into its own block (same descriptor, same
-   * size); a new one takes a free slot and block, evicting as needed. */
+   * size) - unless GPU mode released it after uploading; a new one takes a
+   * free slot and block, evicting as needed. */
+  if (t && t->pool_bytes < decoded_aligned) {
+    const size_t offset = pool_allocate(r, decoded_aligned);
+    if (offset == SIZE_MAX) {
+      texture_miss(r, &h, "texture cache full");
+      return NULL;
+    }
+    t->pool_offset = offset;
+    t->pool_bytes = decoded_aligned;
+  }
   if (!t) {
     for (uint32_t i = 0; i < RASTER_TEXTURES && !t; i++)
       if (!r->textures[i].valid) t = &r->textures[i];
@@ -1080,6 +1169,8 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
   t->address = h.address;
   t->raw_bytes = raw_bytes;
   t->raw_hash = hash;
+  t->sample_hash = sample;
+  t->full_epoch = r->texture_epoch;
   t->validated = r->texture_epoch;
   t->last_used = r->draw_serial;
   t->valid = true;
@@ -1111,7 +1202,7 @@ static bool resolve_texture(Tex_Resolver *res, uint32_t handle, Raster3d_Texture
   /* The texture pool and guest reads are shared with the other bands. */
   workers_lock(&ctx->r->workers);
   if (tic_pool && ctx->mem->read(ctx->mem->user, tic_pool + (uint64_t)tic_index * TEX_HEADER_BYTES, tic, sizeof(tic)))
-    t = texture_load(ctx->r, tic, ctx->mem);
+    t = texture_load(ctx->r, tic, ctx->mem, true);
   if (tsc_pool && ctx->mem->read(ctx->mem->user, tsc_pool + (uint64_t)tsc_index * TEX_SAMPLER_BYTES, tsc, sizeof(tsc)))
     tex_sampler_parse(tsc, &s);
   workers_unlock(&ctx->r->workers);
@@ -2384,7 +2475,13 @@ static uint64_t triangle_extent(const Raster_State *rs, const Vertex *const v[3]
   return (uint64_t)(w + 1.0f) * (uint64_t)(h + 1.0f);
 }
 
+static void gpu_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking);
+
 static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
+  if (rs->ctx->r->gpu) {
+    gpu_triangle(rs, a, b, c, provoking);
+    return;
+  }
   if (g_queue_count == TRIANGLE_QUEUE) flush_triangles(rs);
   Queued_Triangle *q = &g_queue[g_queue_count++];
   q->v[0] = *a;
@@ -2577,6 +2674,880 @@ static void assemble_end(Raster_State *rs, Vertex_Cache *cache, Assembler *as) {
   as->n = 0;
 }
 
+/* ---- GPU mode (§13: the WebGPU renderer) -------------------------- */
+
+/* Everything up to the rasteriser runs here as in software mode; each
+ * triangle that survives clipping and culling goes into the draw's vertex
+ * list in WebGPU NDC (gpu_records.h), and the draw becomes one DRAW record:
+ * attachments, fixed-function state, the pixel program as WGSL, its
+ * textures and its constant buffers. Render targets exist only as GPU
+ * textures (Raster3d_Gpu_Surface); textures are decoded here, uploaded
+ * once and re-uploaded when their guest bytes change. */
+
+#define GPU_SHADER_FAILED UINT32_MAX
+#define GPU_WGSL_BYTES ((size_t)1 << 20)
+#define GPU_VERTEX_BYTES ((size_t)768 * 1024)
+#define GPU_DATA_WORDS (WGSL_DRAW_CONSTANT_WORDS + SM_CBUF_SLOTS * (CBUF_SLOT_BYTES / 4u))
+#define GPU_VERTEX_HEADER_BYTES (GPU_VERTEX_HEADER_WORDS * 4u)
+
+void raster3d_set_gpu(Raster3d *r, Gpu_Stream *stream) {
+  if (!r->ready) return;
+  r->gpu = stream;
+  if (stream) log_info("[gpu] WebGPU renderer: draws stream to the GPU worker");
+}
+
+static uint32_t gpu_new_id(Raster3d *r) {
+  if (++r->gpu_next_id == 0 || r->gpu_next_id == GPU_SHADER_FAILED) r->gpu_next_id = 1;
+  return r->gpu_next_id;
+}
+
+/* The GPU format for a render-target format, and whether guest bytes
+ * upload unchanged (same layout). */
+static uint32_t gpu_color_format(uint32_t format, bool *direct) {
+  *direct = true;
+  switch (format) {
+  case 0xC0: return GPU_FMT_RGBA32_FLOAT;
+  case 0xC1: return GPU_FMT_RGBA32_SINT;
+  case 0xC2: return GPU_FMT_RGBA32_UINT;
+  case 0xC8: return GPU_FMT_RGBA16_SINT;
+  case 0xC9: return GPU_FMT_RGBA16_UINT;
+  case 0xCA: return GPU_FMT_RGBA16_FLOAT;
+  case 0xCB: return GPU_FMT_RG32_FLOAT;
+  case 0xCD: return GPU_FMT_RG32_UINT;
+  case 0xCF: case 0xE6: return GPU_FMT_BGRA8_UNORM;
+  case 0xD0: case 0xE7: return GPU_FMT_BGRA8_SRGB;
+  case 0xD1: return GPU_FMT_RGB10A2_UNORM;
+  case 0xD5: case 0xF9: return GPU_FMT_RGBA8_UNORM;
+  case 0xD6: case 0xFA: return GPU_FMT_RGBA8_SRGB;
+  case 0xD9: return GPU_FMT_RGBA8_UINT;
+  case 0xDE: return GPU_FMT_RG16_FLOAT;
+  case 0xE0: return GPU_FMT_RG11B10_UFLOAT;
+  case 0xE3: return GPU_FMT_R32_SINT;
+  case 0xE4: return GPU_FMT_R32_UINT;
+  case 0xE5: case 0xFF: return GPU_FMT_R32_FLOAT;
+  case 0xEA: return GPU_FMT_RG8_UNORM;
+  case 0xF2: return GPU_FMT_R16_FLOAT;
+  case 0xF3: return GPU_FMT_R8_UNORM;
+  default: break;
+  }
+  *direct = false;
+  const Color_Format *f = color_format(format);
+  if (f && f->kind == KIND_UINT) return GPU_FMT_RGBA32_UINT;
+  if (f && f->kind == KIND_SINT) return GPU_FMT_RGBA32_SINT;
+  return GPU_FMT_RGBA16_FLOAT;
+}
+
+static uint32_t gpu_zeta_format(uint32_t format) {
+  switch (format) {
+  case ZT_ZF32: return GPU_FMT_DEPTH32F;
+  case ZT_Z16: return GPU_FMT_DEPTH16;
+  case ZT_ZF32_X24S8: return GPU_FMT_DEPTH32F_STENCIL8;
+  case ZT_S8: return GPU_FMT_STENCIL8;
+  default: return GPU_FMT_DEPTH24_STENCIL8;
+  }
+}
+
+static bool gpu_format_is_int(uint32_t f, bool *is_signed) {
+  *is_signed = f == GPU_FMT_RGBA16_SINT || f == GPU_FMT_RGBA32_SINT || f == GPU_FMT_R32_SINT;
+  return *is_signed || f == GPU_FMT_RGBA32_UINT || f == GPU_FMT_RGBA16_UINT || f == GPU_FMT_RGBA8_UINT ||
+         f == GPU_FMT_RG32_UINT || f == GPU_FMT_R32_UINT;
+}
+
+/* Formats a WebGPU filtering sampler accepts without optional features. */
+static bool gpu_format_filterable(uint32_t f) {
+  switch (f) {
+  case GPU_FMT_RGBA8_UNORM: case GPU_FMT_RGBA8_SRGB: case GPU_FMT_BGRA8_UNORM: case GPU_FMT_BGRA8_SRGB:
+  case GPU_FMT_RGBA16_FLOAT: case GPU_FMT_R8_UNORM: case GPU_FMT_RG8_UNORM: case GPU_FMT_R16_FLOAT:
+  case GPU_FMT_RG16_FLOAT: case GPU_FMT_RG11B10_UFLOAT: case GPU_FMT_RGB10A2_UNORM:
+    return true;
+  default:
+    return false;
+  }
+}
+
+static void gpu_destroy(Raster3d *r, uint32_t id) {
+  if (id) gpu_stream_write(r->gpu, GPU_REC_TEXTURE_DESTROY, &id, sizeof(id));
+}
+
+static void gpu_create(Raster3d *r, uint32_t id, uint32_t format, uint32_t width, uint32_t height, uint32_t layers,
+                       uint32_t usage, uint32_t levels) {
+  const Gpu_Rec_Texture_Create c = {id, format, width, height, layers, usage, levels, 0};
+  gpu_stream_write(r->gpu, GPU_REC_TEXTURE_CREATE, &c, sizeof(c));
+}
+
+/* Uploads rows of tightly packed texels in records that fit the stream. */
+static void gpu_write_rows(Raster3d *r, uint32_t id, uint32_t width, uint32_t height, uint32_t layer,
+                           uint32_t bytes_per_row, const uint8_t *rows) {
+  const uint64_t budget = gpu_stream_max_payload(r->gpu) - sizeof(Gpu_Rec_Texture_Write);
+  uint32_t per_record = (uint32_t)(budget / bytes_per_row);
+  if (per_record == 0) per_record = 1;
+  for (uint32_t y = 0; y < height; y += per_record) {
+    const uint32_t n = height - y < per_record ? height - y : per_record;
+    const uint32_t data = n * bytes_per_row;
+    const uint32_t padded = (data + 7u) & ~7u;
+    uint8_t *p = gpu_stream_begin(r->gpu, GPU_REC_TEXTURE_WRITE, (uint32_t)sizeof(Gpu_Rec_Texture_Write) + padded);
+    const Gpu_Rec_Texture_Write w = {id, 0, y, width, n, layer, bytes_per_row, data};
+    memcpy(p, &w, sizeof(w));
+    memcpy(p + sizeof(w), rows + (uint64_t)y * bytes_per_row, data);
+    gpu_stream_end(r->gpu);
+    r->gpu_stats.upload_bytes += data;
+  }
+}
+
+/* Uploads a surface's guest contents (formats whose bytes WebGPU reads as
+ * they are). */
+static void gpu_surface_upload(Raster3d *r, Raster3d_Gpu_Surface *s, const Gpu_Memory *mem) {
+  bool direct = false;
+  if (s->depth) return;
+  (void)gpu_color_format(s->format, &direct);
+  if (!direct) return;
+  const uint32_t row = s->width * s->bytes_per_pixel;
+  uint8_t *pixels = r->surfaces[0].pixels; /* software surfaces are unused in GPU mode */
+  if ((uint64_t)row * s->height > RASTER_MAX_SURFACE_BYTES) return;
+  if (s->block_linear) {
+    if (!mem->read(mem->user, s->address, r->staging, s->guest_bytes)) return;
+    block_linear_to_pitch(r->staging, pixels, row, row, s->height, s->block_height_log2);
+  } else {
+    for (uint32_t y = 0; y < s->height; y++)
+      if (!mem->read(mem->user, s->address + (uint64_t)y * s->pitch, pixels + (uint64_t)y * row, row))
+        memset(pixels + (uint64_t)y * row, 0, row);
+  }
+  gpu_write_rows(r, s->id, s->width, s->height, 0, row, pixels);
+}
+
+/* The GPU surface for a render target, created on first use. `load`:
+ * its current guest contents matter (not about to be fully overwritten). */
+static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d, const Gpu_Memory *mem, bool load) {
+  r->tick++;
+  textures_invalidate(r, d->address, surface_guest_bytes(d));
+  Raster3d_Gpu_Surface *victim = NULL;
+  for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
+    Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
+    if (!s->in_use || s->address != d->address) continue;
+    if (s->width == d->width && s->height == d->height && s->format == d->format && s->depth == d->depth) {
+      s->last_used = r->tick;
+      if (s->stale && load) gpu_surface_upload(r, s, mem);
+      s->stale = false;
+      return s;
+    }
+    gpu_destroy(r, s->id); /* re-described */
+    s->in_use = false;
+  }
+  for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
+    Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
+    if (!s->in_use) {
+      victim = s;
+      break;
+    }
+    if (!victim || s->last_used < victim->last_used) victim = s;
+  }
+  if (victim->in_use) {
+    log_warn("[gpu] GPU surface table full: dropping %ux%u @%llx", victim->width, victim->height,
+             (unsigned long long)victim->address);
+    gpu_destroy(r, victim->id);
+  }
+  memset(victim, 0, sizeof(*victim));
+  victim->in_use = true;
+  victim->id = gpu_new_id(r);
+  victim->address = d->address;
+  victim->cpu_address = d->address;
+  if (mem->translate && !mem->translate(mem->user, d->address, &victim->cpu_address)) victim->cpu_address = 0;
+  victim->width = d->width;
+  victim->height = d->height;
+  victim->format = d->format;
+  victim->depth = d->depth;
+  victim->bytes_per_pixel = d->bytes_per_pixel;
+  victim->block_linear = d->block_linear;
+  victim->block_height_log2 = d->block_height_log2;
+  victim->pitch = d->pitch;
+  victim->guest_bytes = surface_guest_bytes(d);
+  victim->last_used = r->tick;
+  bool direct = false;
+  victim->gpu_format = d->depth ? gpu_zeta_format(d->format) : gpu_color_format(d->format, &direct);
+  gpu_create(r, victim->id, victim->gpu_format, d->width, d->height, 1, GPU_USAGE_SAMPLED | GPU_USAGE_RENDER, 1);
+  r->gpu_stats.surfaces++;
+  log_debug("[gpu] GPU surface %u: %ux%u fmt 0x%02x%s @%llx", victim->id, d->width, d->height, d->format,
+            d->depth ? " (zeta)" : "", (unsigned long long)d->address);
+  if (load) gpu_surface_upload(r, victim, mem);
+  return victim;
+}
+
+static Raster3d_Gpu_Surface *gpu_surface_at(Raster3d *r, uint64_t address, uint32_t width) {
+  for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
+    Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
+    if (s->in_use && s->address == address && (!width || s->width == width)) return s;
+  }
+  return NULL;
+}
+
+/* Mip levels for a texture's GPU copy: the guest's count, within the
+ * full chain, for float 2D (array) textures - the consumer builds them
+ * from level 0 (gpu_records.h). Integer, cube and 3D textures: level 0. */
+static uint32_t gpu_texture_levels(const Raster3d *r, const Tex_Image *img, bool is_int) {
+  const Tex_Type type = img->header.type;
+  if (!r->gpu_mipmaps || is_int || img->header.levels <= 1u || (type != TEX_TYPE_2D && type != TEX_TYPE_2D_ARRAY))
+    return 1u;
+  uint32_t full = 1;
+  for (uint32_t size = img->width > img->height ? img->width : img->height; size > 1u; size >>= 1) full++;
+  return img->header.levels < full ? img->header.levels : full;
+}
+
+/* A decoded texture's GPU copy: RGBA8 as it is, anything else as the
+ * 32-bit RGBA texels sampling sees (tex_texel). */
+static uint32_t gpu_texture(Raster3d *r, Raster3d_Texture *t) {
+  const Tex_Image *img = &t->image;
+  const uint32_t layers = img->layers ? img->layers : 1u;
+  const bool is_int = img->header.data_type[0] == TEX_DATA_UINT || img->header.data_type[0] == TEX_DATA_SINT;
+  const uint32_t format = img->rgba8 ? GPU_FMT_RGBA8_UNORM
+                          : !is_int ? GPU_FMT_RGBA32_FLOAT
+                          : img->header.data_type[0] == TEX_DATA_UINT ? GPU_FMT_RGBA32_UINT
+                                                                     : GPU_FMT_RGBA32_SINT;
+  const uint32_t levels = gpu_texture_levels(r, img, is_int);
+  const bool same = t->gpu_id && t->gpu_width == img->width && t->gpu_height == img->height && t->gpu_layers == layers &&
+                    t->gpu_format == format && t->gpu_levels == levels;
+  if (same && t->gpu_hash == t->raw_hash) return t->gpu_id;
+  if (!same) {
+    gpu_destroy(r, t->gpu_id);
+    t->gpu_id = gpu_new_id(r);
+    gpu_create(r, t->gpu_id, format, img->width, img->height, layers, GPU_USAGE_SAMPLED, levels);
+    t->gpu_width = img->width;
+    t->gpu_height = img->height;
+    t->gpu_layers = layers;
+    t->gpu_format = format;
+    t->gpu_levels = levels;
+  }
+  for (uint32_t l = 0; l < layers; l++) {
+    if (img->rgba8) {
+      gpu_write_rows(r, t->gpu_id, img->width, img->height, l, img->row_bytes,
+                     img->texels + img->layer_bytes * l);
+      continue;
+    }
+    /* Convert a band of rows at a time through the staging buffer. */
+    const uint32_t row = img->width * 16u;
+    const uint32_t band = (uint32_t)(RASTER_MAX_SURFACE_BYTES / row);
+    for (uint32_t y0 = 0; y0 < img->height; y0 += band) {
+      const uint32_t n = img->height - y0 < band ? img->height - y0 : band;
+      uint32_t *out = (uint32_t *)(void *)r->staging;
+      for (uint32_t y = 0; y < n; y++)
+        for (uint32_t x = 0; x < img->width; x++) tex_texel(img, x, y0 + y, l, out + ((size_t)y * img->width + x) * 4u);
+      /* gpu_write_rows writes from row 0 of what it is given: offset ids. */
+      const uint64_t budget = gpu_stream_max_payload(r->gpu) - sizeof(Gpu_Rec_Texture_Write);
+      uint32_t per_record = (uint32_t)(budget / row);
+      if (per_record == 0) per_record = 1;
+      for (uint32_t y = 0; y < n; y += per_record) {
+        const uint32_t m = n - y < per_record ? n - y : per_record;
+        uint8_t *p = gpu_stream_begin(r->gpu, GPU_REC_TEXTURE_WRITE, (uint32_t)sizeof(Gpu_Rec_Texture_Write) + m * row);
+        const Gpu_Rec_Texture_Write w = {t->gpu_id, 0, y0 + y, img->width, m, l, row, m * row};
+        memcpy(p, &w, sizeof(w));
+        memcpy(p + sizeof(w), r->staging + (size_t)y * row, (size_t)m * row);
+        gpu_stream_end(r->gpu);
+        r->gpu_stats.upload_bytes += (uint64_t)m * row;
+      }
+    }
+  }
+  t->gpu_hash = t->raw_hash;
+  r->gpu_stats.texture_uploads++;
+  /* The GPU holds it now: release the decoded copy (the pool is then free
+   * for the working set; a change re-decodes into a new block). */
+  t->pool_bytes = 0;
+  t->image.texels = NULL;
+  return t->gpu_id;
+}
+
+/* ---- the draw ---- */
+
+#define GPU_MAX_PROBE_TEXTURES 64u
+
+typedef struct Gpu_Probe {
+  uint32_t count;
+  uint32_t pc[GPU_MAX_PROBE_TEXTURES];
+  uint32_t handle[GPU_MAX_PROBE_TEXTURES];
+} Gpu_Probe;
+
+static void gpu_probe_texture(void *user, const Sm_Tex_Request *requests, Sm_Mask lanes, uint32_t (*out)[4]) {
+  Gpu_Probe *p = (Gpu_Probe *)user;
+  for (uint32_t l = 0; l < SM_LANES; l++) {
+    if (!((lanes >> l) & 1u)) continue;
+    const Sm_Tex_Request *q = &requests[l];
+    bool seen = false;
+    for (uint32_t i = 0; i < p->count && !seen; i++) seen = p->pc[i] == q->pc;
+    if (!seen && p->count < GPU_MAX_PROBE_TEXTURES) {
+      p->pc[p->count] = q->pc;
+      p->handle[p->count] = q->handle;
+      p->count++;
+    }
+    (void)out;
+  }
+}
+
+typedef struct Gpu_Draw {
+  bool active;      /* raster3d_draw in GPU mode is assembling into this */
+  bool prepared;    /* the shader and bindings are known (first triangle) */
+  bool dead;        /* the draw cannot be expressed: its triangles are dropped */
+  uint32_t width, height;
+  uint32_t target_id[MAX_TARGETS];
+  uint32_t target_format[MAX_TARGETS];
+  uint32_t depth_id;
+  uint32_t depth_format;
+  /* varyings: word (vector * 4 + component) -> rs->varyings index; per location its vector */
+  uint8_t varying_index[MAX_VARYINGS];
+  uint8_t location_vector[WGSL_MAX_VARYINGS];
+  uint32_t locations;
+  uint32_t flat_mask;
+  uint32_t stride;
+  uint32_t vertex_bytes;
+  uint32_t vertices;
+  uint32_t shader_id;
+  uint32_t texture_count;
+  uint32_t texture_id[WGSL_MAX_TEXTURES];
+  uint32_t sampler_state[WGSL_MAX_TEXTURES]; /* GPU_SAMPLER_*, for hardware-sampled bindings */
+  uint32_t data_words;
+  Wgsl_Program_Desc desc;
+} Gpu_Draw;
+
+static Gpu_Draw g_gpu_draw;
+
+static uint32_t gpu_blend_factor(uint32_t f) {
+  switch ((Blend_Factor)f) {
+  case BF_ZERO: return GPU_BF_ZERO;
+  case BF_ONE: return GPU_BF_ONE;
+  case BF_SRC_COLOR: return GPU_BF_SRC;
+  case BF_INV_SRC_COLOR: return GPU_BF_ONE_MINUS_SRC;
+  case BF_SRC_ALPHA: return GPU_BF_SRC_ALPHA;
+  case BF_INV_SRC_ALPHA: return GPU_BF_ONE_MINUS_SRC_ALPHA;
+  case BF_DST_ALPHA: return GPU_BF_DST_ALPHA;
+  case BF_INV_DST_ALPHA: return GPU_BF_ONE_MINUS_DST_ALPHA;
+  case BF_DST_COLOR: return GPU_BF_DST;
+  case BF_INV_DST_COLOR: return GPU_BF_ONE_MINUS_DST;
+  case BF_SRC_ALPHA_SAT: return GPU_BF_SRC_ALPHA_SATURATED;
+  case BF_CONST_COLOR: case BF_CONST_ALPHA: return GPU_BF_CONSTANT;
+  default: return GPU_BF_ONE_MINUS_CONSTANT;
+  }
+}
+
+/* OGL 0x200-0x207 or D3D 1-8 -> NEVER .. ALWAYS (depth_compare's rule). */
+static uint32_t gpu_compare(uint32_t func) { return (func >= 0x200u ? func - 0x200u : (func >= 1u ? func - 1u : 7u)) & 7u; }
+
+static uint32_t gpu_stencil_op(uint32_t op) {
+  switch (op) {
+  case 0x0000: case 2: return GPU_SOP_ZERO;
+  case 0x1e01: case 3: return GPU_SOP_REPLACE;
+  case 0x1e02: case 4: return GPU_SOP_INCREMENT_CLAMP;
+  case 0x1e03: case 5: return GPU_SOP_DECREMENT_CLAMP;
+  case 0x150a: case 6: return GPU_SOP_INVERT;
+  case 0x8507: case 7: return GPU_SOP_INCREMENT_WRAP;
+  case 0x8508: case 8: return GPU_SOP_DECREMENT_WRAP;
+  default: return GPU_SOP_KEEP;
+  }
+}
+
+/* Attachments for the draw; false when it cannot be expressed. */
+static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs) {
+  Raster3d *r = ctx->r;
+  Gpu_Draw *g = &g_gpu_draw;
+  memset(g, 0, offsetof(Gpu_Draw, desc));
+  const uint32_t *regs = ctx->regs;
+  const uint32_t select = regs[REG_CT_SELECT];
+  for (uint32_t i = 0; i < rs->target_count; i++) {
+    if (!rs->targets[i].surface) continue;
+    Surface_Desc d;
+    if (!color_target_desc(regs, (select >> (4u + 3u * i)) & 7u, &d)) continue;
+    if (g->width && (d.width != g->width || d.height != g->height)) {
+      log_debug("[gpu] draw target %u is %ux%u, not %ux%u: left out", i, d.width, d.height, g->width, g->height);
+      continue;
+    }
+    Raster3d_Gpu_Surface *s = gpu_surface_get(r, &d, ctx->mem, true);
+    g->width = d.width;
+    g->height = d.height;
+    g->target_id[i] = s->id;
+    g->target_format[i] = s->gpu_format;
+  }
+  if (rs->depth) {
+    Surface_Desc zd;
+    if (zeta_desc(regs, &zd) && (!g->width || (zd.width == g->width && zd.height == g->height))) {
+      Raster3d_Gpu_Surface *s = gpu_surface_get(r, &zd, ctx->mem, true);
+      g->width = zd.width;
+      g->height = zd.height;
+      g->depth_id = s->id;
+      g->depth_format = s->gpu_format;
+    }
+  }
+  if (!g->width) return false;
+  /* Varying locations: each generic vector the pixel program reads. */
+  memset(g->varying_index, 0xff, sizeof(g->varying_index));
+  for (uint32_t i = 0; i < rs->varyings.count; i++) g->varying_index[rs->varyings.word[i]] = (uint8_t)i;
+  wgsl_default_desc(ctx->ps, &g->desc);
+  for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++) {
+    const uint8_t loc = g->desc.varying_location[v];
+    if (loc != 0xffu && loc < WGSL_MAX_VARYINGS) g->location_vector[loc] = (uint8_t)v;
+  }
+  g->locations = g->desc.varying_count;
+  g->flat_mask = g->desc.flat_mask;
+  g->stride = GPU_VERTEX_HEADER_BYTES + 16u * g->locations;
+  g->active = true;
+  return true;
+}
+
+/* Mip levels of the GPU texture `id` (a render target has one). */
+static uint32_t gpu_texture_levels_of(const Raster3d *r, const Raster3d_Gpu_Surface *surface, uint32_t id) {
+  if (surface || !id) return 1u;
+  for (uint32_t i = 0; i < RASTER_TEXTURES; i++)
+    if (r->textures[i].valid && r->textures[i].gpu_id == id) return r->textures[i].gpu_levels;
+  return 1u;
+}
+
+/* Runs the pixel program once (one lane, at a vertex) to learn which
+ * texture handle each texture instruction uses - bindless handles come
+ * from registers - then builds the WGSL descriptor, the shader and the
+ * draw's data. */
+static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex *provoking, bool front) {
+  Draw_Context *ctx = rs->ctx;
+  Raster3d *r = ctx->r;
+  Gpu_Draw *g = &g_gpu_draw;
+  Sm_Thread *t = rs->thread;
+  sm_thread_reset_light(t, 1u);
+  t->front_facing = front ? SM_ALL_LANES : 0;
+  t->attr_in[SM_ATTR_POSITION / 4u + 0u][0] = u32f(at->x);
+  t->attr_in[SM_ATTR_POSITION / 4u + 1u][0] = u32f(rs->lower_left ? (float)rs->surface_height - at->y : at->y);
+  t->attr_in[SM_ATTR_POSITION / 4u + 2u][0] = u32f(at->z);
+  t->attr_in[SM_ATTR_POSITION / 4u + 3u][0] = u32f(at->inv_w);
+  for (uint32_t i = 0; i < rs->varyings.count; i++) {
+    const uint32_t word = SM_ATTR_GENERIC / 4u + rs->varyings.word[i];
+    t->attr_in[word][0] = rs->varyings.interp[i] == SM_INTERP_CONSTANT ? provoking->varying[rs->varyings.word[i]]
+                                                                       : u32f(at->varying[i]);
+  }
+  static Gpu_Probe probe;
+  probe.count = 0;
+  Sm_Env env = ctx->env[1];
+  env.texture = NULL;
+  env.texture_batch = gpu_probe_texture;
+  env.user = &probe;
+  (void)sm_run(ctx->ps, &env, t);
+  /* One binding per distinct handle. */
+  Wgsl_Program_Desc *desc = &g->desc;
+  memset(desc->binding_of, WGSL_NO_BINDING, sizeof(desc->binding_of));
+  desc->texture_count = 0;
+  desc->hw_sample_mask = 0;
+  uint32_t *data = r->gpu_data;
+  memset(data, 0, WGSL_DRAW_CONSTANT_WORDS * 4u);
+  uint32_t handles[WGSL_MAX_TEXTURES];
+  const uint32_t *regs = ctx->regs;
+  const uint64_t tic_pool = addr40(regs[REG_TEX_HEADER_POOL], regs[REG_TEX_HEADER_POOL + 1u]);
+  const uint64_t tsc_pool = addr40(regs[REG_SAMPLER_POOL], regs[REG_SAMPLER_POOL + 1u]);
+  for (uint32_t i = 0; i < probe.count; i++) {
+    uint32_t b = 0;
+    while (b < desc->texture_count && handles[b] != probe.handle[i]) b++;
+    if (b == desc->texture_count) {
+      if (b >= WGSL_MAX_TEXTURES) continue;
+      const uint32_t handle = probe.handle[i];
+      const uint32_t tic_index = handle & 0xfffffu;
+      const uint32_t tsc_index = (regs[REG_SAMPLER_BINDING] & 1u) ? tic_index : (handle >> 20) & 0xfffu;
+      uint32_t tic[8], tsc[8];
+      if (!tic_pool || !ctx->mem->read(ctx->mem->user, tic_pool + (uint64_t)tic_index * TEX_HEADER_BYTES, tic, sizeof(tic)))
+        continue;
+      Tex_Header h;
+      tex_header_parse(tic, &h);
+      Tex_Sampler s;
+      memset(&s, 0, sizeof(s));
+      s.mag_filter = 1;
+      if (tsc_pool && ctx->mem->read(ctx->mem->user, tsc_pool + (uint64_t)tsc_index * TEX_SAMPLER_BYTES, tsc, sizeof(tsc)))
+        tex_sampler_parse(tsc, &s);
+      uint32_t id = 0, sample_type = WGSL_SAMPLE_FLOAT, gpu_format = 0;
+      Raster3d_Gpu_Surface *surf = gpu_surface_at(r, h.address, h.width);
+      if (surf) {
+        bool is_signed = false;
+        id = surf->id;
+        gpu_format = surf->gpu_format;
+        if (gpu_format_is_int(surf->gpu_format, &is_signed)) sample_type = is_signed ? WGSL_SAMPLE_SINT : WGSL_SAMPLE_UINT;
+      } else {
+        Raster3d_Texture *tex = texture_load(r, tic, ctx->mem, false);
+        if (!tex) continue;
+        id = gpu_texture(r, tex);
+        gpu_format = tex->gpu_format;
+        if (h.data_type[0] == TEX_DATA_UINT) sample_type = WGSL_SAMPLE_UINT;
+        if (h.data_type[0] == TEX_DATA_SINT) sample_type = WGSL_SAMPLE_SINT;
+      }
+      /* A hardware sampler where it gives the reference's result. */
+      const bool cube_map = h.type == TEX_TYPE_CUBE || h.type == TEX_TYPE_CUBE_ARRAY;
+      if (sample_type == WGSL_SAMPLE_FLOAT && !cube_map && gpu_format_filterable(gpu_format) && s.wrap[0] <= 2u &&
+          s.wrap[1] <= 2u) {
+        desc->hw_sample_mask |= 1u << b;
+        /* Minification follows magnification on one level (the
+         * reference's single filter); mip chains use the TSC's own. */
+        const bool mips = gpu_texture_levels_of(r, surf, id) > 1u;
+        const bool min_linear = mips ? s.min_filter == 2u : s.mag_filter == 2u;
+        g->sampler_state[b] = (s.mag_filter == 2u ? GPU_SAMPLER_LINEAR : 0u) | (min_linear ? GPU_SAMPLER_MIN_LINEAR : 0u) |
+                              (s.mip_filter == TEX_MIP_LINEAR ? GPU_SAMPLER_MIP_LINEAR : 0u) |
+                              ((uint32_t)s.wrap[0] << GPU_SAMPLER_WRAP_SHIFT(0)) |
+                              ((uint32_t)s.wrap[1] << GPU_SAMPLER_WRAP_SHIFT(1)) |
+                              ((uint32_t)(s.wrap[2] <= 2u ? s.wrap[2] : 2u) << GPU_SAMPLER_WRAP_SHIFT(2));
+      }
+      handles[b] = handle;
+      g->texture_id[b] = id;
+      desc->sample_type[b] = (uint8_t)sample_type;
+      uint32_t *p = data + WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEX_PARAM_WORDS * b;
+      const bool cube = h.type == TEX_TYPE_CUBE || h.type == TEX_TYPE_CUBE_ARRAY;
+      p[WGSL_TEXP_FLAGS] = ((h.normalized || cube) ? WGSL_TEXP_SCALE : 0u) |
+                           (s.mag_filter == 2u && sample_type == WGSL_SAMPLE_FLOAT ? WGSL_TEXP_LINEAR : 0u) |
+                           (cube ? WGSL_TEXP_CUBE : 0u) | (s.depth_compare ? WGSL_TEXP_DEPTH_COMPARE : 0u);
+      p[WGSL_TEXP_WRAP] = (uint32_t)s.wrap[0] | ((uint32_t)s.wrap[1] << 4) | ((uint32_t)s.wrap[2] << 8);
+      p[WGSL_TEXP_SWIZZLE] = (uint32_t)h.swizzle[0] | ((uint32_t)h.swizzle[1] << 4) | ((uint32_t)h.swizzle[2] << 8) |
+                             ((uint32_t)h.swizzle[3] << 12);
+      p[WGSL_TEXP_LEVELS] = h.levels;
+      p[WGSL_TEXP_COMPARE] = s.compare_func;
+      /* Level selection (textures with a mip chain only; the shader
+       * clamps to the levels the GPU texture has). */
+      if (s.mip_filter > TEX_MIP_NONE && s.min_filter == 2u) p[WGSL_TEXP_FLAGS] |= WGSL_TEXP_MIN_LINEAR;
+      p[WGSL_TEXP_LOD_BIAS] = u32f(s.lod_bias);
+      p[WGSL_TEXP_MIN_LOD] = u32f(s.mip_filter > TEX_MIP_NONE ? s.min_lod : 0.0f);
+      p[WGSL_TEXP_MAX_LOD] = u32f(s.mip_filter > TEX_MIP_NONE ? s.max_lod : 0.0f);
+      for (uint32_t c = 0; c < 4; c++) p[WGSL_TEXP_BORDER + c] = u32f(s.border[c]);
+      desc->texture_count++;
+    }
+    desc->binding_of[probe.pc[i]] = (uint8_t)b;
+  }
+  g->texture_count = desc->texture_count;
+  /* Targets. */
+  desc->target_count = rs->target_count;
+  desc->target_int_mask = desc->target_sint_mask = 0;
+  for (uint32_t i = 0; i < rs->target_count; i++) {
+    bool is_signed = false;
+    if (g->target_id[i] && gpu_format_is_int(g->target_format[i], &is_signed)) {
+      desc->target_int_mask |= 1u << i;
+      if (is_signed) desc->target_sint_mask |= 1u << i;
+    }
+  }
+  desc->mrt = rs->mrt;
+  /* The shader. */
+  const uint64_t key = wgsl_desc_hash(desc, ctx->ps);
+  uint32_t slot = (uint32_t)(key % RASTER_GPU_SHADERS);
+  Raster3d_Gpu_Shader *entry = NULL;
+  for (uint32_t probe_i = 0; probe_i < RASTER_GPU_SHADERS; probe_i++) {
+    Raster3d_Gpu_Shader *e = &r->gpu_shaders[(slot + probe_i) % RASTER_GPU_SHADERS];
+    if (e->id == 0 || e->key == key) {
+      entry = e;
+      break;
+    }
+  }
+  if (!entry) { /* full: start over (the GPU side keeps its pipelines by id) */
+    memset(r->gpu_shaders, 0, sizeof(Raster3d_Gpu_Shader) * RASTER_GPU_SHADERS);
+    entry = &r->gpu_shaders[slot];
+  }
+  if (entry->id == 0) {
+    entry->key = key;
+    const Wgsl_Result res = wgsl_translate(ctx->ps, desc, r->gpu_wgsl, GPU_WGSL_BYTES);
+    if (!res.ok) {
+      log_warn("[gpu] pixel program %llx not translated: %s", (unsigned long long)ctx->ps->address, res.reason);
+      entry->id = GPU_SHADER_FAILED;
+    } else {
+      entry->id = gpu_new_id(r);
+      const uint32_t padded = ((uint32_t)res.length + 7u) & ~7u;
+      uint8_t *p = gpu_stream_begin(r->gpu, GPU_REC_SHADER, 8u + padded);
+      const uint32_t head[2] = {entry->id, (uint32_t)res.length};
+      memcpy(p, head, sizeof(head));
+      memcpy(p + 8u, res.text, res.length);
+      memset(p + 8u + res.length, ' ', padded - res.length);
+      gpu_stream_end(r->gpu);
+      r->gpu_stats.shaders++;
+    }
+  }
+  if (entry->id == GPU_SHADER_FAILED) return false;
+  g->shader_id = entry->id;
+  /* Draw constants and the constant buffers the program reads. */
+  data[WGSL_DRAW_SURFACE_HEIGHT] = u32f((float)rs->surface_height);
+  data[WGSL_DRAW_FLAGS] = rs->lower_left ? WGSL_DRAW_LOWER_LEFT : 0u;
+  data[WGSL_DRAW_ALPHA_FUNC] = rs->alpha_test ? 1u + gpu_compare(rs->alpha_func) : 0u;
+  data[WGSL_DRAW_ALPHA_REF] = u32f(rs->alpha_ref);
+  uint32_t words = WGSL_DRAW_CONSTANT_WORDS;
+  const Sm_Env *penv = &ctx->env[1];
+  for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++) {
+    if (!penv->cbuf[s] || !penv->cbuf_size[s]) continue;
+    const uint32_t n = penv->cbuf_size[s] / 4u;
+    memcpy(data + words, penv->cbuf[s], (size_t)n * 4u);
+    data[WGSL_DRAW_CBUF_TABLE + 2u * s] = words;
+    data[WGSL_DRAW_CBUF_TABLE + 2u * s + 1u] = n;
+    words += n;
+  }
+  if (words & 1u) data[words++] = 0; /* records stay 8-aligned */
+  g->data_words = words;
+  return true;
+}
+
+static void gpu_emit_draw(Raster_State *rs) {
+  Raster3d *r = rs->ctx->r;
+  Gpu_Draw *g = &g_gpu_draw;
+  if (!g->vertices) return;
+  uint32_t samplers = 0;
+  for (uint32_t i = 0; i < g->texture_count; i++) samplers += (g->desc.hw_sample_mask >> i) & 1u;
+  const uint32_t bindings = 1u + g->texture_count + samplers;
+  const uint64_t bytes = sizeof(Gpu_Rec_Draw) + sizeof(Gpu_Rec_Binding) * bindings + (uint64_t)g->data_words * 4u +
+                         g->vertex_bytes;
+  if (bytes > gpu_stream_max_payload(r->gpu)) {
+    log_warn("[gpu] draw of %u bytes exceeds the stream's record limit: dropped", (uint32_t)bytes);
+    g->vertices = g->vertex_bytes = 0;
+    return;
+  }
+  uint8_t *p = gpu_stream_begin(r->gpu, GPU_REC_DRAW, (uint32_t)bytes);
+  Gpu_Rec_Draw d;
+  memset(&d, 0, sizeof(d));
+  d.shader_id = g->shader_id;
+  d.target_count = rs->target_count;
+  for (uint32_t i = 0; i < rs->target_count && i < GPU_MAX_TARGETS; i++) {
+    const Target *t = &rs->targets[i];
+    Gpu_Rec_Target *o = &d.targets[i];
+    o->id = g->target_id[i];
+    o->write_mask = t->write_mask;
+    o->blend = t->blend ? 1u : 0u;
+    o->color_op = t->color_op;
+    o->alpha_op = t->alpha_op;
+    o->color_src = gpu_blend_factor(t->color_src);
+    o->color_dst = gpu_blend_factor(t->color_dst);
+    o->alpha_src = gpu_blend_factor(t->alpha_src);
+    o->alpha_dst = gpu_blend_factor(t->alpha_dst);
+  }
+  d.depth_id = g->depth_id;
+  d.depth_test = rs->depth_test ? 1u : 0u;
+  d.depth_write = rs->depth_write ? 1u : 0u;
+  d.depth_compare = rs->depth_test ? gpu_compare(rs->depth_func) : GPU_CMP_ALWAYS;
+  d.stencil = rs->stencil ? 1u : 0u;
+  if (rs->stencil) {
+    Gpu_Rec_Stencil_Face *faces[2] = {&d.stencil_front, &d.stencil_back};
+    for (uint32_t f = 0; f < 2u; f++) {
+      faces[f]->fail = gpu_stencil_op(rs->stencil_op_fail[f]);
+      faces[f]->depth_fail = gpu_stencil_op(rs->stencil_op_zfail[f]);
+      faces[f]->pass = gpu_stencil_op(rs->stencil_op_zpass[f]);
+      faces[f]->compare = gpu_compare(rs->stencil_func[f]);
+    }
+    d.stencil_read_mask = rs->stencil_func_mask[0];
+    d.stencil_write_mask = rs->stencil_write_mask[0];
+    d.stencil_ref = rs->stencil_ref[0];
+  }
+  for (uint32_t c = 0; c < 4; c++) d.blend_constant[c] = u32f(rs->blend_const[c]);
+  d.scissor[0] = rs->clip.x0;
+  d.scissor[1] = rs->clip.y0;
+  d.scissor[2] = rs->clip.x1 - rs->clip.x0;
+  d.scissor[3] = rs->clip.y1 - rs->clip.y0;
+  d.varying_count = g->locations;
+  d.flat_mask = g->flat_mask;
+  d.binding_count = bindings;
+  d.vertex_count = g->vertices;
+  memcpy(p, &d, sizeof(d));
+  p += sizeof(d);
+  Gpu_Rec_Binding b = {GPU_BIND_DATA, WGSL_DATA_BINDING, g->data_words * 4u, 0};
+  memcpy(p, &b, sizeof(b));
+  p += sizeof(b);
+  memcpy(p, r->gpu_data, (size_t)g->data_words * 4u);
+  p += (size_t)g->data_words * 4u;
+  for (uint32_t i = 0; i < g->texture_count; i++) {
+    const bool hw = (g->desc.hw_sample_mask >> i) & 1u;
+    const Gpu_Rec_Binding tb = {GPU_BIND_TEXTURE, WGSL_TEXTURE_BINDING_BASE + i, hw ? GPU_BIND_FILTERED : 0u,
+                                g->texture_id[i]};
+    memcpy(p, &tb, sizeof(tb));
+    p += sizeof(tb);
+    if (!hw) continue;
+    const Gpu_Rec_Binding sb = {GPU_BIND_SAMPLER, WGSL_SAMPLER_BINDING_BASE + i, 0, g->sampler_state[i]};
+    memcpy(p, &sb, sizeof(sb));
+    p += sizeof(sb);
+  }
+  memcpy(p, r->gpu_vertices, g->vertex_bytes);
+  gpu_stream_end(r->gpu);
+  r->gpu_stats.draws++;
+  g->vertices = 0;
+  g->vertex_bytes = 0;
+}
+
+static void gpu_put_vertex(Raster_State *rs, const Screen_Vertex *v, const Vertex *provoking) {
+  Gpu_Draw *g = &g_gpu_draw;
+  uint8_t *p = rs->ctx->r->gpu_vertices + g->vertex_bytes;
+  const float head[4] = {v->x / (float)g->width * 2.0f - 1.0f, 1.0f - v->y / (float)g->height * 2.0f, v->z, v->inv_w};
+  memcpy(p, head, sizeof(head));
+  uint32_t *vary = (uint32_t *)(void *)(p + GPU_VERTEX_HEADER_BYTES);
+  for (uint32_t l = 0; l < g->locations; l++) {
+    const uint32_t vec = g->location_vector[l];
+    for (uint32_t c = 0; c < 4u; c++) {
+      const uint32_t word = vec * 4u + c;
+      const uint8_t i = g->varying_index[word];
+      uint32_t value = 0;
+      if (i != 0xffu) value = rs->varyings.interp[i] == SM_INTERP_CONSTANT ? provoking->varying[word] : u32f(v->varying[i]);
+      vary[l * 4u + c] = value;
+    }
+  }
+  g->vertex_bytes += g->stride;
+  g->vertices++;
+}
+
+/* GPU mode's raster_triangle: culls, then queues the triangle in NDC with
+ * front faces counter-clockwise (y up). */
+static void gpu_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
+  Gpu_Draw *g = &g_gpu_draw;
+  if (!g->active || g->dead) return;
+  Screen_Vertex sv[3];
+  to_screen(rs, a, &sv[0]);
+  to_screen(rs, b, &sv[1]);
+  to_screen(rs, c, &sv[2]);
+  const int64_t area = (sv[1].fx - sv[0].fx) * (sv[2].fy - sv[0].fy) - (sv[1].fy - sv[0].fy) * (sv[2].fx - sv[0].fx);
+  if (area == 0) return;
+  const bool clockwise = area > 0; /* on screen, y down */
+  const bool front = rs->front_ccw ? !clockwise : clockwise;
+  if (rs->cull) {
+    if (rs->cull_face == 0x408u) return;
+    if (rs->cull_face == 0x404u && front) return;
+    if (rs->cull_face == 0x405u && !front) return;
+  }
+  if (!g->prepared) {
+    g->prepared = true;
+    if (!gpu_prepare(rs, &sv[0], provoking, front)) {
+      g->dead = true;
+      rs->ctx->r->gpu_stats.untranslated_draws++;
+      return;
+    }
+  }
+  if (g->vertex_bytes + 3u * g->stride > GPU_VERTEX_BYTES) gpu_emit_draw(rs);
+  /* Clockwise on screen (y down) is counter-clockwise in NDC (y up): the
+   * front face winds that way. */
+  const bool keep = clockwise == front;
+  gpu_put_vertex(rs, &sv[0], provoking);
+  gpu_put_vertex(rs, keep ? &sv[1] : &sv[2], provoking);
+  gpu_put_vertex(rs, keep ? &sv[2] : &sv[1], provoking);
+  rs->ctx->r->gpu_stats.triangles++;
+}
+
+static void gpu_draw_end(Raster_State *rs) {
+  Gpu_Draw *g = &g_gpu_draw;
+  if (g->active && !g->dead) gpu_emit_draw(rs);
+  g->active = false;
+}
+
+/* ---- clears, presents, copies ---- */
+
+static void gpu_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, uint32_t clear) {
+  const uint32_t control = regs[REG_CLEAR_CONTROL];
+  const bool color = (clear & 0x3cu) != 0;
+  const bool depth = (clear & 1u) != 0;
+  const bool stencil = (clear & 2u) != 0;
+  Gpu_Rec_Clear c;
+  memset(&c, 0, sizeof(c));
+  Rect rect = {0, 0, 0, 0};
+  if (color) {
+    const uint32_t mrt = (clear >> 6) & 0xfu;
+    const uint32_t select = regs[REG_CT_SELECT];
+    const uint32_t target = mrt < 8u ? (select >> (4u + 3u * mrt)) & 7u : 0u;
+    Surface_Desc d;
+    if (color_target_desc(regs, target, &d)) {
+      rect = (Rect){0, 0, (int32_t)d.width, (int32_t)d.height};
+      if (control & 0x100u) rect_scissor(&rect, regs);
+      if (control & 0x10u) {
+        const uint32_t h = regs[REG_CLEAR_RECT_H], v = regs[REG_CLEAR_RECT_V];
+        rect_intersect(&rect, (int32_t)(h & 0xffffu), (int32_t)(v & 0xffffu), (int32_t)(h >> 16), (int32_t)(v >> 16));
+      }
+      if (control & 0x1000u) rect_viewport_clip(&rect, regs);
+      const uint32_t write = (regs[REG_SINGLE_CT_WRITE] & 1u) ? regs[REG_CT_WRITE] : regs[REG_CT_WRITE + target];
+      for (uint32_t i = 0; i < 4; i++)
+        if ((clear >> (2u + i)) & 1u && (write >> (4u * i)) & 1u) c.color_mask |= 1u << i;
+      if (rect.x0 < rect.x1 && rect.y0 < rect.y1 && c.color_mask) {
+        const bool full = rect.x0 == 0 && rect.y0 == 0 && rect.x1 == (int32_t)d.width && rect.y1 == (int32_t)d.height &&
+                          c.color_mask == 0xfu;
+        Raster3d_Gpu_Surface *s = gpu_surface_get(r, &d, mem, !full);
+        c.color_id = s->id;
+        for (uint32_t i = 0; i < 4; i++) c.color[i] = regs[REG_CLEAR_COLOR + i];
+        c.flags |= GPU_CLEAR_COLOR;
+      }
+    }
+  }
+  if (depth || stencil) {
+    Surface_Desc d;
+    if (zeta_desc(regs, &d)) {
+      Rect zr = {0, 0, (int32_t)d.width, (int32_t)d.height};
+      if (control & 0x100u) rect_scissor(&zr, regs);
+      const uint32_t sbyte = stencil_byte(d.format);
+      const bool clear_depth = depth && d.format != ZT_S8;
+      const uint8_t smask = (uint8_t)regs[REG_STENCIL_FRONT + 6u];
+      const bool clear_stencil = stencil && sbyte != ZT_NO_STENCIL && smask;
+      if ((clear_depth || clear_stencil) && zr.x0 < zr.x1 && zr.y0 < zr.y1) {
+        if (c.flags) { /* a colour clear too: one record each */
+          c.rect[0] = rect.x0;
+          c.rect[1] = rect.y0;
+          c.rect[2] = rect.x1 - rect.x0;
+          c.rect[3] = rect.y1 - rect.y0;
+          gpu_stream_write(r->gpu, GPU_REC_CLEAR, &c, sizeof(c));
+          memset(&c, 0, sizeof(c));
+        }
+        Raster3d_Gpu_Surface *s = gpu_surface_get(r, &d, mem, false);
+        c.depth_id = s->id;
+        if (clear_depth) c.flags |= GPU_CLEAR_DEPTH;
+        if (clear_stencil) c.flags |= GPU_CLEAR_STENCIL;
+        c.depth = regs[REG_Z_CLEAR];
+        c.stencil = regs[REG_STENCIL_CLEAR] & 0xffu;
+        c.stencil_mask = smask;
+        rect = zr;
+      }
+    }
+  }
+  if (!c.flags) return;
+  c.rect[0] = rect.x0;
+  c.rect[1] = rect.y0;
+  c.rect[2] = rect.x1 - rect.x0;
+  c.rect[3] = rect.y1 - rect.y0;
+  gpu_stream_write(r->gpu, GPU_REC_CLEAR, &c, sizeof(c));
+}
+
+bool raster3d_gpu_present(Raster3d *r, uint64_t cpu_address, uint32_t width, uint32_t height, const int32_t crop[4],
+                          uint32_t flags) {
+  if (!r || !r->gpu) return false;
+  Raster3d_Gpu_Surface *s = NULL;
+  for (uint32_t i = 0; i < RASTER_GPU_SURFACES && !s; i++) {
+    Raster3d_Gpu_Surface *c = &r->gpu_surfaces[i];
+    if (c->in_use && !c->depth && c->cpu_address == cpu_address && c->width >= width) s = c;
+  }
+  if (!s) return false;
+  Gpu_Rec_Present p;
+  memset(&p, 0, sizeof(p));
+  p.id = s->id;
+  p.rect[0] = crop[2] ? crop[0] : 0;
+  p.rect[1] = crop[2] ? crop[1] : 0;
+  p.rect[2] = crop[2] ? crop[2] : (int32_t)width;
+  p.rect[3] = crop[2] ? crop[3] : (int32_t)(height < s->height ? height : s->height);
+  p.flags = flags;
+  gpu_stream_write(r->gpu, GPU_REC_PRESENT, &p, sizeof(p));
+  __atomic_fetch_add((uint32_t *)(void *)(r->gpu->header + GPU_STREAM_OFF_PRESENTS), 1u, __ATOMIC_RELAXED);
+  gpu_stream_publish(r->gpu);
+  r->gpu_stats.presents++;
+  return true;
+}
+
+bool raster3d_gpu_copy(Raster3d *r, const Gpu_Memory *mem, const Raster3d_Surface_Ref *src,
+                       const Raster3d_Surface_Ref *dst, const int32_t src_rect[4], const int32_t dst_rect[4],
+                       bool linear) {
+  if (!r || !r->gpu) return false;
+  Raster3d_Gpu_Surface *from = gpu_surface_at(r, src->address, src->width);
+  if (!from || from->depth) return false;
+  const Color_Format *f = color_format(dst->format);
+  if (!f) return false;
+  Surface_Desc d;
+  memset(&d, 0, sizeof(d));
+  d.address = dst->address;
+  d.width = dst->width;
+  d.height = dst->height;
+  d.format = dst->format;
+  d.bytes_per_pixel = f->bytes;
+  d.block_linear = dst->block_linear;
+  d.block_height_log2 = dst->block_height_log2;
+  d.pitch = dst->pitch;
+  const bool full = dst_rect[0] == 0 && dst_rect[1] == 0 && dst_rect[2] == (int32_t)dst->width &&
+                    dst_rect[3] == (int32_t)dst->height;
+  Raster3d_Gpu_Surface *to = gpu_surface_get(r, &d, mem, !full);
+  Gpu_Rec_Copy c;
+  memset(&c, 0, sizeof(c));
+  c.src_id = from->id;
+  c.dst_id = to->id;
+  memcpy(c.src_rect, src_rect, sizeof(c.src_rect));
+  memcpy(c.dst_rect, dst_rect, sizeof(c.dst_rect));
+  c.filter = linear ? 1u : 0u;
+  gpu_stream_write(r->gpu, GPU_REC_COPY, &c, sizeof(c));
+  r->gpu_stats.copies++;
+  return true;
+}
+
 /* ---- draws -------------------------------------------------------- */
 
 static Draw_Context g_draw_context; /* large (vertex windows); one draw at a time */
@@ -2636,6 +3607,10 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
                (unsigned long long)(((uint64_t)regs[REG_RT] << 32) | regs[REG_RT + 1]), regs[REG_CT_SELECT],
                regs[REG_CT_WRITE], (regs[REG_ZT_SELECT] & 1u) ? "on" : "off", rs.clip.x0, rs.clip.y0, rs.clip.x1, rs.clip.y1);
     }
+    r->stats.skipped_draws++;
+    return;
+  }
+  if (r->gpu && !gpu_draw_begin(ctx, &rs)) {
     r->stats.skipped_draws++;
     return;
   }
@@ -2700,6 +3675,7 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
   const uint64_t pixels_before = r->stats.pixels, triangles_before = r->stats.triangles;
   assemble_end(&rs, &cache, &as);
   flush_triangles(&rs);
+  if (r->gpu) gpu_draw_end(&rs);
   if (r->trace_draws) {
     const Target *t0 = &rs.targets[0];
     log_info("[gpu] draw %llu: topo %u count %u vs %llx ps %llx | rt0 %llx fmt 0x%02x %ux%u targets %u mask %x | "

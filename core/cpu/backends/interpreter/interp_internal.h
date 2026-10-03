@@ -52,6 +52,10 @@ typedef struct Interp_State {
    * run loop never yields while it is held, up to a grace cap). */
   bool exclusive_valid;
   uint64_t exclusive_address;
+  /* What the load-exclusive read (`exclusive_size` bytes): in multicore
+   * mode the store-exclusive is a host compare-and-swap against it. */
+  uint64_t exclusive_value[2];
+  uint32_t exclusive_size;
 
   uint64_t fault_address;
   uint64_t cycles_consumed;    /* by the last run()/step() */

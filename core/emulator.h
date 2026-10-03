@@ -13,6 +13,7 @@
 #include "common/result.h"
 #include "common/vmm.h"
 #include "cpu/cpu.h"
+#include "gpu/gpu_stream.h"
 #include "hle/hle.h"
 #include "hle/kernel/page_allocator.h"
 #include "hle/kernel/process.h"
@@ -132,6 +133,11 @@ typedef struct Emulator
   uint32_t content_node;    /* ramfs node of a chain-loaded NRO */
   int64_t rtc;       /* Unix seconds the next process boots at (emulator_set_rtc) */
   uint32_t frame_skip; /* emulator_set_frame_skip; survives process reloads */
+  Parallel *parallel;  /* emulator_set_host_cores; NULL = serial */
+  /* GPU mode (emulator_set_gpu_mode): the renderer's stream to the GPU
+   * worker, in the layout's gpu_ring region. */
+  Gpu_Stream gpu_stream;
+  bool gpu_stream_ready;
 } Emulator;
 
 /* What one emulator_run_slice() did (§7 scheduler status). */
@@ -189,6 +195,15 @@ void emulator_unload_program(Emulator *emulator);
  * runs for at most `cycle_budget` cycles. */
 Emulator_Status emulator_run_slice(Emulator *emulator, uint64_t cycle_budget);
 
+/* Parallel guest threads (docs/PARALLEL.md): with `cores` >= 1, guest
+ * threads run on that many host threads during emulator_run_slice and the
+ * caller waits for the slice (serving host calls the cores need). 0 (the
+ * default) is the serial scheduler. One core is bit-identical to serial;
+ * from two on, exclusives become host compare-and-swaps and the run is
+ * no longer deterministic. Returns the core count in effect (0 when the
+ * build or the backend cannot run in parallel). Call between slices. */
+uint32_t emulator_set_host_cores(Emulator *emulator, uint32_t cores);
+
 /* Compatibility wrapper: one slice, reported as the backend's exit reason
  * (CPU_EXIT_HALT when no thread ran). With nothing loaded it runs the
  * bare CPU_State, as before the scheduler existed. */
@@ -206,6 +221,13 @@ void emulator_set_rtc(Emulator *emulator, int64_t unix_seconds);
  * missing until the game draws it again. Capped at EMULATOR_MAX_FRAME_SKIP. */
 #define EMULATOR_MAX_FRAME_SKIP 5u
 void emulator_set_frame_skip(Emulator *emulator, uint32_t n);
+
+/* GPU mode (§13): draws, clears, copies and presents of GPU-rendered
+ * frames stream to the GPU worker's WebGPU renderer through the layout's
+ * gpu_ring region (gpu/gpu_stream.h) instead of being rasterised here.
+ * The platform turns it on once a consumer exists (the producer waits for
+ * room in the ring). Off: the software reference renderer. */
+void emulator_set_gpu_mode(Emulator *emulator, bool on);
 
 /* Seeds the emulated SD card (§15): creates `path` (absolute, '/'-
  * separated; missing parent directories are created) holding `size`

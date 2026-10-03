@@ -7,7 +7,8 @@
  * An image is decoded from guest memory once (block-linear -> linear,
  * BCn -> RGBA8) into a Tex_Image, then sampled any number of times.
  * Mipmaps: level 0 only (the reference path has no derivatives - see
- * maxwell_shader.h); explicit LODs clamp to level 0.
+ * maxwell_shader.h); explicit LODs clamp to level 0. The sampler's mip
+ * fields are parsed for the WebGPU renderer, which builds mip chains.
  */
 #ifndef SWITCH_GPU_TEXTURE_H
 #define SWITCH_GPU_TEXTURE_H
@@ -71,12 +72,20 @@ typedef struct Tex_Header {
   bool normalized;
 } Tex_Header;
 
+/* TEXSAMP1_MIP_FILTER values. */
+#define TEX_MIP_NONE 1u
+#define TEX_MIP_POINT 2u
+#define TEX_MIP_LINEAR 3u
+
 typedef struct Tex_Sampler {
   uint8_t wrap[3];
   bool depth_compare;
   uint8_t compare_func;     /* 0 NEVER .. 7 ALWAYS */
   uint8_t mag_filter;       /* 1 point, 2 linear */
-  uint8_t min_filter;
+  uint8_t min_filter;       /* 1 point, 2 linear */
+  uint8_t mip_filter;       /* 1 none, 2 point, 3 linear (TEXSAMP1_MIP_FILTER) */
+  float lod_bias;           /* TEXSAMP1_MIP_LOD_BIAS, levels */
+  float min_lod, max_lod;   /* TEXSAMP2_MIN/MAX_LOD_CLAMP, levels */
   bool srgb_border;
   float border[4];
 } Tex_Sampler;
@@ -132,6 +141,11 @@ void tex_sample(const Tex_Image *image, const Tex_Sampler *sampler, const float 
 void tex_gather(const Tex_Image *image, const Tex_Sampler *sampler, const float coords[3], float layer,
                 uint32_t component, float dref, bool shadow, const int32_t offset[3], uint32_t out[4]);
 void tex_fetch(const Tex_Image *image, const int32_t coords[3], int32_t layer, uint32_t out[4]);
+
+/* The texel at (x, y, layer) of a valid image as sampling sees it before
+ * the swizzle: floats (as bits) or raw integers (the WebGPU renderer's
+ * upload of formats it has no direct equivalent for). */
+void tex_texel(const Tex_Image *image, uint32_t x, uint32_t y, uint32_t layer, uint32_t out[4]);
 
 /* One texel, unswizzled, as floats (or integer bits): R, G, B, A. */
 void tex_decode_texel(uint32_t format, const uint8_t data_type[4], bool srgb, const uint8_t *texel, uint32_t out[4]);

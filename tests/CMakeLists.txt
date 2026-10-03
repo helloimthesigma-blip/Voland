@@ -19,6 +19,9 @@ add_test(NAME vmm_test COMMAND vmm_test)
 add_executable(gpu_stream_test gpu_stream_test.c)
 target_link_libraries(gpu_stream_test PRIVATE switch_core)
 add_test(NAME gpu_stream_test COMMAND gpu_stream_test)
+add_executable(wgsl_test wgsl_test.c)
+target_link_libraries(wgsl_test PRIVATE switch_core)
+add_test(NAME wgsl_test COMMAND wgsl_test)
 
 add_executable(workers_test workers_test.c)
 target_link_libraries(workers_test PRIVATE switch_core)
@@ -161,6 +164,12 @@ target_link_libraries(guest_fixture PRIVATE switch_core loader_fixtures)
 add_executable(scheduler_test scheduler_test.c)
 target_link_libraries(scheduler_test PRIVATE switch_core guest_fixture loader_fixtures)
 add_test(NAME scheduler_test COMMAND scheduler_test)
+
+# Parallel guest threads (docs/PARALLEL.md): one core == serial, and
+# exclusives on two and three real host threads.
+add_executable(parallel_test parallel_test.c)
+target_link_libraries(parallel_test PRIVATE switch_core guest_fixture loader_fixtures)
+add_test(NAME parallel_test COMMAND parallel_test)
 
 # Homebrew NRO (§12): the committed demo NRO loads and runs end to end.
 add_executable(nro_test nro_test.c)

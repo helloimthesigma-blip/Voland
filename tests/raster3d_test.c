@@ -209,7 +209,7 @@ static bool rgba_is(const uint8_t *p, uint8_t r, uint8_t g, uint8_t b, uint8_t a
          abs(p[3] - a) <= tolerance;
 }
 
-static const Gpu_Memory k_mem = {NULL, mem_read, mem_write, NULL, NULL};
+static const Gpu_Memory k_mem = {NULL, mem_read, mem_write, NULL, NULL, NULL};
 
 static void clear_to(Raster3d *r, float red, float green, float blue, float alpha) {
   memcpy(&g_regs[0x360], &red, 4);

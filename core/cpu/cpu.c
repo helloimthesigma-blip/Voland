@@ -12,3 +12,8 @@ const CPU_Backend* cpu_get_active_backend(void) {
 # error "No CPU_BACKEND_* define set. Configure the build with -DCPU_BACKEND=noop (or a real backend)."
 #endif
 }
+
+static bool g_multicore;
+
+void cpu_set_multicore(bool on) { g_multicore = on; }
+bool cpu_multicore(void) { return g_multicore; }

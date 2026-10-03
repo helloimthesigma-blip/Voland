@@ -169,4 +169,12 @@ extern const CPU_Backend CPU_BACKEND_BALLISTIC;   /* only if -DCPU_BACKEND=balli
 /* Returns the backend selected at configure time (see CPU_BACKEND CMake option). */
 const CPU_Backend *cpu_get_active_backend(void);
 
+/* Guest threads run on several host threads at once (docs/PARALLEL.md).
+ * Backends then make store-exclusive a host compare-and-swap against the
+ * value the load-exclusive read, and barriers / acquire-release accesses
+ * host fences. Off (the default) keeps the serial semantics exactly.
+ * Changed only while no guest code runs. */
+void cpu_set_multicore(bool on);
+bool cpu_multicore(void);
+
 #endif /* SWITCH_CPU_CPU_H */

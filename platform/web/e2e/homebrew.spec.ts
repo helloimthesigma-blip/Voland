@@ -23,7 +23,7 @@ test.setTimeout(RUN_MS + 60_000);
 
 test("a real homebrew NRO boots and presents frames", async ({ page }) => {
   page.on("console", (message) => {
-    if (message.text().includes("[gpu] reference renderer")) console.log(message.text());
+    if (/\[gpu\] reference renderer|renderer:|GPU stream|WebGPU|untranslated|not translated/.test(message.text())) console.log(message.text());
   });
   await page.goto("/");
   await expect(page.getByTestId("load-panel")).toBeVisible({ timeout: 20_000 });

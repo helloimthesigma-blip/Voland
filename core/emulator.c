@@ -8,7 +8,9 @@
 #include "hle/loader/nca_parse.h"
 #include "hle/loader/npdm.h"
 #include "hle/loader/nro.h"
+#include "common/workers.h"
 #include "hle/kernel/handle_table.h"
+#include "hle/kernel/parallel.h"
 #include "hle/kernel/thread.h"
 
 #include <stdio.h>
@@ -428,6 +430,7 @@ Error emulator_create_with_backend(Emulator* out, const CPU_Backend* backend) {
 
 void emulator_destroy(Emulator* emulator) {
   if (!emulator) return;
+  (void)emulator_set_host_cores(emulator, 0);
   emulator_unload_program(emulator);
   if (emulator->cpu_backend && emulator->cpu_state) {
     emulator->cpu_backend->destroy(emulator->cpu_state);
@@ -454,6 +457,7 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
   /* The main thread joins the scheduler: it wraps the Emulator's own
    * CPU_State, and its bootstrap handle (0x8000) now names it. */
   scheduler_init(&emulator->scheduler, emulator->cpu_backend);
+  emulator->scheduler.parallel = emulator->parallel;
   Sched_Thread *main_thread = scheduler_new_thread(&emulator->scheduler);
   SWITCH_ASSERT_ALWAYS(main_thread != NULL, "empty scheduler has a slot");
   main_thread->thread.cpu_state = emulator->cpu_state;
@@ -626,6 +630,7 @@ void emulator_unload_program(Emulator* emulator) {
     if (t->state != THREAD_STATE_FREE && t->owns_cpu_state) thread_destroy(&env, &t->thread);
   }
   scheduler_init(&emulator->scheduler, emulator->cpu_backend);
+  emulator->scheduler.parallel = emulator->parallel;
   /* Transfer memory still lent at exit: the heap gets its pages back
    * read-write, so teardown can release them. */
   for (uint32_t i = 0; i < TRANSFER_MEMORY_POOL_CAPACITY; i++) {
@@ -665,13 +670,43 @@ Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
     const uint64_t audio = emulator->audren ? audren_next_wake(emulator->audren) : UINT64_MAX;
     emulator->scheduler.device_wake_at = audio < vsync ? audio : vsync;
   }
-  switch (scheduler_tick(&emulator->scheduler, emulator->cpu_backend, cycle_budget, &reason)) {
+  const Scheduler_Status tick = emulator->parallel
+                                    ? parallel_tick(emulator->parallel, cycle_budget)
+                                    : scheduler_tick(&emulator->scheduler, emulator->cpu_backend, cycle_budget, &reason);
+  switch (tick) {
   case SCHEDULER_RAN: return EMULATOR_RUNNING;
   case SCHEDULER_IDLE: return EMULATOR_IDLE;
   case SCHEDULER_EXITED: return emulator->is_homebrew && chain_load(emulator) ? EMULATOR_RUNNING : EMULATOR_EXITED;
   case SCHEDULER_CRASHED: return EMULATOR_CRASHED;
   default: return EMULATOR_DEADLOCK;
   }
+}
+
+uint32_t emulator_set_host_cores(Emulator* emulator, uint32_t cores) {
+  if (!emulator) return 0;
+  if (cores > PARALLEL_MAX_CORES) cores = PARALLEL_MAX_CORES;
+  if (emulator->parallel && parallel_core_count(emulator->parallel) == cores) return cores;
+  if (emulator->parallel) {
+    parallel_destroy(emulator->parallel);
+    emulator->parallel = NULL;
+    emulator->scheduler.parallel = NULL;
+    cpu_set_multicore(false);
+  }
+  if (cores == 0) return 0;
+  if (!parallel_supported() || emulator->cpu_backend->supports_jit) {
+    /* A JIT's code cache is not yet shareable between host threads. */
+    log_warn("[emulator] parallel guest threads unavailable (%s); staying serial", emulator->cpu_backend->name);
+    return 0;
+  }
+#ifdef __EMSCRIPTEN__
+  /* Every host thread comes from the fixed pthread pool (§24): the pixel
+   * workers give up as many as the cores take. */
+  raster3d_set_workers(&emulator->renderer, WORKERS_MAX + 1u - cores);
+#endif
+  emulator->parallel = parallel_create(&emulator->scheduler, emulator->cpu_backend, cores);
+  if (!emulator->parallel) return 0;
+  cpu_set_multicore(parallel_core_count(emulator->parallel) >= 2u);
+  return parallel_core_count(emulator->parallel);
 }
 
 CPU_ExitReason emulator_run(Emulator* emulator, uint64_t cycle_budget) {
@@ -891,6 +926,31 @@ void emulator_set_shared_font(Emulator* emulator, const uint8_t* ttf, uint32_t s
   if (!emulator->program_loaded) {
     pl_init(&emulator->pl, &emulator->shared_memory, emulator->shared_font, emulator->shared_font_size);
   }
+}
+
+/* The ring is full: wait for the GPU worker to consume (bounded, so a
+ * stalled consumer shows up as slowness rather than a hang in one wait). */
+#define GPU_STREAM_WAIT_NS 20000000ll
+static void gpu_stream_wait(void *user, volatile int32_t *word, int32_t expected) {
+  (void)user;
+#ifdef __EMSCRIPTEN__
+  (void)__builtin_wasm_memory_atomic_wait32((int32_t *)word, expected, GPU_STREAM_WAIT_NS);
+#else
+  (void)word;
+  (void)expected;
+#endif
+}
+
+void emulator_set_gpu_mode(Emulator *emulator, bool on) {
+  if (!emulator) return;
+  if (on && !emulator->gpu_stream_ready) {
+    const Memory_Layout *layout = layout_get();
+    uint8_t *header = (uint8_t *)(uintptr_t)layout->gpu_ring_base;
+    gpu_stream_init(&emulator->gpu_stream, header, header + GPU_STREAM_RING_OFFSET,
+                    LAYOUT_GPU_RING_SIZE - GPU_STREAM_RING_OFFSET, gpu_stream_wait, NULL);
+    emulator->gpu_stream_ready = true;
+  }
+  raster3d_set_gpu(&emulator->renderer, on ? &emulator->gpu_stream : NULL);
 }
 
 void emulator_set_frame_skip(Emulator* emulator, uint32_t n) {

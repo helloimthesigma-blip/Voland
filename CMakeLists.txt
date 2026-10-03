@@ -10,6 +10,8 @@ project(Voland
 set(CPU_BACKEND "noop" CACHE STRING "CPU backend: noop|interpreter|jit|ballistic")
 set_property(CACHE CPU_BACKEND PROPERTY STRINGS noop interpreter jit ballistic)
 
+option(VOLAND_WASM_PROFILING "Web: keep wasm function names (--profiling-funcs) for browser profiles" OFF)
+
 set(GPU_BACKEND "auto" CACHE STRING "GPU backend: webgpu|vulkan|metal|d3d12|auto")
 set_property(CACHE GPU_BACKEND PROPERTY STRINGS webgpu vulkan metal d3d12 auto)
 
@@ -103,14 +105,17 @@ if(EMSCRIPTEN)
                             '_cpu_get_reg_ffi','_cpu_set_reg_ffi','_cpu_get_pc_ffi',
                             '_emulator_load_program_ffi','_emulator_unload_program_ffi',
                             '_emulator_last_error_message_ffi','_emulator_program_id_ffi',
-                            '_emulator_run_slice_ffi','_emulator_virtual_ticks_ffi','_emulator_crash_pc_ffi',
-                            '_emulator_set_program_path_ffi','_emulator_set_rtc_ffi','_emulator_set_frame_skip_ffi',
+                            '_emulator_run_slice_ffi','_emulator_virtual_ticks_ffi','_emulator_perf_counters_ffi','_emulator_crash_pc_ffi',
+                            '_emulator_set_program_path_ffi','_emulator_set_rtc_ffi','_emulator_set_frame_skip_ffi','_emulator_set_gpu_mode_ffi','_emulator_set_host_cores_ffi',
                             '_emulator_set_shared_font_ffi','_emulator_sd_write_file_ffi','_emulator_sd_clear_ffi',
                             '_emulator_sd_generation_ffi','_emulator_sd_manifest_ffi','_emulator_sd_read_file_ffi',
                             '_emulator_text_request_ffi','_emulator_text_respond_ffi',
                             '_malloc','_free']"
     "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap']"
   )
+  if(VOLAND_WASM_PROFILING)
+    add_link_options(--profiling-funcs)  # names only; same optimised code
+  endif()
 endif()
 
 add_subdirectory(core)
@@ -131,4 +136,10 @@ elseif(SWITCH_EMU_BUILD_TESTS AND EMSCRIPTEN AND CPU_BACKEND STREQUAL "jit")
   # Wasm-side JIT tests, run under Node: ctest --preset web-jit
   enable_testing()
   add_subdirectory(tests/jit_wasm)
+endif()
+if(SWITCH_EMU_BUILD_TESTS AND EMSCRIPTEN)
+  # Parallel guest threads under Emscripten pthreads, run by Node; built
+  # only on request (tests/parallel_wasm/CMakeLists.txt).
+  enable_testing()
+  add_subdirectory(tests/parallel_wasm)
 endif()

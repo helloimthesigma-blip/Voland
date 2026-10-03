@@ -32,6 +32,7 @@ set(SWITCH_CORE_SOURCES
   hle/kernel/ipc.c
   hle/kernel/svc_ipc.c
   hle/kernel/scheduler.c
+  hle/kernel/parallel.c
   hle/kernel/event.c
   hle/kernel/shared_memory.c
   hle/services/hid/hid.c
@@ -57,6 +58,7 @@ set(SWITCH_CORE_SOURCES
   gpu/astc.c
   gpu/raster3d.c
   gpu/gpu_stream.c
+  gpu/wgsl.c
   hle/fs/ramfs.c
   hle/kernel/svc_thread.c
   hle/services/sm/sm.c
@@ -114,6 +116,7 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   hle/kernel/ipc.h
   hle/kernel/svc_ipc.h
   hle/kernel/scheduler.h
+  hle/kernel/parallel.h
   hle/kernel/event.h
   hle/kernel/svc_thread.h
   hle/services/sm/sm.h

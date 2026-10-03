@@ -48,6 +48,8 @@ typedef enum Wait_Kind {
   WAIT_ARBITER_LOCK,   /* ArbitrateLock: waiting for a mutex word */
   WAIT_CONDITION,      /* WaitProcessWideKeyAtomic: waiting on a key */
   WAIT_ADDRESS,        /* WaitForAddress */
+  WAIT_OFF_CORE,       /* SetThreadActivity(Paused) on a thread running on another core
+                        * (parallel mode): until it leaves the core. wait_address = its index. */
 } Wait_Kind;
 
 typedef struct Sched_Thread {
@@ -69,8 +71,11 @@ typedef struct Sched_Thread {
   uint64_t wait_sequence;   /* FIFO order among waiters of equal priority */
   uint64_t core_mask;       /* affinity mask (recorded; §7 runs one worker) */
   bool paused;              /* svcSetThreadActivity(Paused): never picked until resumed */
+  bool on_core;             /* inside backend->run on some host thread (parallel mode, docs/PARALLEL.md) */
   uint64_t last_run;        /* round-robin stamp */
 } Sched_Thread;
+
+typedef struct Parallel Parallel; /* hle/kernel/parallel.h */
 
 typedef struct Scheduler {
   Sched_Thread threads[SCHEDULER_MAX_THREADS];
@@ -84,7 +89,10 @@ typedef struct Scheduler {
   uint64_t run_counter;
   uint64_t wait_counter;
   uint64_t next_thread_id;
-  int32_t current;          /* index of the running thread, -1 outside run */
+  /* Index of the running thread, -1 outside run. In parallel mode it
+   * names the thread whose SVC holds the kernel lock (scheduler_kernel_enter). */
+  int32_t current;
+  Parallel *parallel;       /* NULL: serial (the default); see parallel.h */
   bool process_exited;
   bool process_crashed;     /* svcBreak or an unhandled fault */
   uint64_t crash_pc;
@@ -121,9 +129,32 @@ void scheduler_block(Scheduler *sched, Sched_Thread *thread, Wait_Kind kind, uin
  * registers to the caller, who sets e.g. the WaitSynchronization index). */
 void scheduler_wake(Scheduler *sched, Sched_Thread *thread, uint32_t result);
 
+/* `thread` left its core (parallel mode): wakes the WAIT_OFF_CORE waiters on it. */
+void scheduler_wake_off_core_waiters(Scheduler *sched, const Sched_Thread *thread);
+
 /* Marks a thread dead and wakes every WaitSynchronization on it. */
 void scheduler_exit_thread(Scheduler *sched, Sched_Thread *thread, const CPU_Backend *backend);
 
 uint64_t scheduler_ns_to_ticks(uint64_t ns);
+
+/* The kernel lock around HLE entered from guest code (SVC handlers). In
+ * serial mode both are no-ops; in parallel mode enter takes the lock and
+ * points `current` at the calling thread, exit releases it. */
+void scheduler_kernel_enter(Scheduler *sched, const CPU_State *state);
+void scheduler_kernel_exit(Scheduler *sched);
+
+/* Building blocks of scheduler_tick, shared with the parallel scheduler
+ * (parallel.c). All require the kernel lock in parallel mode. */
+void scheduler_expire_timeouts(Scheduler *sched);
+/* The best runnable thread not already on a core, or -1. */
+int32_t scheduler_pick(Scheduler *sched);
+/* Nothing runnable: advance time to the next wake (IDLE), or report
+ * EXITED / DEADLOCK - scheduler_tick's no-thread path. */
+Scheduler_Status scheduler_idle(Scheduler *sched);
+/* Accounts a finished run of `thread` that started at virtual time
+ * `start_ticks`: advances time, stamps round-robin order, and records a
+ * crash. Returns SCHEDULER_RAN, _CRASHED or _EXITED. */
+Scheduler_Status scheduler_finish_run(Scheduler *sched, const CPU_Backend *backend, Sched_Thread *thread,
+                                      uint64_t start_ticks, CPU_ExitReason exit_reason);
 
 #endif /* SWITCH_HLE_KERNEL_SCHEDULER_H */
