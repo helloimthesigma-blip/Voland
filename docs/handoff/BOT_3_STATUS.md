@@ -8,7 +8,11 @@
 - **Gameplay verification (in progress).**
   - The Silksong recipe ran to 4.8M slices in GPU mode: a 3.2 GB stream with 250,416 draws, 5,848 presents and 41 pixel programs. All 46 dumped WGSL modules validate, with 0 untranslated draws and 0 producer warnings.
   - The full replay on Apple Metal takes 20.1 s for 5,848 presents (3.4 ms per frame), with 0 WebGPU errors.
-  - Software reference vs replay, every 50k slices: so far (slices 0–900k, title screen), mean ≤ 0.05/255 and max 4/255 per frame. Gameplay frames are pending (the software run is slow).
+  - Software reference vs replay, every 50k slices over 0–4.8M: all 96 frames match, gameplay included, with mean ≤ 0.17/255, max 6/255 and 0% of pixels off by more than 16. This is after the reference correction below; before it, gameplay showed mean 2.6, max 72 and 5.6% > 16.
+- **Reference correction (DESIGN §13).**
+  - The software renderer blended unclamped pixel-program colours on UNORM/sRGB/SNORM targets. Hardware and WebGPU clamp first.
+  - Silksong's glow passes output values above 1 (premultiplied alpha > 1 gave dst a negative weight), so the reference's highlights were too bright.
+  - `target_color` now clamps for fixed-point targets on every blend path, and the blend constant per target.
 - **Mipmaps (DESIGN §13, stated deviation; stream version 2).**
   - TEXTURE_CREATE carries mip levels. The executor builds a chain with a 2x2 box filter after uploads.
   - The WGSL picks the level per pixel: from derivatives in uniform control flow, from an explicit LL, or level 0 for LZ. It applies the TSC LOD bias and min/max clamps.

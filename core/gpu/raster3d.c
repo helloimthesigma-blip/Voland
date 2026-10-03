@@ -1578,6 +1578,7 @@ typedef struct Target {
   bool blend;
   uint32_t color_op, color_src, color_dst, alpha_op, alpha_src, alpha_dst;
   uint32_t rgba8_blend;          /* RGBA8_BLEND_*: a common blend on an RGBA8 target, done inline */
+  float blend_const[4];          /* the draw's blend constant, clamped like the colour (target_color) */
 } Target;
 
 typedef struct Raster_State {
@@ -1680,6 +1681,16 @@ static uint32_t blend_op(uint32_t v) {
   case 0x8007: case 4: return BOP_MIN;
   case 0x8008: case 5: return BOP_MAX;
   default: return BOP_ADD;
+  }
+}
+
+/* `v` clamped to a fixed-point format's range (unchanged for float and
+ * integer formats). */
+static float clamp_fixed(const Color_Format *f, float v) {
+  switch (f->kind) {
+  case KIND_UNORM: case KIND_SRGB: return v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f;
+  case KIND_SNORM: return v > -1.0f ? (v < 1.0f ? v : 1.0f) : (v <= -1.0f ? -1.0f : 0.0f);
+  default: return v;
   }
 }
 
@@ -1837,6 +1848,10 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
   rs->alpha_func = regs[REG_ALPHA_FUNC];
   rs->alpha_ref = f32(regs[REG_ALPHA_REF]);
   for (uint32_t c = 0; c < 4; c++) rs->blend_const[c] = f32(regs[REG_BLEND_CONST + c]);
+  for (uint32_t i = 0; i < rs->target_count; i++) {
+    Target *t = &rs->targets[i];
+    for (uint32_t c = 0; c < 4; c++) t->blend_const[c] = t->format ? clamp_fixed(t->format, rs->blend_const[c]) : rs->blend_const[c];
+  }
   rs->surface_height = height;
   rs->clip = (Rect){0, 0, width, height};
   rect_scissor(&rs->clip, regs);
@@ -1999,8 +2014,8 @@ static void output_rgba8(const Raster_State *rs, const Target *tg, const uint32_
     dst[3] = tg->format->channel[3] == CH_PAD ? 1.0f : dst[3];
     const float a = src[3], ia = 1.0f - src[3];
     for (uint32_t c = 0; c < 3u; c++) src[c] = src[c] * a + dst[c] * ia;
-    const float sf = factor_value((Blend_Factor)tg->alpha_src, 3, src, dst, rs->blend_const);
-    const float df = factor_value((Blend_Factor)tg->alpha_dst, 3, src, dst, rs->blend_const);
+    const float sf = factor_value((Blend_Factor)tg->alpha_src, 3, src, dst, tg->blend_const);
+    const float df = factor_value((Blend_Factor)tg->alpha_dst, 3, src, dst, tg->blend_const);
     src[3] = (tg->alpha_op == BOP_MIN || tg->alpha_op == BOP_MAX) ? apply_op(tg->alpha_op, a, dst[3])
                                                                    : apply_op(tg->alpha_op, a * sf, dst[3] * df);
   }
@@ -2009,12 +2024,17 @@ static void output_rgba8(const Raster_State *rs, const Target *tg, const uint32_
 }
 
 /* The colour a target receives from one shader result (output_pixel's
- * register selection). */
+ * register selection). Fixed-point targets (UNORM, sRGB, SNORM) receive it
+ * clamped to their range before blending, as the hardware (and every
+ * graphics API, WebGPU included) does; NaN becomes 0. */
 static void target_color(const Raster_State *rs, uint32_t target, const uint32_t *out_regs, uint32_t color[4]) {
   const uint32_t src_target = rs->mrt ? target : 0u;
+  const Color_Format *f = rs->targets[target].format;
   for (uint32_t c = 0; c < 4; c++) {
     const uint8_t reg = rs->color_reg[src_target][c];
     color[c] = reg == 0xffu ? (c == 3u ? u32f(1.0f) : 0u) : out_regs[reg];
+    if (f && (f->kind == KIND_UNORM || f->kind == KIND_SRGB || f->kind == KIND_SNORM))
+      color[c] = u32f(clamp_fixed(f, f32(color[c]))); /* integer and float targets: the bits as they are */
   }
 }
 
@@ -2144,8 +2164,8 @@ static void output_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, 
       for (uint32_t c = 0; c < 4; c++) {
         if (tg->blend) {
           const bool alpha = c == 3u;
-          const float sf = factor_value((Blend_Factor)(alpha ? tg->alpha_src : tg->color_src), c, src, dst, rs->blend_const);
-          const float df = factor_value((Blend_Factor)(alpha ? tg->alpha_dst : tg->color_dst), c, src, dst, rs->blend_const);
+          const float sf = factor_value((Blend_Factor)(alpha ? tg->alpha_src : tg->color_src), c, src, dst, tg->blend_const);
+          const float df = factor_value((Blend_Factor)(alpha ? tg->alpha_dst : tg->color_dst), c, src, dst, tg->blend_const);
           const uint32_t op = alpha ? tg->alpha_op : tg->color_op;
           out[c] = (op == BOP_MIN || op == BOP_MAX) ? apply_op(op, src[c], dst[c]) : apply_op(op, src[c] * sf, dst[c] * df);
         } else {
