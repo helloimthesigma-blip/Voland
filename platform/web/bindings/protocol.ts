@@ -38,6 +38,8 @@ export type MainToCPUMessage =
   | { readonly type: "resume" }
   /* The player's answer to a text-input-request (software keyboard). */
   | { readonly type: "text-input-response"; readonly text: string; readonly accepted: boolean }
+  /* Frame skip, a user setting: rasterise one of every frames + 1 frames. */
+  | { readonly type: "set-frame-skip"; readonly frames: number }
   | { readonly type: "halt" };
 
 /** A software-keyboard prompt (§12 library applets): a title waits for

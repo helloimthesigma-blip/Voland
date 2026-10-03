@@ -132,6 +132,7 @@ interface BootResult {
   readonly loadGame:     (file: File) => Promise<GameLoadOutcome>;
   readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard:  () => Promise<SdImportOutcome>;
+  readonly setFrameSkip: (frames: number) => void;
   readonly setPaused:    (paused: boolean) => void;
   readonly respondText:  (text: string, accepted: boolean) => void;
 }
@@ -364,6 +365,10 @@ async function boot(): Promise<BootResult | null> {
     cpuWorker.postMessage({ type: "text-input-response", text, accepted } satisfies MainToCPUMessage);
   }
 
+  function setFrameSkip(frames: number): void {
+    cpuWorker.postMessage({ type: "set-frame-skip", frames } satisfies MainToCPUMessage);
+  }
+
   function setPaused(paused: boolean): void {
     cpuWorker.postMessage((paused ? { type: "pause" } : { type: "resume" }) satisfies MainToCPUMessage);
   }
@@ -384,6 +389,7 @@ async function boot(): Promise<BootResult | null> {
     addToSdCard,
     clearSdCard,
     setPaused,
+    setFrameSkip,
     respondText,
   };
 }

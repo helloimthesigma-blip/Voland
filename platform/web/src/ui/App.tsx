@@ -13,6 +13,7 @@ import { getLogHistory, getStatus, subscribeLogs, subscribeStatus } from "../log
 import ControlsLegend from "./ControlsLegend";
 import TextInputDialog from "./TextInputDialog";
 import LoadPanel from "./LoadPanel";
+import FrameSkipSetting from "./FrameSkipSetting";
 
 interface AppProps {
   readonly adapterLabel: string;
@@ -22,6 +23,7 @@ interface AppProps {
   readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard:  () => Promise<SdImportOutcome>;
   readonly setPaused:    (paused: boolean) => void;
+  readonly setFrameSkip: (frames: number) => void;
   readonly respondText:  (text: string, accepted: boolean) => void;
 }
 
@@ -57,6 +59,7 @@ function App(props: AppProps) {
           <p>Both workers initialised. Load a decrypted Program NCA or a homebrew NRO, or run the built-in demo. Homebrew you add to the SD card appears in a homebrew menu such as hbmenu.</p>
           <div class="voland-screen" data-voland-screen data-testid="screen" />
           <LoadPanel loadGame={props.loadGame} addToSdCard={props.addToSdCard} clearSdCard={props.clearSdCard} setPaused={props.setPaused} />
+          <FrameSkipSetting setFrameSkip={props.setFrameSkip} />
           <ControlsLegend />
           <TextInputDialog respond={props.respondText} />
           <dl class="voland-facts">

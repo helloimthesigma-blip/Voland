@@ -266,6 +266,10 @@ static void convert_row(uint8_t *row, uint32_t width, uint32_t format) {
 #define VI_TRANSFORM_FLIP_V 2u
 
 static void composite(Vi_State *s, HLE_Context *c, const Vi_Slot *slot) {
+  if (slot->skipped) {
+    s->frames_skipped++; /* the screen keeps the last rendered frame */
+    return;
+  }
   uint64_t base = 0, nvmap_size = 0;
   if (!s->scratch || !nvdrv_nvmap_lookup(s->nvdrv, slot->nvmap_id, &base, &nvmap_size)) {
     s->frames_dropped++;
@@ -400,6 +404,32 @@ static void parse_graphic_buffer(Vi_Slot *slot, const uint8_t *gbfr, uint32_t si
 }
 
 /* Runs one transaction: `r` positioned after the interface token. */
+/* Frame skip, at the guest's frame boundary (QueueBuffer): was the frame
+ * just queued rasterised? A skipped one gets the last rendered frame's
+ * pixels (games read presented buffers back) and is not shown. Then
+ * decide whether the next frame is rasterised. */
+static void frame_skip_on_queue(Vi_State *s, HLE_Context *c, Vi_Slot *slot) {
+  Raster3d *renderer = s->nvdrv ? s->nvdrv->renderer : NULL;
+  uint64_t base = 0, nvmap_size = 0;
+  const bool mapped = nvdrv_nvmap_lookup(s->nvdrv, slot->nvmap_id, &base, &nvmap_size);
+  const uint64_t bytes = slot->layout == NV_LAYOUT_BLOCK_LINEAR
+                             ? block_linear_size(slot->pitch, slot->height, slot->block_height_log2)
+                             : (uint64_t)slot->pitch * slot->height;
+  slot->skipped = renderer && renderer->skip_draws;
+  if (mapped && slot->offset + bytes <= nvmap_size) {
+    const uint64_t buffer = base + slot->offset;
+    if (!slot->skipped) {
+      s->last_buffer = buffer;
+      s->last_buffer_bytes = bytes;
+    } else if (s->last_buffer && s->last_buffer != buffer && s->scratch && bytes == s->last_buffer_bytes &&
+               bytes <= VI_SCRATCH_BYTES && error_is_ok(vmm_read_block(c->vmm, s->last_buffer, s->scratch, bytes))) {
+      (void)vmm_write_block(c->vmm, buffer, s->scratch, bytes);
+    }
+  }
+  s->frames_queued++;
+  if (renderer) renderer->skip_draws = s->frame_skip && (s->frames_queued % (s->frame_skip + 1u)) != 0u;
+}
+
 static int32_t transact(Vi_State *s, HLE_Context *c, Vi_Layer *layer, uint32_t code, Parcel_Reader *r,
                         Parcel_Writer *w) {
   switch (code) {
@@ -482,6 +512,7 @@ static int32_t transact(Vi_State *s, HLE_Context *c, Vi_Layer *layer, uint32_t c
       slot->crop_bottom = (int32_t)rd32(input + QBI_CROP + 12u);
       slot->transform = rd32(input + QBI_TRANSFORM);
     }
+    frame_skip_on_queue(s, c, slot);
     slot->state = VI_SLOT_QUEUED;
     slot->queue_order = ++layer->queue_counter;
     put_buffer_output(w, layer);

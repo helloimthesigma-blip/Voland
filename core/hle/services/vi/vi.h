@@ -80,6 +80,7 @@ typedef struct Vi_Slot {
    * whole buffer) and the NATIVE_WINDOW_TRANSFORM_* flips. */
   int32_t crop_left, crop_top, crop_right, crop_bottom;
   uint32_t transform;
+  bool skipped;        /* frame skip: queued without being rasterised (not shown) */
 } Vi_Slot;
 
 typedef struct Vi_Layer {
@@ -111,6 +112,17 @@ typedef struct Vi_State {
   uint64_t next_stray_layer_id;
   uint64_t frames_presented;
   uint64_t frames_dropped;
+  /* Frame skip (a user setting, 0 = off): of every frame_skip + 1 frames
+   * the guest presents, only the last is rasterised and shown - the others'
+   * draws and clears are skipped (every other GPU command still runs).
+   * Rendering is most of the cost on the reference renderer (§13). */
+  uint32_t frame_skip;
+  uint64_t frames_queued;
+  uint64_t frames_skipped;
+  /* The last rendered frame's buffer: a skipped frame's buffer gets its
+   * contents, so a game reading presented buffers back sees that image. */
+  uint64_t last_buffer;        /* guest VA, 0 = none */
+  uint64_t last_buffer_bytes;
   uint8_t parcel_in[VI_PARCEL_MAX_BYTES];
   uint8_t parcel_out[VI_PARCEL_MAX_BYTES];
 } Vi_State;

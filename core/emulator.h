@@ -131,6 +131,7 @@ typedef struct Emulator
   char next_argv[EMULATOR_ARGV_BYTES];
   uint32_t content_node;    /* ramfs node of a chain-loaded NRO */
   int64_t rtc;       /* Unix seconds the next process boots at (emulator_set_rtc) */
+  uint32_t frame_skip; /* emulator_set_frame_skip; survives process reloads */
 } Emulator;
 
 /* What one emulator_run_slice() did (§7 scheduler status). */
@@ -197,6 +198,14 @@ CPU_ExitReason emulator_run(Emulator *emulator, uint64_t cycle_budget);
  * boot; its clocks then advance with virtual time. Default
  * TIME_DEFAULT_RTC, so headless runs are deterministic. */
 void emulator_set_rtc(Emulator *emulator, int64_t unix_seconds);
+
+/* Frame skip (a speed setting, 0 = off): of every n + 1 frames the guest
+ * presents, only one is rasterised and shown; game logic, audio and every
+ * other GPU command run in full. Faster where rendering dominates, at the
+ * cost of smoothness - and a one-time render landing in a skipped frame is
+ * missing until the game draws it again. Capped at EMULATOR_MAX_FRAME_SKIP. */
+#define EMULATOR_MAX_FRAME_SKIP 5u
+void emulator_set_frame_skip(Emulator *emulator, uint32_t n);
 
 /* Seeds the emulated SD card (§15): creates `path` (absolute, '/'-
  * separated; missing parent directories are created) holding `size`

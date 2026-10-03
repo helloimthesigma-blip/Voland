@@ -649,7 +649,7 @@ static void rect_viewport_clip(Rect *rect, const uint32_t *regs) {
 /* ---- clears ------------------------------------------------------- */
 
 void raster3d_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, uint32_t clear) {
-  if (!r || !r->ready) return;
+  if (!r || !r->ready || r->skip_draws) return;
   r->stats.clears++;
   const uint32_t control = regs[REG_CLEAR_CONTROL];
   const bool color = (clear & 0x3cu) != 0;
@@ -2483,7 +2483,7 @@ static Draw_Context g_draw_context; /* large (vertex windows); one draw at a tim
 
 void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *bindings, const Gpu_Memory *mem,
                    const Raster3d_Draw *draw) {
-  if (!r || !r->ready || !draw->count) return;
+  if (!r || !r->ready || !draw->count || r->skip_draws) return;
   if (!(regs[REG_RASTER_ENABLE] & 1u) && regs[REG_RASTER_ENABLE] != 0) return;
   r->stats.draws++;
   r->surface_view_count = 0; /* no worker holds last draw's views */

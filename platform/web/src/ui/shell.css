@@ -266,3 +266,21 @@
 }
 .voland-dialog-buttons button[type="submit"] { background: #2f4bd1; border-color: #3e5bea; }
 .voland-dialog-buttons button:disabled { opacity: 0.5; cursor: default; }
+
+/* User settings (frame skip). */
+.voland-setting {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 12px 0;
+  max-width: 640px;
+}
+.voland-setting select {
+  font: inherit;
+  padding: 4px 8px;
+}
+.voland-setting small {
+  flex-basis: 100%;
+  opacity: 0.7;
+}

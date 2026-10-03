@@ -101,7 +101,7 @@ if(EMSCRIPTEN)
                             '_emulator_load_program_ffi','_emulator_unload_program_ffi',
                             '_emulator_last_error_message_ffi','_emulator_program_id_ffi',
                             '_emulator_run_slice_ffi','_emulator_virtual_ticks_ffi','_emulator_crash_pc_ffi',
-                            '_emulator_set_program_path_ffi','_emulator_set_rtc_ffi',
+                            '_emulator_set_program_path_ffi','_emulator_set_rtc_ffi','_emulator_set_frame_skip_ffi',
                             '_emulator_set_shared_font_ffi','_emulator_sd_write_file_ffi','_emulator_sd_clear_ffi',
                             '_emulator_sd_generation_ffi','_emulator_sd_manifest_ffi','_emulator_sd_read_file_ffi',
                             '_emulator_text_request_ffi','_emulator_text_respond_ffi',

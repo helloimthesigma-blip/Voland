@@ -12,6 +12,7 @@
  *       --expect-frame-hash HEX      exit 5 unless the newest frame hashes to HEX
  *       --sdmc DIR                   seed the emulated SD card with DIR's contents
  *       --dump-frame FILE            write the newest frame as a binary PPM (P6)
+ *       --frame-skip N               rasterise and show one of every N + 1 frames
  *       --dump-frames-every N        with --dump-frame: also write FILE.<slice>.ppm
  *                                    every N slices (watching a long run progress)
  *       --snapshot-at N --snapshot-dir DIR
@@ -371,6 +372,7 @@ static int run(int argc, char **argv) {
   const CPU_Backend *backend = &CPU_BACKEND_INTERPRETER;
   uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES, dump_every = 0, snapshot_at = 0;
   const char *snapshot_dir = NULL;
+  uint32_t frame_skip = 0;
   bool test_card = false, svc_stats = false, swkbd_cancel = false;
   const char *swkbd_text = NULL;
   Input_Event inputs[MAX_INPUT_EVENTS];
@@ -411,6 +413,8 @@ static int run(int argc, char **argv) {
       audio_path = argv[++i];
     } else if (!strcmp(argv[i], "--font") && has_value) {
       font_path = argv[++i];
+    } else if (!strcmp(argv[i], "--frame-skip") && has_value) {
+      frame_skip = (uint32_t)strtoul(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--snapshot-at") && has_value) {
       snapshot_at = strtoull(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--snapshot-dir") && has_value) {
@@ -466,6 +470,7 @@ static int run(int argc, char **argv) {
   const char *base = strrchr(path, '/');
   emulator_set_program_path(&emu, base ? base + 1 : path);
   /* The file stays open while the program runs: fsp-srv reads its RomFS. */
+  emulator_set_frame_skip(&emu, frame_skip);
   err = emulator_load(&emu, &source, 0);
   if (!error_is_ok(err)) {
     fprintf(stderr, "voland-cli: load failed: %s\n", err.message ? err.message : "(no message)");

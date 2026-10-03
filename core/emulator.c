@@ -306,6 +306,7 @@ static void reset_process_services(Emulator* emulator) {
   time_init(&emulator->time, &emulator->shared_memory, emulator->rtc);
   fs_reset_process(&emulator->fs, NULL);
   vi_init(&emulator->vi, &emulator->nvdrv, emulator->vi_scratch);
+  emulator->vi.frame_skip = emulator->frame_skip;
   network_init(&emulator->network);
   misc_init(&emulator->misc);
   audout_init(&emulator->audout);
@@ -890,6 +891,13 @@ void emulator_set_shared_font(Emulator* emulator, const uint8_t* ttf, uint32_t s
   if (!emulator->program_loaded) {
     pl_init(&emulator->pl, &emulator->shared_memory, emulator->shared_font, emulator->shared_font_size);
   }
+}
+
+void emulator_set_frame_skip(Emulator* emulator, uint32_t n) {
+  if (!emulator) return;
+  emulator->frame_skip = n > EMULATOR_MAX_FRAME_SKIP ? EMULATOR_MAX_FRAME_SKIP : n;
+  emulator->vi.frame_skip = emulator->frame_skip;
+  if (!emulator->frame_skip) emulator->renderer.skip_draws = false;
 }
 
 void emulator_set_rtc(Emulator* emulator, int64_t unix_seconds) {

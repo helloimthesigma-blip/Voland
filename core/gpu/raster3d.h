@@ -124,6 +124,7 @@ typedef struct Raster3d {
   Sm_Thread *band_threads[WORKERS_MAX];
   Raster3d_Stats stats;
   bool trace_draws;          /* log every draw's state and result (diagnostics) */
+  bool skip_draws;           /* frame skip: draws and clears are not rasterised */
   /* Diagnostics: called with every newly decoded texture (may be NULL). */
   void (*on_texture_decoded)(void *user, const Tex_Image *image, uint64_t address);
   void *on_texture_user;

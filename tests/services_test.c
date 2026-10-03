@@ -280,6 +280,12 @@ static void test_vi(void) {
   const uint64_t presented = g_emu.vi.frames_presented;
   vi_update(&g_emu.vi, &g_emu.hle, g_emu.vi.next_vsync_ticks);
   CHECK(g_emu.vi.frames_presented == presented + 1 && framebuffer_published() == 1);
+  /* Frame skip: clamped, carried to vi, and off clears the renderer's flag. */
+  emulator_set_frame_skip(&g_emu, 9);
+  CHECK(g_emu.frame_skip == EMULATOR_MAX_FRAME_SKIP && g_emu.vi.frame_skip == EMULATOR_MAX_FRAME_SKIP);
+  g_emu.renderer.skip_draws = true;
+  emulator_set_frame_skip(&g_emu, 0);
+  CHECK(g_emu.vi.frame_skip == 0 && !g_emu.renderer.skip_draws);
   const uint8_t *region = (const uint8_t *)(uintptr_t)layout_get()->framebuffer_slot_base;
   const uint8_t *pixels = region + LAYOUT_FRAMEBUFFER_HEADER_BYTES;
   uint32_t meta[4];

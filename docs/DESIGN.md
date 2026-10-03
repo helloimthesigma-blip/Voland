@@ -2427,9 +2427,14 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.69.0*
+*Document version: 3.70.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.69 → v3.70 (summary)
+
+- **Frame skip (a user speed setting, off by default):** `emulator_set_frame_skip(n)` - of every n + 1 frames the guest queues, only one is rasterised and shown. The decision is made at QueueBuffer (the guest's frame boundary; at vsync it drifted from the frame whose draws it described); a skipped frame's buffer receives the last rendered frame's pixels (Unity copies presented buffers back into textures every frame) and is not composited. Game logic, audio, input, copies and syncpoints run in full. Silksong's opening: 90k slices 55.8 s -> 34.6 s at n = 2. Web: a "Frame skip" selector (remembered per browser; `set-frame-skip` is a settings lifecycle message, not per-frame data, §6); CLI `--frame-skip N`. Risk, stated in the UI: a one-time render landing in a skipped frame is missing until redrawn.
+- **Texture cache:** LRU eviction over first-fit pool blocks (never the current draw's textures) replaces emptying the pool when half full; a separate 64MB raw staging buffer. Silksong's 4096x4096 HUD atlas now fits (the HUD drew black) and large atlases stop being re-decoded.
 
 ### Changelog v3.68 → v3.69 (summary)
 
