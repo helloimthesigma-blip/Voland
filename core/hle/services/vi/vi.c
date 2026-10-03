@@ -425,7 +425,8 @@ static void parse_graphic_buffer(Vi_Slot *slot, const uint8_t *gbfr, uint32_t si
 /* Runs one transaction: `r` positioned after the interface token. */
 /* Frame skip, at the guest's frame boundary (QueueBuffer): was the frame
  * just queued rasterised? A skipped one gets the last rendered frame's
- * pixels (games read presented buffers back) and is not shown. Then
+ * pixels (games read presented buffers back; in GPU mode those live on the
+ * GPU, so there is nothing to copy) and is not shown. Then
  * decide whether the next frame is rasterised. */
 static void frame_skip_on_queue(Vi_State *s, HLE_Context *c, Vi_Slot *slot) {
   Raster3d *renderer = s->nvdrv ? s->nvdrv->renderer : NULL;
@@ -440,7 +441,7 @@ static void frame_skip_on_queue(Vi_State *s, HLE_Context *c, Vi_Slot *slot) {
     if (!slot->skipped) {
       s->last_buffer = buffer;
       s->last_buffer_bytes = bytes;
-    } else if (s->last_buffer && s->last_buffer != buffer && s->scratch && bytes == s->last_buffer_bytes &&
+    } else if (!renderer->gpu && s->last_buffer && s->last_buffer != buffer && s->scratch && bytes == s->last_buffer_bytes &&
                bytes <= VI_SCRATCH_BYTES && error_is_ok(vmm_read_block(c->vmm, s->last_buffer, s->scratch, bytes))) {
       (void)vmm_write_block(c->vmm, buffer, s->scratch, bytes);
     }

@@ -428,6 +428,7 @@ typedef struct Pc_Bucket {
   uint64_t hits;
 } Pc_Bucket;
 static Pc_Bucket g_pc_profile[PC_PROFILE_SLOTS];
+static uint64_t g_thread_cycles[SCHEDULER_MAX_THREADS];
 
 static void pc_profile_sample(Emulator *emu) {
   const Sched_Thread *ran = NULL;
@@ -439,6 +440,7 @@ static void pc_profile_sample(Emulator *emu) {
   if (!ran) return;
   const uint64_t pc = emu->cpu_backend->get_pc(ran->thread.cpu_state);
   const uint64_t cycles = emu->cpu_backend->get_cycles_consumed(ran->thread.cpu_state);
+  g_thread_cycles[ran - emu->scheduler.threads] += cycles;
   const uint64_t block = pc >> PC_PROFILE_BLOCK_BITS;
   for (uint32_t probe = 0; probe < PC_PROFILE_SLOTS; probe++) {
     Pc_Bucket *b = &g_pc_profile[(block * 0x9E3779B1u + probe) % PC_PROFILE_SLOTS];
@@ -454,6 +456,11 @@ static void pc_profile_print(Emulator *emu) {
   uint64_t total = 0;
   for (uint32_t i = 0; i < PC_PROFILE_SLOTS; i++) total += g_pc_profile[i].cycles;
   fprintf(stderr, "voland-cli: guest PC profile (%llu cycles):\n", (unsigned long long)total);
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS && total; i++) {
+    if (g_thread_cycles[i] * 100u < total) continue;
+    fprintf(stderr, "  thread slot %u (id %llu): %.1f%%\n", i, (unsigned long long)emu->scheduler.threads[i].thread_id,
+            100.0 * (double)g_thread_cycles[i] / (double)total);
+  }
   for (uint32_t rank = 0; rank < 40u && total; rank++) {
     Pc_Bucket *best = NULL;
     for (uint32_t i = 0; i < PC_PROFILE_SLOTS; i++)
