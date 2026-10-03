@@ -233,6 +233,9 @@ void emulator_set_frame_skip(Emulator *emulator, uint32_t n);
  * The platform turns it on once a consumer exists (the producer waits for
  * room in the ring). Off: the software reference renderer. */
 void emulator_set_gpu_mode(Emulator *emulator, bool on);
+/* Host nanoseconds the core has waited for the GPU or video worker to
+ * drain a full stream ring (web only; 0 natively). */
+uint64_t emulator_stream_wait_ns(void);
 
 /* A synchronous video decoder for NVDEC (native platforms); without one
  * the requests go to the video region's ring (the web's video worker). */

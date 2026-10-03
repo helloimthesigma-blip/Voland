@@ -1,5 +1,9 @@
 #include "emulator.h"
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten.h>
+#endif
+
 #include "common/arena.h"
 #include "common/assert.h"
 #include "audio/audio_ring.h"
@@ -940,10 +944,18 @@ void emulator_set_shared_font(Emulator* emulator, const uint8_t* ttf, uint32_t s
 /* The ring is full: wait for the GPU worker to consume (bounded, so a
  * stalled consumer shows up as slowness rather than a hang in one wait). */
 #define GPU_STREAM_WAIT_NS 20000000ll
+#define NS_PER_MS 1000000.0
+/* Host time spent in those waits (GPU and video streams), for perf counters. */
+static uint64_t g_stream_wait_ns;
+
+uint64_t emulator_stream_wait_ns(void) { return __atomic_load_n(&g_stream_wait_ns, __ATOMIC_RELAXED); }
+
 static void gpu_stream_wait(void *user, volatile int32_t *word, int32_t expected) {
   (void)user;
 #ifdef __EMSCRIPTEN__
+  const double started = emscripten_get_now();
   (void)__builtin_wasm_memory_atomic_wait32((int32_t *)word, expected, GPU_STREAM_WAIT_NS);
+  __atomic_fetch_add(&g_stream_wait_ns, (uint64_t)((emscripten_get_now() - started) * NS_PER_MS), __ATOMIC_RELAXED);
 #else
   (void)word;
   (void)expected;
