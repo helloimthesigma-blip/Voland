@@ -851,7 +851,48 @@ static uint64_t content_hash(const uint8_t *p, uint64_t n) {
   return h;
 }
 
+#define RT_FORMAT_A8B8G8R8_UNORM 0xD5u
+#define TEX_FORMAT_A8B8G8R8 0x08u
+
+/* Render-to-texture without the round trip: a texture that is exactly a
+ * render target the renderer holds (same address and size, RGBA8 unorm
+ * 2D, one level) samples its host pixels in place - no write-back, read,
+ * hash and decode per pass. NULL: not such a texture. */
+static Raster3d_Texture *surface_view(Raster3d *r, const uint32_t tic[8]) {
+  Tex_Header h;
+  tex_header_parse(tic, &h);
+  if (h.format != TEX_FORMAT_A8B8G8R8 || h.srgb || h.type != TEX_TYPE_2D || h.levels > 1u) return NULL;
+  for (uint32_t c = 0; c < 4u; c++)
+    if (h.data_type[c] != TEX_DATA_UNORM) return NULL;
+  for (uint32_t i = 0; i < RASTER_SURFACES; i++) {
+    const Raster3d_Surface *s = &r->surfaces[i];
+    if (!s->in_use || !s->loaded || s->depth || s->address != h.address || s->format != RT_FORMAT_A8B8G8R8_UNORM ||
+        s->width != h.width || s->height != h.height)
+      continue;
+    Raster3d_Texture *v = &r->surface_views[i];
+    memset(v, 0, sizeof(*v));
+    memcpy(v->tic, tic, sizeof(v->tic));
+    v->address = h.address;
+    v->valid = true;
+    v->image.header = h;
+    v->image.format = TEX_FORMAT_A8B8G8R8;
+    v->image.bytes_per_texel = 4u;
+    v->image.width = h.width;
+    v->image.height = h.height;
+    v->image.layers = 1u;
+    v->image.row_bytes = h.width * 4u;
+    v->image.layer_bytes = (uint64_t)h.width * h.height * 4u;
+    v->image.texels = s->pixels;
+    v->image.rgba8 = true;
+    v->image.valid = true;
+    return v;
+  }
+  return NULL;
+}
+
 static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const Gpu_Memory *mem) {
+  Raster3d_Texture *view = surface_view(r, tic);
+  if (view) return view;
   Raster3d_Texture *t = NULL;
   for (uint32_t i = 0; i < r->texture_count; i++) {
     if (r->textures[i].valid && memcmp(r->textures[i].tic, tic, sizeof(r->textures[i].tic)) == 0) {

@@ -104,6 +104,7 @@ typedef struct Raster3d {
   Raster3d_Program *programs; /* RASTER_PROGRAMS */
   uint8_t *program_bytes;   /* RASTER_PROGRAM_READ_BYTES */
   Raster3d_Texture textures[RASTER_TEXTURES];
+  Raster3d_Texture surface_views[RASTER_SURFACES]; /* render targets sampled in place */
   uint32_t texture_count;
   uint8_t *texture_pool;    /* RASTER_TEXTURE_POOL_BYTES */
   size_t texture_pool_used;
