@@ -75,17 +75,19 @@ enum {
   L_LAST_I32 = 58,
   L_FS = 59,     /* FP fast paths: f32 */
   L_FS2 = 60,
-  L_LAST_F32 = 60,
-  L_FD = 61,     /* ...f64 */
-  L_FD2 = 62,
-  L_LAST_F64 = 62,
-  L_VA = 63,     /* vector FP fast paths: v128 */
-  L_VB = 64,
-  L_VD = 65,
-  L_VR = 66,
-  L_VR2 = 67,
-  L_VT = 68,
-  L_LAST_V128 = 68,
+  L_FS3 = 61,
+  L_LAST_F32 = 61,
+  L_FD = 62,     /* ...f64 */
+  L_FD2 = 63,
+  L_FD3 = 64,
+  L_LAST_F64 = 64,
+  L_VA = 65,     /* vector FP fast paths: v128 */
+  L_VB = 66,
+  L_VD = 67,
+  L_VR = 68,
+  L_VR2 = 69,
+  L_VT = 70,
+  L_LAST_V128 = 70,
 };
 #define I64_LOCALS (L_LAST_I64 - L_STATE)
 #define I32_LOCALS (L_LAST_I32 - L_LAST_I64)
@@ -1932,6 +1934,38 @@ static void emit_result_normal(Ctx *c, uint32_t local, bool dbl) {
   op(c, WASM_OP_I32_AND);
 }
 
+/* i32: |local| < infinity (finite, not NaN). Sums and differences are
+ * exact whenever they are tiny (zero or subnormal), so finite suffices. */
+static void emit_result_finite(Ctx *c, uint32_t local, bool dbl) {
+  lget(c, local);
+  op(c, dbl ? WASM_OP_F64_ABS : WASM_OP_F32_ABS);
+  if (dbl) f64c(c, FP_INFINITY_D);
+  else f32c(c, FP_INFINITY_S);
+  op(c, dbl ? WASM_OP_F64_LT : WASM_OP_F32_LT);
+}
+
+/* i32: local == 0.0 (either sign). */
+static void emit_is_zero(Ctx *c, uint32_t local, bool dbl) {
+  lget(c, local);
+  if (dbl) f64c(c, 0);
+  else f32c(c, 0);
+  op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
+}
+
+/* i32: an f64 that is non-zero but no larger than the smallest f32
+ * normal - a fused single result that may underflow. */
+#define FP_MIN_NORMAL_S_AS_D 0x3810000000000000ull
+static void emit_tiny_single_in_double(Ctx *c, uint32_t local) {
+  lget(c, local);
+  f64c(c, 0);
+  op(c, WASM_OP_F64_NE);
+  lget(c, local);
+  op(c, WASM_OP_F64_ABS);
+  f64c(c, FP_MIN_NORMAL_S_AS_D);
+  op(c, WASM_OP_F64_LE);
+  op(c, WASM_OP_I32_AND);
+}
+
 /* if (guard on the stack) { fast } else { exact direct call }: opens the
  * fast arm; finish with fp_else_exact(). */
 static void fp_fast_arm(Ctx *c) { open_if(c, WASM_BLOCK_VOID); }
@@ -1947,10 +1981,12 @@ static uint32_t fp_result_local(bool dbl) { return dbl ? L_FD : L_FS; }
 static void emit_fp_arith(Ctx *c, bool dbl, uint32_t opcode, bool two, uint32_t n, uint32_t m, uint32_t d) {
   static const uint8_t ops64[4] = {WASM_OP_F64_MUL, WASM_OP_F64_DIV, WASM_OP_F64_ADD, WASM_OP_F64_SUB};
   static const uint8_t ops32[4] = {WASM_OP_F32_MUL, WASM_OP_F32_DIV, WASM_OP_F32_ADD, WASM_OP_F32_SUB};
-  const uint32_t r = fp_result_local(dbl);
+  const uint32_t r = fp_result_local(dbl), a = dbl ? L_FD2 : L_FS2, b = dbl ? L_FD3 : L_FS3;
   load_fp(c, n, dbl);
+  ltee(c, a);
   if (two) {
     load_fp(c, m, dbl);
+    ltee(c, b);
     const uint32_t k = opcode == 8u ? 0u : opcode;
     op(c, dbl ? ops64[k] : ops32[k]);
     if (opcode == 8u) op(c, dbl ? WASM_OP_F64_NEG : WASM_OP_F32_NEG); /* FNMUL: -(a*b), after rounding */
@@ -1958,7 +1994,24 @@ static void emit_fp_arith(Ctx *c, bool dbl, uint32_t opcode, bool two, uint32_t 
     op(c, dbl ? WASM_OP_F64_SQRT : WASM_OP_F32_SQRT);
   }
   lset(c, r);
-  emit_result_normal(c, r, dbl);
+  if (two && (opcode == 2u || opcode == 3u)) { /* FADD, FSUB: any finite result is exact or merely inexact */
+    emit_result_finite(c, r, dbl);
+  } else { /* normal, or an exact zero: x*0, 0/x, sqrt(+-0) */
+    emit_result_normal(c, r, dbl);
+    emit_is_zero(c, r, dbl);
+    if (!two) {
+      /* sqrt: a zero result means a zero input */
+    } else if (opcode == 1u) {
+      emit_is_zero(c, a, dbl);
+      op(c, WASM_OP_I32_AND);
+    } else {
+      emit_is_zero(c, a, dbl);
+      emit_is_zero(c, b, dbl);
+      op(c, WASM_OP_I32_OR);
+      op(c, WASM_OP_I32_AND);
+    }
+    op(c, WASM_OP_I32_OR);
+  }
   emit_fp_env_ok(c);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
@@ -1984,7 +2037,10 @@ static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t 
   ltee(c, L_FD);
   op(c, WASM_OP_F32_DEMOTE_F64);
   lset(c, L_FS);
-  emit_result_normal(c, L_FS, false);
+  emit_result_finite(c, L_FS, false); /* finite, and not tiny unless exactly zero */
+  emit_tiny_single_in_double(c, L_FD);
+  op(c, WASM_OP_I32_EQZ);
+  op(c, WASM_OP_I32_AND);
   lget(c, L_FD); /* not on a midpoint */
   op(c, WASM_OP_I64_REINTERPRET_F64);
   i64c(c, (1ull << F32_EXTRA_BITS) - 1u);
@@ -2189,9 +2245,12 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
         store_fp_local(c, rd, true, L_FD);
       } else { /* double -> single: rounds */
         load_fp(c, rn, true);
+        ltee(c, L_FD);
         op(c, WASM_OP_F32_DEMOTE_F64);
         lset(c, L_FS);
         emit_result_normal(c, L_FS, false);
+        emit_is_zero(c, L_FD, true); /* a zero converts exactly */
+        op(c, WASM_OP_I32_OR);
         emit_fp_env_ok(c);
         op(c, WASM_OP_I32_AND);
         fp_fast_arm(c);
@@ -2280,27 +2339,60 @@ static void v128_high_to_low(Ctx *c) {
   v128_shuffle(c, lanes);
 }
 
-/* i32: every active lane of the v128 in `local` normal and finite. */
-static void emit_lanes_normal(Ctx *c, uint32_t local, bool dbl, bool q) {
-  lget(c, local);
-  simd(c, dbl ? WASM_SIMD_F64X2_ABS : WASM_SIMD_F32X4_ABS);
-  lset(c, L_VT);
-  lget(c, L_VT);
-  if (dbl) f64c(c, FP_MIN_NORMAL_D);
-  else f32c(c, FP_MIN_NORMAL_S);
-  simd(c, dbl ? WASM_SIMD_F64X2_SPLAT : WASM_SIMD_F32X4_SPLAT);
-  simd(c, dbl ? WASM_SIMD_F64X2_GT : WASM_SIMD_F32X4_GT);
-  lget(c, L_VT);
-  if (dbl) f64c(c, FP_INFINITY_D);
-  else f32c(c, FP_INFINITY_S);
-  simd(c, dbl ? WASM_SIMD_F64X2_SPLAT : WASM_SIMD_F32X4_SPLAT);
-  simd(c, dbl ? WASM_SIMD_F64X2_LT : WASM_SIMD_F32X4_LT);
-  simd(c, WASM_SIMD_V128_AND);
+/* i32: every active lane set in the mask on the stack. */
+static void emit_all_lanes(Ctx *c, bool q) {
   if (!q) { /* the upper half is not part of a 64-bit vector */
     v128_const(c, 0, ~(uint64_t)0);
     simd(c, WASM_SIMD_V128_OR);
   }
   simd(c, WASM_SIMD_I32X4_ALL_TRUE);
+}
+
+/* Lane mask: |local| < infinity. */
+static void emit_lane_finite(Ctx *c, uint32_t local, bool dbl) {
+  lget(c, local);
+  simd(c, dbl ? WASM_SIMD_F64X2_ABS : WASM_SIMD_F32X4_ABS);
+  if (dbl) f64c(c, FP_INFINITY_D);
+  else f32c(c, FP_INFINITY_S);
+  simd(c, dbl ? WASM_SIMD_F64X2_SPLAT : WASM_SIMD_F32X4_SPLAT);
+  simd(c, dbl ? WASM_SIMD_F64X2_LT : WASM_SIMD_F32X4_LT);
+}
+
+/* Lane mask: local == 0.0. */
+static void emit_lane_zero(Ctx *c, uint32_t local, bool dbl) {
+  lget(c, local);
+  if (dbl) f64c(c, 0);
+  else f32c(c, 0);
+  simd(c, dbl ? WASM_SIMD_F64X2_SPLAT : WASM_SIMD_F32X4_SPLAT);
+  simd(c, dbl ? WASM_SIMD_F64X2_EQ : WASM_SIMD_F32X4_EQ);
+}
+
+/* Lane mask: smallest normal < |local| < infinity. */
+static void emit_lane_normal(Ctx *c, uint32_t local, bool dbl) {
+  lget(c, local);
+  simd(c, dbl ? WASM_SIMD_F64X2_ABS : WASM_SIMD_F32X4_ABS);
+  if (dbl) f64c(c, FP_MIN_NORMAL_D);
+  else f32c(c, FP_MIN_NORMAL_S);
+  simd(c, dbl ? WASM_SIMD_F64X2_SPLAT : WASM_SIMD_F32X4_SPLAT);
+  simd(c, dbl ? WASM_SIMD_F64X2_GT : WASM_SIMD_F32X4_GT);
+  emit_lane_finite(c, local, dbl);
+  simd(c, WASM_SIMD_V128_AND);
+}
+
+/* i32: no f64 lane of `local` non-zero and at most the smallest f32 normal. */
+static void emit_no_tiny_singles(Ctx *c, uint32_t local) {
+  lget(c, local);
+  f64c(c, 0);
+  simd(c, WASM_SIMD_F64X2_SPLAT);
+  simd(c, WASM_SIMD_F64X2_NE);
+  lget(c, local);
+  simd(c, WASM_SIMD_F64X2_ABS);
+  f64c(c, FP_MIN_NORMAL_S_AS_D);
+  simd(c, WASM_SIMD_F64X2_SPLAT);
+  simd(c, WASM_SIMD_F64X2_LE);
+  simd(c, WASM_SIMD_V128_AND);
+  simd(c, WASM_SIMD_V128_ANY_TRUE);
+  op(c, WASM_OP_I32_EQZ);
 }
 
 /* V[d] = the v128 in `local` (only the low 64 bits for a 64-bit vector). */
@@ -2371,8 +2463,12 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
     emit_fused_pair(c, true);
     lset(c, L_VR2);
     emit_off_midpoints(c, L_VR);
+    emit_no_tiny_singles(c, L_VR);
+    op(c, WASM_OP_I32_AND);
     if (q) {
       emit_off_midpoints(c, L_VR2);
+      op(c, WASM_OP_I32_AND);
+      emit_no_tiny_singles(c, L_VR2);
       op(c, WASM_OP_I32_AND);
     }
     lset(c, L_PASS);
@@ -2383,7 +2479,8 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
     simd(c, WASM_SIMD_F32X4_DEMOTE_F64X2_ZERO);
     v128_shuffle(c, join);
     lset(c, L_VR);
-    emit_lanes_normal(c, L_VR, false, q);
+    emit_lane_finite(c, L_VR, false);
+    emit_all_lanes(c, q);
     lget(c, L_PASS);
     op(c, WASM_OP_I32_AND);
   } else {
@@ -2391,7 +2488,20 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
     lget(c, L_VB);
     simd(c, dbl ? ops64[vop] : ops32[vop]);
     lset(c, L_VR);
-    emit_lanes_normal(c, L_VR, dbl, q);
+    if (vop == VFP_ADD || vop == VFP_SUB) {
+      emit_lane_finite(c, L_VR, dbl);
+    } else { /* normal, or an exact zero: x*0, 0/x */
+      emit_lane_normal(c, L_VR, dbl);
+      emit_lane_zero(c, L_VR, dbl);
+      emit_lane_zero(c, L_VA, dbl);
+      if (vop == VFP_MUL) {
+        emit_lane_zero(c, L_VB, dbl);
+        simd(c, WASM_SIMD_V128_OR);
+      }
+      simd(c, WASM_SIMD_V128_AND);
+      simd(c, WASM_SIMD_V128_OR);
+    }
+    emit_all_lanes(c, q);
   }
   emit_fp_env_ok(c);
   op(c, WASM_OP_I32_AND);

@@ -341,17 +341,23 @@ static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint64_t *x, u
     CPU_Vector_Register v = {x[i % 31] * 3u, x[(i + 7) % 31]};
     const int64_t small = (int64_t)(x[i] & 0xFFFF) - 32768;
     if (i < 8) { /* ordinary doubles: the FP fast paths */
-      const double d = (i & 1) ? (double)small : (double)small / 3.0;
+      double d = (i & 1) ? (double)small : (double)small / 3.0;
+      if (((x[i] >> 40) & 3u) == 0) d = (i & 2) ? -0.0 : 0.0;
+      if (((x[i] >> 42) & 7u) == 1) d *= 1e-160;
       memcpy(&v.lo, &d, sizeof(d));
     } else if (i < 16) { /* ordinary singles */
-      const float f = (i & 1) ? (float)small : (float)small / 7.0f;
+      float f = (i & 1) ? (float)small : (float)small / 7.0f;
+      if (((x[i] >> 40) & 3u) == 0) f = 0.0f;
+      if (((x[i] >> 42) & 7u) == 1) f *= 1e-22f;
       uint32_t bits32;
       memcpy(&bits32, &f, sizeof(bits32));
       v.lo = bits32;
     } else if (i < 24) { /* vectors of four ordinary singles */
       uint32_t lanes[4];
       for (uint32_t k = 0; k < 4u; k++) {
-        const float f = (float)((int64_t)((x[(i + k) % 31] >> (k * 8u)) & 0xFFF) - 2048) / (float)(k + 3u);
+        float f = (float)((int64_t)((x[(i + k) % 31] >> (k * 8u)) & 0xFFF) - 2048) / (float)(k + 3u);
+        if (((x[(i + k) % 31] >> 40) & 3u) == 0) f = (k & 1u) ? -0.0f : 0.0f; /* exact zeros: x*0, 0/x */
+        if (((x[(i + k) % 31] >> 42) & 7u) == 1) f *= 1e-22f;               /* tiny: products underflow */
         memcpy(&lanes[k], &f, sizeof(lanes[k]));
       }
       v.lo = lanes[0] | ((uint64_t)lanes[1] << 32);
