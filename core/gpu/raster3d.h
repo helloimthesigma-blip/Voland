@@ -125,6 +125,7 @@ typedef struct Raster3d {
   uint8_t *texture_pool;    /* RASTER_TEXTURE_POOL_BYTES: decoded texels, LRU-evicted blocks */
   uint8_t *texture_raw;     /* RASTER_TEXTURE_RAW_BYTES: one texture's guest bytes while it decodes */
   uint32_t draw_serial;
+  uint32_t texture_epoch;    /* decoded textures re-validate against guest memory once per epoch (frame) */
   uint8_t *cbuf_data;       /* 2 stages x SM_CBUF_SLOTS x 64 KiB */
   Sm_Thread *thread;        /* one invocation's state (vertex work; band 0) */
   /* Pixel work runs in parallel over interleaved row bands (§13): one
@@ -181,6 +182,12 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
  * over it are written back, and when it is written, they reload and
  * decoded textures over it re-validate at their next use. */
 void raster3d_sync_range(Raster3d *r, const struct Gpu_Memory *mem, uint64_t address, uint64_t bytes, bool write);
+
+/* The guest presented a frame: decoded textures re-validate (re-read and
+ * hash their guest bytes) at their first use after it - catching what the
+ * CPU wrote. GPU-side writes (render targets, copy engines via
+ * raster3d_sync_range) invalidate exactly what they touch at once. */
+void raster3d_end_frame(Raster3d *r);
 
 /* Writes every dirty render target back to guest memory. */
 void raster3d_flush(Raster3d *r, const struct Gpu_Memory *mem);

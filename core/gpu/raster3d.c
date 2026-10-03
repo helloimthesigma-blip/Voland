@@ -183,7 +183,11 @@ void raster3d_restart_workers_after_fork(Raster3d *r) {
 
 void raster3d_begin_submission(Raster3d *r) {
   if (!r->ready) return;
-  r->submission++; /* decoded textures survive; each re-validates on first use in a submission */
+  r->submission++; /* programs re-validate on first use in a submission; textures per frame (raster3d_end_frame) */
+}
+
+void raster3d_end_frame(Raster3d *r) {
+  if (r && r->ready) r->texture_epoch++;
 }
 
 /* ---- colour formats ----------------------------------------------- */
@@ -550,7 +554,7 @@ static void surface_load(Raster3d *r, Raster3d_Surface *s, const Gpu_Memory *mem
 static void textures_invalidate(Raster3d *r, uint64_t address, uint64_t bytes) {
   for (uint32_t i = 0; i < RASTER_TEXTURES; i++) {
     Raster3d_Texture *t = &r->textures[i];
-    if (t->valid && t->address < address + bytes && address < t->address + t->raw_bytes) t->validated = r->submission - 1u;
+    if (t->valid && t->address < address + bytes && address < t->address + t->raw_bytes) t->validated = r->texture_epoch - 1u;
   }
 }
 
@@ -956,7 +960,7 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     }
   }
   if (t) t->last_used = r->draw_serial;
-  if (t && t->validated == r->submission) return t;
+  if (t && t->validated == r->texture_epoch) return t;
   Tex_Header h;
   tex_header_parse(tic, &h);
   const uint64_t raw_bytes = tex_read_bytes(&h);
@@ -983,7 +987,7 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
   }
   const uint64_t hash = content_hash(raw, raw_bytes);
   if (t && t->raw_hash == hash) {
-    t->validated = r->submission;
+    t->validated = r->texture_epoch;
     return t;
   }
   /* A changed texture decodes into its own block (same descriptor, same
@@ -1017,7 +1021,7 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
   t->address = h.address;
   t->raw_bytes = raw_bytes;
   t->raw_hash = hash;
-  t->validated = r->submission;
+  t->validated = r->texture_epoch;
   t->last_used = r->draw_serial;
   t->valid = true;
   if (r->on_texture_decoded) r->on_texture_decoded(r->on_texture_user, &t->image, h.address);

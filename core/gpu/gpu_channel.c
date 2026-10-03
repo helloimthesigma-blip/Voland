@@ -255,9 +255,19 @@ static void dma_semaphore(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t launc
 static void dma_launch(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t launch) {
   if (mem->renderer) {
     /* The copy may read what the 3D engine drew, or overwrite what it
-     * cached (textures, render targets). */
+     * cached (textures, render targets, shader code). */
     raster3d_flush(mem->renderer, mem);
     raster3d_begin_submission(mem->renderer);
+  }
+  if (mem->renderer && (launch & LAUNCH_TRANSFER_MASK)) {
+    /* Decoded textures over the destination re-validate. */
+    const uint64_t dst_base = addr40(ch->dma[DMA_OFFSET_OUT_UPPER], ch->dma[DMA_OFFSET_OUT_LOWER]);
+    const uint64_t lines = (launch & LAUNCH_MULTI_LINE) ? ch->dma[DMA_LINE_COUNT] : 1u;
+    const uint64_t span = (launch & LAUNCH_DST_PITCH)
+                              ? (uint64_t)ch->dma[DMA_PITCH_OUT] * (lines ? lines - 1u : 0u) + ch->dma[DMA_LINE_LENGTH_IN] * 16ull
+                              : block_linear_size(ch->dma[DMA_DST_WIDTH] * 16u, ch->dma[DMA_DST_HEIGHT],
+                                                  BLOCK_HEIGHT_LOG2(ch->dma[DMA_DST_BLOCK_SIZE]));
+    raster3d_sync_range(mem->renderer, mem, dst_base, span, true);
   }
   if (launch & LAUNCH_TRANSFER_MASK) {
     const bool remap = (launch & LAUNCH_REMAP) != 0;
@@ -800,7 +810,15 @@ static void i2m_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t index, u
       ch->i2m_active = false;
       ch->i2m_uploads++;
       /* Shader code and textures may have changed under the renderer. */
-      if (mem->renderer) raster3d_begin_submission(mem->renderer);
+      if (mem->renderer) {
+        raster3d_begin_submission(mem->renderer);
+        const uint64_t base = addr40(ch->i2m[I2M_OFFSET_UPPER], ch->i2m[I2M_OFFSET]);
+        const uint64_t span = (ch->i2m[I2M_LAUNCH] & I2M_LAYOUT_PITCH)
+                                  ? (uint64_t)ch->i2m[I2M_PITCH] * ch->i2m[I2M_LINE_COUNT] + line_length
+                                  : block_linear_size(ch->i2m[I2M_WIDTH], ch->i2m[I2M_ORIGIN_Y] + ch->i2m[I2M_LINE_COUNT],
+                                                      (ch->i2m[I2M_BLOCK_SIZE] >> 4) & 0xFu);
+        raster3d_sync_range(mem->renderer, mem, base, span, true);
+      }
     }
     return;
   }

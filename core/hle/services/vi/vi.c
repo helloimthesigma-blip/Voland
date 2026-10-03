@@ -427,6 +427,7 @@ static void frame_skip_on_queue(Vi_State *s, HLE_Context *c, Vi_Slot *slot) {
     }
   }
   s->frames_queued++;
+  if (renderer) raster3d_end_frame(renderer);
   if (renderer) renderer->skip_draws = s->frame_skip && (s->frames_queued % (s->frame_skip + 1u)) != 0u;
 }
 
