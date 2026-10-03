@@ -64,6 +64,12 @@
 #include "common/input_region.h"
 #include "common/layout.h"
 #include "emulator.h"
+#include "hle/kernel/parallel.h"
+#ifdef __APPLE__
+#include <libproc.h>
+#include <sys/resource.h>
+#include <unistd.h>
+#endif
 #include "hle/kernel/handle_table.h"
 #include "cpu/backends/interpreter/interpreter.h"
 #include "cpu/backends/jit/jit.h"
@@ -369,6 +375,7 @@ typedef struct Snapshot_Job {
   char snapshot_dir[512];
   Input_Event inputs[MAX_INPUT_EVENTS];
   uint32_t input_count;
+  int32_t host_cores; /* "cores N": --host-cores for this job; -1 = unchanged */
 } Snapshot_Job;
 
 static bool read_job(const char *path, Snapshot_Job *job) {
@@ -379,6 +386,7 @@ static bool read_job(const char *path, Snapshot_Job *job) {
     unsigned long long a = 0, b = 0;
     unsigned buttons = 0;
     if (sscanf(line, "max_slices %llu", &a) == 1) job->max_slices = a;
+    else if (sscanf(line, "cores %llu", &a) == 1) job->host_cores = (int32_t)a;
     else if (sscanf(line, "every %llu", &a) == 1) job->dump_every = a;
     else if (sscanf(line, "trace %llu:%llu", &a, &b) == 2) {
       job->trace_start = a;
@@ -691,10 +699,13 @@ static int run(int argc, char **argv) {
       memset(&job, 0, sizeof(job));
       job.max_slices = max_slices;
       job.trace_start = UINT64_MAX;
+      job.host_cores = -1;
       (void)emulator_set_host_cores(&emu, 0); /* fork() keeps no other thread */
       snapshot_serve(snapshot_dir, &job); /* returns in a job's child */
       raster3d_restart_workers_after_fork(&emu.renderer);
-      (void)emulator_set_host_cores(&emu, host_cores);
+      if (job.host_cores >= 0) host_cores = (uint32_t)job.host_cores;
+      if (host_cores)
+        fprintf(stderr, "voland-cli: %u host core(s) for guest threads\n", emulator_set_host_cores(&emu, host_cores));
       max_slices = job.max_slices;
       if (job.dump_every) dump_every = job.dump_every;
       if (job.frame_path[0]) frame_path = job.frame_path;
@@ -758,6 +769,30 @@ static int run(int argc, char **argv) {
             (unsigned long long)(gs->hashed_bytes >> 20));
   }
   if (pc_profile) pc_profile_print(&emu);
+#ifdef __APPLE__
+  {
+    /* Host work, independent of machine load (a forked snapshot job counts
+     * only its own): compare modes by instructions, not wall time. */
+    struct rusage_info_v4 usage;
+    struct rusage times;
+    if (proc_pid_rusage(getpid(), RUSAGE_INFO_V4, (rusage_info_t *)&usage) == 0 && getrusage(RUSAGE_SELF, &times) == 0) {
+      const double cpu = (double)(times.ru_utime.tv_sec + times.ru_stime.tv_sec) +
+                         (double)(times.ru_utime.tv_usec + times.ru_stime.tv_usec) / 1e6;
+      fprintf(stderr, "voland-cli: host %.3fe9 instructions, %.3fe9 cycles, %.1fs CPU\n",
+              (double)usage.ri_instructions / 1e9, (double)usage.ri_cycles / 1e9, cpu);
+    }
+  }
+#endif
+  if (emu.parallel) {
+    /* Parallelism: guest cycles over the per-slice busiest core's. */
+    const Parallel_Stats ps = parallel_stats(emu.parallel);
+    fprintf(stderr,
+            "voland-cli: parallel: %llu slices, %llu guest cycles over a span of %llu (%.2fx), %.1f%% of slices on "
+            "2+ cores\n",
+            (unsigned long long)ps.slices, (unsigned long long)ps.cycles, (unsigned long long)ps.span,
+            ps.span ? (double)ps.cycles / (double)ps.span : 0.0,
+            ps.slices ? 100.0 * (double)ps.shared_slices / (double)ps.slices : 0.0);
+  }
   uint32_t width = 0, height = 0;
   const uint64_t frame_hash = newest_frame_hash(&width, &height);
   static const char *const k_status[] = {"running", "idle", "exited", "crashed", "deadlock", "not loaded"};

@@ -8,7 +8,8 @@
  *   2. Two and three cores: every program still completes correctly,
  *      including tests/guest/atomics.s, whose three workers increment
  *      shared counters with LDXR/STXR loops while really running at
- *      once: a lost update fails it.
+ *      once (a lost update fails it), and repeated rounds of the
+ *      condvar producer/consumer (a lost wakeup deadlocks it).
  *   3. Host calls from a core reach the driver thread (parallel_on_driver).
  */
 #define CHECK_NAME "parallel_test"
@@ -102,15 +103,23 @@ static void test_multicore(void) {
   }
 }
 
-/* The atomics program many times on three cores: lost updates are rare
- * events, so give them chances. */
-static void test_atomics_stress(void) {
+/* Races are rare events: give them chances. atomics.s checks exclusives
+ * (a lost update fails it); condvar.s hands 500 items between two threads
+ * through a mutex and two condition variables, so a lost wakeup in the
+ * kernel's condvar/mutex handling (svc_thread.c) deadlocks it. */
+static void test_stress(void) {
   static Outcome o;
-  for (uint32_t round = 0; round < 20u; round++) {
-    run_program(&k_programs[3], 3, 50000, &o);
-    check_completes(&k_programs[3], 3, 50000, &o);
+  static const struct { size_t program; uint32_t cores; uint64_t budget; } runs[] = {
+      {3, 3, 50000}, {1, 2, 997}, {1, 3, 997}, {1, 2, 100000},
+  };
+  for (size_t k = 0; k < sizeof(runs) / sizeof(runs[0]); k++) {
+    for (uint32_t round = 0; round < 20u; round++) {
+      run_program(&k_programs[runs[k].program], runs[k].cores, runs[k].budget, &o);
+      check_completes(&k_programs[runs[k].program], runs[k].cores, runs[k].budget, &o);
+    }
+    printf("[parallel_test] %s: 20 rounds on %u cores (budget %llu), no lost update or wakeup\n",
+           k_programs[runs[k].program].name, runs[k].cores, (unsigned long long)runs[k].budget);
   }
-  printf("[parallel_test] atomics: 20 rounds on 3 cores, no lost update\n");
 }
 
 static pthread_t g_driver;
@@ -154,7 +163,7 @@ int main(void) {
   }
   test_serial_equivalence();
   test_multicore();
-  test_atomics_stress();
+  test_stress();
   test_host_calls();
   printf("[parallel_test] passed\n");
   return 0;
