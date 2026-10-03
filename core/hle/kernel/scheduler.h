@@ -130,6 +130,13 @@ void scheduler_block(Scheduler *sched, Sched_Thread *thread, Wait_Kind kind, uin
  * registers to the caller, who sets e.g. the WaitSynchronization index). */
 void scheduler_wake(Scheduler *sched, Sched_Thread *thread, uint32_t result);
 
+/* A yield with nothing else to run (svc_thread.c, SleepThread(0)): true if
+ * no thread but `self` is runnable or on a core, and *wake_at is then the
+ * earliest time anything can change - the next timeout or device event,
+ * SCHEDULER_WAIT_FOREVER if none. Sleeping `self` until then is what the
+ * idle jump would do anyway, minus the spinning (docs/PARALLEL.md). */
+bool scheduler_alone(const Scheduler *sched, const Sched_Thread *self, uint64_t *wake_at);
+
 /* `thread` left its core (parallel mode): wakes the WAIT_OFF_CORE waiters on it. */
 void scheduler_wake_off_core_waiters(Scheduler *sched, const Sched_Thread *thread);
 

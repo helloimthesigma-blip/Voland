@@ -95,6 +95,18 @@ void scheduler_exit_thread(Scheduler *sched, Sched_Thread *thread, const CPU_Bac
   }
 }
 
+bool scheduler_alone(const Scheduler *sched, const Sched_Thread *self, uint64_t *wake_at) {
+  uint64_t earliest = sched->device_wake_at;
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    const Sched_Thread *t = &sched->threads[i];
+    if (t == self) continue;
+    if (t->on_core || (t->state == THREAD_STATE_RUNNABLE && !t->paused)) return false;
+    if (t->state == THREAD_STATE_WAITING && t->wake_at < earliest) earliest = t->wake_at;
+  }
+  *wake_at = earliest;
+  return true;
+}
+
 void scheduler_wake_off_core_waiters(Scheduler *sched, const Sched_Thread *thread) {
   const uint64_t index = (uint64_t)(thread - sched->threads);
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {

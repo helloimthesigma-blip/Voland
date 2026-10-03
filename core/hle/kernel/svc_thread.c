@@ -112,8 +112,19 @@ void hle_svc_sleep_thread(HLE_Context *c, CPU_State *s) {
   CPU_Register_File *r = regs(c, s);
   const int64_t ns = (int64_t)r->x[0];
   r->x[0] = HLE_RESULT_SUCCESS;
-  if (ns <= SLEEP_YIELD_LIMIT) return; /* yield: the scheduler rotates on the SVC exit */
   Sched_Thread *t = current(c, s);
+  if (ns <= SLEEP_YIELD_LIMIT) {
+    /* A yield: the scheduler rotates on the SVC exit. With nothing else
+     * to run, spinning only burns virtual time until the next timeout or
+     * device event; sleep until then instead (the idle jump follows). */
+    uint64_t wake_at = SCHEDULER_WAIT_FOREVER;
+    if (t && scheduler_alone(c->scheduler, t, &wake_at) && wake_at != SCHEDULER_WAIT_FOREVER &&
+        wake_at > c->scheduler->ticks) {
+      scheduler_block(c->scheduler, t, WAIT_SLEEP, SCHEDULER_WAIT_FOREVER);
+      t->wake_at = wake_at;
+    }
+    return;
+  }
   if (t) scheduler_block(c->scheduler, t, WAIT_SLEEP, (uint64_t)ns);
 }
 
