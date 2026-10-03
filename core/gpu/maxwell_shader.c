@@ -544,17 +544,20 @@ static bool bool_op(uint32_t op, bool a, bool b) {
   }
 }
 
+#define HALF_EXP_MANT_MASK 0x7fffu
+#define HALF_INF_OR_NAN 0x7c00u
+#define HALF_TO_FLOAT_SHIFT 13u
+#define FLOAT_EXP_MASK 0x7f800000u
+#define HALF_TO_FLOAT_SCALE 0x1p112f /* 2^(127 - 15): rebias the exponent */
+
+/* Exact: the half's exponent and mantissa moved into float position read
+ * as 2^-112 times the value (subnormals as float subnormals), so one exact
+ * power-of-two multiply rebias them; infinities and NaNs are rebuilt. */
 static float half_to_float(uint16_t h) {
-  const uint32_t sign = (uint32_t)(h >> 15) << 31;
-  const uint32_t exp = (h >> 10) & 0x1fu;
-  uint32_t mant = h & 0x3ffu;
-  if (exp == 0) {
-    if (mant == 0) return f32(sign);
-    float v = (float)mant / 1024.0f / 16384.0f; /* 2^-14 * mant/1024 */
-    return sign ? -v : v;
-  }
-  if (exp == 31) return f32(sign | 0x7f800000u | (mant << 13));
-  return f32(sign | ((exp + 112u) << 23) | (mant << 13));
+  const uint32_t sign = (uint32_t)(h & 0x8000u) << 16;
+  const uint32_t em = h & HALF_EXP_MANT_MASK;
+  if (em >= HALF_INF_OR_NAN) return f32(sign | FLOAT_EXP_MASK | ((em & 0x3ffu) << HALF_TO_FLOAT_SHIFT));
+  return f32(u32f(f32(em << HALF_TO_FLOAT_SHIFT) * HALF_TO_FLOAT_SCALE) | sign);
 }
 
 static uint16_t float_to_half(float f) {
@@ -953,32 +956,31 @@ static void exec_texs(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mas
   Sm_Tex_Request reqs[SM_LANES];
   uint32_t texels[SM_LANES][4];
   FOR_LANES(m) {
-    Sm_Tex_Request req;
-    memset(&req, 0, sizeof(req));
-    req.kind = SM_TEX_SAMPLE;
-    req.handle = handle;
+    Sm_Tex_Request *req = &reqs[l];
+    memset(req, 0, sizeof(*req));
+    req->kind = SM_TEX_SAMPLE;
+    req->handle = handle;
     uint32_t args[8] = {0};
     float x = 0, y = 0, z = 0;
     switch (target) {
-    case 0: tex_args(t, w, 1, args, l); req.dims = 1; req.has_lod = true; x = f32(args[0]); break;
-    case 1: tex_args(t, w, 2, args, l); req.dims = 2; x = f32(args[0]); y = f32(args[1]); break;
-    case 2: tex_args(t, w, 2, args, l); req.dims = 2; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); break;
-    case 3: tex_args(t, w, 3, args, l); req.dims = 2; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); req.lod = f32(args[2]); break;
-    case 4: tex_args(t, w, 3, args, l); req.dims = 2; req.shadow = true; x = f32(args[0]); y = f32(args[1]); req.dref = f32(args[2]); break;
-    case 5: tex_args(t, w, 4, args, l); req.dims = 2; req.shadow = true; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); req.lod = f32(args[2]); req.dref = f32(args[3]); break;
-    case 6: tex_args(t, w, 3, args, l); req.dims = 2; req.shadow = true; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); req.dref = f32(args[2]); break;
-    case 7: tex_args(t, w, 3, args, l); req.dims = 2; req.array = true; req.layer = (float)args[0]; x = f32(args[1]); y = f32(args[2]); break;
-    case 8: tex_args(t, w, 3, args, l); req.dims = 2; req.array = true; req.has_lod = true; req.layer = (float)args[0]; x = f32(args[1]); y = f32(args[2]); break;
-    case 9: tex_args(t, w, 4, args, l); req.dims = 2; req.array = true; req.shadow = true; req.has_lod = true; req.layer = (float)args[0]; x = f32(args[1]); y = f32(args[2]); req.dref = f32(args[3]); break;
-    case 10: case 11: tex_args(t, w, 3, args, l); req.dims = 3; req.has_lod = target == 11u; x = f32(args[0]); y = f32(args[1]); z = f32(args[2]); break;
-    case 12: tex_args(t, w, 3, args, l); req.dims = 3; req.cube = true; x = f32(args[0]); y = f32(args[1]); z = f32(args[2]); break;
-    case 13: tex_args(t, w, 4, args, l); req.dims = 3; req.cube = true; req.has_lod = true; x = f32(args[0]); y = f32(args[1]); z = f32(args[2]); req.lod = f32(args[3]); break;
-    default: req.dims = 2; break;
+    case 0: tex_args(t, w, 1, args, l); req->dims = 1; req->has_lod = true; x = f32(args[0]); break;
+    case 1: tex_args(t, w, 2, args, l); req->dims = 2; x = f32(args[0]); y = f32(args[1]); break;
+    case 2: tex_args(t, w, 2, args, l); req->dims = 2; req->has_lod = true; x = f32(args[0]); y = f32(args[1]); break;
+    case 3: tex_args(t, w, 3, args, l); req->dims = 2; req->has_lod = true; x = f32(args[0]); y = f32(args[1]); req->lod = f32(args[2]); break;
+    case 4: tex_args(t, w, 3, args, l); req->dims = 2; req->shadow = true; x = f32(args[0]); y = f32(args[1]); req->dref = f32(args[2]); break;
+    case 5: tex_args(t, w, 4, args, l); req->dims = 2; req->shadow = true; req->has_lod = true; x = f32(args[0]); y = f32(args[1]); req->lod = f32(args[2]); req->dref = f32(args[3]); break;
+    case 6: tex_args(t, w, 3, args, l); req->dims = 2; req->shadow = true; req->has_lod = true; x = f32(args[0]); y = f32(args[1]); req->dref = f32(args[2]); break;
+    case 7: tex_args(t, w, 3, args, l); req->dims = 2; req->array = true; req->layer = (float)args[0]; x = f32(args[1]); y = f32(args[2]); break;
+    case 8: tex_args(t, w, 3, args, l); req->dims = 2; req->array = true; req->has_lod = true; req->layer = (float)args[0]; x = f32(args[1]); y = f32(args[2]); break;
+    case 9: tex_args(t, w, 4, args, l); req->dims = 2; req->array = true; req->shadow = true; req->has_lod = true; req->layer = (float)args[0]; x = f32(args[1]); y = f32(args[2]); req->dref = f32(args[3]); break;
+    case 10: case 11: tex_args(t, w, 3, args, l); req->dims = 3; req->has_lod = target == 11u; x = f32(args[0]); y = f32(args[1]); z = f32(args[2]); break;
+    case 12: tex_args(t, w, 3, args, l); req->dims = 3; req->cube = true; x = f32(args[0]); y = f32(args[1]); z = f32(args[2]); break;
+    case 13: tex_args(t, w, 4, args, l); req->dims = 3; req->cube = true; req->has_lod = true; x = f32(args[0]); y = f32(args[1]); z = f32(args[2]); req->lod = f32(args[3]); break;
+    default: req->dims = 2; break;
     }
-    req.coords[0] = x;
-    req.coords[1] = y;
-    req.coords[2] = z;
-    reqs[l] = req;
+    req->coords[0] = x;
+    req->coords[1] = y;
+    req->coords[2] = z;
   }
   tex_lanes(env, reqs, m, texels);
   FOR_LANES(m) {
@@ -997,26 +999,25 @@ static void exec_tlds(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mas
   Sm_Tex_Request reqs[SM_LANES];
   uint32_t texels[SM_LANES][4];
   FOR_LANES(m) {
-    Sm_Tex_Request req;
-    memset(&req, 0, sizeof(req));
-    req.kind = SM_TEX_FETCH;
-    req.handle = handle;
+    Sm_Tex_Request *req = &reqs[l];
+    memset(req, 0, sizeof(*req));
+    req->kind = SM_TEX_FETCH;
+    req->handle = handle;
     uint32_t args[8] = {0};
     switch (target) {
-    case 0: tex_args(t, w, 1, args, l); req.dims = 1; req.icoords[0] = (int32_t)args[0]; break;
-    case 1: tex_args(t, w, 2, args, l); req.dims = 1; req.icoords[0] = (int32_t)args[0]; req.ilod = (int32_t)args[1]; break;
-    case 2: tex_args(t, w, 2, args, l); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; break;
-    case 4: tex_args(t, w, 3, args, l); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1];
-      req.offset[0] = (int32_t)(args[2] << 28) >> 28; req.offset[1] = (int32_t)(args[2] << 24) >> 28; break;
-    case 5: tex_args(t, w, 3, args, l); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; req.ilod = (int32_t)args[2]; break;
-    case 6: tex_args(t, w, 3, args, l); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; break;
-    case 7: tex_args(t, w, 3, args, l); req.dims = 3; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; req.icoords[2] = (int32_t)args[2]; break;
-    case 8: tex_args(t, w, 3, args, l); req.dims = 2; req.array = true; req.layer = (float)args[0]; req.icoords[0] = (int32_t)args[1]; req.icoords[1] = (int32_t)args[2]; break;
-    case 12: tex_args(t, w, 4, args, l); req.dims = 2; req.icoords[0] = (int32_t)args[0]; req.icoords[1] = (int32_t)args[1]; req.ilod = (int32_t)args[2];
-      req.offset[0] = (int32_t)(args[3] << 28) >> 28; req.offset[1] = (int32_t)(args[3] << 24) >> 28; break;
-    default: req.dims = 2; break;
+    case 0: tex_args(t, w, 1, args, l); req->dims = 1; req->icoords[0] = (int32_t)args[0]; break;
+    case 1: tex_args(t, w, 2, args, l); req->dims = 1; req->icoords[0] = (int32_t)args[0]; req->ilod = (int32_t)args[1]; break;
+    case 2: tex_args(t, w, 2, args, l); req->dims = 2; req->icoords[0] = (int32_t)args[0]; req->icoords[1] = (int32_t)args[1]; break;
+    case 4: tex_args(t, w, 3, args, l); req->dims = 2; req->icoords[0] = (int32_t)args[0]; req->icoords[1] = (int32_t)args[1];
+      req->offset[0] = (int32_t)(args[2] << 28) >> 28; req->offset[1] = (int32_t)(args[2] << 24) >> 28; break;
+    case 5: tex_args(t, w, 3, args, l); req->dims = 2; req->icoords[0] = (int32_t)args[0]; req->icoords[1] = (int32_t)args[1]; req->ilod = (int32_t)args[2]; break;
+    case 6: tex_args(t, w, 3, args, l); req->dims = 2; req->icoords[0] = (int32_t)args[0]; req->icoords[1] = (int32_t)args[1]; break;
+    case 7: tex_args(t, w, 3, args, l); req->dims = 3; req->icoords[0] = (int32_t)args[0]; req->icoords[1] = (int32_t)args[1]; req->icoords[2] = (int32_t)args[2]; break;
+    case 8: tex_args(t, w, 3, args, l); req->dims = 2; req->array = true; req->layer = (float)args[0]; req->icoords[0] = (int32_t)args[1]; req->icoords[1] = (int32_t)args[2]; break;
+    case 12: tex_args(t, w, 4, args, l); req->dims = 2; req->icoords[0] = (int32_t)args[0]; req->icoords[1] = (int32_t)args[1]; req->ilod = (int32_t)args[2];
+      req->offset[0] = (int32_t)(args[3] << 28) >> 28; req->offset[1] = (int32_t)(args[3] << 24) >> 28; break;
+    default: req->dims = 2; break;
     }
-    reqs[l] = req;
   }
   tex_lanes(env, reqs, m, texels);
   FOR_LANES(m) {
@@ -1032,27 +1033,26 @@ static void exec_tld4s(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Ma
   Sm_Tex_Request reqs[SM_LANES];
   uint32_t texels[SM_LANES][4];
   FOR_LANES(m) {
-    Sm_Tex_Request req;
-    memset(&req, 0, sizeof(req));
-    req.kind = SM_TEX_GATHER;
-    req.handle = handle;
-    req.dims = 2;
-    req.gather_component = (uint8_t)BITS(w, 52, 2);
-    req.has_offset = BIT(w, 51) != 0;
-    req.shadow = BIT(w, 50) != 0;
-    const uint32_t n = 2u + (req.has_offset ? 1u : 0u) + (req.shadow ? 1u : 0u);
+    Sm_Tex_Request *req = &reqs[l];
+    memset(req, 0, sizeof(*req));
+    req->kind = SM_TEX_GATHER;
+    req->handle = handle;
+    req->dims = 2;
+    req->gather_component = (uint8_t)BITS(w, 52, 2);
+    req->has_offset = BIT(w, 51) != 0;
+    req->shadow = BIT(w, 50) != 0;
+    const uint32_t n = 2u + (req->has_offset ? 1u : 0u) + (req->shadow ? 1u : 0u);
     uint32_t args[8] = {0};
     tex_args(t, w, n, args, l);
-    req.coords[0] = f32(args[0]);
-    req.coords[1] = f32(args[1]);
+    req->coords[0] = f32(args[0]);
+    req->coords[1] = f32(args[1]);
     uint32_t k = 2;
-    if (req.has_offset) {
-      req.offset[0] = (int32_t)(args[k] << 26) >> 26;
-      req.offset[1] = (int32_t)(args[k] << 18) >> 26;
+    if (req->has_offset) {
+      req->offset[0] = (int32_t)(args[k] << 26) >> 26;
+      req->offset[1] = (int32_t)(args[k] << 18) >> 26;
       k++;
     }
-    if (req.shadow) req.dref = f32(args[k]);
-    reqs[l] = req;
+    if (req->shadow) req->dref = f32(args[k]);
   }
   tex_lanes(env, reqs, m, texels);
   FOR_LANES(m) write_scalar_results(t, w, texels[l], 4, l);
@@ -1067,102 +1067,101 @@ static void exec_tex_vector(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, 
   uint32_t texels[SM_LANES][4];
   Sm_Mask sampled = 0; /* lanes whose result comes from the texture unit */
   FOR_LANES(m) {
-    Sm_Tex_Request req;
-    memset(&req, 0, sizeof(req));
+    Sm_Tex_Request *req = &reqs[l];
+    memset(req, 0, sizeof(*req));
     /* TEX.B (bindless): the handle is Rb's first register, in the same
      * {TIC index, TSC index << 20} encoding the constant buffer holds;
      * Rb's other arguments follow it. */
-    req.handle = in->op == SM_OP_TEX_B ? (REG_B(w) == SM_RZ ? 0u : t->r[REG_B(w)][l]) : handle;
+    req->handle = in->op == SM_OP_TEX_B ? (REG_B(w) == SM_RZ ? 0u : t->r[REG_B(w)][l]) : handle;
     const uint32_t dim = BITS(w, 29, 2);
-    req.dims = (uint8_t)(dim == 3u ? 3u : dim + 1u);
-    req.cube = dim == 3u;
-    req.array = BIT(w, 28) != 0;
-    const uint32_t coord_count = req.dims;
+    req->dims = (uint8_t)(dim == 3u ? 3u : dim + 1u);
+    req->cube = dim == 3u;
+    req->array = BIT(w, 28) != 0;
+    const uint32_t coord_count = req->dims;
     uint32_t args[8] = {0};
-    uint32_t n = (req.array ? 1u : 0u) + coord_count;
+    uint32_t n = (req->array ? 1u : 0u) + coord_count;
     bool lod = false, bias = false, offset = false, dc = false, ms = false;
     switch (in->op) {
     case SM_OP_TEX: {
       const uint32_t lodm = BITS(w, 55, 2);
-      req.kind = SM_TEX_SAMPLE;
+      req->kind = SM_TEX_SAMPLE;
       lod = lodm == 3u;
       bias = lodm == 2u;
-      req.has_lod = lodm == 1u || lodm == 3u;
+      req->has_lod = lodm == 1u || lodm == 3u;
       offset = BIT(w, 54) != 0;
       dc = BIT(w, 50) != 0;
       break;
     }
     case SM_OP_TEX_B: { /* the TEX fields, lodm and offset moved down (36-38) */
       const uint32_t lodm = BITS(w, 37, 2);
-      req.kind = SM_TEX_SAMPLE;
+      req->kind = SM_TEX_SAMPLE;
       lod = lodm == 3u;
       bias = lodm == 2u;
-      req.has_lod = lodm == 1u || lodm == 3u;
+      req->has_lod = lodm == 1u || lodm == 3u;
       offset = BIT(w, 36) != 0;
       dc = BIT(w, 50) != 0;
       break;
     }
     case SM_OP_TLD:
-      req.kind = SM_TEX_FETCH;
+      req->kind = SM_TEX_FETCH;
       lod = BIT(w, 55) != 0;
       ms = BIT(w, 50) != 0;
       offset = BIT(w, 35) != 0;
       break;
     case SM_OP_TLD4:
-      req.kind = SM_TEX_GATHER;
-      req.gather_component = (uint8_t)BITS(w, 56, 2);
+      req->kind = SM_TEX_GATHER;
+      req->gather_component = (uint8_t)BITS(w, 56, 2);
       offset = BITS(w, 54, 2) != 0;
       dc = BIT(w, 50) != 0;
       break;
     case SM_OP_TXD:
-      req.kind = SM_TEX_SAMPLE;
-      req.has_lod = true; /* derivatives ignored: base level */
+      req->kind = SM_TEX_SAMPLE;
+      req->has_lod = true; /* derivatives ignored: base level */
       break;
     case SM_OP_TXQ:
-      req.kind = SM_TEX_QUERY_DIMS;
+      req->kind = SM_TEX_QUERY_DIMS;
       break;
     default: /* TMML */
-      req.kind = SM_TEX_QUERY_LOD;
+      req->kind = SM_TEX_QUERY_LOD;
       break;
     }
-    if (req.kind == SM_TEX_QUERY_DIMS) {
-      req.ilod = (int32_t)t->r[REG_A(w)][l];
+    if (req->kind == SM_TEX_QUERY_DIMS) {
+      req->ilod = (int32_t)t->r[REG_A(w)][l];
       if (BITS(w, 22, 6) == 1u) sampled |= (Sm_Mask)(1u << l); /* other queries read 0 */
-    } else if (req.kind == SM_TEX_QUERY_LOD) {
+    } else if (req->kind == SM_TEX_QUERY_LOD) {
       /* reads 0 */
     } else {
       n += (lod || bias) ? 1u : 0u;
       n += offset ? 1u : 0u;
       n += ms ? 1u : 0u;
       n += dc ? 1u : 0u;
-      tex_args_vec(t, w, n, (req.array ? 1u : 0u) + coord_count, args, l, in->op == SM_OP_TEX_B ? 1u : 0u);
+      tex_args_vec(t, w, n, (req->array ? 1u : 0u) + coord_count, args, l, in->op == SM_OP_TEX_B ? 1u : 0u);
       uint32_t k = 0;
-      if (req.array) req.layer = (float)(args[k++] & 0xffffu);
+      if (req->array) req->layer = (float)(args[k++] & 0xffffu);
       for (uint32_t c = 0; c < coord_count; c++) {
-        if (req.kind == SM_TEX_FETCH) req.icoords[c] = (int32_t)args[k];
-        else req.coords[c] = f32(args[k]);
+        if (req->kind == SM_TEX_FETCH) req->icoords[c] = (int32_t)args[k];
+        else req->coords[c] = f32(args[k]);
         k++;
       }
       if (lod || bias) {
-        if (req.kind == SM_TEX_FETCH) req.ilod = (int32_t)args[k];
-        else req.lod = f32(args[k]);
-        req.has_lod = lod;
-        req.has_bias = bias;
+        if (req->kind == SM_TEX_FETCH) req->ilod = (int32_t)args[k];
+        else req->lod = f32(args[k]);
+        req->has_lod = lod;
+        req->has_bias = bias;
         k++;
       }
       if (offset) {
-        req.has_offset = true;
-        for (uint32_t c = 0; c < coord_count && c < 3u; c++) req.offset[c] = (int32_t)(args[k] << (28u - 4u * c)) >> 28;
+        req->has_offset = true;
+        for (uint32_t c = 0; c < coord_count && c < 3u; c++) req->offset[c] = (int32_t)(args[k] << (28u - 4u * c)) >> 28;
         k++;
       }
       if (ms) k++;
       if (dc) {
-        req.shadow = true;
-        req.dref = f32(args[k]);
+        req->shadow = true;
+        req->dref = f32(args[k]);
       }
       sampled |= (Sm_Mask)(1u << l);
     }
-    reqs[l] = req;
   }
   tex_lanes(env, reqs, sampled, texels);
   FOR_LANES(m) {

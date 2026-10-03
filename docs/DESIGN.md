@@ -2427,9 +2427,14 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.66.0*
+*Document version: 3.67.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.66 → v3.67 (summary)
+
+- **Shader interpreter (§13): 32 lanes per instruction** (was 16; lane masks are 32-bit, the hardware warp width). Per-instruction dispatch is spread over twice the pixels: ~1.05 -> ~0.58 ns per lane-op on a pure-FFMA micro-benchmark. Texture requests are built in place. `half_to_float` is an exact rebias (bit-identical on all 65536 inputs). All output unchanged (homebrew golden frames, the Unity title's frame).
+- **Progress:** Silksong goes from the title through Select Profile and New Game into its opening (the prologue poem), driven by scripted `--input` presses.
 
 ### Changelog v3.65 → v3.66 (summary)
 
