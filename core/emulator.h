@@ -14,6 +14,7 @@
 #include "common/vmm.h"
 #include "cpu/cpu.h"
 #include "gpu/gpu_stream.h"
+#include "video/video_stream.h"
 #include "hle/hle.h"
 #include "hle/kernel/page_allocator.h"
 #include "hle/kernel/process.h"
@@ -138,6 +139,10 @@ typedef struct Emulator
    * worker, in the layout's gpu_ring region. */
   Gpu_Stream gpu_stream;
   bool gpu_stream_ready;
+  /* Video decode (§13): NVDEC requests and decoded frames, in the
+   * layout's video region (video/video_stream.h). Set up once. */
+  Video_Stream video;
+  bool video_ready;
 } Emulator;
 
 /* What one emulator_run_slice() did (§7 scheduler status). */
@@ -228,6 +233,10 @@ void emulator_set_frame_skip(Emulator *emulator, uint32_t n);
  * The platform turns it on once a consumer exists (the producer waits for
  * room in the ring). Off: the software reference renderer. */
 void emulator_set_gpu_mode(Emulator *emulator, bool on);
+
+/* A synchronous video decoder for NVDEC (native platforms); without one
+ * the requests go to the video region's ring (the web's video worker). */
+void emulator_set_video_backend(Emulator *emulator, const Video_Backend *backend);
 
 /* Seeds the emulated SD card (§15): creates `path` (absolute, '/'-
  * separated; missing parent directories are created) holding `size`

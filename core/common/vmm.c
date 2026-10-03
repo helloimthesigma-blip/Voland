@@ -571,6 +571,17 @@ VMM_DEFINE_CHECKED_WRITE(64, uint64_t)
 #undef VMM_DEFINE_CHECKED_READ
 #undef VMM_DEFINE_CHECKED_WRITE
 
+Error vmm_compare_exchange32(VMM_Context *ctx, uint64_t gva, uint32_t *expected, uint32_t desired, bool *swapped) {
+  if (!ctx || !expected || !swapped) return ERR(RESULT_INVALID_ARGUMENT, "vmm_compare_exchange32: NULL argument");
+  if (gva & (sizeof(uint32_t) - 1u)) return ERR(RESULT_INVALID_ARGUMENT, "vmm_compare_exchange32: unaligned");
+  VMM_Fault fault;
+  uint8_t *host = vmm_translate_inline(ctx->l1, gva, VMM_PERM_W, &fault);
+  if (!host) return record_fault(ctx, &fault);
+  *swapped = __atomic_compare_exchange_n((uint32_t *)(void *)host, expected, desired, false, __ATOMIC_SEQ_CST,
+                                         __ATOMIC_SEQ_CST);
+  return OK;
+}
+
 Error vmm_read_block(VMM_Context *ctx, uint64_t gva, void *out, uint64_t size) {
   if (!ctx) return ERR(RESULT_INVALID_ARGUMENT, "vmm_read_block: ctx is NULL");
   if (size == 0) return OK;

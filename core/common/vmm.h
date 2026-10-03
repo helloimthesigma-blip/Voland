@@ -222,6 +222,14 @@ Error vmm_write16(VMM_Context *ctx, uint64_t gva, uint16_t value);
 Error vmm_write32(VMM_Context *ctx, uint64_t gva, uint32_t value);
 Error vmm_write64(VMM_Context *ctx, uint64_t gva, uint64_t value);
 
+/* Atomic compare-and-swap of an aligned guest word (seq_cst): the kernel's
+ * updates to guest synchronization words (mutexes, condvar keys, address
+ * arbiters), which guest code on other host threads changes with
+ * LDXR/STXR at the same time (docs/PARALLEL.md). *swapped reports whether
+ * it held *expected; if not, *expected receives the current value.
+ * Needs VMM_PERM_W. */
+Error vmm_compare_exchange32(VMM_Context *ctx, uint64_t gva, uint32_t *expected, uint32_t desired, bool *swapped);
+
 /* Bulk copies for HLE buffer traffic and section loading. The whole range
  * is validated before any byte moves, so a fault leaves both the guest
  * and `out`/`src` untouched. Pages need not be physically contiguous.

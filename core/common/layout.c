@@ -91,9 +91,11 @@ Error layout_create(void) {
   void* input_region        = arena_allocate(&storage.arena, LAYOUT_INPUT_REGION_SIZE, 8);
   void* trace_buffer        = arena_allocate(&storage.arena, LAYOUT_TRACE_BUFFER_SIZE, 8);
   void* breakpoint_region   = arena_allocate(&storage.arena, LAYOUT_BREAKPOINT_REGION_SIZE, 8);
+  void* video_region        = arena_allocate(&storage.arena, LAYOUT_VIDEO_REGION_SIZE, 8);
 
   if (!storage.guest_ram || !page_table_l1 || !framebuffer || !audio_ring || !gpu_ring ||
-      !gpu_completion_ring || !input_region || !trace_buffer || !breakpoint_region) {
+      !gpu_completion_ring || !input_region || !trace_buffer || !breakpoint_region ||
+      !video_region) {
 #if !defined(__EMSCRIPTEN__)
     guest_ram_release(storage.guest_ram, LAYOUT_GUEST_RAM_SIZE);
 #endif
@@ -113,13 +115,14 @@ Error layout_create(void) {
   g_layout.input_region_base        = (uint64_t)(uintptr_t)input_region;
   g_layout.trace_buffer_base        = (uint64_t)(uintptr_t)trace_buffer;
   g_layout.breakpoint_region_base   = (uint64_t)(uintptr_t)breakpoint_region;
+  g_layout.video_region_base        = (uint64_t)(uintptr_t)video_region;
 
   g_layout_live = 1;
 
   log_info("[layout] reserved: guest_ram=%llu MiB, page_table_l1=%llu KiB, "
            "framebuffer=%llu MiB, audio_ring=%llu KiB, gpu_ring=%llu KiB, "
            "gpu_completion_ring=%llu KiB, input_region=%llu B, trace_buffer=%llu KiB, "
-           "breakpoint_region=%llu B",
+           "breakpoint_region=%llu B, video_region=%llu MiB",
            (unsigned long long)(LAYOUT_GUEST_RAM_SIZE / (1024 * 1024)),
            (unsigned long long)(LAYOUT_PAGE_TABLE_L1_SIZE / 1024),
            (unsigned long long)(LAYOUT_FRAMEBUFFER_REGION_SIZE / (1024 * 1024)),
@@ -128,7 +131,8 @@ Error layout_create(void) {
            (unsigned long long)(LAYOUT_GPU_COMPLETION_RING_SIZE / 1024),
            (unsigned long long)LAYOUT_INPUT_REGION_SIZE,
            (unsigned long long)(LAYOUT_TRACE_BUFFER_SIZE / 1024),
-           (unsigned long long)LAYOUT_BREAKPOINT_REGION_SIZE);
+           (unsigned long long)LAYOUT_BREAKPOINT_REGION_SIZE,
+           (unsigned long long)(LAYOUT_VIDEO_REGION_SIZE / (1024 * 1024)));
 
   return OK;
 }

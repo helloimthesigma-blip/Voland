@@ -435,7 +435,8 @@ WebAssembly.Memory (shared, address: i64, initial == maximum ≈ 5.25 GB)
                ├─ audio ring (§14)
                ├─ GPU command ring (§13)
                ├─ input region (§18)
-               └─ trace buffer (§23)
+               ├─ trace buffer (§23)
+               └─ video region: decode requests + decoded NV12 frames (§13)
   GUEST_RAM_BASE                       ┐
                guest physical RAM, 4GB │ arena-carved at boot,
   GUEST_RAM_BASE + 4GB                 ┘ page-aligned
@@ -458,6 +459,7 @@ typedef struct {
   uint64_t input_region_base;     // §18
   uint64_t trace_buffer_base;     // §23
   uint64_t breakpoint_region_base;// §23
+  uint64_t video_region_base;     // §13: NVDEC requests out, decoded frames back (appended last)
 } Memory_Layout;
 
 const Memory_Layout* layout_get(void);

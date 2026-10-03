@@ -50,6 +50,29 @@
         "CMAKE_BUILD_TYPE": "Release",
         "CPU_BACKEND": "interpreter"
       }
+    },
+    {
+      "name": "native-jit",
+      "displayName": "Native (JIT backend)",
+      "description": "CPU_BACKEND=jit natively: the interpreter plus the wasm emitter (compiled blocks only execute under Emscripten; docs/JIT.md).",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/native-jit",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "CPU_BACKEND": "jit"
+      }
+    },
+    {
+      "name": "web-jit",
+      "displayName": "Web (Emscripten, JIT backend)",
+      "description": "The web preset with CPU_BACKEND=jit (docs/JIT.md). Requires $EMSDK.",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/build/web-jit",
+      "toolchainFile": "$env{EMSDK}/upstream/emscripten/cmake/Modules/Platform/Emscripten.cmake",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "CPU_BACKEND": "jit"
+      }
     }
   ],
   "buildPresets": [
@@ -68,6 +91,14 @@
     {
       "name": "native-release",
       "configurePreset": "native-release"
+    },
+    {
+      "name": "native-jit",
+      "configurePreset": "native-jit"
+    },
+    {
+      "name": "web-jit",
+      "configurePreset": "web-jit"
     }
   ],
   "testPresets": [
@@ -96,6 +127,28 @@
     {
       "name": "native-release",
       "configurePreset": "native-release",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": true
+      }
+    },
+    {
+      "name": "native-jit",
+      "configurePreset": "native-jit",
+      "output": {
+        "outputOnFailure": true
+      },
+      "execution": {
+        "noTestsAction": "error",
+        "stopOnFailure": true
+      }
+    },
+    {
+      "name": "web-jit",
+      "configurePreset": "web-jit",
       "output": {
         "outputOnFailure": true
       },

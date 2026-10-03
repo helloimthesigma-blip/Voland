@@ -194,6 +194,10 @@ typedef struct Raster3d {
   /* Diagnostics: called with every newly decoded shader program (may be NULL). */
   void (*on_program_decoded)(void *user, const Sm_Program *program);
   void *on_program_user;
+  /* Diagnostics: called at every frame end (raster3d_end_frame), before
+   * the epoch advances (may be NULL). */
+  void (*on_frame_end)(void *user, const struct Raster3d *r);
+  void *on_frame_end_user;
   /* GPU mode (§13 WebGPU renderer): set by raster3d_set_gpu. */
   struct Gpu_Stream *gpu;
   uint32_t gpu_next_id;

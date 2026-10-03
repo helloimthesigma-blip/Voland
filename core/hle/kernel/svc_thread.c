@@ -320,12 +320,35 @@ static Sched_Thread *best_waiter(Scheduler *sched, Wait_Kind kind, uint64_t addr
   return best;
 }
 
+/* Guest synchronization words (mutexes, condvar keys, address arbiters)
+ * also change under guest LDXR/STXR running on other host threads in
+ * parallel mode (docs/PARALLEL.md). The kernel therefore updates them
+ * only with atomic compare-and-swaps - never a read and then a write,
+ * which could undo a guest update made in between. With one thread at a
+ * time every swap succeeds first time, exactly as a plain write. */
+static bool cas_word(HLE_Context *c, uint64_t address, uint32_t *expected, uint32_t desired, bool *swapped) {
+  return error_is_ok(vmm_compare_exchange32(c->vmm, address, expected, desired, swapped));
+}
+
+/* An atomic store of `value` (seq_cst, so ordered with the kernel's other
+ * word updates as other cores see them). */
+static bool store_word(HLE_Context *c, uint64_t address, uint32_t value) {
+  if (address & 3u) return error_is_ok(vmm_write32(c->vmm, address, value));
+  uint32_t seen = 0;
+  if (!error_is_ok(vmm_read32(c->vmm, address, &seen))) return false;
+  bool swapped = false;
+  while (!swapped) {
+    if (!cas_word(c, address, &seen, value, &swapped)) return false;
+  }
+  return true;
+}
+
 /* Releases the mutex at `address` to its best waiter (or to nobody). */
 static uint32_t release_mutex(HLE_Context *c, uint64_t address) {
   uint32_t waiters = 0;
   Sched_Thread *next = best_waiter(c->scheduler, WAIT_ARBITER_LOCK, address, &waiters);
   const uint32_t value = next ? (next->wait_tag | (waiters > 1u ? HLE_MUTEX_HAS_WAITERS : 0u)) : 0u;
-  if (!error_is_ok(vmm_write32(c->vmm, address, value))) return HLE_RESULT_INVALID_MEMORY_STATE;
+  if (!store_word(c, address, value)) return HLE_RESULT_INVALID_MEMORY_STATE;
   if (next) scheduler_wake(c->scheduler, next, HLE_RESULT_SUCCESS);
   return HLE_RESULT_SUCCESS;
 }
@@ -360,9 +383,13 @@ void hle_svc_wait_process_wide_key_atomic(HLE_Context *c, CPU_State *s) {
   const uint32_t tag = (uint32_t)r->x[2];
   const int64_t timeout = (int64_t)r->x[3];
   if (mutex & 3u) { r->x[0] = HLE_RESULT_INVALID_POINTER; return; }
+  /* "Has waiters" goes into the key before the mutex is released: a
+   * signaler on another core takes the mutex, then reads the key to
+   * decide whether to call SignalProcessWideKey. In the other order it can
+   * read 0 and the wakeup is lost. */
+  if (!store_word(c, key, 1u)) { r->x[0] = HLE_RESULT_INVALID_MEMORY_STATE; return; }
   const uint32_t released = release_mutex(c, mutex);
   if (released != HLE_RESULT_SUCCESS) { r->x[0] = released; return; }
-  if (!error_is_ok(vmm_write32(c->vmm, key, 1u))) { r->x[0] = HLE_RESULT_INVALID_MEMORY_STATE; return; }
   if (timeout == 0) { r->x[0] = HLE_RESULT_TIMED_OUT; return; }
   Sched_Thread *self = current(c, s);
   if (!self) { r->x[0] = HLE_RESULT_TIMED_OUT; return; }
@@ -381,26 +408,28 @@ void hle_svc_signal_process_wide_key(HLE_Context *c, CPU_State *s) {
     Sched_Thread *t = best_waiter(c->scheduler, WAIT_CONDITION, key, NULL);
     if (!t) break;
     woken++;
-    /* Re-acquire the mutex for the woken thread, inside the kernel. */
+    /* Re-acquire the mutex for the woken thread, inside the kernel: take
+     * it if free, else mark it contended - atomically against its owner
+     * releasing it on another core meanwhile. */
     uint32_t value = 0;
-    if (!error_is_ok(vmm_read32(c->vmm, t->mutex_address, &value))) {
+    bool swapped = false, ok = error_is_ok(vmm_read32(c->vmm, t->mutex_address, &value));
+    while (ok && !swapped) {
+      ok = cas_word(c, t->mutex_address, &value, value == 0 ? t->wait_tag : (value | HLE_MUTEX_HAS_WAITERS),
+                    &swapped);
+    }
+    if (!ok) {
       scheduler_wake(c->scheduler, t, HLE_RESULT_INVALID_MEMORY_STATE);
       continue;
     }
     if (value == 0) {
-      if (!error_is_ok(vmm_write32(c->vmm, t->mutex_address, t->wait_tag))) {
-        scheduler_wake(c->scheduler, t, HLE_RESULT_INVALID_MEMORY_STATE);
-      } else {
-        scheduler_wake(c->scheduler, t, HLE_RESULT_SUCCESS);
-      }
+      scheduler_wake(c->scheduler, t, HLE_RESULT_SUCCESS);
       continue;
     }
-    (void)vmm_write32(c->vmm, t->mutex_address, value | HLE_MUTEX_HAS_WAITERS);
     t->wait = WAIT_ARBITER_LOCK; /* now waiting for the mutex, forever */
     t->wait_address = t->mutex_address;
     t->wake_at = SCHEDULER_WAIT_FOREVER;
   }
-  if (!best_waiter(c->scheduler, WAIT_CONDITION, key, NULL)) (void)vmm_write32(c->vmm, key, 0u);
+  if (!best_waiter(c->scheduler, WAIT_CONDITION, key, NULL)) (void)store_word(c, key, 0u);
   r->x[0] = HLE_RESULT_SUCCESS;
 }
 
@@ -421,10 +450,16 @@ void hle_svc_wait_for_address(HLE_Context *c, CPU_State *s) {
   if (type > ARBITRATION_WAIT_IF_EQUAL) { r->x[0] = HLE_RESULT_INVALID_ENUM_VALUE; return; }
   uint32_t raw = 0;
   if (!error_is_ok(vmm_read32(c->vmm, address, &raw))) { r->x[0] = HLE_RESULT_INVALID_MEMORY_STATE; return; }
-  const int32_t current_value = (int32_t)raw;
-  const bool wait = type == ARBITRATION_WAIT_IF_EQUAL ? current_value == value : current_value < value;
-  if (!wait) { r->x[0] = HLE_RESULT_INVALID_STATE; return; }
-  if (type == ARBITRATION_DECREMENT_AND_WAIT_IF_LESS_THAN) (void)vmm_write32(c->vmm, address, raw - 1u);
+  for (;;) {
+    const int32_t current_value = (int32_t)raw;
+    const bool wait = type == ARBITRATION_WAIT_IF_EQUAL ? current_value == value : current_value < value;
+    if (!wait) { r->x[0] = HLE_RESULT_INVALID_STATE; return; }
+    if (type != ARBITRATION_DECREMENT_AND_WAIT_IF_LESS_THAN) break;
+    /* The decrement is atomic: on a lost race, decide again on the new value. */
+    bool swapped = false;
+    if (!cas_word(c, address, &raw, raw - 1u, &swapped)) { r->x[0] = HLE_RESULT_INVALID_MEMORY_STATE; return; }
+    if (swapped) break;
+  }
   if (timeout == 0) { r->x[0] = HLE_RESULT_TIMED_OUT; return; }
   Sched_Thread *self = current(c, s);
   if (!self) { r->x[0] = HLE_RESULT_TIMED_OUT; return; }
@@ -456,10 +491,13 @@ void hle_svc_signal_to_address(HLE_Context *c, CPU_State *s) {
         new_value = others == 0 ? value + 1 : (others <= (uint32_t)count ? value - 1 : value);
       }
     }
-    if (!error_is_ok(vmm_write32(c->vmm, address, (uint32_t)new_value))) {
+    /* Only if it still holds `value` (another core may have changed it). */
+    bool swapped = false;
+    if (!cas_word(c, address, &raw, (uint32_t)new_value, &swapped)) {
       r->x[0] = HLE_RESULT_INVALID_MEMORY_STATE;
       return;
     }
+    if (!swapped) { r->x[0] = HLE_RESULT_INVALID_STATE; return; }
   }
   int32_t woken = 0;
   while (count <= 0 || woken < count) {
