@@ -160,6 +160,21 @@ fn dec(c: f32) -> f32 { if (c <= 0.04045) { return c / 12.92; } return pow((c + 
 }`;
 }
 
+/* Integer copies: nearest texels, raw values (no flips or conversions
+ * apply between integer surfaces). */
+function intBlitShader(type: "u32" | "i32"): string {
+  return `${FULLSCREEN_VS}
+@group(0) @binding(0) var<storage, read> P: array<u32>;
+@group(0) @binding(1) var S: texture_2d_array<${type}>;
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<${type}> {
+  let s = vec4<f32>(bitcast<f32>(P[0]), bitcast<f32>(P[1]), bitcast<f32>(P[2]), bitcast<f32>(P[3]));
+  let d = vec4<f32>(bitcast<f32>(P[4]), bitcast<f32>(P[5]), bitcast<f32>(P[6]), bitcast<f32>(P[7]));
+  let p = vec2<f32>(s.x + (pos.x - d.x) / d.z * s.z, s.y + (pos.y - d.y) / d.w * s.w);
+  let dm = vec2<f32>(textureDimensions(S));
+  return textureLoad(S, vec2<i32>(clamp(floor(p), vec2<f32>(0.0), dm - 1.0)), 0, 0);
+}`;
+}
+
 function clearShader(type: "f32" | "u32" | "i32"): string {
   return `${FULLSCREEN_VS}
 @group(0) @binding(0) var<storage, read> P: array<u32>;
@@ -851,8 +866,7 @@ export class GpuExecutor {
   private copy(c: Copy): void {
     let src = this.textures.get(c.srcId);
     const dst = this.textures.get(c.dstId);
-    if (!src || !dst || !dst.renderView || isDepthFormat(src.format) || shaderType(dst.format) !== "f32" ||
-        shaderType(src.format) !== "f32") {
+    if (!src || !dst || !dst.renderView || isDepthFormat(src.format) || shaderType(dst.format) !== shaderType(src.format)) {
       this.warnOnce(`copy ${src?.format}->${dst?.format}`, `GPU copy ${src?.format ?? "?"} -> ${dst?.format ?? "?"} not supported`);
       return;
     }
@@ -871,6 +885,24 @@ export class GpuExecutor {
     }
     if (c.srcId === c.dstId) src = this.shadowOf(c.srcId, src);
     const pass = this.passFor([c.dstId], 0);
+    const type = shaderType(src.format);
+    if (type !== "f32") {
+      if (!pass || !this.scissor(pass, c.dstRect)) return;
+      const entries: GPUBindGroupLayoutEntry[] = [
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
+        { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: type === "u32" ? "uint" : "sint", viewDimension: "2d-array" } },
+      ];
+      const { pipeline, layout } = this.simplePipeline(`blit-${type}`, intBlitShader(type), dst.format, 0xf, null, entries);
+      const words = [...c.srcRect.map(f32Bits), ...c.dstRect.map(f32Bits)];
+      const offset = this.stageWords(words);
+      pass.setPipeline(pipeline);
+      pass.setBindGroup(0, this.device.createBindGroup({ layout, entries: [
+        { binding: 0, resource: { buffer: this.dataBuffer, offset, size: words.length * 4 } },
+        { binding: 1, resource: src.sampleView },
+      ] }));
+      pass.draw(3);
+      return;
+    }
     if (!pass || !this.scissor(pass, c.dstRect)) return;
     this.blit(pass, src, dst.format, c.srcRect, c.dstRect, c.filter ? 4 : 0);
   }
