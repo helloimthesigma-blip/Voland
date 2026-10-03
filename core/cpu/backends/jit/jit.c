@@ -54,8 +54,7 @@
 #define CODE_HASH_OFFSET 0xCBF29CE484222325ull /* FNV-1a 64 */
 #define CODE_HASH_PRIME 0x100000001B3ull
 
-static uint64_t code_hash(const uint32_t *code, uint32_t count) {
-  uint64_t hash = CODE_HASH_OFFSET;
+static uint64_t code_hash(uint64_t hash, const uint32_t *code, uint32_t count) {
   for (uint32_t i = 0; i < count; i++) hash = (hash ^ code[i]) * CODE_HASH_PRIME;
   return hash;
 }
@@ -67,6 +66,33 @@ static const uint32_t *block_code(const Interp_State *s, uint64_t pc) {
   if ((pte & VMM_PERM_X) == 0 || (pte & VMM_PERM_W) != 0 || (pc & 3u)) return NULL;
   VMM_Fault fault;
   return (const uint32_t *)(const void *)vmm_translate_inline(s->l1, pc, VMM_PERM_X, &fault);
+}
+
+/* The hash of every range's words as mapped now; false if any range is no
+ * longer executable-and-not-writable. */
+static bool ranges_hash(const Interp_State *s, const Jit_Code_Range *ranges, uint32_t count, uint64_t *hash) {
+  uint64_t h = CODE_HASH_OFFSET;
+  for (uint32_t i = 0; i < count; i++) {
+    const uint32_t *code = block_code(s, ranges[i].start);
+    if (!code) return false;
+    h = code_hash(h, code, ranges[i].words);
+  }
+  *hash = h;
+  return true;
+}
+
+/* Jit_Code_Source over a guest thread's address space. */
+static const uint32_t *source_page_code(void *context, uint64_t page) {
+  return block_code((const Interp_State *)context, page);
+}
+static bool source_peek64(void *context, uint64_t address, uint64_t *value) {
+  const Interp_State *s = (const Interp_State *)context;
+  if (vmm_access_crosses_page(address, sizeof(uint64_t))) return false;
+  VMM_Fault fault;
+  const uint8_t *host = vmm_translate_inline(s->l1, address, VMM_PERM_R, &fault);
+  if (!host) return false;
+  memcpy(value, host, sizeof(*value));
+  return true;
 }
 
 /* Everything compiled code depends on, per host thread. Compiled
@@ -148,9 +174,9 @@ void jit_print_hot_regions(uint32_t top) {
     }
     if (best == JIT_CACHE_ENTRIES) return;
     printed[best] = true;
-    fprintf(stderr, "  %010llx  %12llu entries  entry block %3u insns  region %4u words\n",
+    fprintf(stderr, "  %010llx  %12llu entries  entry block %3u insns  first range %4u words\n",
             (unsigned long long)g_cache[best].pc, (unsigned long long)g_cache[best].entries, g_cache[best].length,
-            g_cache[best].code_words);
+            g_cache[best].ranges[0].words);
   }
 }
 
@@ -174,8 +200,11 @@ const Jit_Stats *jit_stats(void) { return &g_stats; }
 static void dump_code(uint64_t pc, uint64_t start, const uint32_t *words, uint32_t count) {
   char path[DUMP_PATH_BYTES];
   snprintf(path, sizeof(path), "%s/%010llx.s", g_dump_directory, (unsigned long long)pc);
-  FILE *f = fopen(path, "w");
-  if (!f) return;
+  FILE *f = fopen(path, "a");
+  if (!f || !words) {
+    if (f) fclose(f);
+    return;
+  }
   fprintf(f, "// region %llx, code from %llx\n", (unsigned long long)pc, (unsigned long long)start);
   for (uint32_t i = 0; i < count; i++) {
     fprintf(f, ".word 0x%08x // %llx\n", words[i], (unsigned long long)(start + 4u * i));
@@ -398,16 +427,15 @@ uint32_t jit_helper_store(Jit_State *state, uint64_t address, uint32_t shape, ui
 /* Compiles the block at `pc` into its cache slot (evicting whatever is
  * there). */
 static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t generation) {
-  const uint32_t *code = block_code(s, pc);
-  if (!code) return;
-  const uint32_t *page_code = code - (pc & VMM_PAGE_OFFSET_MASK) / sizeof(uint32_t);
+  if (!block_code(s, pc)) return;
+  const Jit_Code_Source source = {source_page_code, source_peek64, (void *)(uintptr_t)s};
   Jit_Link link;
   link.cache_address = (uint64_t)(uintptr_t)t->cache;
   link.generation_address = (uint64_t)(uintptr_t)&t->generation;
   link.count_entries = g_hot_profile;
   Jit_Compiled compiled;
   compiler_lock();
-  const bool built = jit_compile_block(pc, page_code, memory_pages(), &link, t->module, JIT_MODULE_BYTES, &compiled);
+  const bool built = jit_compile_block(pc, &source, memory_pages(), &link, t->module, JIT_MODULE_BYTES, &compiled);
   compiler_unlock();
   if (!built) {
     g_stats.compile_failures++;
@@ -415,8 +443,14 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
   }
   if (g_dump_directory) {
     dump_module(pc, t->module, compiled.module_bytes);
-    dump_code(pc, compiled.code_start, page_code + (compiled.code_start & VMM_PAGE_OFFSET_MASK) / sizeof(uint32_t),
-              compiled.code_words);
+    for (uint32_t i = 0; i < compiled.range_count; i++) {
+      dump_code(pc, compiled.ranges[i].start, block_code(s, compiled.ranges[i].start), compiled.ranges[i].words);
+    }
+  }
+  uint64_t hash;
+  if (!ranges_hash(s, compiled.ranges, compiled.range_count, &hash)) {
+    g_stats.compile_failures++;
+    return;
   }
   const uint64_t function = install(t->module, compiled.module_bytes);
   if (!function) {
@@ -432,12 +466,11 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
   e->generation = generation;
   e->function = function;
   e->length = compiled.instructions;
-  e->code_start = compiled.code_start;
-  e->code_words = compiled.code_words;
+  e->range_count = compiled.range_count;
+  memcpy(e->ranges, compiled.ranges, sizeof(e->ranges));
   e->entries = 0;
   e->multicore = cpu_multicore();
-  e->code_hash = code_hash(page_code + (compiled.code_start & VMM_PAGE_OFFSET_MASK) / sizeof(uint32_t),
-                           compiled.code_words);
+  e->code_hash = hash;
   g_stats.blocks_compiled++;
   g_stats.region_blocks += compiled.blocks;
   g_stats.module_bytes += compiled.module_bytes;
@@ -450,8 +483,8 @@ static Jit_Entry *find(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64
   if (e->pc != pc || !e->function) return NULL;
   if (e->generation == generation) return e;
   if (e->multicore != cpu_multicore()) goto stale; /* exclusives/fences were compiled for the other mode */
-  const uint32_t *code = block_code(s, e->code_start);
-  if (code && code_hash(code, e->code_words) == e->code_hash) {
+  uint64_t hash;
+  if (ranges_hash(s, e->ranges, e->range_count, &hash) && hash == e->code_hash) {
     e->generation = generation;
     g_stats.revalidations++;
     return e;

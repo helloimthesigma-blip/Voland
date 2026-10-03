@@ -34,6 +34,7 @@
 
 #include <stddef.h>
 
+#include "common/assert.h"
 #include "cpu/backends/interpreter/softfloat.h"
 #include "cpu/backends/jit/jit_wasm.h"
 
@@ -165,7 +166,13 @@ typedef struct Region_Block {
   uint64_t pc;
   uint32_t length;  /* instructions */
   bool needs_flags; /* may observe NZCV before writing it: entering edges materialize */
+  bool return_site; /* the instruction after a BL in the region: a RET may come back here */
 } Region_Block;
+
+typedef struct Region_Page {
+  uint64_t base;
+  const uint32_t *code;
+} Region_Page;
 
 typedef enum Carry { CARRY_ZERO, CARRY_ONE, CARRY_FLAG } Carry;
 
@@ -191,8 +198,14 @@ typedef struct Ctx {
   bool discover;                  /* analysis pass: collect region blocks */
   Region_Block blocks[JIT_MAX_REGION_BLOCKS];
   uint32_t block_count, max_blocks, max_block_insns;
-  uint64_t page;                  /* the region's code page (guest address) */
-  const uint32_t *page_code;      /* its instruction words */
+  const Jit_Code_Source *source;
+  Region_Page pages[JIT_MAX_REGION_PAGES];
+  uint32_t page_count;
+  /* Within the current block: registers holding known constants (ADRP,
+   * ADD #imm) and registers predicted from guest memory at compile time
+   * (an LDR from a known address: a PLT stub's GOT slot). */
+  uint32_t known_mask, predicted_mask;
+  uint64_t known_value[31], predicted_value[31];
   uint32_t block_len;             /* the current block's length (final pass) */
   bool uses_helper;               /* some block calls the shared $helper */
   Flag_Kind flag_kind;            /* lazy flags, at this point of the block */
@@ -318,6 +331,8 @@ static void set_x(Ctx *c, uint32_t r) {
     op(c, WASM_OP_DROP);
     return;
   }
+  c->known_mask &= ~(1u << r);
+  c->predicted_mask &= ~(1u << r);
   c->used |= (uint64_t)1 << r;
   c->written |= (uint64_t)1 << r;
   lset(c, L_X0 + r);
@@ -451,6 +466,20 @@ static void exit_to_stack(Ctx *c) {
   br(c, LEVEL_EXIT);
 }
 
+/* The page table index of `page`, adding it if there is room and its code
+ * may be compiled; -1 otherwise. */
+static int32_t region_page(Ctx *c, uint64_t page) {
+  for (uint32_t i = 0; i < c->page_count; i++) {
+    if (c->pages[i].base == page) return (int32_t)i;
+  }
+  if (!c->discover || c->page_count >= JIT_MAX_REGION_PAGES) return -1;
+  const uint32_t *code = c->source->page_code(c->source->context, page);
+  if (!code) return -1;
+  c->pages[c->page_count].base = page;
+  c->pages[c->page_count].code = code;
+  return (int32_t)c->page_count++;
+}
+
 static int32_t find_block(const Ctx *c, uint64_t pc) {
   for (uint32_t i = 0; i < c->block_count; i++) {
     if (c->blocks[i].pc == pc) return (int32_t)i;
@@ -460,9 +489,10 @@ static int32_t find_block(const Ctx *c, uint64_t pc) {
 
 /* Adds `pc` as a region block if it can be one; true if it is one. */
 static bool add_block(Ctx *c, uint64_t pc) {
-  if ((pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK) != c->page || (pc & 3u)) return false;
+  if (pc & 3u) return false;
   if (find_block(c, pc) >= 0) return true;
   if (c->block_count >= c->max_blocks) return false;
+  if (region_page(c, pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK) < 0) return false;
   c->blocks[c->block_count].pc = pc;
   c->blocks[c->block_count++].length = 0;
   return true;
@@ -889,10 +919,18 @@ static void emit_extend(Ctx *c, uint32_t option) {
 /* Data processing - immediate.                                        */
 /* ------------------------------------------------------------------ */
 
+static void know(Ctx *c, uint32_t r, uint64_t value) {
+  if (r == REG_ZR) return;
+  c->known_mask |= 1u << r;
+  c->known_value[r] = value;
+}
+
 static bool c_pc_relative(Ctx *c, uint32_t insn) {
   const uint64_t imm = (uint64_t)sign_extend((bits(insn, 23, 5) << 2) | bits(insn, 30, 29), 21);
-  i64c(c, bit(insn, 31) ? (c->pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK) + (imm << 12) : c->pc + imm);
+  const uint64_t value = bit(insn, 31) ? (c->pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK) + (imm << 12) : c->pc + imm;
+  i64c(c, value);
   set_x(c, bits(insn, 4, 0));
+  know(c, bits(insn, 4, 0), value);
   return true;
 }
 
@@ -905,7 +943,10 @@ static bool c_add_sub_immediate(Ctx *c, uint32_t insn) {
     i64c(c, imm);
     op(c, sub ? WASM_OP_I64_SUB : WASM_OP_I64_ADD);
     width(c, sf);
+    const bool known = sf && rn != REG_ZR && (c->known_mask & (1u << rn));
+    const uint64_t value = known ? (sub ? c->known_value[rn] - imm : c->known_value[rn] + imm) : 0;
     set_xsp(c, rd);
+    if (known) know(c, rd, value);
     return true;
   }
   get_xsp(c, rn);
@@ -1640,13 +1681,22 @@ static bool c_single_unsigned_offset(Ctx *c, uint32_t insn) {
   const uint32_t size = bits(insn, 31, 30);
   Access access;
   if (!decode_access(size, bits(insn, 23, 22), true, &access)) return false;
-  const uint32_t bytes = 1u << size, n = bits(insn, 9, 5);
+  const uint32_t bytes = 1u << size, n = bits(insn, 9, 5), t = bits(insn, 4, 0);
   if (access == ACCESS_PREFETCH) return true;
   get_xsp(c, n);
   i64c(c, (uint64_t)bits(insn, 21, 10) * bytes);
   op(c, WASM_OP_I64_ADD);
   lset(c, L_ADDR);
-  emit_transfer(c, access, bytes, bits(insn, 4, 0), n, false, 0);
+  emit_transfer(c, access, bytes, t, n, false, 0);
+  /* LDR Xt, [Xn, #imm] from a known address (a PLT stub's GOT slot):
+   * remember what is there now, to predict a BR Xt. */
+  uint64_t value;
+  if (access == ACCESS_LOAD_ZERO && bytes == sizeof(uint64_t) && n != REG_ZR && t != REG_ZR &&
+      (c->known_mask & (1u << n)) &&
+      c->source->peek64(c->source->context, c->known_value[n] + (uint64_t)bits(insn, 21, 10) * bytes, &value)) {
+    c->predicted_mask |= 1u << t;
+    c->predicted_value[t] = value;
+  }
   return true;
 }
 
@@ -3134,12 +3184,13 @@ static Outcome c_system(Ctx *c, uint32_t insn) {
 
 static Outcome c_branch_system(Ctx *c, uint32_t insn) {
   if (bits(insn, 30, 26) == 0x05) { /* B, BL */
-    if (bit(insn, 31)) { /* a call: leaves the region */
+    if (bit(insn, 31)) { /* BL: into the callee in the region if it can be there, back at the return site */
       if (g_interp_trace_count) return OUTCOME_END_HELPER;
-      i64c(c, c->pc + INSN_BYTES);
+      const uint64_t target = branch_target(c, insn, 25, 0), back = c->pc + INSN_BYTES;
+      i64c(c, back);
       set_x(c, CPU_REG_X30);
-      i64c(c, branch_target(c, insn, 25, 0));
-      exit_to_stack(c);
+      if (c->discover && add_block(c, target) && add_block(c, back)) c->blocks[find_block(c, back)].return_site = true;
+      branch_to(c, target);
       return OUTCOME_END;
     }
     branch_to(c, branch_target(c, insn, 25, 0));
@@ -3174,11 +3225,29 @@ static Outcome c_branch_system(Ctx *c, uint32_t insn) {
       return OUTCOME_END_HELPER;
     }
     if (g_interp_trace_count && opc != 0) return OUTCOME_END_HELPER;
-    get_x(c, bits(insn, 9, 5));
+    const uint32_t rn = bits(insn, 9, 5);
+    const bool predicted = opc == 0 && rn != REG_ZR && (c->predicted_mask & (1u << rn));
+    const uint64_t prediction = predicted ? c->predicted_value[rn] : 0;
+    get_x(c, rn);
+    lset(c, L_NPC);
     if (opc == 1) {
       i64c(c, c->pc + INSN_BYTES);
       set_x(c, CPU_REG_X30);
     }
+    if (predicted && c->discover) (void)add_block(c, prediction);
+    /* Guarded internal targets: a RET to a return site in the region, a
+     * BR to the predicted PLT target; anything else leaves. */
+    for (uint32_t i = 0; i < c->block_count && opc != 1; i++) {
+      const bool candidate = opc == 2 ? c->blocks[i].return_site : (predicted && c->blocks[i].pc == prediction);
+      if (!candidate) continue;
+      lget(c, L_NPC);
+      i64c(c, c->blocks[i].pc);
+      op(c, WASM_OP_I64_EQ);
+      open_if(c, WASM_BLOCK_VOID);
+      branch_to(c, c->blocks[i].pc);
+      end_(c);
+    }
+    lget(c, L_NPC);
     exit_to_stack(c);
     return OUTCOME_END;
   }
@@ -3203,8 +3272,16 @@ static Outcome compile_instruction(Ctx *c, uint32_t insn) {
 /* Region block `b`'s instructions; returns how many. */
 static uint32_t compile_block_code(Ctx *c, uint32_t b) {
   const uint64_t start = c->blocks[b].pc;
-  const uint32_t *code = c->page_code + ((start - c->page) / INSN_BYTES);
-  const uint32_t available = (uint32_t)((c->page + VMM_PAGE_SIZE - start) / INSN_BYTES);
+  const uint64_t page = start & ~(uint64_t)VMM_PAGE_OFFSET_MASK;
+  int32_t p = -1;
+  for (uint32_t i = 0; i < c->page_count; i++) {
+    if (c->pages[i].base == page) p = (int32_t)i;
+  }
+  SWITCH_ASSERT_ALWAYS(p >= 0, "jit: region block outside the region's pages");
+  const uint32_t *code = c->pages[p].code + ((start - page) / INSN_BYTES);
+  const uint32_t available = (uint32_t)((page + VMM_PAGE_SIZE - start) / INSN_BYTES);
+  c->known_mask = 0;
+  c->predicted_mask = 0;
   const uint32_t count = available < c->max_block_insns ? available : c->max_block_insns;
   c->block_len = c->blocks[b].length;
   c->pc = start;
@@ -3514,21 +3591,21 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
 #define JIT_ANALYSIS_BYTES (256u * 1024u)
 static uint8_t g_analysis[JIT_ANALYSIS_BYTES];
 
-bool jit_compile_block(uint64_t pc, const uint32_t *page_code, uint64_t memory_pages, const Jit_Link *link,
+bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memory_pages, const Jit_Link *link,
                        uint8_t *out, uint32_t capacity, Jit_Compiled *result) {
   static Ctx analysis, c;
   uint32_t max_blocks = JIT_MAX_REGION_BLOCKS, max_block_insns = JIT_MAX_BLOCK_INSNS;
   for (;;) {
-    /* Pass 1: the region's blocks, and which registers they touch. */
+    /* Pass 1: the region's blocks and pages, and which registers they touch. */
     Wasm_Buf scratch = wasm_buf(g_analysis, JIT_ANALYSIS_BYTES);
     memset(&analysis, 0, sizeof(analysis));
     analysis.b = &scratch;
     analysis.link = link;
     analysis.discover = true;
-    analysis.page = pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK;
-    analysis.page_code = page_code;
+    analysis.source = source;
     analysis.max_blocks = max_blocks;
     analysis.max_block_insns = max_block_insns;
+    if (region_page(&analysis, pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK) < 0) return false;
     analysis.blocks[0].pc = pc;
     analysis.block_count = 1;
     emit_function(&analysis);
@@ -3543,8 +3620,9 @@ bool jit_compile_block(uint64_t pc, const uint32_t *page_code, uint64_t memory_p
     memset(&c, 0, sizeof(c));
     c.b = &b;
     c.link = link;
-    c.page = analysis.page;
-    c.page_code = page_code;
+    c.source = source;
+    memcpy(c.pages, analysis.pages, sizeof(c.pages));
+    c.page_count = analysis.page_count;
     c.max_blocks = max_blocks;
     c.max_block_insns = max_block_insns;
     memcpy(c.blocks, analysis.blocks, sizeof(c.blocks));
@@ -3557,16 +3635,22 @@ bool jit_compile_block(uint64_t pc, const uint32_t *page_code, uint64_t memory_p
     wasm_patch_size(&b, body);
     wasm_patch_size(&b, section);
     if (!b.overflow && !scratch.overflow) {
-      uint64_t low = pc, high = pc;
-      for (uint32_t i = 0; i < c.block_count; i++) {
-        const uint64_t start = c.blocks[i].pc, end = start + (uint64_t)c.blocks[i].length * INSN_BYTES;
-        if (start < low) low = start;
-        if (end > high) high = end;
+      /* One code range per page: the span of the blocks in it. */
+      result->range_count = c.page_count;
+      for (uint32_t p = 0; p < c.page_count; p++) {
+        uint64_t low = UINT64_MAX, high = 0;
+        for (uint32_t i = 0; i < c.block_count; i++) {
+          const uint64_t start = c.blocks[i].pc, end = start + (uint64_t)c.blocks[i].length * INSN_BYTES;
+          if ((start & ~(uint64_t)VMM_PAGE_OFFSET_MASK) != c.pages[p].base) continue;
+          if (start < low) low = start;
+          if (end > high) high = end;
+        }
+        if (low == UINT64_MAX) low = high = c.pages[p].base; /* a page with no surviving block */
+        result->ranges[p].start = low;
+        result->ranges[p].words = (uint32_t)((high - low) / INSN_BYTES);
       }
       result->instructions = c.blocks[0].length;
       result->blocks = c.block_count;
-      result->code_start = low;
-      result->code_words = (uint32_t)((high - low) / INSN_BYTES);
       result->module_bytes = b.length;
       return true;
     }
