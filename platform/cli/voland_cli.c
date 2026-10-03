@@ -512,8 +512,10 @@ static int run(int argc, char **argv) {
       }
       for (uint32_t k = 0; k < job.input_count && input_count < MAX_INPUT_EVENTS; k++) inputs[input_count++] = job.inputs[k];
       if (job.snapshot_at > slices) {
+        static char nested_dir[sizeof(job.snapshot_dir)]; /* `job` is cleared before the next serve */
+        memcpy(nested_dir, job.snapshot_dir, sizeof(nested_dir));
         snapshot_at = job.snapshot_at;
-        snapshot_dir = job.snapshot_dir;
+        snapshot_dir = nested_dir;
       }
     }
 #endif
