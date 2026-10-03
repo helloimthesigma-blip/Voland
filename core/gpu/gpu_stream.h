@@ -12,6 +12,7 @@
  *     +32 u64 read position (monotonic; advanced by the consumer)
  *     +40 i32 write signal (bumped + notified on publish: the consumer waits on it)
  *     +44 i32 read signal (bumped + notified by the consumer: a full producer waits on it)
+ *     +48 u32 presents (PRESENT records written so far; read by the frame-rate meter)
  *   Record: u32 type, u32 size (header included, a multiple of 8), payload.
  *   A record never straddles the ring's end: the producer pads to it with
  *   GPU_REC_PAD and continues at offset 0.
@@ -28,7 +29,7 @@
 
 #define GPU_STREAM_MAGIC 0x55504756u /* "VGPU" */
 #define GPU_STREAM_VERSION 1u
-#define GPU_STREAM_HEADER_BYTES 48u
+#define GPU_STREAM_HEADER_BYTES 56u
 #define GPU_STREAM_RECORD_HEADER_BYTES 8u
 #define GPU_STREAM_ALIGN 8u
 #define GPU_STREAM_RING_OFFSET 64u /* where the ring starts when it shares a region with its header */
@@ -41,6 +42,7 @@
 #define GPU_STREAM_OFF_READ 32u
 #define GPU_STREAM_OFF_WRITE_SIGNAL 40u
 #define GPU_STREAM_OFF_READ_SIGNAL 44u
+#define GPU_STREAM_OFF_PRESENTS 48u /* u32: PRESENT records written (the platform's frame-rate meter) */
 
 #define GPU_REC_PAD 0u /* skip to the ring's start */
 

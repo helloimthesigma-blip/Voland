@@ -6,7 +6,7 @@
 
 export const GPU_STREAM_MAGIC = 0x55504756;
 export const GPU_STREAM_VERSION = 1;
-export const GPU_STREAM_HEADER_BYTES = 48;
+export const GPU_STREAM_HEADER_BYTES = 56;
 export const GPU_STREAM_RECORD_HEADER_BYTES = 8;
 export const OFF_MAGIC = 0;
 export const OFF_VERSION = 4;
@@ -16,6 +16,7 @@ export const OFF_WRITE = 24;
 export const OFF_READ = 32;
 export const OFF_WRITE_SIGNAL = 40;
 export const OFF_READ_SIGNAL = 44;
+export const OFF_PRESENTS = 48;
 
 export const REC_PAD = 0;
 export const REC_TEXTURE_CREATE = 1;

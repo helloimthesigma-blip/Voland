@@ -2427,9 +2427,28 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.70.0*
+*Document version: 3.71.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.70 → v3.71 (summary)
+
+- **WebGPU renderer (§13), on by default in the browser.** The software renderer's front half stays on the CPU: vertex programs, assembly, clipping, the viewport transform and culling. Screen-space triangles, with varyings pre-divided by w, stream to the GPU worker through the `gpu_ring` region (`docs/GPU_COMMAND_STREAM.md`, `gpu_stream.h`, `gpu_records.h`).
+  - **Pixel programs** are translated to WGSL (`core/gpu/wgsl.{h,c}`) with the interpreter's semantics. Straight-line code is emitted directly; branchy code runs in a pc-dispatch loop with one-lane flow stacks. Quad ops become `dpdxFine`/`dpdyFine`.
+  - **Textures** are read with `textureLoad`, with wrap, border, bilinear, depth compare and swizzle done in-shader from per-draw constants. A hardware sampler is used where it is exact: filterable formats with WebGPU wrap modes. Bindless handles are found by running the pixel program once on the CPU per draw (a probe).
+  - **Render targets** live only on the GPU. vi presents of them and 2D-engine blits from them become PRESENT/COPY records, matched through a new `Gpu_Memory.translate` (GPU VA → guest VA).
+  - **Executor** (`platform/web/workers/gpu-executor.ts`): one encoder per batch; uploads flush the batch (queue-timeline order); buffer sets rotate.
+  - **Off switch:** `?renderer=software` selects the reference renderer.
+- **Verification.**
+  - Differential WGSL vectors (`tests/wgsl_test.c` → `tools/wgsl-vectors.mjs`) match the interpreter bit for bit on WebGPU, or within 1 ulp through hardware samplers.
+  - `voland-cli --gpu-stream` records a stream that `tools/replay-gpu-stream.mjs` replays.
+  - NX-Shell's frame is pixel-identical to the software renderer's. Silksong's title screen differs by a mean of 0.02/255.
+  - All 23 Silksong pixel programs seen so far validate.
+- **Speed.**
+  - Silksong's title-screen stream replays at 4.4 ms of GPU time per frame on Apple Metal.
+  - Native GPU mode reaches the title in 73 s against about 10 min for software rasterisation.
+  - Browser, real GPU, at the logos: about 3 fps, up from 1.1. The rest is ARM interpretation (profiled by the new `VOLAND_PC_PROFILE`), which is what the JIT (`local/jit`) addresses.
+- **Deviation, stated:** headless Chromium uses SwiftShader unless given `--use-angle=metal`. The new Playwright project `chromium-gpu` (homebrew spec only) measures on the real GPU.
 
 ### Changelog v3.69 → v3.70 (summary)
 

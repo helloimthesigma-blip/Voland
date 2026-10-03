@@ -40,6 +40,7 @@ the header is at its base and the ring starts at +64. In `voland-cli
 | +32 | u64 read position (monotonic; advanced by the consumer) |
 | +40 | i32 write signal (bumped + `memory.atomic.notify` on publish) |
 | +44 | i32 read signal (bumped + `Atomics.notify` by the consumer) |
+| +48 | u32 presents (PRESENT records written; the frame-rate meter reads it) |
 
 - **Records.** Each record is `u32 type, u32 size` (header included, a
   multiple of 8), then the payload. A record never straddles the ring's

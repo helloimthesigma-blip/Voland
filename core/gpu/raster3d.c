@@ -3422,6 +3422,7 @@ bool raster3d_gpu_present(Raster3d *r, uint64_t cpu_address, uint32_t width, uin
   p.rect[3] = crop[2] ? crop[3] : (int32_t)(height < s->height ? height : s->height);
   p.flags = flags;
   gpu_stream_write(r->gpu, GPU_REC_PRESENT, &p, sizeof(p));
+  __atomic_fetch_add((uint32_t *)(void *)(r->gpu->header + GPU_STREAM_OFF_PRESENTS), 1u, __ATOMIC_RELAXED);
   gpu_stream_publish(r->gpu);
   r->gpu_stats.presents++;
   return true;

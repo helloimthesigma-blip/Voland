@@ -416,6 +416,65 @@ static void snapshot_serve(const char *dir, Snapshot_Job *job) {
 
 static void setup_call_trace(Emulator *emu);
 
+/* VOLAND_PC_PROFILE=1: after every slice, the thread that ran is charged
+ * the slice's cycles at the 256-byte block of guest code it stopped in;
+ * the hottest blocks print at exit (module + offset) - where guest time
+ * goes, for titles without symbols (diagnostics). */
+#define PC_PROFILE_SLOTS 65536u
+#define PC_PROFILE_BLOCK_BITS 8u
+typedef struct Pc_Bucket {
+  uint64_t block;
+  uint64_t cycles;
+  uint64_t hits;
+} Pc_Bucket;
+static Pc_Bucket g_pc_profile[PC_PROFILE_SLOTS];
+
+static void pc_profile_sample(Emulator *emu) {
+  const Sched_Thread *ran = NULL;
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    const Sched_Thread *th = &emu->scheduler.threads[i];
+    if (th->state == THREAD_STATE_FREE || !th->thread.cpu_state) continue;
+    if (!ran || th->last_run > ran->last_run) ran = th;
+  }
+  if (!ran) return;
+  const uint64_t pc = emu->cpu_backend->get_pc(ran->thread.cpu_state);
+  const uint64_t cycles = emu->cpu_backend->get_cycles_consumed(ran->thread.cpu_state);
+  const uint64_t block = pc >> PC_PROFILE_BLOCK_BITS;
+  for (uint32_t probe = 0; probe < PC_PROFILE_SLOTS; probe++) {
+    Pc_Bucket *b = &g_pc_profile[(block * 0x9E3779B1u + probe) % PC_PROFILE_SLOTS];
+    if (b->hits && b->block != block) continue;
+    b->block = block;
+    b->cycles += cycles;
+    b->hits++;
+    return;
+  }
+}
+
+static void pc_profile_print(Emulator *emu) {
+  uint64_t total = 0;
+  for (uint32_t i = 0; i < PC_PROFILE_SLOTS; i++) total += g_pc_profile[i].cycles;
+  fprintf(stderr, "voland-cli: guest PC profile (%llu cycles):\n", (unsigned long long)total);
+  for (uint32_t rank = 0; rank < 40u && total; rank++) {
+    Pc_Bucket *best = NULL;
+    for (uint32_t i = 0; i < PC_PROFILE_SLOTS; i++)
+      if (g_pc_profile[i].cycles && (!best || g_pc_profile[i].cycles > best->cycles)) best = &g_pc_profile[i];
+    if (!best) break;
+    const uint64_t pc = best->block << PC_PROFILE_BLOCK_BITS;
+    const char *module = "?";
+    uint64_t offset = pc;
+    for (uint32_t m = 0; m < emu->process.module_count; m++) {
+      const Process_Module *mod = &emu->process.modules[m];
+      if (pc >= mod->base_gva && pc < mod->base_gva + mod->image_size) {
+        module = mod->name;
+        offset = pc - mod->base_gva;
+      }
+    }
+    fprintf(stderr, "  %5.2f%%  %s+0x%llx  (%llu slices)\n", 100.0 * (double)best->cycles / (double)total, module,
+            (unsigned long long)offset, (unsigned long long)best->hits);
+    best->cycles = 0;
+  }
+}
+
 /* --gpu-stream: the ring the GPU-mode producer writes, drained into a file
  * whenever it fills and after every slice. */
 #define CLI_GPU_RING_BYTES ((uint64_t)4 * 1024 * 1024)
@@ -584,6 +643,7 @@ static int run(int argc, char **argv) {
     gpu_stream_init(&g_gpu_stream, g_gpu_header, g_gpu_ring, CLI_GPU_RING_BYTES, gpu_stream_wait, NULL);
     raster3d_set_gpu(&emu.renderer, &g_gpu_stream);
   }
+  const bool pc_profile = getenv("VOLAND_PC_PROFILE") != NULL;
   /* VOLAND_TRACE_DRAWS=START:LENGTH logs every draw in that slice window. */
   uint64_t trace_start = UINT64_MAX, trace_length = 0;
   if (getenv("VOLAND_TRACE_DRAWS")) {
@@ -619,6 +679,7 @@ static int run(int argc, char **argv) {
     if (input_count) apply_input(inputs, input_count, slices);
     emu.renderer.trace_draws = slices >= trace_start && slices - trace_start < trace_length;
     status = emulator_run_slice(&emu, budget);
+    if (pc_profile) pc_profile_sample(&emu);
     {
       /* A software keyboard is up: answer it like a player would. */
       static Am_Text_Request request;
@@ -654,6 +715,7 @@ static int run(int argc, char **argv) {
             (unsigned long long)(gs->upload_bytes >> 20), (unsigned long long)gs->surfaces,
             (unsigned long long)gs->presents, (unsigned long long)gs->copies);
   }
+  if (pc_profile) pc_profile_print(&emu);
   uint32_t width = 0, height = 0;
   const uint64_t frame_hash = newest_frame_hash(&width, &height);
   static const char *const k_status[] = {"running", "idle", "exited", "crashed", "deadlock", "not loaded"};
