@@ -46,6 +46,9 @@
  *     expectations, 64 usage, 66 load failure.
  *
  *   voland-cli verify-dump <file>
+ *   voland-cli romfs <file.nca> [SUBSTRING [OUTDIR]]
+ *     Lists the program's RomFS files whose path contains SUBSTRING (all
+ *     without one), with sizes; with OUTDIR, copies them there (flat).
  *     Structural check of a dump without booting: NRO or decrypted NCA
  *     (encrypted input is reported with docs/DUMP.md, §1.6), its type,
  *     program id and sections, plus an FNV-1a-64 fingerprint of the file
@@ -71,6 +74,7 @@
 #include "gpu/wgsl.h"
 #include "hle/loader/nca_parse.h"
 #include "hle/loader/nro.h"
+#include "hle/loader/romfs.h"
 
 #include <dirent.h>
 #include <stdio.h>
@@ -956,7 +960,8 @@ static void usage(void) {
           "                      [--max-slices N] [--test-card] [--expect-output TEXT]\n"
           "                      [--dump-frame FILE [--dump-frames-every N]]\n"
           "                      [--expect-frame-hash HEX]\n"
-          "       voland-cli verify-dump <file>\n");
+          "       voland-cli verify-dump <file>\n"
+          "       voland-cli romfs <file.nca> [SUBSTRING [OUTDIR]]\n");
 }
 
 
@@ -1009,7 +1014,76 @@ static void setup_call_trace(Emulator *emu) {
   interp_set_call_trace(targets, count, trace_hook);
 }
 
+/* ------------------------------------------------------------------ */
+/* romfs                                                               */
+/* ------------------------------------------------------------------ */
+
+#define ROMFS_ARENA_BYTES ((size_t)80 * 1024 * 1024)
+#define ROMFS_COPY_CHUNK ((uint64_t)1 << 20)
+
+static uint32_t romfs_walk(const RomFS *fs, uint32_t dir_offset, char *path, size_t length, const char *filter,
+                           const char *out_dir) {
+  static uint8_t chunk[ROMFS_COPY_CHUNK];
+  RomFS_Dir_Entry dir;
+  uint32_t matches = 0;
+  if (!error_is_ok(romfs_dir_entry(fs, dir_offset, &dir))) return 0;
+  for (uint32_t f = dir.first_child_file; f != ROMFS_NO_ENTRY;) {
+    RomFS_File_Entry file;
+    if (!error_is_ok(romfs_file_entry(fs, f, &file))) break;
+    const int n = snprintf(path + length, ROMFS_MAX_PATH_BYTES - length, "/%.*s", (int)file.name_length, file.name);
+    if (n > 0 && (!filter || strstr(path, filter))) {
+      printf("%12llu  %s\n", (unsigned long long)file.data_size, path);
+      matches++;
+      if (out_dir) {
+        char target[2048];
+        snprintf(target, sizeof(target), "%s/%.*s", out_dir, (int)file.name_length, file.name);
+        FILE *out = fopen(target, "wb");
+        for (uint64_t at = 0; out && at < file.data_size; at += ROMFS_COPY_CHUNK) {
+          const uint64_t size = file.data_size - at < ROMFS_COPY_CHUNK ? file.data_size - at : ROMFS_COPY_CHUNK;
+          if (!error_is_ok(romfs_read_file(fs, &file, at, chunk, size))) break;
+          fwrite(chunk, 1, (size_t)size, out);
+        }
+        if (out) fclose(out);
+      }
+    }
+    path[length] = 0;
+    f = file.next_sibling;
+  }
+  for (uint32_t d = dir.first_child_dir; d != ROMFS_NO_ENTRY;) {
+    RomFS_Dir_Entry child;
+    if (!error_is_ok(romfs_dir_entry(fs, d, &child))) break;
+    const int n = snprintf(path + length, ROMFS_MAX_PATH_BYTES - length, "/%.*s", (int)child.name_length, child.name);
+    if (n > 0) matches += romfs_walk(fs, d, path, length + (size_t)n, filter, out_dir);
+    path[length] = 0;
+    d = child.next_sibling;
+  }
+  return matches;
+}
+
+static int romfs_command(int argc, char **argv) {
+  FILE *file = NULL;
+  Byte_Source source;
+  if (!open_source(argv[0], &file, &source)) return EXIT_LOAD_FAILED;
+  static Emulator emu;
+  if (!error_is_ok(emulator_create(&emu)) || !error_is_ok(emulator_load(&emu, &source, 0)) || !emu.romfs) {
+    fprintf(stderr, "voland-cli: %s: no RomFS\n", argv[0]);
+    return EXIT_LOAD_FAILED;
+  }
+  Arena arena;
+  RomFS fs;
+  if (!arena_create(&arena, ROMFS_ARENA_BYTES) || !error_is_ok(romfs_open(emu.romfs, &arena, &fs))) {
+    fprintf(stderr, "voland-cli: RomFS unreadable\n");
+    return EXIT_LOAD_FAILED;
+  }
+  static char path[ROMFS_MAX_PATH_BYTES + 1];
+  const uint32_t matches = romfs_walk(&fs, ROMFS_ROOT_DIR_OFFSET, path, 0, argc > 1 ? argv[1] : NULL,
+                                      argc > 2 ? argv[2] : NULL);
+  fprintf(stderr, "voland-cli: %u file(s)\n", matches);
+  return 0;
+}
+
 int main(int argc, char **argv) {
+  if (argc >= 3 && !strcmp(argv[1], "romfs")) return romfs_command(argc - 2, argv + 2);
   if (argc >= 3 && !strcmp(argv[1], "run")) return run(argc - 2, argv + 2);
   if (argc == 3 && !strcmp(argv[1], "verify-dump")) return verify_dump(argv[2]);
   usage();

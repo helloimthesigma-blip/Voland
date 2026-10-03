@@ -47,6 +47,14 @@ static void test_h264_params(void) {
   CHECK(p.log2_max_frame_num_minus4 == 5u && p.pic_init_qp_minus26 == -3);
   CHECK(p.chroma_qp_index_offset == -2 && p.second_chroma_qp_index_offset == -2 && p.weighted_bipred_idc == 2u);
   CHECK(p.chroma_format_idc == 1u && !p.scaling_matrix_present);
+  CHECK(p.max_num_ref_frames == 4u); /* l0 default active + 1 */
+  /* DPB entries with a top/bottom marking are references (Silksong's words). */
+  CHECK(nvdec_h264_references(s) == 0u);
+  wr32(s + 0xC0, 0x00223000u);
+  wr32(s + 0xD0, 0x00223081u);
+  wr32(s + 0xE0, 0x00003002u); /* state set, unmarked: not a reference */
+  CHECK(nvdec_h264_references(s) == 2u);
+  memset(s + 0xC0, 0, 0x30);
   /* A non-flat 4x4 list turns the matrices on, read in zig-zag order. */
   s[0x1C0 + 4] = 20; /* raster (row 1, col 0) = zig-zag position 2 */
   nvdec_h264_params(s, &p);
