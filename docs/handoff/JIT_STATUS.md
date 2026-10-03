@@ -107,7 +107,8 @@ target.
 | JIT, before vector FP | 7.63 | 9,034 |
 | JIT + vector FP / integer NEON fast paths | 9.55 | 11,273 |
 | JIT + exact-zero-aware FP guards | 11.90 | 14,034 |
-| JIT + regions spanning calls / PLT stubs (cores=0) | **15.55** | **18,449** |
+| JIT + regions spanning calls / PLT stubs (cores=0) | 15.55 | 18,449 |
+| JIT + span only small callees / PLT stubs (cores=0) | **18.85** (20 steady) | **22,390** |
 
 - The title screen is dominated by vector NEON FP (FMUL/FADD/FMLA .4S,
   by element).
@@ -134,6 +135,16 @@ entered millions of times. Regions now span calls:
 
 In the benchmark the BL/RET loop went from 3.3 to 0.87 ns per
 instruction.
+
+Spanning only small callees (leaf functions and PLT stubs that return or
+branch away within 16 instructions) beats spanning every callee. Node,
+process CPU time on the gameplay recipe:
+
+| | CPU to slice 3.5M | 500k gameplay slices | modules |
+|---|---|---|---|
+| no spanning | 594 s | 32.6 s | 320 MB |
+| span every callee | 836 s | 25.8 s | 660 MB |
+| span small callees | **492 s** | **19.5 s** | 352 MB |
 
 ## Merge status (for the coordinator)
 
