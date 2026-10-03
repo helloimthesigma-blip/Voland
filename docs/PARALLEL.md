@@ -1,6 +1,7 @@
 # Parallel guest threads
 
-Status: opt-in scheduler mode, the default in the web build (two cores).
+Status: opt-in scheduler mode, the default in the web build (three cores
+where the machine has room).
 The owner is bot 1 (`docs/handoff/BOT_1.md`). This document is the design;
 measurements live in `docs/handoff/BOT_1_STATUS.md`.
 
@@ -209,8 +210,9 @@ core nothing changes.
 
 ## Web
 
-- **Default and override.** `cpu.worker.ts` applies `DEFAULT_HOST_CORES`
-  (2) on every load. `?cores=N` on the page URL overrides it through a
+- **Default and override.** `cpu.worker.ts` applies `DEFAULT_HOST_CORES` on
+  every load: 3 (the Switch's application cores), capped at
+  `navigator.hardwareConcurrency - 2` and at least 1. `?cores=N` on the page URL overrides it through a
   `set-host-cores` message; `?cores=0` is serial.
 - **The CPU worker is Emscripten's main runtime thread.** A core's
   syscalls (stderr, anything else not marked `__proxy: none`) are proxied

@@ -28,9 +28,12 @@ Owner: bot 1. The design is `docs/PARALLEL.md`.
       heap addresses.
     - Cost of one core: +6.4% host instructions (1.666e12 vs 1.566e12),
       from the per-slice handoff to the core thread.
-- [ ] 2. Two or three host threads natively: Silksong reaches the title and
-  gameplay; measure. *In progress.*
-- [ ] 3. Web: on by default (2 cores) in this branch; fps not measured yet.
+- [x] **2. Two or three host threads natively.** Silksong reaches the title
+  (900k slices on 2 cores) and runs gameplay from a 4.75M-slice snapshot
+  on 2, 3 and 4 cores with no crash or deadlock: 12 runs after the
+  sync-word fix. Measurements are below.
+- [ ] 3. Web: on by default (3 cores, capped by hardwareConcurrency).
+  Browser fps measurement is in progress.
 - [x] 4. Stress test: exclusives on real host threads, see milestone 1
   (`atomics.s`).
 
@@ -69,7 +72,7 @@ All are small and delimited:
   `add_subdirectory(tests/parallel_wasm)` for Emscripten builds (all
   targets are `EXCLUDE_FROM_ALL`).
 - **Web.**
-  - `platform/web/workers/cpu.worker.ts`: `DEFAULT_HOST_CORES = 2`, and
+  - `platform/web/workers/cpu.worker.ts`: `DEFAULT_HOST_CORES` (3, capped at hardwareConcurrency - 2), and
     the `set-host-cores` message.
   - `platform/web/bindings/{core,protocol}.ts`: the FFI type and the
     message.
@@ -91,21 +94,40 @@ host's instructions-retired counter, which load doesn't change.
 | Title, 900k slices, native, 2 cores | No crash or deadlock; 1,350 presents vs 1,218 serial, virtual time 490.9M vs 456.9M. Wall 374 s vs 353 s, but the process got only about 0.8 of a host core on average (machine saturated). |
 | One core vs serial | +6.4% host instructions (the per-slice handoff) at a 100k budget. |
 
-Gameplay numbers (snapshot at 4.75M slices) are pending.
+### Gameplay
 
-## Needs from others
+All runs start from one snapshot at 4.75M slices (the gameplay recipe) and
+cover 100k slices each. Silksong runs at exactly 60 fps of *virtual* time
+in gameplay and idles until vsync, so the wall-clock fps is how fast we
+simulate virtual time.
 
-- **JIT agent.**
-  - `emulator_set_host_cores` accepts only a backend with `supports_multicore` (new `CPU_Backend` flag), so a JIT
-    it stays serial: the JIT code cache would be shared by host threads.
-  - To lift that: make the code cache per host thread (as
-    `interp_predecode.c` now does) or safe to share, and route
-    LDXR/STXR/LDAXR/STLXR/LDAR/STLR/DMB through the interpreter, or do the
-    same CAS and fences when `cpu_multicore()` is set.
-  - After the SVC handler returns, the backend must not write guest
-    registers: another core may already be writing X0/X1 of a woken
-    thread.
-- **Bot 4 / coordinator.** `PTHREAD_POOL_SIZE=8` is shared by the pixel
-  workers and the guest cores. `emulator_set_host_cores` shrinks the pixel
-  workers to fit. A pool of 12 would let both be full-size; that is a §24
-  flag change I have not made.
+Stability after the kernel sync-word fix (`37cfe86`):
+
+| Mode | Runs | Frames per run | Parallelism | Host instructions per frame |
+|---|---|---|---|---|
+| Serial | 1 | 164 | 1.00× | 2.20e9 |
+| 2 cores | 8 | 145–147 | 1.35–1.36× | 2.25e9 (+2.4%) |
+| 3 cores | 4 | 150–152 | 1.93–1.94× | 2.27e9 (+3%) |
+
+- Total host work barely grows. The handoff and lock overhead is small.
+- The critical path per frame (instructions per frame ÷ parallelism)
+  gives the expected speedup on a machine with free cores: about **1.32×
+  for 2 cores and 1.88× for 3**.
+- Before the fix, one 2-core run out of 8 stalled: the main thread slept
+  forever on a condvar.
+
+Wall time on this machine (load 13–20; noisy, ±20% between identical
+runs), as virtual time per wall second against serial:
+
+| Mode | Round 1 | Round 2 | Mean |
+|---|---|---|---|
+| 2 cores | +25% | +17% | ≈ +21% |
+| 3 cores | +41% | +28% | ≈ +34% |
+| 4 cores | — | +36% | — |
+
+One core vs serial at gameplay: bit-identical (virtual time
+2,126,879,793 in every run).
+
+### Browser
+
+Pending (`tools/perf.mjs`, `cores=0` vs `cores=3`, title screen).
