@@ -7,8 +7,8 @@ project(Voland
 #
 # Options (see docs/DESIGN.md section 24)
 #
-set(CPU_BACKEND "noop" CACHE STRING "CPU backend: noop|interpreter|ballistic")
-set_property(CACHE CPU_BACKEND PROPERTY STRINGS noop interpreter ballistic)
+set(CPU_BACKEND "noop" CACHE STRING "CPU backend: noop|interpreter|jit|ballistic")
+set_property(CACHE CPU_BACKEND PROPERTY STRINGS noop interpreter jit ballistic)
 
 set(GPU_BACKEND "auto" CACHE STRING "GPU backend: webgpu|vulkan|metal|d3d12|auto")
 set_property(CACHE GPU_BACKEND PROPERTY STRINGS webgpu vulkan metal d3d12 auto)

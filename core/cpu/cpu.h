@@ -163,6 +163,7 @@ struct CPU_Backend
 
 extern const CPU_Backend CPU_BACKEND_NOOP;
 extern const CPU_Backend CPU_BACKEND_INTERPRETER; /* Phase 2 */
+extern const CPU_Backend CPU_BACKEND_JIT;         /* Voland's ARM64 -> wasm JIT (docs/JIT.md) */
 extern const CPU_Backend CPU_BACKEND_BALLISTIC;   /* only if -DCPU_BACKEND=ballistic */
 
 /* Returns the backend selected at configure time (see CPU_BACKEND CMake option). */

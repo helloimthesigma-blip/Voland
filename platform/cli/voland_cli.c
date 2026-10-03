@@ -4,7 +4,7 @@
  * launcher frontends. No GUI toolkit.
  *
  *   voland-cli run <file.nca|file.nro> [options]
- *       --backend interpreter|noop   CPU backend (default: interpreter)
+ *       --backend interpreter|jit|noop CPU backend (default: interpreter)
  *       --budget N                   cycles per scheduler slice (default 100000)
  *       --max-slices N               stop after N slices (default 10000000)
  *       --test-card                  publish the core's test card before running
@@ -401,6 +401,7 @@ static int run(int argc, char **argv) {
       const char *name = argv[++i];
       if (!strcmp(name, "noop")) backend = &CPU_BACKEND_NOOP;
       else if (!strcmp(name, "interpreter")) backend = &CPU_BACKEND_INTERPRETER;
+      else if (!strcmp(name, "jit")) backend = &CPU_BACKEND_JIT;
       else { fprintf(stderr, "voland-cli: unknown backend %s\n", name); return EXIT_USAGE; }
     } else if (!strcmp(argv[i], "--budget") && has_value) {
       budget = strtoull(argv[++i], NULL, 0);
@@ -758,7 +759,7 @@ static int verify_dump(const char *path) {
 
 static void usage(void) {
   fprintf(stderr,
-          "usage: voland-cli run <file.nca|file.nro> [--backend interpreter|noop] [--budget N]\n"
+          "usage: voland-cli run <file.nca|file.nro> [--backend interpreter|jit|noop] [--budget N]\n"
           "                      [--max-slices N] [--test-card] [--expect-output TEXT]\n"
           "                      [--dump-frame FILE [--dump-frames-every N]]\n"
           "                      [--expect-frame-hash HEX]\n"

@@ -19,6 +19,7 @@ set(SWITCH_CORE_SOURCES
   cpu/backends/interpreter/interp_simd_ldst.c
   cpu/backends/interpreter/interp_predecode.c
   cpu/backends/interpreter/softfloat.c
+  cpu/backends/jit/jit.c
   hle/hle.c
   hle/kernel/page_allocator.c
   hle/kernel/address_space.c
@@ -100,6 +101,7 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   cpu/cpu.h
   cpu/backends/noop/noop.h
   cpu/backends/interpreter/interpreter.h
+  cpu/backends/jit/jit.h
   hle/hle.h
   hle/kernel/page_allocator.h
   hle/kernel/address_space.h
@@ -159,6 +161,10 @@ elseif(CPU_BACKEND STREQUAL "interpreter")
   # The interpreter is always compiled (its tests run under every preset);
   # this only makes it the active backend.
   target_compile_definitions(switch_core PUBLIC SWITCH_CPU_BACKEND_INTERPRETER=1)
+elseif(CPU_BACKEND STREQUAL "jit")
+  # Voland's own ARM64 -> wasm JIT (docs/JIT.md); mixed mode over the
+  # interpreter, which is why the interpreter is always compiled too.
+  target_compile_definitions(switch_core PUBLIC SWITCH_CPU_BACKEND_JIT=1)
 elseif(CPU_BACKEND STREQUAL "ballistic")
   message(FATAL_ERROR "ballistic backend is a Phase 5 deliverable, not yet built (§10)")
 else()
