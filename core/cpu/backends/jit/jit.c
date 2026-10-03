@@ -567,6 +567,7 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
   s->cycles_consumed = 0;
   s->exclusive_valid = false; /* a potential context switch (§7) */
   j->cycle_budget = cycle_budget;
+  j->thread_cache = (uint64_t)(uintptr_t)t->cache; /* the guest thread may have moved cores */
   uint32_t grace = 0;
   CPU_ExitReason exit_reason = CPU_EXIT_CYCLES_ELAPSED;
   for (;;) {
