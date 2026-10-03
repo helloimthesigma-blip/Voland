@@ -317,7 +317,17 @@ static uint32_t g_fpcr, g_fpsr;
 static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint64_t *x, uint64_t sp, uint32_t nzcv) {
   for (uint8_t i = 0; i < 31; i++) cpu->set_reg(s, i, x[i]);
   for (uint8_t i = 0; i < CPU_VECTOR_REGISTER_COUNT; i++) {
-    const CPU_Vector_Register v = {x[i % 31] * 3u, x[(i + 7) % 31]};
+    CPU_Vector_Register v = {x[i % 31] * 3u, x[(i + 7) % 31]};
+    const int64_t small = (int64_t)(x[i] & 0xFFFF) - 32768;
+    if (i < 8) { /* ordinary doubles: the FP fast paths */
+      const double d = (i & 1) ? (double)small : (double)small / 3.0;
+      memcpy(&v.lo, &d, sizeof(d));
+    } else if (i < 16) { /* ordinary singles */
+      const float f = (i & 1) ? (float)small : (float)small / 7.0f;
+      uint32_t bits32;
+      memcpy(&bits32, &f, sizeof(bits32));
+      v.lo = bits32;
+    }
     cpu->set_vector_reg(s, i, v);
   }
   cpu->set_sp(s, sp);

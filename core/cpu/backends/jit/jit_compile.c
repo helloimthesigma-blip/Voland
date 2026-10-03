@@ -34,6 +34,7 @@
 
 #include <stddef.h>
 
+#include "cpu/backends/interpreter/softfloat.h"
 #include "cpu/backends/jit/jit_wasm.h"
 
 /* ------------------------------------------------------------------ */
@@ -72,9 +73,17 @@ enum {
   L_RESUME = 57, /* $helper: the region block to resume in */
   L_PASS = 58,   /* store-exclusive: did the monitor pass */
   L_LAST_I32 = 58,
+  L_FS = 59,     /* FP fast paths: f32 */
+  L_FS2 = 60,
+  L_LAST_F32 = 60,
+  L_FD = 61,     /* ...f64 */
+  L_FD2 = 62,
+  L_LAST_F64 = 62,
 };
 #define I64_LOCALS (L_LAST_I64 - L_STATE)
 #define I32_LOCALS (L_LAST_I32 - L_LAST_I64)
+#define F32_LOCALS (L_LAST_F32 - L_LAST_I32)
+#define F64_LOCALS (L_LAST_F64 - L_LAST_F32)
 
 /* Imported function indices, then the block function. */
 #define FUNC_INTERPRET 0u
@@ -1815,7 +1824,414 @@ static void simd_fp_sync(uint32_t insn, Sync *sync) {
   }
 }
 
+/* ------------------------------------------------------------------ */
+/* Scalar floating point: native fast paths.                           */
+/* ------------------------------------------------------------------ */
+/*
+ * The interpreter's FP is softfloat with ARM semantics and sticky FPSR
+ * flags. A wasm f32/f64 operation gives the identical bits and flags
+ * when: FPCR is 0 (round to nearest, no FZ, no DN); no NaN is involved;
+ * the result is finite and strictly above the smallest normal (no
+ * overflow, no underflow - ARM detects tininess before rounding, hence
+ * "strictly"); and FPSR.IXC is already set, so an inexact result changes
+ * nothing. Anything else - including the first inexact operation of a
+ * run - takes the exact path (emit_direct_call into the interpreter),
+ * which has not changed any state yet.
+ */
+
+#define FP_MIN_NORMAL_D 0x0010000000000000ull
+#define FP_INFINITY_D 0x7FF0000000000000ull
+#define FP_MIN_NORMAL_S 0x00800000u
+#define FP_INFINITY_S 0x7F800000u
+#define FP_SIGN_D 0x8000000000000000ull
+#define FP_SIGN_S 0x80000000u
+#define FPSR_IXC_BIT 4u /* softfloat.h FPSR_IXC */
+#define F32_EXTRA_BITS 29u /* f64 fraction bits below an f32's */
+#define F32_MIDPOINT (1ull << (F32_EXTRA_BITS - 1u))
+
+static void f64c(Ctx *c, uint64_t bits_value) {
+  op(c, WASM_OP_F64_CONST);
+  uint8_t raw[sizeof(uint64_t)];
+  for (uint32_t i = 0; i < sizeof(raw); i++) raw[i] = (uint8_t)(bits_value >> (8u * i));
+  wasm_bytes(c->b, raw, sizeof(raw));
+}
+static void f32c(Ctx *c, uint32_t bits_value) {
+  op(c, WASM_OP_F32_CONST);
+  uint8_t raw[sizeof(uint32_t)];
+  for (uint32_t i = 0; i < sizeof(raw); i++) raw[i] = (uint8_t)(bits_value >> (8u * i));
+  wasm_bytes(c->b, raw, sizeof(raw));
+}
+
+/* i32: FPCR == 0. */
+static void emit_fpcr_default(Ctx *c) {
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPCR);
+  op(c, WASM_OP_I32_EQZ);
+}
+/* i32: FPCR == 0 and FPSR.IXC set. */
+static void emit_fp_env_ok(Ctx *c) {
+  emit_fpcr_default(c);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
+  i32c(c, FPSR_IXC_BIT);
+  op(c, WASM_OP_I32_SHR_U);
+  op(c, WASM_OP_I32_AND);
+}
+
+/* The scalar in V[n] as f32/f64 on the stack. */
+static void load_fp(Ctx *c, uint32_t n, bool dbl) {
+  lget(c, L_STATE);
+  mem(c, dbl ? WASM_OP_F64_LOAD : WASM_OP_F32_LOAD, dbl ? ALIGN_8 : ALIGN_4, OFF_V(n));
+}
+
+/* V[d] = the f32/f64 in `local`, the rest of the register zeroed. */
+static void store_fp_local(Ctx *c, uint32_t d, bool dbl, uint32_t local) {
+  lget(c, L_STATE);
+  i64c(c, 0);
+  mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_V(d) + V_HIGH_HALF);
+  if (!dbl) {
+    lget(c, L_STATE);
+    i64c(c, 0);
+    mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_V(d));
+  }
+  lget(c, L_STATE);
+  lget(c, local);
+  mem(c, dbl ? WASM_OP_F64_STORE : WASM_OP_F32_STORE, dbl ? ALIGN_8 : ALIGN_4, OFF_V(d));
+}
+
+/* V[d] = the i64 bit pattern on the stack (a scalar of the format), the
+ * rest zeroed. */
+static void store_fp_bits(Ctx *c, uint32_t d) {
+  lset(c, L_T0);
+  state_store64_local(c, OFF_V(d), L_T0);
+  lget(c, L_STATE);
+  i64c(c, 0);
+  mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_V(d) + V_HIGH_HALF);
+}
+
+/* i32: smallest normal < |local| < infinity (false for NaN). */
+static void emit_result_normal(Ctx *c, uint32_t local, bool dbl) {
+  lget(c, local);
+  op(c, dbl ? WASM_OP_F64_ABS : WASM_OP_F32_ABS);
+  if (dbl) f64c(c, FP_MIN_NORMAL_D);
+  else f32c(c, FP_MIN_NORMAL_S);
+  op(c, dbl ? WASM_OP_F64_GT : WASM_OP_F32_GT);
+  lget(c, local);
+  op(c, dbl ? WASM_OP_F64_ABS : WASM_OP_F32_ABS);
+  if (dbl) f64c(c, FP_INFINITY_D);
+  else f32c(c, FP_INFINITY_S);
+  op(c, dbl ? WASM_OP_F64_LT : WASM_OP_F32_LT);
+  op(c, WASM_OP_I32_AND);
+}
+
+/* if (guard on the stack) { fast } else { exact direct call }: opens the
+ * fast arm; finish with fp_else_exact(). */
+static void fp_fast_arm(Ctx *c) { open_if(c, WASM_BLOCK_VOID); }
+static void fp_else_exact(Ctx *c, const Sync *sync) {
+  else_(c);
+  emit_direct_call(c, sync);
+  end_(c);
+}
+
+static uint32_t fp_result_local(bool dbl) { return dbl ? L_FD : L_FS; }
+
+/* FMUL, FDIV, FADD, FSUB, FNMUL, and FSQRT (two = false). */
+static void emit_fp_arith(Ctx *c, bool dbl, uint32_t opcode, bool two, uint32_t n, uint32_t m, uint32_t d) {
+  static const uint8_t ops64[4] = {WASM_OP_F64_MUL, WASM_OP_F64_DIV, WASM_OP_F64_ADD, WASM_OP_F64_SUB};
+  static const uint8_t ops32[4] = {WASM_OP_F32_MUL, WASM_OP_F32_DIV, WASM_OP_F32_ADD, WASM_OP_F32_SUB};
+  const uint32_t r = fp_result_local(dbl);
+  load_fp(c, n, dbl);
+  if (two) {
+    load_fp(c, m, dbl);
+    const uint32_t k = opcode == 8u ? 0u : opcode;
+    op(c, dbl ? ops64[k] : ops32[k]);
+    if (opcode == 8u) op(c, dbl ? WASM_OP_F64_NEG : WASM_OP_F32_NEG); /* FNMUL: -(a*b), after rounding */
+  } else {
+    op(c, dbl ? WASM_OP_F64_SQRT : WASM_OP_F32_SQRT);
+  }
+  lset(c, r);
+  emit_result_normal(c, r, dbl);
+  emit_fp_env_ok(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  store_fp_local(c, d, dbl, r);
+  Sync none = {0};
+  fp_else_exact(c, &none);
+}
+
+/* Single-precision FMADD/FMSUB/FNMADD/FNMSUB: addend + n*m in f64 (the
+ * product is exact there, the sum rounds once), then to f32 - the same
+ * as one rounding unless the f64 sum sits exactly on an f32 midpoint. */
+static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t m, uint32_t a, uint32_t d) {
+  load_fp(c, a, false);
+  op(c, WASM_OP_F64_PROMOTE_F32);
+  if (o1) op(c, WASM_OP_F64_NEG);
+  load_fp(c, n, false);
+  op(c, WASM_OP_F64_PROMOTE_F32);
+  if (o0 != o1) op(c, WASM_OP_F64_NEG);
+  load_fp(c, m, false);
+  op(c, WASM_OP_F64_PROMOTE_F32);
+  op(c, WASM_OP_F64_MUL);
+  op(c, WASM_OP_F64_ADD);
+  ltee(c, L_FD);
+  op(c, WASM_OP_F32_DEMOTE_F64);
+  lset(c, L_FS);
+  emit_result_normal(c, L_FS, false);
+  lget(c, L_FD); /* not on a midpoint */
+  op(c, WASM_OP_I64_REINTERPRET_F64);
+  i64c(c, (1ull << F32_EXTRA_BITS) - 1u);
+  op(c, WASM_OP_I64_AND);
+  i64c(c, F32_MIDPOINT);
+  op(c, WASM_OP_I64_NE);
+  op(c, WASM_OP_I32_AND);
+  emit_fp_env_ok(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  store_fp_local(c, d, false, L_FS);
+  Sync none = {0};
+  fp_else_exact(c, &none);
+}
+
+/* FCMP/FCMPE (and with #0.0): NZCV from an ordered compare. */
+static void emit_fp_compare(Ctx *c, bool dbl, uint32_t n, uint32_t m, bool with_zero) {
+  load_fp(c, n, dbl);
+  if (dbl) lset(c, L_FD);
+  else lset(c, L_FS);
+  if (with_zero) {
+    if (dbl) f64c(c, 0);
+    else f32c(c, 0);
+  } else {
+    load_fp(c, m, dbl);
+  }
+  if (dbl) lset(c, L_FD2);
+  else lset(c, L_FS2);
+  const uint32_t a = dbl ? L_FD : L_FS, b = dbl ? L_FD2 : L_FS2;
+  const uint8_t eq = dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ, lt = dbl ? WASM_OP_F64_LT : WASM_OP_F32_LT;
+  lget(c, a); /* no NaN: each equals itself */
+  lget(c, a);
+  op(c, eq);
+  lget(c, b);
+  lget(c, b);
+  op(c, eq);
+  op(c, WASM_OP_I32_AND);
+  emit_fpcr_default(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  i32c(c, CPU_PSTATE_N);                  /* a < b: 1000 */
+  i32c(c, CPU_PSTATE_Z | CPU_PSTATE_C);   /* a == b: 0110 */
+  i32c(c, CPU_PSTATE_C);                  /* a > b: 0010 */
+  lget(c, a);
+  lget(c, b);
+  op(c, eq);
+  op(c, WASM_OP_SELECT);
+  lget(c, a);
+  lget(c, b);
+  op(c, lt);
+  op(c, WASM_OP_SELECT);
+  store_flags(c);
+  Sync flags = {0};
+  flags.nzcv = true;
+  fp_else_exact(c, &flags);
+  c->flag_kind = FLAGS_LIVE;
+}
+
+/* Scalar FP with a native fast path; false: not one of these forms. */
+static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
+  if (bits(insn, 31, 29) != 0 || bits(insn, 28, 24) < 0x1E) {
+    /* FMOV/SCVTF/UCVTF/FCVTZS/FCVTZU (general) have sf in bit 31 */
+    if (!(bits(insn, 30, 24) == 0x1E && bit(insn, 21) && bits(insn, 15, 10) == 0)) return false;
+  }
+  const uint32_t ftype = bits(insn, 23, 22);
+  const uint32_t rn = bits(insn, 9, 5), rd = bits(insn, 4, 0), rm = bits(insn, 20, 16);
+  if (bit(insn, 24)) { /* FMADD & co.: single only (doubles need a true fused multiply-add) */
+    if (bit(insn, 31) || ftype != 0) return false;
+    emit_fp_fused_single(c, bit(insn, 21), bit(insn, 15), rn, rm, bits(insn, 14, 10), rd);
+    return true;
+  }
+  if (!bit(insn, 21)) return false; /* fixed-point conversions */
+  const bool dbl = ftype == 1u;
+  if (bits(insn, 15, 10) == 0) { /* conversions between FP and general registers */
+    const bool sf = bit(insn, 31);
+    const uint32_t rmode = bits(insn, 20, 19), opcode = bits(insn, 18, 16);
+    if (opcode == 6 || opcode == 7) { /* FMOV (general) */
+      if (sf && ftype == 2u && rmode == 1u) { /* Vd.D[1] <-> Xn */
+        if (opcode == 7) {
+          lget(c, L_STATE);
+          get_x(c, rn);
+          mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_V(rd) + V_HIGH_HALF);
+        } else {
+          state_load64(c, OFF_V(rn) + V_HIGH_HALF);
+          set_x(c, rd);
+        }
+        return true;
+      }
+      if (rmode != 0 || !((!sf && ftype == 0u) || (sf && ftype == 1u))) return false;
+      if (opcode == 7) {
+        get_xw(c, rn, sf);
+        store_fp_bits(c, rd);
+      } else {
+        state_load64(c, OFF_V(rn));
+        width(c, sf);
+        set_x(c, rd);
+      }
+      return true;
+    }
+    if (ftype > 1u) return false;
+    if ((opcode == 2 || opcode == 3) && rmode == 0) { /* SCVTF / UCVTF */
+      static const uint8_t to64[2][2] = {{WASM_OP_F64_CONVERT_I32_S, WASM_OP_F64_CONVERT_I32_U},
+                                         {WASM_OP_F64_CONVERT_I64_S, WASM_OP_F64_CONVERT_I64_U}};
+      static const uint8_t to32[2][2] = {{WASM_OP_F32_CONVERT_I32_S, WASM_OP_F32_CONVERT_I32_U},
+                                         {WASM_OP_F32_CONVERT_I64_S, WASM_OP_F32_CONVERT_I64_U}};
+      const uint32_t is_unsigned = opcode == 3;
+      const uint32_t r = fp_result_local(dbl);
+      get_x(c, rn);
+      if (!sf) op(c, WASM_OP_I32_WRAP_I64);
+      op(c, dbl ? to64[sf][is_unsigned] : to32[sf][is_unsigned]);
+      lset(c, r);
+      if (dbl && !sf) { /* a 32-bit integer always fits a double exactly */
+        emit_fpcr_default(c);
+      } else {
+        emit_fp_env_ok(c);
+      }
+      fp_fast_arm(c);
+      store_fp_local(c, rd, dbl, r);
+      Sync sync = {0};
+      sync_x(&sync, rn);
+      sync_x(&sync, rd);
+      fp_else_exact(c, &sync);
+      return true;
+    }
+    if ((opcode == 0 || opcode == 1) && rmode == 3) { /* FCVTZS / FCVTZU: truncation, in range only */
+      const bool is_unsigned = opcode == 1;
+      const uint32_t a = fp_result_local(dbl);
+      load_fp(c, rn, dbl);
+      lset(c, a);
+      /* low < a < high, as doubles (exact for every f32) */
+      const double high = sf ? 18446744073709551616.0 : 4294967296.0;
+      const double high_signed = sf ? 9223372036854775808.0 : 2147483648.0;
+      const double low = is_unsigned ? -1.0 : -(high_signed) - 1.0;
+      const double top = is_unsigned ? high : high_signed;
+      uint64_t low_bits, top_bits;
+      memcpy(&low_bits, &low, sizeof(low_bits));
+      memcpy(&top_bits, &top, sizeof(top_bits));
+      lget(c, a);
+      if (!dbl) op(c, WASM_OP_F64_PROMOTE_F32);
+      f64c(c, low_bits);
+      op(c, WASM_OP_F64_GT);
+      lget(c, a);
+      if (!dbl) op(c, WASM_OP_F64_PROMOTE_F32);
+      f64c(c, top_bits);
+      op(c, WASM_OP_F64_LT);
+      op(c, WASM_OP_I32_AND);
+      emit_fp_env_ok(c);
+      op(c, WASM_OP_I32_AND);
+      fp_fast_arm(c);
+      lget(c, a);
+      if (sf) {
+        static const uint8_t trunc64[2][2] = {{WASM_OP_I64_TRUNC_F32_S, WASM_OP_I64_TRUNC_F32_U},
+                                              {WASM_OP_I64_TRUNC_F64_S, WASM_OP_I64_TRUNC_F64_U}};
+        op(c, trunc64[dbl][is_unsigned]);
+      } else {
+        static const uint8_t trunc32[2][2] = {{WASM_OP_I32_TRUNC_F32_S, WASM_OP_I32_TRUNC_F32_U},
+                                              {WASM_OP_I32_TRUNC_F64_S, WASM_OP_I32_TRUNC_F64_U}};
+        op(c, trunc32[dbl][is_unsigned]);
+        op(c, WASM_OP_I64_EXTEND_I32_U);
+      }
+      set_x(c, rd);
+      Sync sync = {0};
+      sync_x(&sync, rn);
+      sync_x(&sync, rd);
+      fp_else_exact(c, &sync);
+      return true;
+    }
+    return false;
+  }
+  if (ftype > 1u) return false;
+  const uint64_t sign = dbl ? FP_SIGN_D : FP_SIGN_S;
+  if (bits(insn, 14, 10) == 0x10) { /* one source */
+    const uint32_t opcode = bits(insn, 20, 15);
+    switch (opcode) {
+    case 0: case 1: case 2: /* FMOV, FABS, FNEG: bit operations */
+      state_load64(c, OFF_V(rn));
+      width(c, dbl);
+      if (opcode == 1) {
+        i64c(c, ~sign);
+        op(c, WASM_OP_I64_AND);
+      } else if (opcode == 2) {
+        i64c(c, sign);
+        op(c, WASM_OP_I64_XOR);
+      }
+      store_fp_bits(c, rd);
+      return true;
+    case 3: /* FSQRT */
+      emit_fp_arith(c, dbl, 0, false, rn, 0, rd);
+      return true;
+    case 4: case 5: { /* FCVT between single and double */
+      const uint32_t to = opcode & 3u;
+      if (to == ftype) return false;
+      if (!dbl) { /* single -> double: exact unless NaN */
+        load_fp(c, rn, false);
+        op(c, WASM_OP_F64_PROMOTE_F32);
+        ltee(c, L_FD);
+        lget(c, L_FD);
+        op(c, WASM_OP_F64_EQ);
+        emit_fpcr_default(c);
+        op(c, WASM_OP_I32_AND);
+        fp_fast_arm(c);
+        store_fp_local(c, rd, true, L_FD);
+      } else { /* double -> single: rounds */
+        load_fp(c, rn, true);
+        op(c, WASM_OP_F32_DEMOTE_F64);
+        lset(c, L_FS);
+        emit_result_normal(c, L_FS, false);
+        emit_fp_env_ok(c);
+        op(c, WASM_OP_I32_AND);
+        fp_fast_arm(c);
+        store_fp_local(c, rd, false, L_FS);
+      }
+      Sync none = {0};
+      fp_else_exact(c, &none);
+      return true;
+    }
+    default:
+      return false;
+    }
+  }
+  if (bits(insn, 13, 10) == 0x8) { /* FCMP, FCMPE */
+    const uint32_t opcode2 = bits(insn, 4, 0);
+    if (bits(insn, 15, 14) != 0 || (opcode2 & 7u) != 0) return false;
+    emit_fp_compare(c, dbl, rn, rm, (opcode2 >> 3) & 1u);
+    return true;
+  }
+  if (bits(insn, 12, 10) == 0x4) { /* FMOV (immediate) */
+    if (rn != 0) return false;
+    i64c(c, fp_expand_imm8(dbl ? FP_DOUBLE : FP_SINGLE, bits(insn, 20, 13)));
+    store_fp_bits(c, rd);
+    return true;
+  }
+  switch (bits(insn, 11, 10)) {
+  case 2: { /* two source */
+    const uint32_t opcode = bits(insn, 15, 12);
+    if (opcode > 3u && opcode != 8u) return false; /* FMAX/FMIN & co.: NaN and zero rules */
+    emit_fp_arith(c, dbl, opcode, true, rn, rm, rd);
+    return true;
+  }
+  case 3: /* FCSEL */
+    state_load64(c, OFF_V(rn));
+    width(c, dbl);
+    state_load64(c, OFF_V(rm));
+    width(c, dbl);
+    emit_condition(c, bits(insn, 15, 12));
+    op(c, WASM_OP_SELECT);
+    store_fp_bits(c, rd);
+    return true;
+  default:
+    return false;
+  }
+}
+
 static bool c_simd_fp(Ctx *c, uint32_t insn) {
+  if (c_scalar_fp_fast(c, insn)) return true;
   Sync sync = {0};
   simd_fp_sync(insn, &sync);
   emit_direct_call(c, &sync);
@@ -2342,12 +2758,16 @@ static void emit_chain(Ctx *c) {
 }
 
 static void emit_function(Ctx *c) {
-  /* Locals: one run of i64, one of i32. */
-  wasm_uleb(c->b, 2);
+  /* Locals: one run each of i64, i32, f32, f64. */
+  wasm_uleb(c->b, 4);
   wasm_uleb(c->b, I64_LOCALS);
   wasm_u8(c->b, WASM_TYPE_I64);
   wasm_uleb(c->b, I32_LOCALS);
   wasm_u8(c->b, WASM_TYPE_I32);
+  wasm_uleb(c->b, F32_LOCALS);
+  wasm_u8(c->b, WASM_TYPE_F32);
+  wasm_uleb(c->b, F64_LOCALS);
+  wasm_u8(c->b, WASM_TYPE_F64);
 
   /* Prologue. The caller checked that block 0 fits the budget. */
   state_load64(c, OFF_L1);
