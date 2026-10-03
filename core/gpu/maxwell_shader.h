@@ -160,8 +160,8 @@ typedef enum Sm_Tex_Kind {
 } Sm_Tex_Kind;
 
 /* Lanes of one SIMT invocation (Sm_Thread below): a bit per lane. */
-#define SM_LANES 16u
-typedef uint16_t Sm_Mask;
+#define SM_LANES 32u
+typedef uint32_t Sm_Mask;
 
 typedef struct Sm_Tex_Request {
   Sm_Tex_Kind kind;
@@ -206,7 +206,7 @@ typedef struct Sm_Env {
  * masks. Lanes whose branches disagree split into separate warps that
  * each keep their own reconvergence stack, so every lane observes exactly
  * the scalar semantics. */
-#define SM_ALL_LANES ((Sm_Mask)0xFFFFu)
+#define SM_ALL_LANES ((Sm_Mask)0xFFFFFFFFu)
 
 typedef struct Sm_Thread {
   uint32_t lanes;                        /* lanes in use, 1..SM_LANES */

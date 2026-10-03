@@ -1966,7 +1966,7 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     /* Lane j's Ra to lane i (PTX shfl): mode IDX / UP / DOWN / BFLY, b the
      * lane operand, c = {segment mask @8, clamp @0}; an out-of-range j
      * reads the lane's own value and clears the predicate. Lanes are this
-     * warp's 16 (a quad is lanes 4q..4q+3, as the rasterizer packs them). */
+     * warp's SM_LANES (a quad is lanes 4q..4q+3, as the rasterizer packs them). */
     const uint32_t *a = t->r[REG_A(w)];
     uint32_t *d = dst_row(t, REG_D(w));
     const uint32_t mode = BITS(w, 30, 2);
