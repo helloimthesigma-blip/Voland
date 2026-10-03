@@ -82,14 +82,20 @@ typedef struct Jit_Thread {
    * an alias just makes a block hot a little early). */
   Jit_Entry cache[JIT_CACHE_ENTRIES];
   uint16_t hits[JIT_HIT_COUNTERS];
-  /* The code generation the dispatcher last saw; chained blocks only enter
-   * entries validated in it (jit_compile.c, emit_chain). */
+  /* The code generation the dispatcher last saw (for the counters).
+   * Chained blocks check the shared one (vmm.h) - entries validated in it,
+   * jit_compile.c emit_chain - so another core's mapping change stops
+   * them at once. */
   uint64_t generation;
   uint8_t module[JIT_MODULE_BYTES];
   /* The dispatcher's last block starts (bit 63: a compiled region was
    * entered), for the crash report. */
   uint64_t recent[JIT_RECENT_BLOCKS];
   uint32_t recent_next;
+  /* This thread's counters: every core bumping one shared struct on each
+   * block entry made its cache line bounce between cores (and raced).
+   * jit_stats() sums the threads. */
+  Jit_Stats stats;
 } Jit_Thread;
 
 #define JIT_RECENT_COMPILED (1ull << 63)
@@ -125,7 +131,6 @@ static void report_stop(const Jit_Thread *t, const Interp_State *s, CPU_ExitReas
 
 static Jit_Thread g_main_thread;
 static uint32_t g_hot_threshold = JIT_DEFAULT_HOT_THRESHOLD;
-static Jit_Stats g_stats;
 
 void jit_set_hot_threshold(uint32_t executions) { g_hot_threshold = executions ? executions : 1u; }
 
@@ -166,7 +171,6 @@ static void dump_module(uint64_t pc, const uint8_t *bytes, uint32_t length) {
   fwrite(bytes, 1, length, f);
   fclose(f);
 }
-const Jit_Stats *jit_stats(void) { return &g_stats; }
 
 /* The guest code a region was compiled from: DIR/<pc>.s, for an
  * assembler + disassembler (".word" per instruction, the address in a
@@ -251,6 +255,7 @@ static bool can_install(void) { return false; } /* no wasm engine natively */
 static Jit_Thread *thread_jit(void) { return &g_main_thread; }
 static void compiler_lock(void) {}
 static void compiler_unlock(void) {}
+const Jit_Stats *jit_stats(void) { return &g_main_thread.stats; }
 #else
 #include <pthread.h>
 
@@ -262,6 +267,38 @@ static void compiler_unlock(void) { pthread_mutex_unlock(&g_compiler); }
 
 static _Thread_local Jit_Thread *t_jit;
 static bool g_main_claimed;
+
+/* Every live thread's state, for jit_stats() (under g_compiler). */
+#define JIT_MAX_THREADS 16u
+static Jit_Thread *g_threads[JIT_MAX_THREADS];
+
+static void register_thread(Jit_Thread *t, bool add) {
+  compiler_lock();
+  for (uint32_t i = 0; i < JIT_MAX_THREADS; i++) {
+    if (add ? g_threads[i] == NULL : g_threads[i] == t) {
+      g_threads[i] = add ? t : NULL;
+      break;
+    }
+  }
+  compiler_unlock();
+}
+
+#define JIT_STATS_WORDS (sizeof(Jit_Stats) / sizeof(uint64_t))
+const Jit_Stats *jit_stats(void) {
+  static Jit_Stats total;
+  uint64_t sum[JIT_STATS_WORDS] = {0};
+  compiler_lock();
+  for (uint32_t i = 0; i < JIT_MAX_THREADS; i++) {
+    if (!g_threads[i]) continue;
+    uint64_t words[JIT_STATS_WORDS];
+    memcpy(words, &g_threads[i]->stats, sizeof(words));
+    for (uint32_t w = 0; w < JIT_STATS_WORDS; w++) sum[w] += words[w];
+  }
+  compiler_unlock();
+  memcpy(&total, sum, sizeof(total));
+  total.last_fpcr = g_main_thread.stats.last_fpcr; /* not a count */
+  return &total;
+}
 static pthread_key_t g_jit_key;
 static pthread_once_t g_jit_key_once = PTHREAD_ONCE_INIT;
 
@@ -269,6 +306,7 @@ static pthread_once_t g_jit_key_once = PTHREAD_ONCE_INIT;
  * reused), then its cache goes. */
 static void release_thread_jit(void *data) {
   Jit_Thread *t = (Jit_Thread *)data;
+  register_thread(t, false);
   for (uint32_t i = 0; i < JIT_CACHE_ENTRIES; i++) {
     if (t->cache[i].function) uninstall(t->cache[i].function);
   }
@@ -282,12 +320,14 @@ static Jit_Thread *thread_jit(void) {
   if (t_jit) return t_jit;
   if (!__atomic_exchange_n(&g_main_claimed, true, __ATOMIC_ACQ_REL)) {
     t_jit = &g_main_thread;
+    register_thread(t_jit, true);
     return t_jit;
   }
   Jit_Thread *t = (Jit_Thread *)calloc(1, sizeof(Jit_Thread)); /* once per extra host thread */
   if (!t) return NULL;
   (void)pthread_once(&g_jit_key_once, make_jit_key);
   (void)pthread_setspecific(g_jit_key, t);
+  register_thread(t, true);
   t_jit = t;
   return t_jit;
 }
@@ -329,17 +369,25 @@ void jit_print_fallback_profile(uint32_t top) {
   }
 }
 
+/* The calling host thread's counters (a dummy if it has no JIT state). */
+static Jit_Stats *thread_stats(void) {
+  static _Thread_local Jit_Stats spare;
+  Jit_Thread *t = thread_jit();
+  return t ? &t->stats : &spare;
+}
+
 static void count_helper(uint32_t insn) {
+  Jit_Stats *const st = thread_stats();
   if (g_fallback_profile) profile_fallback(insn);
   switch (bits(insn, 28, 25)) {
-  case 0x7: case 0xF: g_stats.helper_simd_fp++; break;
+  case 0x7: case 0xF: st->helper_simd_fp++; break;
   case 0x4: case 0x6: case 0xC: case 0xE:
-    if (bit(insn, 26)) g_stats.helper_memory_simd++;
-    else if (bits(insn, 29, 28) == 0) g_stats.helper_memory_exclusive++;
-    else g_stats.helper_memory++;
+    if (bit(insn, 26)) st->helper_memory_simd++;
+    else if (bits(insn, 29, 28) == 0) st->helper_memory_exclusive++;
+    else st->helper_memory++;
     break;
-  case 0xA: case 0xB: g_stats.helper_system++; break;
-  default: g_stats.helper_other++; break;
+  case 0xA: case 0xB: st->helper_system++; break;
+  default: st->helper_other++; break;
   }
 }
 
@@ -364,11 +412,12 @@ uint32_t jit_helper_read(Jit_State *state, uint64_t address, uint32_t size) {
 }
 
 uint32_t jit_helper_simd(Jit_State *state, uint32_t insn) {
+  Jit_Stats *const st = thread_stats();
   if (g_fallback_profile) profile_fallback(insn);
-  if (state->interp.fpcr != 0) g_stats.simd_fpcr_nonzero++;
-  else if (!(state->interp.fpsr & 0x10u)) g_stats.simd_ixc_clear++;
-  g_stats.last_fpcr = state->interp.fpcr;
-  g_stats.direct_simd++;
+  if (state->interp.fpcr != 0) st->simd_fpcr_nonzero++;
+  else if (!(state->interp.fpsr & 0x10u)) st->simd_ixc_clear++;
+  st->last_fpcr = state->interp.fpcr;
+  st->direct_simd++;
   return interp_execute(&state->interp, insn) == INTERP_CONTINUE ? 0u : 1u;
 }
 
@@ -403,14 +452,16 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
   const uint32_t *page_code = code - (pc & VMM_PAGE_OFFSET_MASK) / sizeof(uint32_t);
   Jit_Link link;
   link.cache_address = (uint64_t)(uintptr_t)t->cache;
-  link.generation_address = (uint64_t)(uintptr_t)&t->generation;
+  /* The shared code generation, not this thread's view of it: another
+   * core's mapping change must stop chaining here at once (vmm.h). */
+  link.generation_address = (uint64_t)(uintptr_t)&g_vmm_generation;
   link.count_entries = g_hot_profile;
   Jit_Compiled compiled;
   compiler_lock();
   const bool built = jit_compile_block(pc, page_code, memory_pages(), &link, t->module, JIT_MODULE_BYTES, &compiled);
   compiler_unlock();
   if (!built) {
-    g_stats.compile_failures++;
+    t->stats.compile_failures++;
     return;
   }
   if (g_dump_directory) {
@@ -420,13 +471,13 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
   }
   const uint64_t function = install(t->module, compiled.module_bytes);
   if (!function) {
-    g_stats.compile_failures++;
+    t->stats.compile_failures++;
     return;
   }
   Jit_Entry *e = &t->cache[jit_cache_index(pc)];
   if (e->function) {
     uninstall(e->function);
-    g_stats.evictions++;
+    t->stats.evictions++;
   }
   e->pc = pc;
   e->generation = generation;
@@ -438,9 +489,9 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
   e->multicore = cpu_multicore();
   e->code_hash = code_hash(page_code + (compiled.code_start & VMM_PAGE_OFFSET_MASK) / sizeof(uint32_t),
                            compiled.code_words);
-  g_stats.blocks_compiled++;
-  g_stats.region_blocks += compiled.blocks;
-  g_stats.module_bytes += compiled.module_bytes;
+  t->stats.blocks_compiled++;
+  t->stats.region_blocks += compiled.blocks;
+  t->stats.module_bytes += compiled.module_bytes;
 }
 
 /* The compiled block for `pc`, valid in `generation`, or NULL. A block
@@ -453,11 +504,11 @@ static Jit_Entry *find(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64
   const uint32_t *code = block_code(s, e->code_start);
   if (code && code_hash(code, e->code_words) == e->code_hash) {
     e->generation = generation;
-    g_stats.revalidations++;
+    t->stats.revalidations++;
     return e;
   }
 stale:
-  g_stats.stale++;
+  t->stats.stale++;
   uninstall(e->function);
   e->function = 0;
   e->pc = 0;
@@ -489,13 +540,13 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
     const uint64_t generation = interp_code_generation();
     if (generation != t->generation) {
       t->generation = generation;
-      g_stats.generations++;
+      t->stats.generations++;
     }
     const uint64_t pc = s->regs.pc;
     const Jit_Entry *e = find(t, s, pc, generation);
     if (e) {
       if (s->cycles_consumed + e->length <= cycle_budget) {
-        g_stats.block_entries++;
+        t->stats.block_entries++;
         note_block(t, pc | JIT_RECENT_COMPILED);
         const Jit_Block_Fn fn = (Jit_Block_Fn)(uintptr_t)e->function;
         if (fn(j) == JIT_BLOCK_STOP) {
@@ -512,7 +563,7 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
         if (find(t, s, pc, generation)) continue;
       }
     }
-    g_stats.interpreted_blocks++;
+    t->stats.interpreted_blocks++;
     note_block(t, pc);
     if (!interp_predecode_run_block(s, cycle_budget, &grace, &exit_reason)) {
       if (exit_reason == CPU_EXIT_FAULT || exit_reason == CPU_EXIT_BREAKPOINT) report_stop(t, s, exit_reason);
