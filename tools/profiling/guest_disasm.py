@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-"""disasm.py MODULES_DIR module+0xOFF [BEFORE AFTER] - disassembles guest code
-around a PC-profile block (scratch tool; uses clang + llvm-objdump)."""
+"""guest_disasm.py MODULES_DIR module+0xOFF [BEFORE AFTER]: disassembles guest
+code around a PC-profile block (needs clang + llvm-objdump; see README.md)."""
 import os, subprocess, sys, tempfile
 d, spec = sys.argv[1], sys.argv[2]
 before = int(sys.argv[3], 0) if len(sys.argv) > 3 else 0x100
