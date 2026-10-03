@@ -22,6 +22,8 @@
 #define NV_TYPE_AS_GPU 0x41u
 #define NV_TYPE_CTRL_GPU 0x47u
 #define NV_TYPE_GPU 0x48u
+#define NV_CHANNEL_SET_NVMAP_FD 0x01u /* type 0x48, every channel */
+#define SUBMIT_INCR_BYTES 20u
 
 #define NVMAP_PARAM_SIZE 1u
 #define NVMAP_PARAM_ALIGNMENT 2u
@@ -513,16 +515,25 @@ static uint32_t channel_common_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint
   switch (nr) {
   case 0x01: { /* SUBMIT {num_cmdbufs, num_relocs, num_syncpt_incrs, num_fences, arrays...} */
     const uint32_t cmdbufs = rd32(d), relocs = rd32(d + 4), incrs = rd32(d + 8), fences = rd32(d + 12);
-    /* cmdbuf 12 bytes, reloc 16, reloc shift 4, syncpt incr 8, fence threshold 4. */
+    /* cmdbuf 12 bytes, reloc 16, reloc shift 4, syncpt incr 20 ({id,
+     * increments, waitbase, next, prev} - libnx's nvioctl_syncpt_incr),
+     * fence threshold 4: threshold i is where incr i's syncpoint lands.
+     * The engines' work itself is not emulated (decoded video is black,
+     * §13): its syncpoints complete at once. */
     const uint64_t incr_at = 16u + (uint64_t)cmdbufs * 12u + (uint64_t)relocs * 20u;
-    const uint64_t fence_at = incr_at + (uint64_t)incrs * 8u;
+    const uint64_t fence_at = incr_at + (uint64_t)incrs * SUBMIT_INCR_BYTES;
     if (fence_at + (uint64_t)fences * 4u > size) return NV_BAD_PARAMETER;
-    uint32_t value = 0;
+    const uint32_t own = ensure_syncpoint(s, f);
     for (uint32_t i = 0; i < incrs; i++) {
-      const uint32_t count = rd32(d + incr_at + i * 8u + 4u);
-      value = complete_submission(s, f, count);
+      const uint8_t *e = d + incr_at + i * SUBMIT_INCR_BYTES;
+      uint32_t id = rd32(e);
+      if (id == 0 || id >= SYNCPOINT_COUNT) id = own;
+      uint32_t value = s->syncpoints.max[id];
+      for (uint32_t k = 0; k < rd32(e + 4); k++) value = syncpoint_increment_max(&s->syncpoints, id);
+      syncpoint_complete(&s->syncpoints, id, value);
+      if (i < fences) wr32(d + fence_at + i * 4u, value);
     }
-    for (uint32_t i = 0; i < fences; i++) wr32(d + fence_at + i * 4u, value);
+    f->submissions++;
     return NV_SUCCESS;
   }
   case 0x02: wr32(d + 4, ensure_syncpoint(s, f)); return NV_SUCCESS; /* GET_SYNCPOINT {module; syncpt out} */
@@ -580,6 +591,10 @@ static uint32_t dispatch_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t request, uint8
     if (type == NV_TYPE_CTRL_GPU && nr == 0x14) return NV_SUCCESS; /* SET_USER_DATA (type 0x47) */
     return type == NV_TYPE_CTRL ? channel_common_ioctl(s, f, nr, data, size) : NV_NOT_IMPLEMENTED;
   default: /* nvdec, vic, nvjpg */
+    if (type == NV_TYPE_GPU && nr == NV_CHANNEL_SET_NVMAP_FD) {
+      f->nvmap_fd = rd32(data);
+      return NV_SUCCESS;
+    }
     return type == NV_TYPE_CTRL ? channel_common_ioctl(s, f, nr, data, size) : NV_NOT_IMPLEMENTED;
   }
 }

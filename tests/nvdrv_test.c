@@ -172,11 +172,16 @@ int main(void) {
   wr32(d + 4, 5);
   CHECK(ioctl(ctrl, IOWR(0x00u, 0x1Du, 16), d) == NV_TIMEOUT);
 
-  /* VIC: one syncpoint-increment entry of 2 -> fence threshold 2. */
+  /* VIC (and NVDEC: its first ioctl is SET_NVMAP_FD, type 0x48): one
+   * 20-byte syncpoint-increment entry of 2 -> fence threshold 2. */
+  memset(d, 0, sizeof(d));
+  wr32(d, nvmap);
+  CHECK(ioctl(vic, IOW(0x48u, 0x01u, 4), d) == 0);
   memset(d, 0, sizeof(d));
   wr32(d + 8, 1); wr32(d + 12, 1);              /* 1 incr, 1 fence */
-  wr32(d + 16, 0); wr32(d + 20, 2);             /* syncpt_incrs[0] = {id, 2} */
-  CHECK(ioctl(vic, IOWR(0x00u, 0x01u, 28), d) == 0 && rd32(d + 24) == 2);
+  wr32(d + 16, 0); wr32(d + 20, 2);             /* syncpt_incrs[0] = {id (own), 2, waitbase, next, prev} */
+  wr32(d + 24, 0xFFFFFFFFu); wr32(d + 28, 0xFFFFFFFFu); wr32(d + 32, 0xFFFFFFFFu);
+  CHECK(ioctl(vic, IOWR(0x00u, 0x01u, 40), d) == 0 && rd32(d + 36) == 2);
   memset(d, 0, sizeof(d));
   CHECK(ioctl(vic, IOWR(0x00u, 0x02u, 8), d) == 0 && rd32(d + 4) != 0 && rd32(d + 4) != syncpoint);
 
