@@ -32,6 +32,7 @@
 #include <string.h>
 
 #include "common/assert.h"
+#include "common/log.h"
 #include "cpu/backends/jit/jit_internal.h"
 #include "cpu/backends/jit/jit_wasm.h"
 
@@ -44,6 +45,7 @@
 #define JIT_HIT_COUNTERS (1u << 16)
 #define JIT_DEFAULT_HOT_THRESHOLD 16u
 #define JIT_MODULE_BYTES (512u * 1024u)
+#define JIT_RECENT_BLOCKS 64u
 
 #define CODE_HASH_OFFSET 0xCBF29CE484222325ull /* FNV-1a 64 */
 #define CODE_HASH_PRIME 0x100000001B3ull
@@ -80,7 +82,42 @@ typedef struct Jit_Thread {
    * entries validated in it (jit_compile.c, emit_chain). */
   uint64_t generation;
   uint8_t module[JIT_MODULE_BYTES];
+  /* The dispatcher's last block starts (bit 63: a compiled region was
+   * entered), for the crash report. */
+  uint64_t recent[JIT_RECENT_BLOCKS];
+  uint32_t recent_next;
 } Jit_Thread;
+
+#define JIT_RECENT_COMPILED (1ull << 63)
+
+static void note_block(Jit_Thread *t, uint64_t pc_and_flag) {
+  t->recent[t->recent_next] = pc_and_flag;
+  t->recent_next = (t->recent_next + 1u) % JIT_RECENT_BLOCKS;
+}
+
+/* A run ended in a fault or breakpoint: the registers and how the
+ * dispatcher got there (chained regions do not pass through it, so a
+ * compiled entry may have run through several regions). */
+static void report_stop(const Jit_Thread *t, const Interp_State *s, CPU_ExitReason reason) {
+  log_error("[jit] %s at pc=0x%010llx (fault address 0x%010llx), sp=0x%010llx nzcv=%x",
+            reason == CPU_EXIT_FAULT ? "fault" : "breakpoint", (unsigned long long)s->regs.pc,
+            (unsigned long long)s->fault_address, (unsigned long long)s->regs.sp, s->regs.pstate >> 28);
+  for (uint32_t r = 0; r < 31u; r += 4u) {
+    log_error("[jit]   x%-2u %016llx %016llx %016llx %016llx", r, (unsigned long long)s->regs.x[r],
+              (unsigned long long)(r + 1u < 31u ? s->regs.x[r + 1u] : 0), (unsigned long long)(r + 2u < 31u ? s->regs.x[r + 2u] : 0),
+              (unsigned long long)(r + 3u < 31u ? s->regs.x[r + 3u] : 0));
+  }
+  char line[JIT_RECENT_BLOCKS * 24u];
+  uint32_t used = 0;
+  for (uint32_t i = 0; i < JIT_RECENT_BLOCKS; i++) {
+    const uint64_t v = t->recent[(t->recent_next + i) % JIT_RECENT_BLOCKS];
+    if (!v) continue;
+    used += (uint32_t)snprintf(line + used, sizeof(line) - used, " %s%llx", (v & JIT_RECENT_COMPILED) ? "*" : "",
+                               (unsigned long long)(v & ~JIT_RECENT_COMPILED));
+    if (used >= sizeof(line)) break;
+  }
+  log_error("[jit] recent block starts (oldest first, * = compiled region entered):%s", line);
+}
 
 static Jit_Thread g_main_thread;
 static uint32_t g_hot_threshold = JIT_DEFAULT_HOT_THRESHOLD;
@@ -448,8 +485,12 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
     if (e) {
       if (s->cycles_consumed + e->length <= cycle_budget) {
         g_stats.block_entries++;
+        note_block(t, pc | JIT_RECENT_COMPILED);
         const Jit_Block_Fn fn = (Jit_Block_Fn)(uintptr_t)e->function;
-        if (fn(j) == JIT_BLOCK_STOP) return j->exit_reason;
+        if (fn(j) == JIT_BLOCK_STOP) {
+          if (j->exit_reason == CPU_EXIT_FAULT || j->exit_reason == CPU_EXIT_BREAKPOINT) report_stop(t, s, j->exit_reason);
+          return j->exit_reason;
+        }
         continue;
       }
     } else {
@@ -461,7 +502,11 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
       }
     }
     g_stats.interpreted_blocks++;
-    if (!interp_predecode_run_block(s, cycle_budget, &grace, &exit_reason)) return exit_reason;
+    note_block(t, pc);
+    if (!interp_predecode_run_block(s, cycle_budget, &grace, &exit_reason)) {
+      if (exit_reason == CPU_EXIT_FAULT || exit_reason == CPU_EXIT_BREAKPOINT) report_stop(t, s, exit_reason);
+      return exit_reason;
+    }
   }
 }
 
