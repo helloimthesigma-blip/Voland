@@ -185,6 +185,11 @@ static char g_text[1u << 20];
 static uint32_t g_vectors;
 
 static uint32_t g_hw_sample_mask; /* the next vector's hardware-sampled textures */
+/* The next vector samples a 2-level texture (level 1 = the 2x2 box of
+ * level 0) with the sampler's level clamps at [0, 1]: the expected output
+ * is level 1's texel, not the interpreter's (level 0 only - the WebGPU
+ * renderer's mip chains are a deliberate improvement, DESIGN.md §13). */
+static bool g_mip_vector;
 
 static void finish(const Builder *b, const char *name, bool float_compare) {
   sm_program_decode(b->bytes, SM_SPH_BYTES + 8u * b->words, 0, &g_prog);
@@ -220,7 +225,19 @@ static void finish(const Builder *b, const char *name, bool float_compare) {
     fprintf(f, "%s[%u,%u,%u,%u]", v ? "," : "", g_varying[v][0], g_varying[v][1], g_varying[v][2], g_varying[v][3]);
   fprintf(f, "],\"texture\":{\"width\":%u,\"height\":%u,\"rgba8\":[", TEX_W, TEX_H);
   for (uint32_t i = 0; i < sizeof(g_texels); i++) fprintf(f, "%s%u", i ? "," : "", g_texels[i]);
-  fprintf(f, "],\"wrap\":%u,\"linear\":%s,\"textures\":%u},", 0x222u, "true", desc.texture_count);
+  fprintf(f, "],\"wrap\":%u,\"linear\":%s,\"textures\":%u", 0x222u, "true", desc.texture_count);
+  if (g_mip_vector) {
+    uint32_t mip1[4];
+    for (uint32_t c = 0; c < 4; c++) {
+      uint32_t sum = 0;
+      for (uint32_t i = 0; i < TEX_W * TEX_H; i++) sum += g_texels[4u * i + c];
+      mip1[c] = (sum + 2u) / 4u;
+      out[c] = (uint32_t)f_bits((float)mip1[c] / 255.0f);
+    }
+    fprintf(f, ",\"levels\":2,\"mip1\":[%u,%u,%u,%u],\"lod\":[0,0,1]", mip1[0], mip1[1], mip1[2], mip1[3]);
+    g_mip_vector = false;
+  }
+  fprintf(f, "},");
   if (alive) fprintf(f, "\"expected\":[%u,%u,%u,%u]}\n", out[0], out[1], out[2], out[3]);
   else fprintf(f, "\"expected\":\"killed\"}\n");
   fclose(f);
@@ -348,6 +365,21 @@ static void vector_texture_hw(void) {
   finish(&b, "texture_hw", true);
 }
 
+/* TEXS 2D LL: the explicit level picks level 1 (see g_mip_vector). */
+static void vector_texture_lod(void) {
+  Builder b;
+  begin(&b);
+  put_varying(0, 0.3f, 0.6f, 0.0f, 0.0f);
+  put_varying(1, 1.0f, 2.0f, 0.0f, 0.0f);
+  emit(&b, IPA(4, SM_ATTR_GENERIC, 0, (uint32_t)RZ));
+  emit(&b, IPA(5, SM_ATTR_GENERIC + 4u, 0, (uint32_t)RZ));
+  emit(&b, IPA(6, SM_ATTR_GENERIC + 16u, 0, (uint32_t)RZ)); /* lod 1.0 */
+  emit(&b, TEXS(0, 2, 4, 6, 3, 4, 0));
+  emit(&b, EXIT());
+  g_mip_vector = true;
+  finish(&b, "texture_lod", true);
+}
+
 static void vector_kill(void) {
   Builder b;
   begin(&b);
@@ -417,16 +449,48 @@ static void structural(void) {
   CHECK(h != wgsl_desc_hash(&desc, &g_prog));
 }
 
+/* Level selection (the WebGPU renderer's mip chains): TEXS 2D picks its
+ * level from derivatives in uniform control flow, LZ takes level 0, LL
+ * its register; a predicated sample has no derivatives (level 0). */
+static void lod_selection(void) {
+  Builder b;
+  Wgsl_Program_Desc desc;
+  begin(&b);
+  emit(&b, TEXS(0, 2, 4, 5, 1, 4, 0));            /* 2D: automatic */
+  emit(&b, TEXS(6, 8, 4, 5, 2, 4, 0));            /* 2D LZ */
+  emit(&b, TEXS(10, 12, 4, 5, 3, 4, 0));          /* 2D LL: the level in the second operand pair */
+  emit(&b, EXIT());
+  sm_program_decode(b.bytes, SM_SPH_BYTES + 8u * b.words, 0, &g_prog);
+  wgsl_default_desc(&g_prog, &desc);
+  Wgsl_Result r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
+  CHECK(r.ok);
+  CHECK(strstr(g_text, "fn t0_lod(") != NULL);
+  CHECK(strstr(g_text, "vec2<i32>(0), t0_lod(tc, tl)); ") != NULL);
+  CHECK(strstr(g_text, "vec2<i32>(0), 0.0); ") != NULL);
+  CHECK(strstr(g_text, "vec2<i32>(0), F(r") != NULL);
+  /* Predicated: no derivatives. */
+  begin(&b);
+  emit(&b, TEXS(0, 2, 4, 5, 1, 4, 0) & ~(0xfull << 16)); /* @P0 */
+  emit(&b, EXIT());
+  sm_program_decode(b.bytes, SM_SPH_BYTES + 8u * b.words, 0, &g_prog);
+  wgsl_default_desc(&g_prog, &desc);
+  r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
+  CHECK(r.ok);
+  CHECK(strstr(g_text, "t0_lod(tc") == NULL && strstr(g_text, "vec2<i32>(0), 0.0); ") != NULL);
+}
+
 int main(int argc, char **argv) {
   g_dir = argc > 1 ? argv[1] : NULL;
   tex_init_tables();
   setup_image();
   structural();
+  lod_selection();
   vector_float();
   vector_integer();
   vector_branches();
   vector_select_texture();
   vector_texture_hw();
+  vector_texture_lod();
   vector_kill();
   vector_ldc();
   printf("[wgsl_test] passed (%u vectors%s%s)\n", g_vectors, g_dir ? " written to " : "", g_dir ? g_dir : "");

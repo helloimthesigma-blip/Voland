@@ -19,7 +19,10 @@
  *       --gpu-stream FILE            run the WebGPU renderer's producer (GPU mode) and record
  *                                    its stream to FILE (u32 type, u32 bytes, payload per
  *                                    record) - replayed by platform/web/tools/replay-gpu-stream.mjs
- *                                    every N slices (watching a long run progress)
+ *                                    every N slices (watching a long run progress); with
+ *                                    --dump-frames-every, logs the present each multiple
+ *                                    ended on (replay --at). VOLAND_GPU_MIPMAPS=0: no mip
+ *                                    chains (level 0, as the software reference)
  *       --snapshot-at N --snapshot-dir DIR
  *                                    (POSIX) at slice N, stop and serve jobs: each
  *                                    DIR/job file forks a copy-on-write child that
@@ -665,6 +668,9 @@ static int run(int argc, char **argv) {
     }
     gpu_stream_init(&g_gpu_stream, g_gpu_header, g_gpu_ring, CLI_GPU_RING_BYTES, gpu_stream_wait, NULL);
     raster3d_set_gpu(&emu.renderer, &g_gpu_stream);
+    /* VOLAND_GPU_MIPMAPS=0: level 0 only, as the software reference (for
+     * comparing replays with --dump-frame output pixel for pixel). */
+    if (getenv("VOLAND_GPU_MIPMAPS") && !strcmp(getenv("VOLAND_GPU_MIPMAPS"), "0")) emu.renderer.gpu_mipmaps = false;
   }
   const bool pc_profile = getenv("VOLAND_PC_PROFILE") != NULL;
   /* VOLAND_TRACE_DRAWS=START:LENGTH logs every draw in that slice window. */
@@ -722,6 +728,12 @@ static int run(int argc, char **argv) {
     if (g_gpu_file) gpu_stream_drain();
     audio_frames += drain_audio(wav); /* and plays (or discards) every sample */
     slices++;
+    if (g_gpu_file && dump_every && slices % dump_every == 0) {
+      /* GPU mode rasterises nothing CPU-side: name the present a replay
+       * (replay-gpu-stream.mjs --at) captures for this slice instead. */
+      fprintf(stderr, "voland-cli: gpu-stream slice %llu present %llu\n", (unsigned long long)slices,
+              (unsigned long long)emu.renderer.gpu_stats.presents);
+    }
     if (frame_path && dump_every && slices % dump_every == 0) {
       char numbered[1024];
       snprintf(numbered, sizeof(numbered), "%s.%llu.ppm", frame_path, (unsigned long long)slices);
@@ -736,12 +748,13 @@ static int run(int argc, char **argv) {
     const Raster3d_Gpu_Stats *gs = &emu.renderer.gpu_stats;
     fprintf(stderr,
             "voland-cli: GPU stream: %llu records (%llu MB); %llu draws, %llu triangles, %llu shaders, %llu untranslated "
-            "draws, %llu texture uploads (%llu MB), %llu surfaces, %llu presents, %llu copies\n",
+            "draws, %llu texture uploads (%llu MB), %llu surfaces, %llu presents, %llu copies, %llu MB re-hashed\n",
             (unsigned long long)g_gpu_records, (unsigned long long)(g_gpu_stream.bytes >> 20),
             (unsigned long long)gs->draws, (unsigned long long)gs->triangles, (unsigned long long)gs->shaders,
             (unsigned long long)gs->untranslated_draws, (unsigned long long)gs->texture_uploads,
             (unsigned long long)(gs->upload_bytes >> 20), (unsigned long long)gs->surfaces,
-            (unsigned long long)gs->presents, (unsigned long long)gs->copies);
+            (unsigned long long)gs->presents, (unsigned long long)gs->copies,
+            (unsigned long long)(gs->hashed_bytes >> 20));
   }
   if (pc_profile) pc_profile_print(&emu);
 #ifdef __APPLE__

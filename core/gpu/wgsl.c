@@ -72,6 +72,11 @@ typedef struct Tr {
   bool uses_local;
   bool straight;    /* no branches or flow stacks: blocks run in order, no dispatch loop */
   bool straight_live; /* straight: the blocks so far can fall through to the next */
+  /* Implicit texture LODs need derivatives in uniform control flow: a
+   * straight program before any conditional end, outside predicated
+   * instructions. Elsewhere implicit LODs are level 0 (the reference). */
+  bool uniform_flow;
+  bool guarded;       /* emitting a predicated instruction */
   bool leader[SM_MAX_WORDS];
   bool reached[SM_MAX_WORDS];
 } Tr;
@@ -545,11 +550,11 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
   out_add(o, "@group(0) @binding(%u) var T%u: texture_2d_array<%s>;\n", WGSL_TEXTURE_BINDING_BASE + i, i, type);
   if (hw) out_add(o, "@group(0) @binding(%u) var S%u: sampler;\n", WGSL_SAMPLER_BINDING_BASE + i, i);
   out_add(o,
-          "fn t%u_texel(x: i32, y: i32, l: u32) -> vec4<u32> {\n"
-          "  let dm = vec2<i32>(textureDimensions(T%u)); let wr = D[%uu];\n"
+          "fn t%u_texel(x: i32, y: i32, l: u32, lv: u32) -> vec4<u32> {\n"
+          "  let dm = vec2<i32>(textureDimensions(T%u, lv)); let wr = D[%uu];\n"
           "  let wx = wrapi(x, dm.x, wr & 15u); let wy = wrapi(y, dm.y, (wr >> 4u) & 15u);\n"
           "  if (wx < 0 || wy < 0) { return vec4<u32>(D[%uu], D[%uu], D[%uu], D[%uu]); }\n"
-          "  let v = textureLoad(T%u, vec2<i32>(wx, wy), min(l, textureNumLayers(T%u) - 1u), 0);\n"
+          "  let v = textureLoad(T%u, vec2<i32>(wx, wy), min(l, textureNumLayers(T%u) - 1u), lv);\n"
           "  return %s;\n"
           "}\n",
           i, i, pw + WGSL_TEXP_WRAP, pw + WGSL_TEXP_BORDER, pw + WGSL_TEXP_BORDER + 1u, pw + WGSL_TEXP_BORDER + 2u,
@@ -568,25 +573,41 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
   char hw_tap[256] = "";
   if (hw)
     snprintf(hw_tap, sizeof(hw_tap),
-             "  if (!shadow) { let uv = (q.xy + vec2<f32>(off)) / vec2<f32>(textureDimensions(T%u));\n"
-             "    return swz(bitcast<vec4<u32>>(textureSampleLevel(T%u, S%u, uv, l, 0.0)), sw); }\n",
+             "  if (!shadow) { let uv = (q0.xy + vec2<f32>(off)) / vec2<f32>(textureDimensions(T%u));\n"
+             "    return swz(bitcast<vec4<u32>>(textureSampleLevel(T%u, S%u, uv, l, lf)), sw); }\n",
              i, i, i);
+  /* Level selection: `lod` is the instruction's (explicit, or implicit
+   * from derivatives plus biases); the sampler clamps it, the texture's
+   * levels bound it. One level (the reference): level 0, the magnification
+   * filter, as before. Shader-side filtering picks the nearest level. */
   out_add(o,
-          "fn t%u_sample(c: vec3<f32>, layer: f32, dref: f32, shadow: bool, off: vec2<i32>) -> vec4<u32> {\n"
+          "fn t%u_lod(c: vec3<f32>, layer: f32) -> f32 {\n"
+          "  let q = t%u_coords(c, layer).xy; let dx = dpdxFine(q); let dy = dpdyFine(q);\n"
+          "  let r = max(dot(dx, dx), dot(dy, dy)); if (!(r > 0.0)) { return -32.0; }\n"
+          "  return 0.5 * log2(r) + F(D[%uu]);\n"
+          "}\n",
+          i, i, pw + WGSL_TEXP_LOD_BIAS);
+  out_add(o,
+          "fn t%u_sample(c: vec3<f32>, layer: f32, dref: f32, shadow: bool, off: vec2<i32>, lod: f32) -> vec4<u32> {\n"
           "  let fl = D[%uu]; let sw = D[%uu]; let cf = D[%uu];\n"
-          "  let q = t%u_coords(c, layer); let l = u32(q.z);\n"
+          "  let q0 = t%u_coords(c, layer); let l = u32(q0.z);\n"
+          "  let nl = textureNumLevels(T%u); var lf = 0.0; var lv = 0u; var lin = (fl & %uu) != 0u;\n"
+          "  if (nl > 1u) { let lc = clamp(lod, F(D[%uu]), F(D[%uu]));\n"
+          "    lf = clamp(lc, 0.0, f32(nl - 1u)); lv = u32(floor(lf + 0.5)); if (lc > 0.0) { lin = (fl & %uu) != 0u; } }\n"
+          "  var q = q0; if (lv > 0u) { q = vec3<f32>(q0.xy * vec2<f32>(textureDimensions(T%u, lv)) /\n"
+          "    vec2<f32>(textureDimensions(T%u)), q0.z); }\n"
           "  let cmp = shadow && (fl & %uu) != 0u;\n"
           "%s"
-          "  if (!%s || (fl & %uu) == 0u) {\n"
-          "    var tx = t%u_texel(i32(floor(q.x)) + off.x, i32(floor(q.y)) + off.y, l);\n"
+          "  if (!%s || !lin) {\n"
+          "    var tx = t%u_texel(i32(floor(q.x)) + off.x, i32(floor(q.y)) + off.y, l, lv);\n"
           "    if (cmp) { let r = select(0u, 0x3f800000u, tcmp(cf, dref, F(tx.x))); tx = vec4<u32>(r, r, r, tx.w); }\n"
           "    return swz(tx, sw);\n"
           "  }\n"
           "  let x = q.x - 0.5; let y = q.y - 0.5; let fx = floor(x); let fy = floor(y);\n"
           "  let ax = x - fx; let ay = y - fy; let x0 = i32(fx) + off.x; let y0 = i32(fy) + off.y;\n"
-          "  let t00 = t%u_texel(x0, y0, l); let t10 = t%u_texel(x0 + 1, y0, l);\n"
-          "  var t01 = t%u_texel(x0, y0 + 1, l); var t11 = t%u_texel(x0 + 1, y0 + 1, l);\n"
-          "  if (textureDimensions(T%u).y <= 1u) { t01 = t00; t11 = t10; }\n"
+          "  let t00 = t%u_texel(x0, y0, l, lv); let t10 = t%u_texel(x0 + 1, y0, l, lv);\n"
+          "  var t01 = t%u_texel(x0, y0 + 1, l, lv); var t11 = t%u_texel(x0 + 1, y0 + 1, l, lv);\n"
+          "  if (textureDimensions(T%u, lv).y <= 1u) { t01 = t00; t11 = t10; }\n"
           "  var a = bitcast<vec4<f32>>(t00); var b = bitcast<vec4<f32>>(t10);\n"
           "  var cc = bitcast<vec4<f32>>(t01); var d = bitcast<vec4<f32>>(t11);\n"
           "  if (cmp) {\n"
@@ -596,8 +617,9 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
           "  let top = a + (b - a) * ax; let bottom = cc + (d - cc) * ax;\n"
           "  return swz(bitcast<vec4<u32>>(top + (bottom - top) * ay), sw);\n"
           "}\n",
-          i, pw + WGSL_TEXP_FLAGS, pw + WGSL_TEXP_SWIZZLE, pw + WGSL_TEXP_COMPARE, i, WGSL_TEXP_DEPTH_COMPARE,
-          hw_tap, filterable ? "true" : "false", WGSL_TEXP_LINEAR, i, i, i, i, i, i);
+          i, pw + WGSL_TEXP_FLAGS, pw + WGSL_TEXP_SWIZZLE, pw + WGSL_TEXP_COMPARE, i, i, WGSL_TEXP_LINEAR,
+          pw + WGSL_TEXP_MIN_LOD, pw + WGSL_TEXP_MAX_LOD, WGSL_TEXP_MIN_LINEAR, i, i, WGSL_TEXP_DEPTH_COMPARE, hw_tap,
+          filterable ? "true" : "false", i, i, i, i, i, i);
   out_add(o,
           "fn t%u_gather(c: vec3<f32>, layer: f32, comp: u32, dref: f32, shadow: bool, off: vec2<i32>) -> vec4<u32> {\n"
           "  let fl = D[%uu]; let sw = D[%uu]; let cf = D[%uu];\n"
@@ -606,7 +628,7 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
           "  let xs = vec4<i32>(x0, x0 + 1, x0 + 1, x0); let ys = vec4<i32>(y0 + 1, y0 + 1, y0, y0);\n"
           "  var o = vec4<u32>(0u);\n"
           "  for (var k = 0u; k < 4u; k = k + 1u) {\n"
-          "    let tx = t%u_texel(xs[k], ys[k], l);\n"
+          "    let tx = t%u_texel(xs[k], ys[k], l, 0u);\n"
           "    o[k] = swz(tx, sw)[comp & 3u];\n"
           "    if (shadow && (fl & %uu) != 0u) { o[k] = select(0u, 0x3f800000u, tcmp(cf, dref, F(tx.x))); }\n"
           "  }\n"
@@ -699,32 +721,53 @@ static void write_scalar(Tr *t, uint64_t w, const uint32_t *comps, uint32_t coun
 
 static const char k_unbound[] = "vec4<u32>(0u, 0u, 0u, 0x3f800000u)";
 
+/* A sample's level of detail: LZ (level 0), LL (explicit), automatic or
+ * LB (automatic + bias) - automatic only where derivatives are defined
+ * (Tr.uniform_flow), else level 0 as the reference. */
+typedef enum Lod_Mode { LOD_ZERO, LOD_EXPLICIT, LOD_AUTO, LOD_BIAS } Lod_Mode;
+
+static Ex lod_expr(Tr *t, uint32_t b, Lod_Mode mode, Ex value, Ex c, Ex layer) {
+  if (mode == LOD_EXPLICIT) return ex("F(%s)", value.s);
+  if (mode == LOD_ZERO || !t->uniform_flow || t->guarded) return ex("0.0");
+  if (mode == LOD_BIAS) return ex("(t%u_lod(%s, %s) + F(%s))", b, c.s, layer.s, value.s);
+  return ex("t%u_lod(%s, %s)", b, c.s, layer.s);
+}
+
 static void emit_texs(Tr *t, const Sm_Insn *in, uint32_t pc) {
   const uint64_t w = in->raw;
   const uint32_t target = BITS(w, 53, 4), b = texture_binding(t, pc);
   uint32_t comps[4];
   const uint32_t n = scalar_components(BITS(w, 50, 3), BITS(w, 28, 8) != SM_RZ, comps);
   Ex a[8];
-  Ex x = ex("0.0"), y = ex("0.0"), z = ex("0.0"), layer = ex("0.0"), dref = ex("0.0");
+  Ex x = ex("0.0"), y = ex("0.0"), z = ex("0.0"), layer = ex("0.0"), dref = ex("0.0"), lod = ex("0u");
   bool shadow = false;
+  /* TEXS targets: 0 1D LZ, 1 2D, 2 2D LZ, 3 2D LL, 4 2D DC, 5 2D LL DC,
+   * 6 2D LZ DC, 7 2D array, 8 2D array LZ, 9 2D array LZ DC, 10 3D,
+   * 11 3D LZ, 12 cube, 13 cube LL. */
+  Lod_Mode mode = LOD_ZERO;
   switch (target) {
   case 0: tex_args(t, w, 1, a); x = fl(a[0]); break;
-  case 1: case 2: tex_args(t, w, 2, a); x = fl(a[0]); y = fl(a[1]); break;
-  case 3: tex_args(t, w, 3, a); x = fl(a[0]); y = fl(a[1]); break;
-  case 4: tex_args(t, w, 3, a); x = fl(a[0]); y = fl(a[1]); dref = fl(a[2]); shadow = true; break;
-  case 5: tex_args(t, w, 4, a); x = fl(a[0]); y = fl(a[1]); dref = fl(a[3]); shadow = true; break;
+  case 1: case 2: tex_args(t, w, 2, a); x = fl(a[0]); y = fl(a[1]); mode = target == 1u ? LOD_AUTO : LOD_ZERO; break;
+  case 3: tex_args(t, w, 3, a); x = fl(a[0]); y = fl(a[1]); lod = a[2]; mode = LOD_EXPLICIT; break;
+  case 4: tex_args(t, w, 3, a); x = fl(a[0]); y = fl(a[1]); dref = fl(a[2]); shadow = true; mode = LOD_AUTO; break;
+  case 5: tex_args(t, w, 4, a); x = fl(a[0]); y = fl(a[1]); lod = a[2]; dref = fl(a[3]); shadow = true; mode = LOD_EXPLICIT;
+    break;
   case 6: tex_args(t, w, 3, a); x = fl(a[0]); y = fl(a[1]); dref = fl(a[2]); shadow = true; break;
-  case 7: case 8: tex_args(t, w, 3, a); layer = ex("f32(%s)", a[0].s); x = fl(a[1]); y = fl(a[2]); break;
+  case 7: case 8: tex_args(t, w, 3, a); layer = ex("f32(%s)", a[0].s); x = fl(a[1]); y = fl(a[2]);
+    mode = target == 7u ? LOD_AUTO : LOD_ZERO; break;
   case 9: tex_args(t, w, 4, a); layer = ex("f32(%s)", a[0].s); x = fl(a[1]); y = fl(a[2]); dref = fl(a[3]); shadow = true;
     break;
   case 10: case 11: case 12: tex_args(t, w, 3, a); x = fl(a[0]); y = fl(a[1]); z = fl(a[2]); break;
-  case 13: tex_args(t, w, 4, a); x = fl(a[0]); y = fl(a[1]); z = fl(a[2]); break;
+  case 13: tex_args(t, w, 4, a); x = fl(a[0]); y = fl(a[1]); z = fl(a[2]); lod = a[3]; mode = LOD_EXPLICIT; break;
   default: break;
   }
-  if (b == WGSL_NO_BINDING) EMIT("let tx = %s; ", k_unbound);
-  else
-    EMIT("let tx = t%u_sample(vec3<f32>(%s, %s, %s), %s, %s, %s, vec2<i32>(0)); ", b, x.s, y.s, z.s, layer.s, dref.s,
-         shadow ? "true" : "false");
+  if (b == WGSL_NO_BINDING) {
+    EMIT("let tx = %s; ", k_unbound);
+  } else {
+    EMIT("let tc = vec3<f32>(%s, %s, %s); let tl = %s; ", x.s, y.s, z.s, layer.s);
+    const Ex l = lod_expr(t, b, mode, lod, ex("tc"), ex("tl"));
+    EMIT("let tx = t%u_sample(tc, tl, %s, %s, vec2<i32>(0), %s); ", b, dref.s, shadow ? "true" : "false", l.s);
+  }
   write_scalar(t, w, comps, n);
 }
 
@@ -783,7 +826,7 @@ static void emit_tex_vector(Tr *t, const Sm_Insn *in, uint32_t pc) {
   const uint32_t dims = dim == 3u ? 3u : dim + 1u;
   const bool array = BIT(w, 28) != 0;
   enum { K_SAMPLE, K_FETCH, K_GATHER, K_DIMS, K_ZERO } kind;
-  bool lod = false, bias = false, offset = false, dc = false, ms = false;
+  bool lod = false, bias = false, offset = false, dc = false, ms = false, lod_zero = false;
   uint32_t gather_comp = 0;
   switch (in->op) {
   case SM_OP_TEX: {
@@ -791,6 +834,7 @@ static void emit_tex_vector(Tr *t, const Sm_Insn *in, uint32_t pc) {
     kind = K_SAMPLE;
     lod = lodm == 3u;
     bias = lodm == 2u;
+    lod_zero = lodm == 1u;
     offset = BIT(w, 54) != 0;
     dc = BIT(w, 50) != 0;
     break;
@@ -800,6 +844,7 @@ static void emit_tex_vector(Tr *t, const Sm_Insn *in, uint32_t pc) {
     kind = K_SAMPLE;
     lod = lodm == 3u;
     bias = lodm == 2u;
+    lod_zero = lodm == 1u;
     offset = BIT(w, 36) != 0;
     dc = BIT(w, 50) != 0;
     break;
@@ -837,7 +882,8 @@ static void emit_tex_vector(Tr *t, const Sm_Insn *in, uint32_t pc) {
     if (array) layer = ex("(%s & 0xffffu)", a[k++].s);
     Ex c[3] = {ex("0u"), ex("0u"), ex("0u")};
     for (uint32_t i = 0; i < dims; i++) c[i] = a[k++];
-    if (lod || bias) k++;
+    Ex lod_value = ex("0u");
+    if (lod || bias) lod_value = a[k++];
     Ex off = ex("vec2<i32>(0)");
     if (offset) {
       off = ex("vec2<i32>(i32(%s << 28u) >> 28u, i32(%s << 24u) >> 28u)", a[k].s, a[k].s);
@@ -852,8 +898,14 @@ static void emit_tex_vector(Tr *t, const Sm_Insn *in, uint32_t pc) {
       EMIT("let tx = t%u_gather(vec3<f32>(F(%s), F(%s), F(%s)), f32(%s), %uu, %s, %s, %s); ", b, c[0].s, c[1].s, c[2].s,
            layer.s, gather_comp, dref.s, dc ? "true" : "false", off.s);
     } else {
-      EMIT("let tx = t%u_sample(vec3<f32>(F(%s), F(%s), F(%s)), f32(%s), %s, %s, %s); ", b, c[0].s, c[1].s, c[2].s,
-           layer.s, dref.s, dc ? "true" : "false", off.s);
+      EMIT("let tc = vec3<f32>(F(%s), F(%s), F(%s)); let tl = f32(%s); ", c[0].s, c[1].s, c[2].s, layer.s);
+      const Lod_Mode mode = in->op == SM_OP_TXD ? LOD_ZERO
+                            : lod               ? LOD_EXPLICIT
+                            : bias              ? LOD_BIAS
+                            : lod_zero          ? LOD_ZERO
+                                                : LOD_AUTO;
+      const Ex l = lod_expr(t, b, mode, lod_value, ex("tc"), ex("tl"));
+      EMIT("let tx = t%u_sample(tc, tl, %s, %s, %s, %s); ", b, dref.s, dc ? "true" : "false", off.s, l.s);
     }
   }
   uint32_t d = REG_D(w);
@@ -1608,6 +1660,7 @@ static bool emit_straight_end(Tr *t, const Sm_Insn *in) {
   const Ex g = control_guard(in);
   const bool always = !strcmp(g.s, "true");
   const char *leave = in->op == SM_OP_KIL ? "discard; break;" : "break;";
+  if (!always) t->uniform_flow = false;
   if (always) EMIT("%s ", leave);
   else EMIT("if (%s) { %s } ", g.s, leave);
   return !always;
@@ -1638,7 +1691,9 @@ static void emit_block(Tr *t, uint32_t start) {
           emit_insn(t, in, pc);
         } else {
           EMIT("if (%s) { ", pred(pr, neg).s);
+          t->guarded = true;
           emit_insn(t, in, pc);
+          t->guarded = false;
           EMIT("} ");
         }
         EMIT("\n      ");
@@ -1759,6 +1814,7 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   for (uint32_t pc = 0; pc < program->word_count; pc++)
     if (t->reached[pc] && is_flow(program->insns[pc].op)) t->straight = false;
   t->straight_live = true;
+  t->uniform_flow = t->straight;
   for (uint32_t pc = 0; pc < program->word_count && t->ok && (!t->straight || t->straight_live); pc++)
     if (t->leader[pc] && t->reached[pc]) emit_block(t, pc);
   Out head = {buffer, half, 0, false};

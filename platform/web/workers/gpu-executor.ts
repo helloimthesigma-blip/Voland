@@ -12,6 +12,15 @@
  * rotate (BUFFER_SETS) so that write does not stall on in-flight work.
  * Anything that must happen on the queue timeline
  * between draws (texture uploads) flushes the batch first.
+ *
+ * Full-surface clears are deferred: the next pass that attaches the
+ * surface clears it as its load operation (one pass instead of two or
+ * three per frame); any other use first performs the clear in a pass of
+ * its own. Copies between equal formats and sizes are texture copies.
+ *
+ * Mipmapped textures (TEXTURE_CREATE levels > 1) receive level 0 only;
+ * the rest of the chain is rebuilt from it (2x2 box filter, render passes
+ * in the encoder) before the next draw samples a texture written since.
  */
 
 import {
@@ -43,6 +52,8 @@ import {
   REC_TEXTURE_DESTROY,
   REC_TEXTURE_WRITE,
   SAMPLER_LINEAR,
+  SAMPLER_MIN_LINEAR,
+  SAMPLER_MIP_LINEAR,
   SAMPLER_WRAPS,
   STENCIL_OPS,
   TEXTURE_WRITE_BYTES,
@@ -62,6 +73,11 @@ const DATA_BUFFER_BYTES = 16 * 1024 * 1024;
  * batch's data never waits for the GPU to finish reading the last one. */
 const BUFFER_SETS = 3;
 const DATA_ALIGN = 256;
+/* Draw data binds through a dynamic offset into a window of this size
+ * (the most a draw carries: constants + 18 constant buffers of 64 KB), so
+ * one bind group serves every draw with the same textures and samplers. */
+const DATA_WINDOW_BYTES = 2 * 1024 * 1024;
+const BIND_GROUP_CACHE_LIMIT = 4096;
 const MAX_TEXTURES = 16; /* core/gpu/wgsl.h WGSL_MAX_TEXTURES: samplers bind at 1 + MAX_TEXTURES + i */
 
 export interface PresentTarget {
@@ -85,6 +101,7 @@ interface Tex {
   readonly width: number;
   readonly height: number;
   readonly layers: number;
+  readonly levels: number;
   readonly sampleType: GPUTextureSampleType;
   readonly sampleView: GPUTextureView; /* 2d-array, depth aspect for depth formats */
   readonly renderView: GPUTextureView | null;
@@ -104,6 +121,7 @@ export interface ExecutorStats {
   presents: number;
   errors: number;
   shadows: number;
+  copies: number;
 }
 
 const FULLSCREEN_VS = /* wgsl */ `
@@ -148,6 +166,17 @@ function clearShader(type: "f32" | "u32" | "i32"): string {
 @fragment fn fs() -> @location(0) vec4<${type}> { return bitcast<vec4<${type}>>(vec4<u32>(P[0], P[1], P[2], P[3])); }`;
 }
 
+/* One mip level from the one above: the 2x2 box (edge texels repeat for
+ * odd sizes). */
+const MIP_SHADER = `${FULLSCREEN_VS}
+@group(0) @binding(0) var S: texture_2d<f32>;
+@fragment fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  let m = vec2<i32>(textureDimensions(S)) - 1;
+  let p = vec2<i32>(floor(pos.xy)) * 2;
+  return 0.25 * (textureLoad(S, min(p, m), 0) + textureLoad(S, min(p + vec2<i32>(1, 0), m), 0) +
+                 textureLoad(S, min(p + vec2<i32>(0, 1), m), 0) + textureLoad(S, min(p + vec2<i32>(1, 1), m), 0));
+}`;
+
 const DEPTH_CLEAR_SHADER = `${FULLSCREEN_VS}
 @group(0) @binding(0) var<storage, read> P: array<u32>;
 struct O { @builtin(frag_depth) depth: f32 }
@@ -188,7 +217,7 @@ function f32Bits(v: number): number {
 }
 
 export class GpuExecutor {
-  readonly stats: ExecutorStats = { draws: 0, passes: 0, submits: 0, pipelines: 0, presents: 0, errors: 0, shadows: 0 };
+  readonly stats: ExecutorStats = { draws: 0, passes: 0, submits: 0, pipelines: 0, presents: 0, errors: 0, shadows: 0, copies: 0 };
   private readonly textures = new Map<number, Tex>();
   private readonly shaders = new Map<number, GPUShaderModule>();
   private readonly pipelines = new Map<string, CachedPipeline>();
@@ -209,6 +238,13 @@ export class GpuExecutor {
   private passKey = "";
   private passSize: readonly [number, number] = [0, 0];
   private pendingDestroy: GPUTexture[] = [];
+  private readonly mipsStale = new Set<GPUTexture>(); /* level 0 written since the chain was built */
+  /* Deferred full clears by texture id: colour value, or depth / stencil. */
+  private readonly pendingColor = new Map<number, GPUColorDict>();
+  private readonly pendingDepth = new Map<number, { depth: number | null; stencil: number | null }>();
+  private readonly bindGroups = new Map<string, GPUBindGroup>();
+  private readonly objectIds = new WeakMap<object, number>();
+  private nextObjectId = 1;
   private readonly warned = new Set<string>();
 
   constructor(private readonly device: GPUDevice, private readonly host: ExecutorHost) {
@@ -258,6 +294,34 @@ export class GpuExecutor {
     this.pendingDestroy = [];
   }
 
+  private idOf(o: object): number {
+    let id = this.objectIds.get(o);
+    if (id === undefined) {
+      id = this.nextObjectId++;
+      this.objectIds.set(o, id);
+    }
+    return id;
+  }
+
+  /** Performs a deferred clear of texture `id` now (before it is read or
+   * written other than as the next pass's attachment). */
+  private materialize(id: number): void {
+    const color = this.pendingColor.get(id);
+    const depth = this.pendingDepth.get(id);
+    if (!color && !depth) return;
+    const t = this.textures.get(id);
+    this.pendingColor.delete(id);
+    this.pendingDepth.delete(id);
+    if (!t || !t.renderView) return;
+    if (color) {
+      this.beginPass(`${id}|0`, [{ view: t.renderView, loadOp: "clear", storeOp: "store", clearValue: color }], null,
+        [t.width, t.height]);
+    } else if (depth) {
+      this.beginPass(`|${id}`, [], this.depthAttachment(t, depth.depth, depth.stencil), [t.width, t.height]);
+    }
+    this.endPass();
+  }
+
   private warnOnce(key: string, message: string): void {
     if (this.warned.has(key)) return;
     this.warned.add(key);
@@ -267,16 +331,43 @@ export class GpuExecutor {
   /* ---- resources ---- */
 
   private makeTex(format: GPUTextureFormat, width: number, height: number, layers: number, render: boolean,
-                  fallback: boolean): Tex {
+                  fallback: boolean, levels = 1): Tex {
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC |
-      (render ? GPUTextureUsage.RENDER_ATTACHMENT : 0);
-    const texture = this.device.createTexture({ size: [width, height, layers], format, usage });
+      (render || levels > 1 ? GPUTextureUsage.RENDER_ATTACHMENT : 0);
+    const texture = this.device.createTexture({ size: [width, height, layers], format, usage, mipLevelCount: levels });
     const aspect: GPUTextureAspect = hasDepth(format) && hasStencil(format) ? "depth-only" : "all";
     return {
-      texture, format, width, height, layers, sampleType: sampleTypeOf(format), fallback,
+      texture, format, width, height, layers, levels, sampleType: sampleTypeOf(format), fallback,
       sampleView: texture.createView({ dimension: "2d-array", aspect }),
-      renderView: render ? texture.createView({ dimension: "2d", baseArrayLayer: 0, arrayLayerCount: 1 }) : null,
+      renderView: render
+        ? texture.createView({ dimension: "2d", baseArrayLayer: 0, arrayLayerCount: 1, baseMipLevel: 0, mipLevelCount: 1 })
+        : null,
     };
+  }
+
+  /** Rebuilds `t`'s mip chain from level 0, in the encoder (after earlier
+   * passes, before later ones). */
+  private buildMips(t: Tex): void {
+    this.mipsStale.delete(t.texture);
+    this.endPass();
+    const entries: GPUBindGroupLayoutEntry[] = [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
+    ];
+    const { pipeline, layout } = this.simplePipeline("mip", MIP_SHADER, t.format, 0xf, null, entries);
+    const encoder = this.ensureEncoder();
+    for (let layer = 0; layer < t.layers; layer++) {
+      for (let level = 1; level < t.levels; level++) {
+        const view = (mip: number): GPUTextureView => t.texture.createView({
+          dimension: "2d", baseMipLevel: mip, mipLevelCount: 1, baseArrayLayer: layer, arrayLayerCount: 1,
+        });
+        const pass = encoder.beginRenderPass({ colorAttachments: [{ view: view(level), loadOp: "clear", storeOp: "store" }] });
+        pass.setPipeline(pipeline);
+        pass.setBindGroup(0, this.device.createBindGroup({ layout, entries: [{ binding: 0, resource: view(level - 1) }] }));
+        pass.draw(3);
+        pass.end();
+        this.stats.passes++;
+      }
+    }
   }
 
   private textureCreate(v: DataView): void {
@@ -296,15 +387,29 @@ export class GpuExecutor {
       fallback = true;
     }
     const old = this.textures.get(c.id);
-    if (old) this.pendingDestroy.push(old.texture);
-    this.textures.set(c.id, this.makeTex(format, Math.max(1, c.width), Math.max(1, c.height), Math.max(1, c.layers),
-      (c.usage & USAGE_RENDER) !== 0, fallback));
+    if (old) {
+      this.pendingDestroy.push(old.texture);
+      this.mipsStale.delete(old.texture);
+    }
+    this.pendingColor.delete(c.id);
+    this.pendingDepth.delete(c.id);
+    const width = Math.max(1, c.width), height = Math.max(1, c.height);
+    /* Mip chains: float formats the box filter can render (the producer
+     * asks for them on sampled float textures only). */
+    const full = Math.floor(Math.log2(Math.max(width, height))) + 1;
+    const levels = (c.usage & USAGE_RENDER) === 0 && shaderType(format) === "f32" && !isDepthFormat(format)
+      ? Math.min(c.levels, full) : 1;
+    this.textures.set(c.id, this.makeTex(format, width, height, Math.max(1, c.layers), (c.usage & USAGE_RENDER) !== 0,
+      fallback, levels));
   }
 
   private textureDestroy(id: number): void {
     const t = this.textures.get(id);
     if (!t) return;
     this.textures.delete(id);
+    this.mipsStale.delete(t.texture);
+    this.pendingColor.delete(id);
+    this.pendingDepth.delete(id);
     this.pendingDestroy.push(t.texture);
   }
 
@@ -312,6 +417,7 @@ export class GpuExecutor {
     const w = parseTextureWrite(v);
     const t = this.textures.get(w.id);
     if (!t || t.fallback || isDepthFormat(t.format)) return;
+    this.materialize(w.id);
     this.flush(); /* earlier draws read the old contents */
     this.device.queue.writeTexture(
       { texture: t.texture, origin: { x: w.x, y: w.y, z: w.layer } },
@@ -319,6 +425,7 @@ export class GpuExecutor {
       { bytesPerRow: w.bytesPerRow, rowsPerImage: w.height },
       { width: w.width, height: w.height, depthOrArrayLayers: 1 },
     );
+    if (t.levels > 1) this.mipsStale.add(t.texture);
   }
 
   private shader(v: DataView, payload: Uint8Array): void {
@@ -337,6 +444,13 @@ export class GpuExecutor {
   private ensureEncoder(): GPUCommandEncoder {
     if (!this.encoder) this.encoder = this.device.createCommandEncoder();
     return this.encoder;
+  }
+
+  /** Whether the open pass attaches texture `id`. */
+  private attachedNow(id: number): boolean {
+    if (!this.pass) return false;
+    const [colors, depth] = this.passKey.split("|");
+    return depth === String(id) || (colors ?? "").split(",").includes(String(id));
   }
 
   private endPass(): void {
@@ -383,18 +497,25 @@ export class GpuExecutor {
       const t = id ? this.textures.get(id) : undefined;
       if (!t || !t.renderView) return null;
       size = [t.width, t.height];
-      return { view: t.renderView, loadOp: "load", storeOp: "store" };
+      const clear = this.pendingColor.get(id);
+      this.pendingColor.delete(id);
+      return clear ? { view: t.renderView, loadOp: "clear", storeOp: "store", clearValue: clear }
+        : { view: t.renderView, loadOp: "load", storeOp: "store" };
     });
     const dt = depthId ? this.textures.get(depthId) : undefined;
-    const depth = dt && dt.renderView ? this.depthAttachment(dt, null, null) : null;
+    const pd = this.pendingDepth.get(depthId);
+    this.pendingDepth.delete(depthId);
+    const depth = dt && dt.renderView ? this.depthAttachment(dt, pd?.depth ?? null, pd?.stencil ?? null) : null;
     if (dt) size = [dt.width, dt.height];
     if (!size) return null;
     return this.beginPass(key, colors, depth, size);
   }
 
-  private stageData(bytes: Uint8Array): number {
+  /** Stages `bytes` at a DATA_ALIGN offset; `window`: the binding reads
+   * that many bytes from the offset (they must lie inside the buffer). */
+  private stageData(bytes: Uint8Array, window = 0): number {
     let at = Math.ceil(this.dataUsed / DATA_ALIGN) * DATA_ALIGN;
-    if (at + bytes.byteLength > DATA_BUFFER_BYTES) {
+    if (at + Math.max(bytes.byteLength, window) > DATA_BUFFER_BYTES) {
       this.flush();
       at = 0;
     }
@@ -424,9 +545,12 @@ export class GpuExecutor {
   private sampler(state: number): GPUSampler {
     let s = this.samplers.get(state);
     if (!s) {
-      const filter: GPUFilterMode = state & SAMPLER_LINEAR ? "linear" : "nearest";
+      const filter = (bit: number): GPUFilterMode => (state & bit ? "linear" : "nearest");
       const wrap = (axis: number): GPUAddressMode => SAMPLER_WRAPS[(state >> (1 + 2 * axis)) & 3] ?? "clamp-to-edge";
-      s = this.device.createSampler({ magFilter: filter, minFilter: filter, addressModeU: wrap(0), addressModeV: wrap(1), addressModeW: wrap(2) });
+      s = this.device.createSampler({
+        magFilter: filter(SAMPLER_LINEAR), minFilter: filter(SAMPLER_MIN_LINEAR), mipmapFilter: filter(SAMPLER_MIP_LINEAR),
+        addressModeU: wrap(0), addressModeV: wrap(1), addressModeW: wrap(2),
+      });
       this.samplers.set(state, s);
     }
     return s;
@@ -442,7 +566,7 @@ export class GpuExecutor {
     ].join("|");
     return this.cached(key, () => {
       const entries: GPUBindGroupLayoutEntry[] = [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
+        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage", hasDynamicOffset: true } },
       ];
       textures.forEach((t, i) => {
         entries.push({
@@ -520,7 +644,8 @@ export class GpuExecutor {
   }
 
   /** A copy of attachment `t` for a draw that also samples it. */
-  private shadowOf(t: Tex): Tex {
+  private shadowOf(id: number, t: Tex): Tex {
+    this.materialize(id);
     const key = `${t.format}:${t.width}x${t.height}x${t.layers}`;
     let s = this.shadows.get(key);
     if (!s) {
@@ -586,31 +711,42 @@ export class GpuExecutor {
         this.warnOnce(`texture ${id}`, `draw samples unknown texture ${id}`);
         return;
       }
-      textures.push(attached.has(id) ? this.shadowOf(t) : t);
+      if (this.mipsStale.has(t.texture)) this.buildMips(t);
+      if (!attached.has(id)) this.materialize(id);
+      textures.push(attached.has(id) ? this.shadowOf(id, t) : t);
     }
     const colorFormats = colorIds.map((id) => (id ? this.textures.get(id)?.format ?? null : null));
     const { pipeline, layout } = this.drawPipeline(d, module, textures, filtered, colorFormats, depthId ? depthTex : undefined);
     /* Vertices and data (a flush may happen in between: stage both first). */
     if (this.vertexUsed + vertices.byteLength > VERTEX_BUFFER_BYTES ||
-        Math.ceil(this.dataUsed / DATA_ALIGN) * DATA_ALIGN + (data?.byteLength ?? 0) > DATA_BUFFER_BYTES) this.flush();
-    const dataOffset = this.stageData(data ?? new Uint8Array(16));
-    const dataSize = Math.max(16, data?.byteLength ?? 0);
+        Math.ceil(this.dataUsed / DATA_ALIGN) * DATA_ALIGN + Math.max(data?.byteLength ?? 0, DATA_WINDOW_BYTES) > DATA_BUFFER_BYTES) {
+      this.flush();
+    }
+    const dataOffset = this.stageData(data ?? new Uint8Array(16), DATA_WINDOW_BYTES);
     const vertexOffset = this.vertexUsed;
     this.vertexStaging.set(vertices, vertexOffset);
     this.vertexUsed += Math.ceil(vertices.byteLength / 16) * 16;
     const pass = this.passFor(colorIds, depthId);
     if (!pass) return;
     if (!this.scissor(pass, d.scissor)) return;
-    const group = this.device.createBindGroup({
-      layout,
-      entries: [
-        { binding: 0, resource: { buffer: this.dataBuffer, offset: dataOffset, size: dataSize } },
-        ...textures.map((t, i) => ({ binding: 1 + i, resource: t.sampleView })),
-        ...[...samplerStates].map(([binding, state]) => ({ binding, resource: this.sampler(state) })),
-      ],
-    });
+    const samplers = [...samplerStates].map(([binding, state]) => ({ binding, resource: this.sampler(state) }));
+    const key = [this.idOf(layout), this.set, ...textures.map((t) => this.idOf(t.sampleView)),
+      ...samplers.map((e) => `${e.binding}:${this.idOf(e.resource)}`)].join(",");
+    let group = this.bindGroups.get(key);
+    if (!group) {
+      if (this.bindGroups.size >= BIND_GROUP_CACHE_LIMIT) this.bindGroups.clear();
+      group = this.device.createBindGroup({
+        layout,
+        entries: [
+          { binding: 0, resource: { buffer: this.dataBuffer, offset: 0, size: DATA_WINDOW_BYTES } },
+          ...textures.map((t, i) => ({ binding: 1 + i, resource: t.sampleView })),
+          ...samplers,
+        ],
+      });
+      this.bindGroups.set(key, group);
+    }
     pass.setPipeline(pipeline);
-    pass.setBindGroup(0, group);
+    pass.setBindGroup(0, group, [dataOffset]);
     pass.setVertexBuffer(0, this.vertexBuffer, vertexOffset, vertices.byteLength);
     pass.setBlendConstant({ r: d.blendConstant[0] ?? 0, g: d.blendConstant[1] ?? 0, b: d.blendConstant[2] ?? 0, a: d.blendConstant[3] ?? 0 });
     pass.setStencilReference(d.stencilRef);
@@ -635,12 +771,11 @@ export class GpuExecutor {
         if (type === "i32") return bits | 0;
         return new DataView(new Uint32Array([bits]).buffer).getFloat32(0, true);
       });
-      this.beginPass(`${c.colorId}|0`, [{
-        view: t.renderView, loadOp: "clear", storeOp: "store",
-        clearValue: { r: value[0] ?? 0, g: value[1] ?? 0, b: value[2] ?? 0, a: value[3] ?? 0 },
-      }], null, [t.width, t.height]);
+      if (this.attachedNow(c.colorId)) this.endPass();
+      this.pendingColor.set(c.colorId, { r: value[0] ?? 0, g: value[1] ?? 0, b: value[2] ?? 0, a: value[3] ?? 0 });
       return;
     }
+    this.materialize(c.colorId);
     const pass = this.passFor([c.colorId], 0);
     if (!pass || !this.scissor(pass, c.rect)) return;
     const { pipeline, layout } = this.simplePipeline(`clear-${type}`, clearShader(type), t.format, c.colorMask, null,
@@ -659,9 +794,12 @@ export class GpuExecutor {
     const depth = (c.flags & CLEAR_DEPTH) && hasDepth(t.format) ? c.depth : null;
     const stencil = (c.flags & CLEAR_STENCIL) && hasStencil(t.format) ? c.stencil : null;
     if (whole && (stencil === null || (c.stencilMask & 0xff) === 0xff)) {
-      this.beginPass(`|${c.depthId}`, [], this.depthAttachment(t, depth, stencil), [t.width, t.height]);
+      if (this.attachedNow(c.depthId)) this.endPass();
+      const prev = this.pendingDepth.get(c.depthId);
+      this.pendingDepth.set(c.depthId, { depth: depth ?? prev?.depth ?? null, stencil: stencil ?? prev?.stencil ?? null });
       return;
     }
+    this.materialize(c.depthId);
     const pass = this.passFor([], c.depthId);
     if (!pass || !this.scissor(pass, c.rect)) return;
     const ds: GPUDepthStencilState = { format: t.format };
@@ -718,7 +856,20 @@ export class GpuExecutor {
       this.warnOnce(`copy ${src?.format}->${dst?.format}`, `GPU copy ${src?.format ?? "?"} -> ${dst?.format ?? "?"} not supported`);
       return;
     }
-    if (c.srcId === c.dstId) src = this.shadowOf(src);
+    this.materialize(c.srcId);
+    const [sx, sy, sw, sh] = [c.srcRect[0] ?? 0, c.srcRect[1] ?? 0, c.srcRect[2] ?? 0, c.srcRect[3] ?? 0];
+    const [dx, dy, dw, dh] = [c.dstRect[0] ?? 0, c.dstRect[1] ?? 0, c.dstRect[2] ?? 0, c.dstRect[3] ?? 0];
+    if (c.srcId !== c.dstId && src.format === dst.format && sw === dw && sh === dh && sw > 0 && sh > 0 && sx >= 0 &&
+        sy >= 0 && dx >= 0 && dy >= 0 && sx + sw <= src.width && sy + sh <= src.height && dx + dw <= dst.width &&
+        dy + dh <= dst.height) {
+      this.materialize(c.dstId);
+      this.endPass();
+      this.ensureEncoder().copyTextureToTexture({ texture: src.texture, origin: { x: sx, y: sy } },
+        { texture: dst.texture, origin: { x: dx, y: dy } }, [sw, sh, 1]);
+      this.stats.copies++;
+      return;
+    }
+    if (c.srcId === c.dstId) src = this.shadowOf(c.srcId, src);
     const pass = this.passFor([c.dstId], 0);
     if (!pass || !this.scissor(pass, c.dstRect)) return;
     this.blit(pass, src, dst.format, c.srcRect, c.dstRect, c.filter ? 4 : 0);
@@ -728,6 +879,7 @@ export class GpuExecutor {
     const src = this.textures.get(p.id);
     const width = p.rect[2] ?? 0, height = p.rect[3] ?? 0;
     if (!src || width <= 0 || height <= 0) return;
+    this.materialize(p.id);
     const target = this.host.presentTarget(width, height);
     if (!target) return;
     this.beginPass("present", [{ view: target.view, loadOp: "clear", storeOp: "store", clearValue: { r: 0, g: 0, b: 0, a: 1 } }],

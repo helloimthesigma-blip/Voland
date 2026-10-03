@@ -180,6 +180,7 @@ void raster3d_init(Raster3d *r, uint8_t *storage, size_t bytes) {
   tex_init_tables(); /* before any worker samples */
   workers_start(&r->workers, workers_default_count());
   log_info("[gpu] reference renderer: %u pixel worker(s)", r->workers.count);
+  r->gpu_mipmaps = true;
   r->ready = true;
 }
 
@@ -570,7 +571,10 @@ static void surface_load(Raster3d *r, Raster3d_Surface *s, const Gpu_Memory *mem
 static void textures_invalidate(Raster3d *r, uint64_t address, uint64_t bytes) {
   for (uint32_t i = 0; i < RASTER_TEXTURES; i++) {
     Raster3d_Texture *t = &r->textures[i];
-    if (t->valid && t->address < address + bytes && address < t->address + t->raw_bytes) t->validated = r->texture_epoch - 1u;
+    if (t->valid && t->address < address + bytes && address < t->address + t->raw_bytes) {
+      t->validated = r->texture_epoch - 1u;
+      t->full_epoch = r->texture_epoch - RASTER_TEXTURE_FULL_EVERY; /* a whole hash next time */
+    }
   }
 }
 
@@ -930,6 +934,27 @@ static uint64_t content_hash_end(const Content_Hash *h) {
 
 /* Hashes guest GPU memory [va, va + n) in chunks (callers hold the pool
  * lock, so one chunk buffer serves). */
+/* A cheap per-frame check: RASTER_TEXTURE_SAMPLES spans spread over the
+ * texture's guest bytes. A change it misses is caught by the whole-texture
+ * hash every RASTER_TEXTURE_FULL_EVERY frames; copy-engine writes force one
+ * at once (textures_invalidate). */
+static bool guest_sample_hash(const Gpu_Memory *mem, uint64_t va, uint64_t n, uint64_t *out) {
+  uint8_t span[RASTER_TEXTURE_SAMPLE_BYTES];
+  Content_Hash h;
+  content_hash_begin(&h, n);
+  if (n <= (uint64_t)RASTER_TEXTURE_SAMPLES * RASTER_TEXTURE_SAMPLE_BYTES) {
+    *out = 0;
+    return false; /* small: the whole hash is as cheap */
+  }
+  const uint64_t step = n / RASTER_TEXTURE_SAMPLES;
+  for (uint32_t i = 0; i < RASTER_TEXTURE_SAMPLES; i++) {
+    if (!mem->read(mem->user, va + (uint64_t)i * step, span, sizeof(span))) return false;
+    content_hash_update(&h, span, sizeof(span));
+  }
+  *out = content_hash_end(&h);
+  return true;
+}
+
 static bool guest_hash(const Gpu_Memory *mem, uint64_t va, uint64_t n, uint64_t *out) {
   static uint8_t chunk[HASH_CHUNK_BYTES];
   Content_Hash h;
@@ -1042,7 +1067,9 @@ static void texture_miss(Raster3d *r, const Tex_Header *h, const char *why) {
   r->stats.texture_misses++;
 }
 
-static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const Gpu_Memory *mem) {
+/* `texels`: the caller samples on the CPU (GPU mode releases decoded
+ * copies once uploaded; this decodes again where needed). */
+static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const Gpu_Memory *mem, bool texels) {
   Raster3d_Texture *view = surface_view(r, tic);
   if (view) return view;
   Raster3d_Texture *t = NULL;
@@ -1053,7 +1080,8 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     }
   }
   if (t) t->last_used = r->draw_serial;
-  if (t && t->validated == r->texture_epoch) return t;
+  const bool usable = t && (!texels || t->image.texels);
+  if (usable && t->validated == r->texture_epoch) return t;
   Tex_Header h;
   tex_header_parse(tic, &h);
   const uint64_t raw_bytes = tex_read_bytes(&h);
@@ -1073,15 +1101,26 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     if (s->in_use && s->dirty && s->address < h.address + raw_bytes && h.address < s->address + s->guest_bytes)
       surface_write_back(r, s, mem);
   }
-  /* Unchanged since it was decoded? Hashed in place: the whole texture is
-   * staged only to decode it. */
+  /* Unchanged since it was decoded? Between whole hashes, a sampled one
+   * decides (most frames); a sample that differs, or none, falls through. */
+  uint64_t sample = 0;
+  const bool sampled = guest_sample_hash(mem, h.address, raw_bytes, &sample);
+  if (usable && sampled && t->raw_bytes == raw_bytes && t->sample_hash == sample &&
+      r->texture_epoch - t->full_epoch < RASTER_TEXTURE_FULL_EVERY) {
+    t->validated = r->texture_epoch;
+    return t;
+  }
+  /* Hashed in place: the whole texture is staged only to decode it. */
   uint64_t hash = 0;
+  r->gpu_stats.hashed_bytes += raw_bytes;
   if (!guest_hash(mem, h.address, raw_bytes, &hash)) {
     texture_miss(r, &h, "unreadable");
     return NULL;
   }
-  if (t && t->raw_hash == hash) {
+  if (usable && t->raw_hash == hash) {
     t->validated = r->texture_epoch;
+    t->full_epoch = r->texture_epoch;
+    t->sample_hash = sample;
     return t;
   }
   uint8_t *raw = r->texture_raw;
@@ -1090,7 +1129,17 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     return NULL;
   }
   /* A changed texture decodes into its own block (same descriptor, same
-   * size); a new one takes a free slot and block, evicting as needed. */
+   * size) - unless GPU mode released it after uploading; a new one takes a
+   * free slot and block, evicting as needed. */
+  if (t && t->pool_bytes < decoded_aligned) {
+    const size_t offset = pool_allocate(r, decoded_aligned);
+    if (offset == SIZE_MAX) {
+      texture_miss(r, &h, "texture cache full");
+      return NULL;
+    }
+    t->pool_offset = offset;
+    t->pool_bytes = decoded_aligned;
+  }
   if (!t) {
     for (uint32_t i = 0; i < RASTER_TEXTURES && !t; i++)
       if (!r->textures[i].valid) t = &r->textures[i];
@@ -1120,6 +1169,8 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
   t->address = h.address;
   t->raw_bytes = raw_bytes;
   t->raw_hash = hash;
+  t->sample_hash = sample;
+  t->full_epoch = r->texture_epoch;
   t->validated = r->texture_epoch;
   t->last_used = r->draw_serial;
   t->valid = true;
@@ -1151,7 +1202,7 @@ static bool resolve_texture(Tex_Resolver *res, uint32_t handle, Raster3d_Texture
   /* The texture pool and guest reads are shared with the other bands. */
   workers_lock(&ctx->r->workers);
   if (tic_pool && ctx->mem->read(ctx->mem->user, tic_pool + (uint64_t)tic_index * TEX_HEADER_BYTES, tic, sizeof(tic)))
-    t = texture_load(ctx->r, tic, ctx->mem);
+    t = texture_load(ctx->r, tic, ctx->mem, true);
   if (tsc_pool && ctx->mem->read(ctx->mem->user, tsc_pool + (uint64_t)tsc_index * TEX_SAMPLER_BYTES, tsc, sizeof(tsc)))
     tex_sampler_parse(tsc, &s);
   workers_unlock(&ctx->r->workers);
@@ -2719,8 +2770,8 @@ static void gpu_destroy(Raster3d *r, uint32_t id) {
 }
 
 static void gpu_create(Raster3d *r, uint32_t id, uint32_t format, uint32_t width, uint32_t height, uint32_t layers,
-                       uint32_t usage) {
-  const Gpu_Rec_Texture_Create c = {id, format, width, height, layers, usage};
+                       uint32_t usage, uint32_t levels) {
+  const Gpu_Rec_Texture_Create c = {id, format, width, height, layers, usage, levels, 0};
   gpu_stream_write(r->gpu, GPU_REC_TEXTURE_CREATE, &c, sizeof(c));
 }
 
@@ -2813,7 +2864,7 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
   victim->last_used = r->tick;
   bool direct = false;
   victim->gpu_format = d->depth ? gpu_zeta_format(d->format) : gpu_color_format(d->format, &direct);
-  gpu_create(r, victim->id, victim->gpu_format, d->width, d->height, 1, GPU_USAGE_SAMPLED | GPU_USAGE_RENDER);
+  gpu_create(r, victim->id, victim->gpu_format, d->width, d->height, 1, GPU_USAGE_SAMPLED | GPU_USAGE_RENDER, 1);
   r->gpu_stats.surfaces++;
   log_debug("[gpu] GPU surface %u: %ux%u fmt 0x%02x%s @%llx", victim->id, d->width, d->height, d->format,
             d->depth ? " (zeta)" : "", (unsigned long long)d->address);
@@ -2829,6 +2880,18 @@ static Raster3d_Gpu_Surface *gpu_surface_at(Raster3d *r, uint64_t address, uint3
   return NULL;
 }
 
+/* Mip levels for a texture's GPU copy: the guest's count, within the
+ * full chain, for float 2D (array) textures - the consumer builds them
+ * from level 0 (gpu_records.h). Integer, cube and 3D textures: level 0. */
+static uint32_t gpu_texture_levels(const Raster3d *r, const Tex_Image *img, bool is_int) {
+  const Tex_Type type = img->header.type;
+  if (!r->gpu_mipmaps || is_int || img->header.levels <= 1u || (type != TEX_TYPE_2D && type != TEX_TYPE_2D_ARRAY))
+    return 1u;
+  uint32_t full = 1;
+  for (uint32_t size = img->width > img->height ? img->width : img->height; size > 1u; size >>= 1) full++;
+  return img->header.levels < full ? img->header.levels : full;
+}
+
 /* A decoded texture's GPU copy: RGBA8 as it is, anything else as the
  * 32-bit RGBA texels sampling sees (tex_texel). */
 static uint32_t gpu_texture(Raster3d *r, Raster3d_Texture *t) {
@@ -2839,18 +2902,19 @@ static uint32_t gpu_texture(Raster3d *r, Raster3d_Texture *t) {
                           : !is_int ? GPU_FMT_RGBA32_FLOAT
                           : img->header.data_type[0] == TEX_DATA_UINT ? GPU_FMT_RGBA32_UINT
                                                                      : GPU_FMT_RGBA32_SINT;
-  if (t->gpu_id && t->gpu_hash == t->raw_hash && t->gpu_width == img->width && t->gpu_height == img->height &&
-      t->gpu_layers == layers && t->gpu_format == format)
-    return t->gpu_id;
-  if (!t->gpu_id || t->gpu_width != img->width || t->gpu_height != img->height || t->gpu_layers != layers ||
-      t->gpu_format != format) {
+  const uint32_t levels = gpu_texture_levels(r, img, is_int);
+  const bool same = t->gpu_id && t->gpu_width == img->width && t->gpu_height == img->height && t->gpu_layers == layers &&
+                    t->gpu_format == format && t->gpu_levels == levels;
+  if (same && t->gpu_hash == t->raw_hash) return t->gpu_id;
+  if (!same) {
     gpu_destroy(r, t->gpu_id);
     t->gpu_id = gpu_new_id(r);
-    gpu_create(r, t->gpu_id, format, img->width, img->height, layers, GPU_USAGE_SAMPLED);
+    gpu_create(r, t->gpu_id, format, img->width, img->height, layers, GPU_USAGE_SAMPLED, levels);
     t->gpu_width = img->width;
     t->gpu_height = img->height;
     t->gpu_layers = layers;
     t->gpu_format = format;
+    t->gpu_levels = levels;
   }
   for (uint32_t l = 0; l < layers; l++) {
     if (img->rgba8) {
@@ -2883,6 +2947,10 @@ static uint32_t gpu_texture(Raster3d *r, Raster3d_Texture *t) {
   }
   t->gpu_hash = t->raw_hash;
   r->gpu_stats.texture_uploads++;
+  /* The GPU holds it now: release the decoded copy (the pool is then free
+   * for the working set; a change re-decodes into a new block). */
+  t->pool_bytes = 0;
+  t->image.texels = NULL;
   return t->gpu_id;
 }
 
@@ -3020,6 +3088,14 @@ static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs) {
   return true;
 }
 
+/* Mip levels of the GPU texture `id` (a render target has one). */
+static uint32_t gpu_texture_levels_of(const Raster3d *r, const Raster3d_Gpu_Surface *surface, uint32_t id) {
+  if (surface || !id) return 1u;
+  for (uint32_t i = 0; i < RASTER_TEXTURES; i++)
+    if (r->textures[i].valid && r->textures[i].gpu_id == id) return r->textures[i].gpu_levels;
+  return 1u;
+}
+
 /* Runs the pixel program once (one lane, at a vertex) to learn which
  * texture handle each texture instruction uses - bindless handles come
  * from registers - then builds the WGSL descriptor, the shader and the
@@ -3084,7 +3160,7 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
         gpu_format = surf->gpu_format;
         if (gpu_format_is_int(surf->gpu_format, &is_signed)) sample_type = is_signed ? WGSL_SAMPLE_SINT : WGSL_SAMPLE_UINT;
       } else {
-        Raster3d_Texture *tex = texture_load(r, tic, ctx->mem);
+        Raster3d_Texture *tex = texture_load(r, tic, ctx->mem, false);
         if (!tex) continue;
         id = gpu_texture(r, tex);
         gpu_format = tex->gpu_format;
@@ -3096,7 +3172,12 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
       if (sample_type == WGSL_SAMPLE_FLOAT && !cube_map && gpu_format_filterable(gpu_format) && s.wrap[0] <= 2u &&
           s.wrap[1] <= 2u) {
         desc->hw_sample_mask |= 1u << b;
-        g->sampler_state[b] = (s.mag_filter == 2u ? GPU_SAMPLER_LINEAR : 0u) |
+        /* Minification follows magnification on one level (the
+         * reference's single filter); mip chains use the TSC's own. */
+        const bool mips = gpu_texture_levels_of(r, surf, id) > 1u;
+        const bool min_linear = mips ? s.min_filter == 2u : s.mag_filter == 2u;
+        g->sampler_state[b] = (s.mag_filter == 2u ? GPU_SAMPLER_LINEAR : 0u) | (min_linear ? GPU_SAMPLER_MIN_LINEAR : 0u) |
+                              (s.mip_filter == TEX_MIP_LINEAR ? GPU_SAMPLER_MIP_LINEAR : 0u) |
                               ((uint32_t)s.wrap[0] << GPU_SAMPLER_WRAP_SHIFT(0)) |
                               ((uint32_t)s.wrap[1] << GPU_SAMPLER_WRAP_SHIFT(1)) |
                               ((uint32_t)(s.wrap[2] <= 2u ? s.wrap[2] : 2u) << GPU_SAMPLER_WRAP_SHIFT(2));
@@ -3114,6 +3195,12 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
                              ((uint32_t)h.swizzle[3] << 12);
       p[WGSL_TEXP_LEVELS] = h.levels;
       p[WGSL_TEXP_COMPARE] = s.compare_func;
+      /* Level selection (textures with a mip chain only; the shader
+       * clamps to the levels the GPU texture has). */
+      if (s.mip_filter > TEX_MIP_NONE && s.min_filter == 2u) p[WGSL_TEXP_FLAGS] |= WGSL_TEXP_MIN_LINEAR;
+      p[WGSL_TEXP_LOD_BIAS] = u32f(s.lod_bias);
+      p[WGSL_TEXP_MIN_LOD] = u32f(s.mip_filter > TEX_MIP_NONE ? s.min_lod : 0.0f);
+      p[WGSL_TEXP_MAX_LOD] = u32f(s.mip_filter > TEX_MIP_NONE ? s.max_lod : 0.0f);
       for (uint32_t c = 0; c < 4; c++) p[WGSL_TEXP_BORDER + c] = u32f(s.border[c]);
       desc->texture_count++;
     }
