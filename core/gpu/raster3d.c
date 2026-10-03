@@ -869,7 +869,14 @@ static Raster3d_Texture *surface_view(Raster3d *r, const uint32_t tic[8]) {
     if (!s->in_use || !s->loaded || s->depth || s->address != h.address || s->format != RT_FORMAT_A8B8G8R8_UNORM ||
         s->width != h.width || s->height != h.height)
       continue;
-    Raster3d_Texture *v = &r->surface_views[i];
+    for (uint32_t k = 0; k < r->surface_view_count; k++) {
+      Raster3d_Texture *v = &r->surface_views[k];
+      if (v->image.texels == s->pixels && memcmp(v->tic, tic, sizeof(v->tic)) == 0) return v;
+    }
+    if (r->surface_view_count >= RASTER_SURFACE_VIEWS) return NULL; /* the round trip instead */
+    /* Filled before any worker can see it (callers hold the pool lock and
+     * publish it through their own resolver). */
+    Raster3d_Texture *v = &r->surface_views[r->surface_view_count++];
     memset(v, 0, sizeof(*v));
     memcpy(v->tic, tic, sizeof(v->tic));
     v->address = h.address;
@@ -2420,6 +2427,7 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
   if (!r || !r->ready || !draw->count) return;
   if (!(regs[REG_RASTER_ENABLE] & 1u) && regs[REG_RASTER_ENABLE] != 0) return;
   r->stats.draws++;
+  r->surface_view_count = 0; /* no worker holds last draw's views */
   Draw_Context *ctx = &g_draw_context;
   ctx->r = r;
   ctx->regs = regs;

@@ -39,6 +39,7 @@ struct Gpu_Memory;
 #define RASTER_MAX_SURFACE_BYTES ((size_t)2048 * 1280 * 4)
 #define RASTER_PROGRAMS 64u
 #define RASTER_TEXTURES 256u
+#define RASTER_SURFACE_VIEWS 32u
 #define RASTER_TEXTURE_POOL_BYTES ((size_t)256 * 1024 * 1024)
 #define RASTER_INLINE_INDICES 0x10000u
 #define RASTER_STREAMS 32u
@@ -104,7 +105,10 @@ typedef struct Raster3d {
   Raster3d_Program *programs; /* RASTER_PROGRAMS */
   uint8_t *program_bytes;   /* RASTER_PROGRAM_READ_BYTES */
   Raster3d_Texture textures[RASTER_TEXTURES];
-  Raster3d_Texture surface_views[RASTER_SURFACES]; /* render targets sampled in place */
+  /* Render targets sampled in place: built once per (surface, descriptor)
+   * per draw and never rewritten while the draw's workers may read them. */
+  Raster3d_Texture surface_views[RASTER_SURFACE_VIEWS];
+  uint32_t surface_view_count;
   uint32_t texture_count;
   uint8_t *texture_pool;    /* RASTER_TEXTURE_POOL_BYTES */
   size_t texture_pool_used;
