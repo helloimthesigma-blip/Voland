@@ -23,9 +23,11 @@ test.setTimeout(RUN_MS + 60_000);
 
 test("a real homebrew NRO boots and presents frames", async ({ page }) => {
   page.on("console", (message) => {
-    if (/\[gpu\] reference renderer|renderer:|GPU stream|WebGPU|untranslated|not translated/.test(message.text())) console.log(message.text());
+    if (/\[gpu\] reference renderer|renderer:|guest threads on|GPU stream|WebGPU|untranslated|not translated/.test(message.text())) console.log(message.text());
   });
-  await page.goto("/");
+  // VOLAND_PAGE_QUERY: page options, e.g. "cores=0" (docs/PARALLEL.md).
+  const query = process.env["VOLAND_PAGE_QUERY"] ?? "";
+  await page.goto(query === "" ? "/" : `/?${query}`);
   await expect(page.getByTestId("load-panel")).toBeVisible({ timeout: 20_000 });
   // By path: the browser reads the file itself, so multi-GB content (a
   // decrypted NCA) loads without passing through this process.

@@ -2,7 +2,10 @@
 //
 // Producer/consumer over a one-slot mailbox guarded by a libnx-style
 // mutex and two condition variables (WaitProcessWideKeyAtomic re-acquires
-// the mutex in the kernel when signalled). The producer sends 1..500; the
+// the mutex in the kernel when signalled). Signallers skip the SVC while
+// the key reads 0 (no waiters), as libnx and nn::os do: on several host
+// threads a kernel that releases the mutex before marking the key loses
+// wakeups here. The producer sends 1..500; the
 // consumer sums them; main checks 125250. Then the timeout paths:
 // a condvar wait nobody signals must return TimedOut (0xEA01) WITHOUT the
 // mutex held, and WaitForAddress must return InvalidState (0xFA01) on a
@@ -122,9 +125,12 @@ producer:
   str   w22, [x21, #8]
   mov   w9, #1
   str   w9, [x21, #4]
-  add   x0, x21, #16                 // signal(not_empty, 1)
+  add   x0, x21, #16                 // signal(not_empty, 1), only if
+  ldr   w9, [x0]                     // the key shows waiters (as libnx
+  cbz   w9, 4f                       // and nn::os do)
   mov   w1, #1
   svc   #0x1D
+4:
   bl    unlock
   add   w22, w22, #1
   cmp   w22, #501
@@ -152,9 +158,12 @@ consumer:
   add   w10, w10, w9
   str   w10, [x21, #12]
   str   wzr, [x21, #4]
-  add   x0, x21, #20                 // signal(not_full, 1)
+  add   x0, x21, #20                 // signal(not_full, 1), only if
+  ldr   w9, [x0]                     // the key shows waiters
+  cbz   w9, 4f
   mov   w1, #1
   svc   #0x1D
+4:
   bl    unlock
   subs  w22, w22, #1
   b.ne  1b

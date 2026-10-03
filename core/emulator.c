@@ -700,8 +700,9 @@ uint32_t emulator_set_host_cores(Emulator* emulator, uint32_t cores) {
   }
 #ifdef __EMSCRIPTEN__
   /* Every host thread comes from the fixed pthread pool (§24): the pixel
-   * workers give up as many as the cores take. */
-  raster3d_set_workers(&emulator->renderer, WORKERS_MAX + 1u - cores);
+   * workers give up as many as the cores take (never grow). */
+  const uint32_t pixel_workers = WORKERS_MAX + 1u - cores;
+  if (emulator->renderer.workers.count > pixel_workers) raster3d_set_workers(&emulator->renderer, pixel_workers);
 #endif
   emulator->parallel = parallel_create(&emulator->scheduler, emulator->cpu_backend, cores);
   if (!emulator->parallel) return 0;

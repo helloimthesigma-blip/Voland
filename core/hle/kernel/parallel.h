@@ -45,6 +45,15 @@ void parallel_destroy(Parallel *p);
 
 uint32_t parallel_core_count(const Parallel *p);
 
+/* What the cores did, for measuring (docs/PARALLEL.md "Measuring"). */
+typedef struct Parallel_Stats {
+  uint64_t slices;         /* slices that opened (something was runnable) */
+  uint64_t cycles;         /* guest cycles, summed over cores */
+  uint64_t span;           /* per slice the busiest core's cycles, summed */
+  uint64_t shared_slices;  /* slices in which two or more cores ran */
+} Parallel_Stats;
+Parallel_Stats parallel_stats(const Parallel *p);
+
 /* One slice: every core runs guest threads for up to `budget` cycles.
  * Called by the driver; returns like scheduler_tick (RAN, IDLE, ...). */
 Scheduler_Status parallel_tick(Parallel *p, uint64_t budget);
