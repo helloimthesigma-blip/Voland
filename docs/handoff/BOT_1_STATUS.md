@@ -79,7 +79,19 @@ All are small and delimited:
 
 ## Measurements
 
-See the milestone notes. Native two- and three-core numbers are pending.
+The machine runs six agents (load average 20–50 on 8 cores), so wall
+time is mostly noise. The numbers below are the scheduler's own account
+(`voland-cli: parallel:` line, docs/PARALLEL.md "Measuring") and the
+host's instructions-retired counter, which load doesn't change.
+
+| Run | Result |
+|---|---|
+| Boot, 20k slices, native, 2 cores | Parallelism 1.51× (guest cycles summed over cores / busiest core per slice); 94.8% of slices ran both cores. Virtual time 37.9M vs 24.5M ticks serial (1.55× more progress per slice). ArbitrateLock/Unlock went from 971/1459 to 15223/17301: the guest's mutexes are really contended now. |
+| Boot, 20k slices, Node (V8, the browser's wasm), 2 cores | Parallelism 1.52×; 92.5% of slices on both cores. |
+| Title, 900k slices, native, 2 cores | No crash or deadlock; 1,350 presents vs 1,218 serial, virtual time 490.9M vs 456.9M. Wall 374 s vs 353 s, but the process got only about 0.8 of a host core on average (machine saturated). |
+| One core vs serial | +6.4% host instructions (the per-slice handoff) at a 100k budget. |
+
+Gameplay numbers (snapshot at 4.75M slices) are pending.
 
 ## Needs from others
 

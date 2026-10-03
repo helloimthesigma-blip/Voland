@@ -219,6 +219,33 @@ core nothing changes.
   It also builds `voland-cli` for Node (`parallel-cli-node`) for measuring
   in V8.
 
+## Measuring
+
+On a busy machine, wall time says little: the cores compete with
+everything else. `voland-cli --host-cores N` therefore ends with the
+scheduler's own account:
+
+```
+voland-cli: parallel: S slices, C guest cycles over a span of P (C/P x), F% of slices on 2+ cores
+```
+
+- **C** sums every core's guest cycles.
+- **P** sums, per slice, the busiest core's cycles: the critical path if
+  the host cores were free.
+- **C / P** is the parallelism the guest actually offers. It is the
+  ceiling on the wall-time speedup (less the per-slice handoff, about 6%
+  of host instructions at a 100k-cycle budget with one core).
+
+Snapshot jobs (`--snapshot-at`) take `cores N`, so serial and parallel
+runs can start from the same game state:
+
+```
+printf 'max_slices 4850000\ncores 2\nlog /tmp/two.log\n' > DIR/job
+```
+
+In the browser, `?cores=N` selects the mode, and the homebrew e2e spec
+passes `VOLAND_PAGE_QUERY` through to the page.
+
 ## Not done / limits
 
 - The JIT backend stays serial until its code cache is per-thread or safe
