@@ -1422,6 +1422,7 @@ typedef struct Target {
   uint32_t write_mask;           /* bit per component */
   bool blend;
   uint32_t color_op, color_src, color_dst, alpha_op, alpha_src, alpha_dst;
+  uint32_t rgba8_blend;          /* RGBA8_BLEND_*: a common blend on an RGBA8 target, done inline */
 } Target;
 
 typedef struct Raster_State {
@@ -1572,6 +1573,36 @@ static bool depth_compare(uint32_t func, float incoming, float stored) {
   }
 }
 
+/* Blends output_pixel does inline on RGBA8 targets: the same float
+ * operations as its generic path (products and sum as separate
+ * expressions, so nothing contracts differently), without the per-channel
+ * factor and op dispatch. Unity draws sprites premultiplied. */
+#define RGBA8_BLEND_GENERIC 0u
+#define RGBA8_BLEND_PREMULTIPLIED 1u /* ONE, ONE_MINUS_SRC_ALPHA, ADD (colour and alpha) */
+#define RGBA8_BLEND_ADDITIVE 2u      /* ONE, ONE, ADD */
+
+static uint32_t rgba8_blend_kind(const Target *t) {
+  if (!t->rgba8 || !t->blend || t->write_mask != 0xfu || t->color_op != BOP_ADD || t->alpha_op != BOP_ADD) return RGBA8_BLEND_GENERIC;
+  if (t->color_src != BF_ONE || t->alpha_src != BF_ONE) return RGBA8_BLEND_GENERIC;
+  if (t->color_dst == BF_INV_SRC_ALPHA && t->alpha_dst == BF_INV_SRC_ALPHA) return RGBA8_BLEND_PREMULTIPLIED;
+  if (t->color_dst == BF_ONE && t->alpha_dst == BF_ONE) return RGBA8_BLEND_ADDITIVE;
+  return RGBA8_BLEND_GENERIC;
+}
+
+static void output_rgba8_blend(const Target *tg, const uint32_t color[4], uint8_t *p) {
+  float dst[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+  for (uint32_t i2 = 0; i2 < 4u; i2++)
+    if (tg->format->channel[i2] != CH_PAD) dst[tg->format->channel[i2]] = g_unorm8[p[i2]];
+  float out[4];
+  const float df = tg->rgba8_blend == RGBA8_BLEND_PREMULTIPLIED ? 1.0f - f32(color[3]) : 1.0f;
+  for (uint32_t c = 0; c < 4u; c++) {
+    const float s = f32(color[c]) * 1.0f;
+    const float d = dst[c] * df;
+    out[c] = s + d;
+  }
+  for (uint32_t i2 = 0; i2 < 4u; i2++) p[i2] = tg->format->channel[i2] == CH_PAD ? 0xffu : to_unorm8(out[tg->format->channel[i2]]);
+}
+
 static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
   Raster3d *r = ctx->r;
   const uint32_t *regs = ctx->regs;
@@ -1614,6 +1645,7 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
     }
     t->rgba8 = is_unorm8x4(t->format);
     t->alpha_blend = t->blend && t->color_op == BOP_ADD && t->color_src == BF_SRC_ALPHA && t->color_dst == BF_INV_SRC_ALPHA;
+    t->rgba8_blend = rgba8_blend_kind(t);
     if ((int32_t)d.width < width) width = (int32_t)d.width;
     if ((int32_t)d.height < height) height = (int32_t)d.height;
     rs->target_count = i + 1u;
@@ -1940,6 +1972,11 @@ static void output_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, 
     uint8_t *p = tg->surface->pixels + ((uint64_t)py * tg->surface->width + (uint64_t)px) * tg->surface->bytes_per_pixel;
     if (target_is_plain_rgba8(tg)) {
       output_rgba8(rs, tg, color, p);
+      tg->surface->dirty = true;
+      continue;
+    }
+    if (tg->rgba8_blend != RGBA8_BLEND_GENERIC) {
+      output_rgba8_blend(tg, color, p);
       tg->surface->dirty = true;
       continue;
     }
