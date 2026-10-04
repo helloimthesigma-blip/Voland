@@ -95,6 +95,18 @@ void scheduler_exit_thread(Scheduler *sched, Sched_Thread *thread, const CPU_Bac
   }
 }
 
+bool scheduler_alone(const Scheduler *sched, const Sched_Thread *self, uint64_t *wake_at) {
+  uint64_t earliest = sched->device_wake_at;
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    const Sched_Thread *t = &sched->threads[i];
+    if (t == self) continue;
+    if (!t->spinning && (t->on_core || (t->state == THREAD_STATE_RUNNABLE && !t->paused))) return false;
+    if (t->state == THREAD_STATE_WAITING && t->wake_at < earliest) earliest = t->wake_at;
+  }
+  *wake_at = earliest;
+  return true;
+}
+
 void scheduler_wake_off_core_waiters(Scheduler *sched, const Sched_Thread *thread) {
   const uint64_t index = (uint64_t)(thread - sched->threads);
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
@@ -117,6 +129,10 @@ void scheduler_expire_timeouts(Scheduler *sched) {
 /* Is `t` a better pick than `b`? With an affine core, home threads win
  * ties of priority before round-robin order does. */
 static bool better(const Sched_Thread *t, const Sched_Thread *b, bool affine, uint32_t core) {
+  /* A thread that is only polling for work (Sched_Thread.spinning) runs
+   * when nothing that does work can: on the Switch it would spin on a core
+   * of its own instead of taking turns with the threads that feed it. */
+  if (t->spinning != b->spinning) return !t->spinning;
   if (t->thread.priority != b->thread.priority) return t->thread.priority < b->thread.priority;
   if (affine) {
     const bool t_home = t->last_core == core, b_home = b->last_core == core;
@@ -179,6 +195,7 @@ Scheduler_Status scheduler_finish_run(Scheduler *sched, const CPU_Backend *backe
     if (end > sched->ticks) sched->ticks = end;
   }
   thread->last_run = ++sched->run_counter;
+  if (exit_reason != CPU_EXIT_SVC) thread->spinning = false; /* it ran its budget: real work */
 
   if (exit_reason == CPU_EXIT_FAULT || exit_reason == CPU_EXIT_BREAKPOINT) {
     if (!sched->process_crashed) {

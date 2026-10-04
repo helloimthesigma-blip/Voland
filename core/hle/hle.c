@@ -109,6 +109,11 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
   HLE_Context *context = (HLE_Context *)userdata;
   SWITCH_ASSERT_ALWAYS(context != NULL, "hle_on_svc: context is NULL");
   scheduler_kernel_enter(context->scheduler, cpu_state);
+  {
+    /* Any SVC but a yield is not polling (svc_thread.c sets the mark). */
+    Sched_Thread *self = context->scheduler ? scheduler_current(context->scheduler) : NULL;
+    if (self) self->spinning = false;
+  }
   dispatch_svc(context, cpu_state, swi);
   scheduler_kernel_exit(context->scheduler);
 }
