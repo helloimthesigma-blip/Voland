@@ -21,6 +21,7 @@
 #include "guest/events.inc"
 #include "guest/threads.inc"
 #include "guest/yieldspin.inc"
+#include "guest/busyfeed.inc"
 #include "hle/kernel/parallel.h"
 
 #include <pthread.h>
@@ -50,6 +51,7 @@ static const Program k_programs[] = {
     {"events", k_guest_events, sizeof(k_guest_events), "signal, reset, timeout, close ok"},
     {"atomics", k_guest_atomics, sizeof(k_guest_atomics), "counters 150000 ok"},
     {"yieldspin", k_guest_yieldspin, sizeof(k_guest_yieldspin), "flag seen"},
+    {"busyfeed", k_guest_busyfeed, sizeof(k_guest_busyfeed), "job taken"},
 };
 #define PROGRAM_COUNT (sizeof(k_programs) / sizeof(k_programs[0]))
 #define MAX_SLICES 20000000ull
@@ -147,6 +149,15 @@ static void test_yield_alone(void) {
     }
   }
   printf("[parallel_test] a lone yield sleeps to the next wake (<= %u SVCs, 0-3 cores)\n", YIELDSPIN_MAX_SVCS);
+  /* Serially, a polling worker waits for the computing main thread rather
+   * than taking a turn every rotation (997-cycle slices: ~3000 rotations). */
+  run_program(&k_programs[5], 0, 997, &o);
+  check_completes(&k_programs[5], 0, 997, &o);
+  if (o.svcs > YIELDSPIN_MAX_SVCS) {
+    fprintf(stderr, "busyfeed, serial: %llu SVCs\n", (unsigned long long)o.svcs);
+    CHECK(false);
+  }
+  printf("[parallel_test] a polling thread yields to working threads (%llu SVCs)\n", (unsigned long long)o.svcs);
 }
 
 static pthread_t g_driver;
