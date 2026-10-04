@@ -44,7 +44,15 @@
 | Executor passes for 250k draws | 101,972 |
 | Producer at the title | negligible in a host profile; the ARM interpreter dominates |
 
+- **Walking recipe (BOTS.md), in progress.** A binds at the prompt (4.87M); Hornet walks left from 4.95M; room transition at about 5.25M; B jumps and Y attacks every 25k slices from 5.26M.
+  - GPU stream to the 5.48M crash: 47 pixel programs, 6 new, all valid; 0 untranslated draws; 7,094 presents, 421,879 draws and 0 WebGPU errors in replay.
+  - Not yet compared with software frames: the software run was stopped at about 1.78M when work paused.
+  - The run asserts in `svc_memory.c:101` (free_one_page) at about 5.48M. The coordinator took that.
+  - `voland-cli` input events: 32 → 256 (1ca7368).
+
 ## Next
+
+0. Rerun the software reference with the walking recipe (`tools/walk-chain.sh` in `~/WORKSPACE/bot3-runs` does GPU, replay and software) and compare 4.7M–5.475M every 25k slices against the replay. The GPU stream `walk.vgs` and its replay frames are kept in `~/WORKSPACE/bot3-runs`.
 
 1. Finish the gameplay frame comparison and fix any mismatch.
 2. The unsupported-path list (register SHFL, global loads, integer copies, cube/3D). Silksong's gameplay hits none of them so far.
