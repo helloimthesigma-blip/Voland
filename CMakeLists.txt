@@ -91,6 +91,12 @@ if(EMSCRIPTEN)
                                   # growth disabled this IS the maximum, so no
                                   # separate MAXIMUM_MEMORY - views never detach
     -sALLOW_MEMORY_GROWTH=0       # fixed at boot (§4); never enable
+    -sSTACK_SIZE=1048576          # 1 MiB (Emscripten's default is 64 KiB): the
+    -sDEFAULT_PTHREAD_STACK_SIZE=1048576 # WGSL translator under a draw under an
+                                  # SVC under the JIT's run loop overflowed 64 KiB
+                                  # and silently corrupted dlmalloc's static
+                                  # state (heap corruption, bogus 8 GiB sbrk).
+                                  # Memory stays fixed: this only moves the heap.
     -sALLOW_TABLE_GROWTH=1        # the JIT installs compiled blocks with
                                   # addFunction (docs/JIT.md); the function
                                   # table grows, linear memory never does
