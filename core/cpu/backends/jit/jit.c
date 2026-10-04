@@ -166,6 +166,11 @@ static uint32_t g_hot_threshold = JIT_DEFAULT_HOT_THRESHOLD;
  * (docs/PARALLEL.md). Consulted in multicore mode only, so serial runs
  * keep the threshold for recompiling evicted code too. */
 static uint64_t g_compiled_somewhere[JIT_HIT_COUNTERS]; /* the exact PC, 0 = none */
+/* Multicore: interpreted executions counted over all cores. Per-core
+ * counts let a block run up to the threshold on every core before any
+ * compiled it (a guest thread migrates between cores), so cores
+ * interpreted 1.7x the blocks serial does. */
+static uint16_t g_shared_hits[JIT_HIT_COUNTERS];
 
 void jit_set_hot_threshold(uint32_t executions) { g_hot_threshold = executions ? executions : 1u; }
 
@@ -763,10 +768,13 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
       }
     } else {
       const uint32_t slot = (uint32_t)(jit_cache_index(pc) & (JIT_HIT_COUNTERS - 1u));
-      uint16_t *hits = &t->hits[slot];
-      if (++*hits >= g_hot_threshold ||
-          (cpu_multicore() && __atomic_load_n(&g_compiled_somewhere[slot], __ATOMIC_RELAXED) == pc)) {
-        *hits = 0;
+      const bool multicore = cpu_multicore();
+      uint16_t *hits = multicore ? &g_shared_hits[slot] : &t->hits[slot];
+      const uint32_t count = multicore ? (uint32_t)__atomic_add_fetch(hits, 1u, __ATOMIC_RELAXED) : ++*hits;
+      if (count >= g_hot_threshold ||
+          (multicore && __atomic_load_n(&g_compiled_somewhere[slot], __ATOMIC_RELAXED) == pc)) {
+        if (multicore) __atomic_store_n(hits, 0, __ATOMIC_RELAXED);
+        else *hits = 0;
         compile(t, s, pc, generation);
         if (find(t, s, pc, generation)) {
           __atomic_store_n(&g_compiled_somewhere[slot], pc, __ATOMIC_RELAXED);
