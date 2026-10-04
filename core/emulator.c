@@ -470,6 +470,7 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
    * CPU_State, and its bootstrap handle (0x8000) now names it. */
   scheduler_init(&emulator->scheduler, emulator->cpu_backend);
   emulator->scheduler.parallel = emulator->parallel;
+  emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
   Sched_Thread *main_thread = scheduler_new_thread(&emulator->scheduler);
   SWITCH_ASSERT_ALWAYS(main_thread != NULL, "empty scheduler has a slot");
   main_thread->thread.cpu_state = emulator->cpu_state;
@@ -643,6 +644,7 @@ void emulator_unload_program(Emulator* emulator) {
   }
   scheduler_init(&emulator->scheduler, emulator->cpu_backend);
   emulator->scheduler.parallel = emulator->parallel;
+  emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
   /* Transfer memory still lent at exit: the heap gets its pages back
    * read-write, so teardown can release them. */
   for (uint32_t i = 0; i < TRANSFER_MEMORY_POOL_CAPACITY; i++) {
@@ -692,6 +694,12 @@ Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
   case SCHEDULER_CRASHED: return EMULATOR_CRASHED;
   default: return EMULATOR_DEADLOCK;
   }
+}
+
+void emulator_set_poll_coalescing(Emulator* emulator, bool on) {
+  if (!emulator) return;
+  emulator->no_poll_coalescing = !on;
+  emulator->scheduler.poll_coalescing = on;
 }
 
 uint32_t emulator_set_host_cores(Emulator* emulator, uint32_t cores) {

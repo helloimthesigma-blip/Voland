@@ -17,6 +17,7 @@
 
 void scheduler_init(Scheduler *sched, const CPU_Backend *backend) {
   memset(sched, 0, sizeof(*sched));
+  sched->poll_coalescing = true;
   sched->backend = backend;
   sched->current = -1;
   sched->next_thread_id = 1;
@@ -40,8 +41,14 @@ Sched_Thread *scheduler_new_thread(Scheduler *sched) {
   return NULL;
 }
 
+static void forget_coalescing(Scheduler *sched, Sched_Thread *thread) {
+  if (!thread->poll_wake_at) return;
+  thread->poll_wake_at = 0;
+  sched->coalesced_waiting--;
+}
+
 void scheduler_free_thread(Scheduler *sched, Sched_Thread *thread) {
-  (void)sched;
+  forget_coalescing(sched, thread);
   memset(thread, 0, sizeof(*thread));
 }
 
@@ -71,6 +78,7 @@ static CPU_Register_File *regs_of(Sched_Thread *thread, const CPU_Backend *backe
 }
 
 void scheduler_wake(Scheduler *sched, Sched_Thread *thread, uint32_t result) {
+  forget_coalescing(sched, thread);
   thread->state = THREAD_STATE_RUNNABLE;
   thread->wait = WAIT_NONE;
   thread->wake_at = SCHEDULER_WAIT_FOREVER;
@@ -95,16 +103,65 @@ void scheduler_exit_thread(Scheduler *sched, Sched_Thread *thread, const CPU_Bac
   }
 }
 
+/* A thread that does work - not polling - is running or can run. */
+static bool worker_active(const Sched_Thread *t) {
+  return !t->spinning && (t->on_core || (t->state == THREAD_STATE_RUNNABLE && !t->paused));
+}
+
+static bool polling_sleep(const Sched_Thread *t) {
+  return t->spinning && t->state == THREAD_STATE_WAITING && t->wait == WAIT_SLEEP;
+}
+
 bool scheduler_alone(const Scheduler *sched, const Sched_Thread *self, uint64_t *wake_at) {
   uint64_t earliest = sched->device_wake_at;
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     const Sched_Thread *t = &sched->threads[i];
     if (t == self) continue;
-    if (!t->spinning && (t->on_core || (t->state == THREAD_STATE_RUNNABLE && !t->paused))) return false;
-    if (t->state == THREAD_STATE_WAITING && t->wake_at < earliest) earliest = t->wake_at;
+    if (worker_active(t)) return false;
+    /* Another poller's next poll is not an event: it can't change anything
+     * either. Its own real deadline, if coalesced, is the event. */
+    if (t->state != THREAD_STATE_WAITING) continue;
+    const uint64_t at = polling_sleep(t) ? SCHEDULER_WAIT_FOREVER : t->wake_at;
+    if (at < earliest) earliest = at;
   }
   *wake_at = earliest;
   return true;
+}
+
+void scheduler_poll_sleep(Scheduler *sched, Sched_Thread *self, int64_t ns, uint64_t run_cycles) {
+  if (!sched->poll_coalescing) { /* the plain scheduler */
+    if (ns > 0) scheduler_block(sched, self, WAIT_SLEEP, (uint64_t)ns);
+    return;
+  }
+  const bool yield = ns <= 0;
+  self->spinning = run_cycles <= SCHEDULER_SPIN_RUN_CYCLES && (yield || (uint64_t)ns <= SCHEDULER_POLL_SLEEP_MAX_NS);
+  if (self->spinning && yield) sched->polling_yields++;
+  if (!yield) scheduler_block(sched, self, WAIT_SLEEP, (uint64_t)ns);
+  uint64_t event = SCHEDULER_WAIT_FOREVER;
+  if (!scheduler_alone(sched, self, &event) || event == SCHEDULER_WAIT_FOREVER || event <= sched->ticks) return;
+  if (yield) { /* a lone yield: sleep to the next event (nothing else to rotate to) */
+    scheduler_block(sched, self, WAIT_SLEEP, SCHEDULER_WAIT_FOREVER);
+    self->wake_at = event;
+    sched->lone_yields++;
+    return;
+  }
+  if (!self->spinning || event <= self->wake_at) return;
+  self->poll_wake_at = self->wake_at; /* what it asked for, restored if a worker wakes */
+  self->wake_at = event;
+  sched->coalesced_polls++;
+  sched->coalesced_waiting++;
+}
+
+/* A worker can run again: every coalesced poller polls on its own schedule
+ * from here on (its requested wake, maybe already due). */
+static void uncoalesce(Scheduler *sched) {
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS && sched->coalesced_waiting; i++) {
+    Sched_Thread *t = &sched->threads[i];
+    if (!t->poll_wake_at) continue;
+    if (t->state == THREAD_STATE_WAITING && t->poll_wake_at < t->wake_at) t->wake_at = t->poll_wake_at;
+    t->poll_wake_at = 0;
+    sched->coalesced_waiting--;
+  }
 }
 
 void scheduler_wake_off_core_waiters(Scheduler *sched, const Sched_Thread *thread) {
@@ -119,6 +176,14 @@ void scheduler_wake_off_core_waiters(Scheduler *sched, const Sched_Thread *threa
 
 /* Wakes every thread whose timeout has passed. */
 void scheduler_expire_timeouts(Scheduler *sched) {
+  if (sched->coalesced_waiting) {
+    for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+      if (worker_active(&sched->threads[i])) {
+        uncoalesce(sched);
+        break;
+      }
+    }
+  }
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     Sched_Thread *t = &sched->threads[i];
     if (t->state != THREAD_STATE_WAITING || t->wake_at > sched->ticks) continue;
