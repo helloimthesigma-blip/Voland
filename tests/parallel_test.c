@@ -22,6 +22,7 @@
 #include "guest/threads.inc"
 #include "guest/yieldspin.inc"
 #include "guest/busyfeed.inc"
+#include "guest/polls.inc"
 #include "hle/kernel/parallel.h"
 
 #include <pthread.h>
@@ -52,6 +53,7 @@ static const Program k_programs[] = {
     {"atomics", k_guest_atomics, sizeof(k_guest_atomics), "counters 150000 ok"},
     {"yieldspin", k_guest_yieldspin, sizeof(k_guest_yieldspin), "flag seen"},
     {"busyfeed", k_guest_busyfeed, sizeof(k_guest_busyfeed), "job taken"},
+    {"polls", k_guest_polls, sizeof(k_guest_polls), "picked up promptly"},
 };
 #define PROGRAM_COUNT (sizeof(k_programs) / sizeof(k_programs[0]))
 #define MAX_SLICES 20000000ull
@@ -160,6 +162,32 @@ static void test_yield_alone(void) {
   printf("[parallel_test] a polling thread yields to working threads (%llu SVCs)\n", (unsigned long long)o.svcs);
 }
 
+/* Poll coalescing: 25us pollers wait for real events (fewer SVCs) and
+ * still pick up work promptly (polls.s checks the latency in-guest); off,
+ * the plain scheduler polls on schedule. */
+static void test_poll_coalescing(void) {
+  static Outcome on, off;
+  for (uint32_t cores = 0; cores <= 3; cores++) {
+    run_program(&k_programs[6], cores, 997, &on);
+    check_completes(&k_programs[6], cores, 997, &on);
+  }
+  guest_boot(&g_run, TEST_BACKEND, k_programs[6].code, k_programs[6].size);
+  emulator_set_poll_coalescing(&g_run.emu, false);
+  off.status = guest_run(&g_run, 997, MAX_SLICES);
+  off.svcs = g_run.emu.hle.svc_call_count;
+  memcpy(off.output, g_run.output, sizeof(off.output));
+  guest_shutdown(&g_run);
+  check_completes(&k_programs[6], 0, 997, &off);
+  run_program(&k_programs[6], 0, 997, &on);
+  if (on.svcs * 2u > off.svcs) {
+    fprintf(stderr, "polls: %llu SVCs coalesced vs %llu plain\n", (unsigned long long)on.svcs,
+            (unsigned long long)off.svcs);
+    CHECK(false);
+  }
+  printf("[parallel_test] poll coalescing: %llu SVCs vs %llu plain, work still picked up promptly (0-3 cores)\n",
+         (unsigned long long)on.svcs, (unsigned long long)off.svcs);
+}
+
 static pthread_t g_driver;
 static bool g_ran_on_driver;
 static void note_thread(void *ctx) {
@@ -203,6 +231,7 @@ int main(void) {
   test_multicore();
   test_stress();
   test_yield_alone();
+  test_poll_coalescing();
   test_host_calls();
   printf("[parallel_test] passed\n");
   return 0;
