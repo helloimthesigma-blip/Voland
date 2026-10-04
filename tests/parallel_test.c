@@ -120,11 +120,14 @@ static void test_multicore(void) {
 /* Races are rare events: give them chances. atomics.s checks exclusives
  * (a lost update fails it); condvar.s hands 500 items between two threads
  * through a mutex and two condition variables, so a lost wakeup in the
- * kernel's condvar/mutex handling (svc_thread.c) deadlocks it. */
+ * kernel's condvar/mutex handling (svc_thread.c) deadlocks it. polls.s
+ * catches a poller stretching its sleep after work finished on another
+ * core while it polled (the work epoch, scheduler.h). */
 static void test_stress(void) {
   static Outcome o;
   static const struct { size_t program; uint32_t cores; uint64_t budget; } runs[] = {
       {3, 3, 50000}, {1, 2, 997}, {1, 3, 997}, {1, 2, 100000},
+      {6, 3, 997}, {6, 2, 31}, {6, 3, 31},
   };
   for (size_t k = 0; k < sizeof(runs) / sizeof(runs[0]); k++) {
     for (uint32_t round = 0; round < 20u; round++) {

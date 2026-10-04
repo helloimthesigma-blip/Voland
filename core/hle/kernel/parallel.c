@@ -167,6 +167,7 @@ static uint64_t run_slice_on_core(Parallel *p, Core *core) {
     Sched_Thread *thread = &sched->threads[index];
     thread->on_core = true;
     thread->last_core = core->index;
+    thread->work_epoch_seen = sched->work_epoch;
     core->running = index;
     p->busy++;
     const uint64_t start_ticks = sched->ticks;

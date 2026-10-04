@@ -75,6 +75,7 @@ typedef struct Sched_Thread {
   uint32_t last_core;       /* parallel mode: the core it last ran on (affinity) */
   bool spinning;            /* its last run was a short poll ending in a yield or short sleep (scheduler_alone) */
   uint64_t poll_wake_at;    /* a coalesced poll sleep: the wake it asked for; 0 = not coalesced */
+  uint64_t work_epoch_seen; /* Scheduler.work_epoch when it was last picked */
   uint64_t last_run;        /* round-robin stamp */
 } Sched_Thread;
 
@@ -95,6 +96,10 @@ typedef struct Scheduler {
   uint64_t polling_yields;  /* yields after a short run (marked spinning) */
   uint64_t coalesced_polls; /* short poll sleeps stretched to the next real event */
   uint32_t coalesced_waiting; /* threads sleeping a coalesced poll now */
+  /* Runs finished by non-pollers. A poller whose run overlapped one (on
+   * another core) may have polled before that work was published, so it
+   * must not stretch its sleep. Serially it never moves within a run. */
+  uint64_t work_epoch;
   /* Poll coalescing (docs/PARALLEL.md "Polling threads"), on by default:
    * pollers wait for real events instead of re-polling while nothing that
    * works can run. Off = the plain scheduler, bit for bit. */
