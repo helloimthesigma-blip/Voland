@@ -300,7 +300,8 @@ EM_JS(void, jit_js_compile_async,
             simd: wasmTable.get(simd),
           },
         });
-        ready.push(id, addFunction(instance.exports.b, 'ip'));
+        /* addFunction returns a BigInt in wasm64 builds; the queue feeds a u32 array. */
+        ready.push(id, Number(addFunction(instance.exports.b, 'ip')));
       },
       (error) => {
         console.error('[jit] module rejected:', error);
