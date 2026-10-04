@@ -70,6 +70,17 @@ void parallel_set_report_hook(Parallel *p, void (*hook)(void)) {
   (void)p;
   (void)hook;
 }
+void parallel_set_device_hook(Parallel *p, void (*devices)(void *ctx), void *ctx) {
+  (void)p;
+  (void)devices;
+  (void)ctx;
+}
+Scheduler_Status parallel_run_for(Parallel *p, uint64_t host_ns, uint64_t budget) {
+  (void)p;
+  (void)host_ns;
+  (void)budget;
+  return SCHEDULER_DEADLOCK;
+}
 bool parallel_on_core_thread(void) { return false; }
 
 #else
@@ -145,6 +156,15 @@ struct Parallel {
   uint64_t core_wake_ns, core_wakes, turnaround_ns, turnarounds;
   uint64_t reported_core_wake_ns, reported_core_wakes, reported_turnaround_ns, reported_turnarounds;
   void (*report_hook)(void);
+
+  /* Free-running mode (docs/PARALLEL.md "Free-running mode"). */
+  void (*devices)(void *ctx);  /* the emulator's device updates, under the kernel lock */
+  void *devices_ctx;
+  uint64_t free_gen;           /* a new value starts a free run */
+  bool free_running;           /* cores keep running; cleared to pause them */
+  uint32_t free_active;        /* cores in the free run, not yet parked */
+  bool free_parked;            /* every core has parked (under `channel`) */
+  Scheduler_Status free_status; /* RAN, or why the run stopped (EXITED, DEADLOCK) */
 };
 
 #define PARALLEL_REPORT_NS 10000000000ull /* every 10 s of host time */
@@ -263,15 +283,90 @@ static uint64_t run_slice_on_core(Parallel *p, Core *core) {
   }
 }
 
+/* Wakes the driver if the run stops (under the kernel lock). */
+static void stop_free_run(Parallel *p, Scheduler_Status status) {
+  if (p->free_status == SCHEDULER_RAN) p->free_status = status;
+  pthread_mutex_lock(&p->channel);
+  pthread_cond_broadcast(&p->channel_cv);
+  pthread_mutex_unlock(&p->channel);
+}
+
+/* Free-running: pick, run, account, repeat until the driver pauses the
+ * run. Devices update on whichever core finds them due; with nothing
+ * runnable anywhere, that core takes the serial idle step (a time jump to
+ * the next wake). Called and returns with the kernel lock. */
+static void run_free_on_core(Parallel *p, Core *core) {
+  Scheduler *sched = p->sched;
+  const CPU_Backend *backend = p->backend;
+  while (p->free_running && !p->quit) {
+    if (sched->process_crashed || sched->process_exited) {
+      stop_free_run(p, sched->process_crashed ? SCHEDULER_CRASHED : SCHEDULER_EXITED);
+      wait_core_cv(p, &core->time.park_ns);
+      continue;
+    }
+    scheduler_expire_timeouts(sched);
+    const int32_t index = scheduler_pick_for_core(sched, core->index);
+    if (index < 0) {
+      if (p->busy == 0 && p->free_status == SCHEDULER_RAN) {
+        /* Nothing runnable anywhere: the serial idle step, then devices. */
+        const Scheduler_Status idle = scheduler_idle(sched);
+        if (idle == SCHEDULER_EXITED || idle == SCHEDULER_DEADLOCK) {
+          stop_free_run(p, idle);
+          continue;
+        }
+        if (p->devices && sched->ticks >= sched->device_wake_at) p->devices(p->devices_ctx);
+        pthread_cond_broadcast(&p->core_cv);
+        continue;
+      }
+      wait_core_cv(p, &core->time.idle_ns);
+      continue;
+    }
+    Sched_Thread *thread = &sched->threads[index];
+    thread->on_core = true;
+    thread->last_core = core->index;
+    thread->work_epoch_seen = sched->work_epoch;
+    core->running = index;
+    p->busy++;
+    const uint64_t start_ticks = sched->ticks;
+    backend->set_sys_reg(thread->thread.cpu_state, CPU_SYSREG_CNTVCT_EL0, start_ticks);
+    pthread_mutex_unlock(&p->kernel);
+
+    const uint64_t run_start = now_ns();
+    const CPU_ExitReason exit_reason = backend->run(thread->thread.cpu_state, p->budget);
+    core->time.run_ns += now_ns() - run_start;
+
+    lock_kernel(p, &core->time.lock_ns);
+    p->busy--;
+    core->running = -1;
+    thread->on_core = false;
+    scheduler_wake_off_core_waiters(sched, thread);
+    p->stats.cycles += backend->get_cycles_consumed(thread->thread.cpu_state);
+    (void)scheduler_finish_run(sched, backend, thread, start_ticks, exit_reason);
+    if (p->devices && sched->ticks >= sched->device_wake_at) p->devices(p->devices_ctx);
+    pthread_cond_broadcast(&p->core_cv);
+  }
+}
+
 static void *core_main(void *arg) {
   Core *core = (Core *)arg;
   Parallel *p = core->parallel;
   t_core = core;
-  uint64_t seen = 0;
+  uint64_t seen = 0, seen_free = 0;
   pthread_mutex_lock(&p->kernel);
   for (;;) {
-    while (p->slice == seen && !p->quit) wait_core_cv(p, &core->time.park_ns);
+    while (p->slice == seen && p->free_gen == seen_free && !p->quit) wait_core_cv(p, &core->time.park_ns);
     if (p->quit) break;
+    if (p->free_gen != seen_free) {
+      seen_free = p->free_gen;
+      run_free_on_core(p, core);
+      if (--p->free_active == 0) {
+        pthread_mutex_lock(&p->channel);
+        p->free_parked = true;
+        pthread_cond_broadcast(&p->channel_cv);
+        pthread_mutex_unlock(&p->channel);
+      }
+      continue;
+    }
     seen = p->slice;
     p->core_wake_ns += now_ns() - p->slice_open_ns;
     p->core_wakes++;
@@ -454,6 +549,72 @@ Scheduler_Status parallel_tick(Parallel *p, uint64_t budget) {
   report(p);
 
   pthread_mutex_lock(&p->kernel);
+  if (sched->process_crashed) status = SCHEDULER_CRASHED;
+  else if (sched->process_exited) status = SCHEDULER_EXITED;
+  pthread_mutex_unlock(&p->kernel);
+  return status;
+}
+
+void parallel_set_device_hook(Parallel *p, void (*devices)(void *ctx), void *ctx) {
+  p->devices = devices;
+  p->devices_ctx = ctx;
+}
+
+/* Serves host calls on the channel until done() (under `channel`) or the
+ * deadline (0 = none). */
+static void drive_until(Parallel *p, bool (*done)(const Parallel *p), uint64_t deadline) {
+  pthread_mutex_lock(&p->channel);
+  while (!done(p) && (!deadline || now_ns() < deadline)) {
+    if (p->call) {
+      Host_Call *call = p->call;
+      call->fn(call->ctx);
+      call->done = true;
+      p->call = NULL;
+      pthread_cond_broadcast(&p->channel_cv);
+      continue;
+    }
+    wait_on_channel(p);
+  }
+  pthread_mutex_unlock(&p->channel);
+}
+
+static bool free_run_stopped(const Parallel *p) {
+  return __atomic_load_n(&p->free_status, __ATOMIC_ACQUIRE) != SCHEDULER_RAN;
+}
+static bool free_run_parked(const Parallel *p) { return p->free_parked; }
+
+Scheduler_Status parallel_run_for(Parallel *p, uint64_t host_ns, uint64_t budget) {
+  Scheduler *sched = p->sched;
+  pthread_mutex_lock(&p->kernel);
+  if (sched->process_crashed || sched->process_exited) {
+    const Scheduler_Status status = sched->process_crashed ? SCHEDULER_CRASHED : SCHEDULER_EXITED;
+    pthread_mutex_unlock(&p->kernel);
+    return status;
+  }
+  p->budget = budget;
+  p->free_status = SCHEDULER_RAN;
+  p->free_running = true;
+  p->free_active = p->core_count;
+  p->free_parked = false;
+  p->free_gen++;
+  pthread_cond_broadcast(&p->core_cv);
+  pthread_mutex_unlock(&p->kernel);
+
+  const uint64_t start = now_ns();
+  drive_until(p, free_run_stopped, start + host_ns);
+
+  /* Pause: every core finishes its run (<= budget) and parks; host calls
+   * are still served meanwhile (a core may be in an SVC that needs one). */
+  pthread_mutex_lock(&p->kernel);
+  p->free_running = false;
+  pthread_cond_broadcast(&p->core_cv);
+  pthread_mutex_unlock(&p->kernel);
+  drive_until(p, free_run_parked, 0);
+  p->driver_wait_ns += now_ns() - start;
+  report(p);
+
+  pthread_mutex_lock(&p->kernel);
+  Scheduler_Status status = p->free_status;
   if (sched->process_crashed) status = SCHEDULER_CRASHED;
   else if (sched->process_exited) status = SCHEDULER_EXITED;
   pthread_mutex_unlock(&p->kernel);

@@ -58,6 +58,13 @@ Parallel_Stats parallel_stats(const Parallel *p);
  * Called by the driver; returns like scheduler_tick (RAN, IDLE, ...). */
 Scheduler_Status parallel_tick(Parallel *p, uint64_t budget);
 
+/* Free-running mode (docs/PARALLEL.md "Free-running mode"): the cores run
+ * without slices for about `host_ns` of host time, updating devices
+ * through the hook as they come due; then they are paused and parked.
+ * Returns RAN, or EXITED / DEADLOCK / CRASHED if the run stopped. */
+Scheduler_Status parallel_run_for(Parallel *p, uint64_t host_ns, uint64_t budget);
+void parallel_set_device_hook(Parallel *p, void (*devices)(void *ctx), void *ctx);
+
 /* scheduler_kernel_enter/exit in parallel mode. */
 void parallel_kernel_enter(Parallel *p, const CPU_State *state);
 void parallel_kernel_exit(Parallel *p);
