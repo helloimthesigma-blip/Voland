@@ -283,6 +283,29 @@ c7ac43c; JIT core, `?cores=0`):
     block keeps interpreting until its module resolves between bursts, and
     the worker never blocks. Proposed to the JIT agent.
 
+## Perf tracker (2026-10-04)
+
+- **Tools.**
+  - `platform/web/tools/perf-track.mjs` measures one commit and appends a
+    row to `docs/perf/silksong.csv`; see `docs/perf/README.md`.
+  - It configures with `cmake --preset web --fresh` and records the backend
+    and host cores in effect.
+  - The CPU-normalised columns are renderer CPU seconds per guest second.
+- **Default page vs. `?cores=0` (coordinator's question).**
+  - The logic is right. Every row logs `backend=jit` with 0 host cores, so
+    the JIT defaults to serial (`defaultHostCores()`).
+  - A direct A/B on the same build (c7ac43c, `perf.mjs --web-dir`) gives the
+    same gameplay: 11.07 fps vs. 10.97, and 5.76 vs. 5.80 CPU s per guest
+    second.
+  - **Still unexplained:** both tracker runs of the default config measured
+    7.00 fps in gameplay (8.4–9.4 CPU s per guest second) against 11.8–12.1
+    for `cores=0`. In each pair the default ran first, right after the
+    fresh build. Suspect the order or that first run rather than the page
+    config. Next step: run the pair in the opposite order.
+- **Watcher stopped** (the owner asked to go idle). Restart it with
+  `zsh $SCRATCH/watch-dev.sh` (a scratch script); it
+  polls `local/dev` and runs both configs.
+
 ## Next
 
 - Re-measure load phases once the JIT's threshold and staging changes are
