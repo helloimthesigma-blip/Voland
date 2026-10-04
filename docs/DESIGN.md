@@ -2454,9 +2454,21 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.72.0*
+*Document version: 3.73.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.72 → v3.73 (summary)
+
+- **§24, stack sizes:** `-sSTACK_SIZE=1048576 -sDEFAULT_PTHREAD_STACK_SIZE=1048576` (Emscripten's default is 64 KiB). The WGSL translator, reached under a draw that is itself under an SVC, overflowed the 64 KiB stack into dlmalloc's static state. The symptoms were spurious 8 GiB sbrk requests and null-function traps on the JIT path, which is a frame or two deeper. Memory stays fixed (§4); the heap starts about 1 MiB later, plus the pthread stacks.
+- **Kernel:** heap and physical-memory release frees contiguous runs, and the page allocator's freelist holds 4,096 runs and merges both neighbours. Silksong crashed when walking past slice 5.48M, because UnmapPhysicalMemory freed page by page into a 16-run freelist.
+- **Web texture pool:** 256 MB (was 512). GPU mode frees decoded copies after upload.
+- **Video:** with no decoder consuming the NVDEC ring, the producer drops requests instead of waiting. It used to hang under Node and in browsers without WebCodecs.
+- **Scheduler:** short polling sleeps coalesce to the next non-poller event (on by default; `--no-poll-coalescing`, `?polls=0`). Guest-visible timing is unchanged apart from poll counts.
+- **Web:** the keyboard is player 1 from page load (Silksong no longer loops its controller applet at boot), plus a tap minimum hold and a slow-speed audio time-stretch.
+- **JIT:**
+  - Per-function translation cache, and regions that span calls into small callees.
+  - Asynchronous compilation exists but is opt-in: it measured slower than synchronous (14.9 vs 18.0 fps at the title).
 
 ### Changelog v3.71 → v3.72 (summary)
 

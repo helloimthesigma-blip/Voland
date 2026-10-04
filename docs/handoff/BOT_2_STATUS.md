@@ -178,3 +178,17 @@ Owner: bot 2. The coordinator reads this when merging.
 - **Short taps** are held for at least 2 guest frames (40–300 ms); presses are immediate.
 - The underrun log is rate-limited to once a minute; plain-language copy, a boot hint and a keyboard hint in the legend.
 - **Latency**, keydown → title-menu cursor visibly moving: 0.78–1.7 s (median ~0.9 s ≈ 10 guest frames at 11–13 fps). Being split into game-internal and pipeline parts natively.
+
+## Save persistence (2026-10-04)
+
+- **Before:** the CPU worker mirrored the live save trees file by file every 3 s, whatever the game was doing. A snapshot could catch a save half-written, and a multi-file save could be stored half old, half new. There was no backup.
+- **Now:** a save persists when the game commits it (`IFileSystem::Commit`, when a Switch makes save data durable), as a whole.
+  - The core snapshots the save into one archive (`core/hle/fs/save_archive.{h,c}`; temp file then swap, so a full pool keeps the previous commit).
+  - The worker stores it as one OPFS file per save, `saves-v2/SS-<attr>.vsave`, within 250 ms. `createWritable` swaps it in on close, so a tab closed mid-write keeps the previous commit.
+  - Uncommitted writes don't persist, as on hardware. The old per-file layout is still restored; the next commit supersedes it.
+- **Backup/restore:** the "Back up saves" / "Restore saves…" buttons export or import a plain tar (`voland-saves/…`, readable with `tar`). Imports are validated by the core before they are stored.
+- **Verified:**
+  - Silksong across a full browser restart (persistent Chromium profile): session 1 played the gameplay recipe; session 2 logged "restored 1 game save(s)". The archive is byte-identical to the native commit (52.6 KB: `shared.dat` + `Restore_Points1/NODELrestoreData1.dat`).
+  - Silksong only writes slot progress at its first save point (a bench), which the recipe doesn't reach, so the profile screen correctly still says New Game.
+  - Tests: `tests/save_archive_test.c`, `tests/unit/save-store.test.ts`.
+- `voland-cli`: `VOLAND_DUMP_SAVES=DIR` writes the committed archives at exit.

@@ -60,6 +60,7 @@ set(SWITCH_CORE_SOURCES
   gpu/gpu_stream.c
   gpu/wgsl.c
   hle/fs/ramfs.c
+  hle/fs/save_archive.c
   hle/kernel/svc_thread.c
   hle/services/sm/sm.c
   hle/services/nvdrv/nvdrv.c

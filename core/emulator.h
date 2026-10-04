@@ -136,6 +136,13 @@ typedef struct Emulator
   uint32_t frame_skip; /* emulator_set_frame_skip; survives process reloads */
   Parallel *parallel;  /* emulator_set_host_cores; NULL = serial */
   bool no_poll_coalescing; /* emulator_set_poll_coalescing(false); survives reloads */
+  bool free_running;   /* emulator_set_free_running; with host cores only */
+  /* Wall-clock pacing (emulator_set_pacing): virtual time never falls
+   * behind wall time since the origin. */
+  bool pacing;
+  uint64_t pacing_origin_ns;    /* host ns at the origin; 0 = take it at the next slice */
+  uint64_t pacing_origin_ticks; /* virtual ticks at the origin */
+  uint64_t paced_ticks;         /* virtual time added by pacing (statistics) */
   /* GPU mode (emulator_set_gpu_mode): the renderer's stream to the GPU
    * worker, in the layout's gpu_ring region. */
   Gpu_Stream gpu_stream;
@@ -210,6 +217,31 @@ Emulator_Status emulator_run_slice(Emulator *emulator, uint64_t cycle_budget);
  * build or the backend cannot run in parallel). Call between slices. */
 uint32_t emulator_set_host_cores(Emulator *emulator, uint32_t cores);
 
+/* Runs guest code for about `host_ms` of host time (or until the program
+ * stops). In slice mode: slices of `cycle_budget` until the deadline. In
+ * free-running mode (with host cores): the cores run without per-slice
+ * barriers and devices update as they come due (docs/PARALLEL.md
+ * "Free-running mode"). Guest code runs only inside the call either way. */
+Emulator_Status emulator_run_for(Emulator *emulator, uint64_t host_ms, uint64_t cycle_budget);
+
+/* Wall-clock pacing (off by default; the web turns it on): before each
+ * slice (or free-running burst) virtual time that has fallen behind wall
+ * time since the origin jumps forward to it, as an idle jump does, and
+ * due timers and device events fire at the new time. The guest sees large
+ * frame deltas and runs at real speed with fewer frames when the host is
+ * slower than the Switch. A jump is capped at EMULATOR_PACING_MAX_JUMP_MS;
+ * further behind (a stall: a hidden tab, GC), the origin resyncs instead
+ * of skipping the gap. Virtual time stays monotonic. */
+#define EMULATOR_PACING_MAX_JUMP_MS 100u
+void emulator_set_pacing(Emulator *emulator, bool on);
+/* Restarts the pacing clock at the current virtual time (run start, resume
+ * after a pause: paused time does not count). */
+void emulator_pacing_resync(Emulator *emulator);
+
+/* Free-running mode (prototype, off by default): emulator_run_for lets the
+ * host cores run continuously. Needs emulator_set_host_cores >= 1. */
+void emulator_set_free_running(Emulator *emulator, bool on);
+
 /* Poll coalescing (scheduler.h, docs/PARALLEL.md "Polling threads"): on
  * by default. Off runs the plain scheduler, bit for bit. */
 void emulator_set_poll_coalescing(Emulator *emulator, bool on);
@@ -277,6 +309,15 @@ void emulator_text_respond(Emulator *emulator, const char *utf8, bool accepted);
 
 /* Reads up to `max` bytes of an SD file; returns its size, or -1. */
 int64_t emulator_sd_card_read_file(Emulator *emulator, const char *path, void *out, uint64_t max);
+
+/* Committed saves (§15, hle/fs/save_archive.h): the guest's IFileSystem::
+ * Commit snapshots a save as one archive, "commit:/SS-<attribute hex>"
+ * (read with emulator_sd_card_read_file). The host persists those - one
+ * file per save, atomically - rather than the live tree. */
+uint64_t emulator_save_commits(const Emulator *emulator);
+uint64_t emulator_save_committed_manifest(const Emulator *emulator, char *out, uint64_t max);
+/* Replaces save `name` ("SS-<attribute hex>") with an archive's contents. */
+Error emulator_save_restore_archive(Emulator *emulator, const char *name, const void *bytes, uint64_t size);
 
 /* Where the next NRO loaded from the host appears on the SD card (and so
  * its argv[0], "sdmc:<path>"); default EMULATOR_DEFAULT_NRO_PATH. Platforms

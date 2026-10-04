@@ -90,12 +90,26 @@ typedef struct Fs_State {
   Ramfs_Pool *pool;              /* the Emulator's; outlives processes */
   uint32_t sd_root;
   Fs_Save saves[FS_MAX_SAVES];   /* survive reloads with the pool */
+  /* Committed saves (hle/fs/save_archive.h): a hidden filesystem holding
+   * one archive per save, "/SS-<attribute hex>", replaced whenever the
+   * guest commits that save; the host persists these, not the live tree. */
+  uint32_t committed_root;
+  uint64_t save_commits;         /* bumped on every successful commit snapshot */
   Fs_Bis bis[FS_MAX_BIS_PARTITIONS]; /* empty NAND partitions (§1.6: no NAND image) */
   const Byte_Source *romfs;      /* the program's RomFS bytes, or NULL */
   Fs_Open_File files[FS_MAX_OPEN_FILES];
   Fs_Open_Directory directories[FS_MAX_OPEN_DIRECTORIES];
   uint8_t bounce[FS_BOUNCE_BYTES];
 } Fs_State;
+
+/* The committed-archive name of save `index` ("SS-<attribute hex>"). */
+#define FS_SAVE_NAME_BYTES (2u + 1u + 2u * FS_SAVE_ATTRIBUTE_BYTES + 1u)
+void fs_save_name(const Fs_Save *save, char out[FS_SAVE_NAME_BYTES]);
+
+/* Snapshots save `root` into the committed filesystem (as IFileSystem::
+ * Commit does). Returns 0 or a Horizon fs result; the previous snapshot
+ * stays if this one cannot be stored. */
+uint32_t fs_commit_save(Fs_State *s, uint32_t root);
 
 /* Once per Emulator: interfaces, the SD card root, no saves. */
 void fs_init(Fs_State *state, Ramfs_Pool *pool);

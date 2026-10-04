@@ -301,6 +301,8 @@ async function main() {
       const cores = /guest threads on (?:the serial scheduler|(\d+) host core)/.exec(m.text());
       if (cores) results.hostCores = cores[1] ? Number(cores[1]) : 0;
       if (m.type() === "error" && /\[(ERROR|WARN )\]|failed|crash/i.test(m.text())) console.log(`  console: ${m.text()}`);
+      /* Parallel guest threads' periodic timing report (docs/PARALLEL.md "Measuring"). */
+      if (/\[parallel\] /.test(m.text())) console.log(`  ${m.text().replace(/^\[INFO \] /, "")}`);
     });
     const pageUrl = opts.urlParams ? `${baseUrl}?${opts.urlParams}` : baseUrl;
     await page.goto(pageUrl);

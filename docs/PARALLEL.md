@@ -166,6 +166,93 @@ bound by two busy threads runs its frames in less virtual time, and
 virtual time advances with the slowest-progressing host core rather than
 the sum of all of them. Vsync stays 60 Hz of virtual time.
 
+### Wall-clock pacing
+
+Virtual time advances with guest work. When the host is slower than the
+Switch, the game therefore runs in slow motion: Silksong renders 60 fps of
+virtual time at ~16 per wall second, so its world moves at ~27% speed.
+`emulator_set_pacing` (on by default in the web, `?pacing=0` opts out)
+makes virtual time keep up with wall time.
+
+- **Where it acts.** Before each slice, and at the start of each
+  free-running burst, when no guest code runs.
+- **What it does.** Virtual time that has fallen behind the wall clock
+  (since the pacing origin) jumps forward, as an idle jump does. Due
+  timers and device events (vsync, audio) then fire at the new time. The
+  guest sees large frame deltas and runs at real speed with fewer
+  rendered frames.
+- **Cap.** One jump is at most 100 ms (`EMULATOR_PACING_MAX_JUMP_MS`).
+  Further behind - a hidden tab, a GC pause - the origin resyncs, so the
+  game never skips a big chunk at once.
+- **Resync.** The origin also resyncs at run start and on resume, so
+  paused time does not count.
+- **Never slows the guest down.** Virtual time only moves forward and stays
+  monotonic; a guest running ahead of wall time is left alone.
+- **Deterministic runs.** The core default, the CLI and the tests stay
+  unpaced, so they remain deterministic and the goldens are unchanged.
+
+## Free-running mode (prototype)
+
+The slice mode above pays a handoff on every slice: about 110 us to wake
+the cores and 50 us for the driver to notice the end, at ~1,100 slices/s
+in Silksong gameplay - about 18% of host time, the cores' "park" share.
+Free-running mode removes the per-slice barrier and keeps everything else.
+The slice mode stays the default for the CLI, the tests and the goldens
+(it is deterministic); free-running is opt-in.
+
+### Shape
+
+- **One call per burst.** `emulator_run_for(emu, host_ms, budget)`
+  replaces many `emulator_run_slice` calls. The web CPU worker makes one
+  call per ~12 ms burst.
+- **Inside the call.**
+  - The cores run continuously: pick, run up to `budget` cycles,
+    account, pick again. There is no slice and no barrier.
+  - The driver only serves host calls (`parallel_on_driver`) and waits
+    for the host deadline or for the process to stop.
+- **Before the call returns** the driver pauses the cores: each finishes
+  its current run, at most one budget, and parks. So guest code still
+  runs only inside the call, and loads, snapshots, input and settings
+  between calls see a quiescent machine.
+  - That is one handoff per burst instead of one per slice: about
+    160 us per 12 ms, ~1.3%.
+
+### Devices and time
+
+- **Device updates run on a core,** under the kernel lock, whenever they
+  are due:
+  - `nvdrv_poll_completions`, `hid_update`, `vi_update` (vsync,
+    composite, GPU present), `audout`/`audren`;
+  - then `device_wake_at` is recomputed (`emulator_update_devices`, the
+    serial run loop's preamble factored out).
+  - They are plain core-side C with no JS hooks.
+- **When updates are due:**
+  - after any run that leaves `scheduler.ticks >= device_wake_at`;
+  - when a core finds nothing runnable while no core is busy.
+- **That second case is the idle path.**
+  - The core does the serial scheduler's idle step: jump time to the
+    earliest wake or device event.
+  - It then runs the device updates, and the cores continue.
+  - DEADLOCK and EXITED stop the call, which returns that status.
+- **Virtual time:** the same rule as slice mode. A run starts at the global
+  time and ends at `max(time, start + cycles)`. Timeouts expire before
+  every pick. A device event is handled by the first core to see time
+  pass it, so it lands at most one run (≤ budget cycles) late in virtual
+  time, as in slice mode, where it waits for the next slice.
+- **Everything else is unchanged:** poll coalescing, its revert-before-pick
+  and work epoch, the exclusive monitor, SVCs under the kernel lock, and
+  affinity.
+
+### Status
+
+A prototype behind `emulator_set_free_running`, the web `?free=1` and the
+CLI `--free-running`. Before it can become a default:
+
+- `parallel_test` on 2–3 cores, including polls and the
+  exclusive-monitor stress, 20+ rounds;
+- a long browser gameplay session with no gaps in presents or ticks;
+- an interleaved browser A/B showing a clear win.
+
 ## Memory model
 
 `cpu_set_multicore(true)` is set when two or more cores are on. With one
@@ -247,10 +334,12 @@ installed them (every wasm thread has its own table). So:
 - **Default and override.** `cpu.worker.ts` applies `DEFAULT_HOST_CORES` on
   every load: 3 (the Switch's application cores), capped at
   `navigator.hardwareConcurrency - 2` and at least 1.
-  - **Under the JIT backend the default is serial (0) for now.** Every
-    core compiles its own JIT code cache, and in the browser 3 cores were
-    about 2.6× slower than serial with the JIT (title screen, 6.6k vs
-    17.3k slices/s). `?cores=N` still forces a count. `?cores=N` on the page URL overrides it through a
+  - The same default applies under the JIT.
+    - Browser, Silksong gameplay recipe, two interleaved pairs: serial
+      14.63 / 14.53 fps vs 3 cores 16.13 / 16.05 fps (+10%).
+    - Node, full recipe: 9.87 vs 16.46 frames per wall second (1.67×), now
+      that poll coalescing lets the cores overlap in 91% of slices (14%
+      before). `?cores=N` on the page URL overrides it through a
   `set-host-cores` message; `?cores=0` is serial.
 - **The CPU worker is Emscripten's main runtime thread.** A core's
   syscalls (stderr, anything else not marked `__proxy: none`) are proxied

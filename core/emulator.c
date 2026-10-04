@@ -1,4 +1,6 @@
+#define _POSIX_C_SOURCE 200809L /* clock_gettime under -std=c11 */
 #include "emulator.h"
+#include "hle/fs/save_archive.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -15,10 +17,14 @@
 #include "common/workers.h"
 #include "hle/kernel/handle_table.h"
 #include "hle/kernel/parallel.h"
+#ifdef SWITCH_CPU_BACKEND_JIT
+#include "cpu/backends/jit/jit.h"
+#endif
 #include "hle/kernel/thread.h"
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define EMULATOR_HOMEBREW_PRIORITY 44u
 #define EMULATOR_HOMEBREW_STACK_BYTES 0x100000u
@@ -663,10 +669,11 @@ void emulator_unload_program(Emulator* emulator) {
   emulator->program_loaded = false;
 }
 
-Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
-  SWITCH_ASSERT_ALWAYS(emulator != NULL, "emulator_run_slice: emulator is NULL");
-  if (!emulator->program_loaded) return EMULATOR_NOT_LOADED;
-  CPU_ExitReason reason = CPU_EXIT_CYCLES_ELAPSED;
+/* The devices the run loop drives between guest runs (§13, §14, §18), then
+ * the next time one of them signals something. Slice mode runs it before
+ * every slice; free-running mode on whichever core finds it due, under the
+ * kernel lock (docs/PARALLEL.md "Free-running mode"). */
+static void update_devices(Emulator* emulator) {
   /* GPU completions (§13) arrive at scheduler-tick cadence. */
   nvdrv_poll_completions(&emulator->nvdrv, &emulator->hle);
   /* Controllers (§18): the input region into hid's shared memory. */
@@ -684,9 +691,11 @@ Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
     const uint64_t audio = emulator->audren ? audren_next_wake(emulator->audren) : UINT64_MAX;
     emulator->scheduler.device_wake_at = audio < vsync ? audio : vsync;
   }
-  const Scheduler_Status tick = emulator->parallel
-                                    ? parallel_tick(emulator->parallel, cycle_budget)
-                                    : scheduler_tick(&emulator->scheduler, emulator->cpu_backend, cycle_budget, &reason);
+}
+
+static void update_devices_hook(void* emulator) { update_devices((Emulator*)emulator); }
+
+static Emulator_Status status_of(Emulator* emulator, Scheduler_Status tick) {
   switch (tick) {
   case SCHEDULER_RAN: return EMULATOR_RUNNING;
   case SCHEDULER_IDLE: return EMULATOR_IDLE;
@@ -696,11 +705,108 @@ Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
   }
 }
 
+static uint64_t host_now_ns(void);
+
+/* Wall-clock pacing (emulator.h): move virtual time up to wall time. Runs
+ * only while no guest code does (before a slice or a burst). */
+static void pace(Emulator* emulator) {
+  if (!emulator->pacing) return;
+  Scheduler* sched = &emulator->scheduler;
+  const uint64_t now = host_now_ns();
+  if (!emulator->pacing_origin_ns) {
+    emulator->pacing_origin_ns = now;
+    emulator->pacing_origin_ticks = sched->ticks;
+    return;
+  }
+  const uint64_t wall_ticks =
+      emulator->pacing_origin_ticks + scheduler_ns_to_ticks(now - emulator->pacing_origin_ns);
+  if (wall_ticks <= sched->ticks) return; /* not behind */
+  const uint64_t max_jump = scheduler_ns_to_ticks((uint64_t)EMULATOR_PACING_MAX_JUMP_MS * 1000000ull);
+  uint64_t behind = wall_ticks - sched->ticks;
+  if (behind > max_jump) { /* a stall: catch up the cap, forget the rest */
+    behind = max_jump;
+    emulator->pacing_origin_ns = now;
+    emulator->pacing_origin_ticks = sched->ticks + behind;
+  }
+  sched->ticks += behind;
+  emulator->paced_ticks += behind;
+}
+
+void emulator_set_pacing(Emulator* emulator, bool on) {
+  if (!emulator) return;
+  emulator->pacing = on;
+  emulator->pacing_origin_ns = 0;
+}
+
+void emulator_pacing_resync(Emulator* emulator) {
+  if (emulator) emulator->pacing_origin_ns = 0;
+}
+
+Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
+  SWITCH_ASSERT_ALWAYS(emulator != NULL, "emulator_run_slice: emulator is NULL");
+  if (!emulator->program_loaded) return EMULATOR_NOT_LOADED;
+  CPU_ExitReason reason = CPU_EXIT_CYCLES_ELAPSED;
+  pace(emulator);
+  update_devices(emulator);
+  const Scheduler_Status tick = emulator->parallel
+                                    ? parallel_tick(emulator->parallel, cycle_budget)
+                                    : scheduler_tick(&emulator->scheduler, emulator->cpu_backend, cycle_budget, &reason);
+  return status_of(emulator, tick);
+}
+
+#define EMULATOR_NS_PER_MS 1000000ull
+static uint64_t host_now_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+Emulator_Status emulator_run_for(Emulator* emulator, uint64_t host_ms, uint64_t cycle_budget) {
+  SWITCH_ASSERT_ALWAYS(emulator != NULL, "emulator_run_for: emulator is NULL");
+  if (!emulator->program_loaded) return EMULATOR_NOT_LOADED;
+  if (emulator->parallel && emulator->free_running) {
+    pace(emulator);
+    update_devices(emulator);
+    return status_of(emulator, parallel_run_for(emulator->parallel, host_ms * EMULATOR_NS_PER_MS, cycle_budget));
+  }
+  /* Slice mode: slices until the deadline or a stop. */
+  const uint64_t deadline = host_now_ns() + host_ms * EMULATOR_NS_PER_MS;
+  Emulator_Status status = EMULATOR_RUNNING;
+  do {
+    status = emulator_run_slice(emulator, cycle_budget);
+  } while ((status == EMULATOR_RUNNING || status == EMULATOR_IDLE) && host_now_ns() < deadline);
+  return status;
+}
+
+void emulator_set_free_running(Emulator* emulator, bool on) {
+  if (!emulator) return;
+  emulator->free_running = on;
+}
+
 void emulator_set_poll_coalescing(Emulator* emulator, bool on) {
   if (!emulator) return;
   emulator->no_poll_coalescing = !on;
   emulator->scheduler.poll_coalescing = on;
 }
+
+#ifdef SWITCH_CPU_BACKEND_JIT
+/* The JIT's compile costs since the last parallel report (all threads). */
+static void report_jit(void) {
+  static Jit_Stats last;
+  const Jit_Stats now = *jit_stats();
+  const double ms = 1e6;
+  log_info("[parallel] jit: %llu regions compiled, %llu evicted, %llu interpreted / %llu compiled block runs; "
+           "codegen %.0f ms, compile-lock wait %.0f ms, %llu sync installs %.0f ms",
+           (unsigned long long)(now.blocks_compiled - last.blocks_compiled),
+           (unsigned long long)(now.evictions - last.evictions),
+           (unsigned long long)(now.interpreted_blocks - last.interpreted_blocks),
+           (unsigned long long)(now.block_entries - last.block_entries), (double)(now.codegen_ns - last.codegen_ns) / ms,
+           (double)(now.compile_lock_ns - last.compile_lock_ns) / ms,
+           (unsigned long long)(now.sync_installs - last.sync_installs),
+           (double)(now.sync_install_ns - last.sync_install_ns) / ms);
+  last = now;
+}
+#endif
 
 uint32_t emulator_set_host_cores(Emulator* emulator, uint32_t cores) {
   if (!emulator) return 0;
@@ -726,6 +832,10 @@ uint32_t emulator_set_host_cores(Emulator* emulator, uint32_t cores) {
 #endif
   emulator->parallel = parallel_create(&emulator->scheduler, emulator->cpu_backend, cores);
   if (!emulator->parallel) return 0;
+  parallel_set_device_hook(emulator->parallel, update_devices_hook, emulator);
+#ifdef SWITCH_CPU_BACKEND_JIT
+  if (emulator->cpu_backend == &CPU_BACKEND_JIT) parallel_set_report_hook(emulator->parallel, report_jit);
+#endif
   cpu_set_multicore(parallel_core_count(emulator->parallel) >= 2u);
   return parallel_core_count(emulator->parallel);
 }
@@ -767,7 +877,16 @@ static bool parse_hex_bytes(const char* text, uint8_t* out, size_t count) {
   return true;
 }
 
+#define COMMIT_PATH_PREFIX "commit:"
+#define COMMIT_PATH_PREFIX_BYTES 7u
+
 static uint32_t host_root(Emulator* emulator, const char* path, bool create, uint32_t* root, const char** rest) {
+  if (strncmp(path, COMMIT_PATH_PREFIX, COMMIT_PATH_PREFIX_BYTES) == 0) { /* committed save archives (read-only use) */
+    if (emulator->fs.committed_root == RAMFS_NO_NODE) return FS_RESULT_TARGET_NOT_FOUND;
+    *root = emulator->fs.committed_root;
+    *rest = path[COMMIT_PATH_PREFIX_BYTES] ? path + COMMIT_PATH_PREFIX_BYTES : "/";
+    return 0;
+  }
   if (strncmp(path, SAVE_PATH_PREFIX, SAVE_PATH_PREFIX_BYTES) != 0) {
     *root = emulator->fs.sd_root;
     *rest = path;
@@ -921,6 +1040,30 @@ uint64_t emulator_sd_card_manifest(const Emulator* emulator, char* out, uint64_t
     need = manifest_tree(&emulator->ramfs, save->root, prefix, NULL, out, max, need);
   }
   return need;
+}
+
+uint64_t emulator_save_commits(const Emulator* emulator) {
+  return emulator && emulator->ramfs_ready ? emulator->fs.save_commits : 0;
+}
+
+uint64_t emulator_save_committed_manifest(const Emulator* emulator, char* out, uint64_t max) {
+  if (!emulator || !emulator->ramfs_ready || emulator->fs.committed_root == RAMFS_NO_NODE) return 0;
+  return manifest_tree(&emulator->ramfs, emulator->fs.committed_root, COMMIT_PATH_PREFIX, NULL, out, max, 0);
+}
+
+Error emulator_save_restore_archive(Emulator* emulator, const char* name, const void* bytes, uint64_t size) {
+  if (!emulator || !name || !emulator->ramfs_ready) return ERR(RESULT_INVALID_ARGUMENT, "saves unavailable");
+  /* "SS-<attribute hex>" -> the save (created if new). */
+  uint8_t space = 0;
+  uint8_t key[FS_SAVE_ATTRIBUTE_BYTES];
+  if (strlen(name) != FS_SAVE_NAME_BYTES - 1u || !parse_hex_bytes(name, &space, 1) || name[2] != '-' ||
+      !parse_hex_bytes(name + 3, key, sizeof(key)))
+    return ERR(RESULT_INVALID_ARGUMENT, "save archive: bad name");
+  uint32_t root = 0;
+  uint32_t rc = fs_save_root(&emulator->fs, space, key, true, &root);
+  if (!rc) rc = save_archive_restore(&emulator->ramfs, root, (const uint8_t*)bytes, size);
+  if (!rc) rc = fs_commit_save(&emulator->fs, root); /* what is stored is what is committed */
+  return sd_result(rc, "save archive: restore failed");
 }
 
 int64_t emulator_sd_card_read_file(Emulator* emulator, const char* path, void* out, uint64_t max) {

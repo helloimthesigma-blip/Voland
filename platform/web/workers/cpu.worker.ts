@@ -19,6 +19,7 @@ import { readMemoryLayout } from "@bindings/layout";
 import { CoreResult, formatTitleId, loadFailureFromResult, readCString, runStateAfterSlice } from "@bindings/load";
 import type { CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
 import { clearSdFiles, diffManifests, parseManifest, persistSdFile, removeSdFile, restoreSdFiles } from "./sd-persistence";
+import { loadSaveArchives, readTar, saveNameOfTar, storeSaveArchive, tarNameOfSave, writeTar } from "./save-store";
 import { parseTextInputRequest } from "./text-input";
 
 const self: DedicatedWorkerGlobalScope =
@@ -234,15 +235,19 @@ const DEFAULT_HOST_CORES = Math.max(
 /** Cores chosen with ?cores=N (set-host-cores); null = the default. */
 let requestedHostCores: number | null = null;
 
-/** The default for this core: serial under the JIT for now - each core
- * compiles its own code cache, which costs more than the cores win
- * (docs/PARALLEL.md "JIT"). */
-function defaultHostCores(target: SwitchCoreExports): number {
-  return CPU_BACKEND_DISPLAY_NAMES[target._cpu_backend_id_ffi()] === "jit" ? 0 : DEFAULT_HOST_CORES;
-}
+
+/** Poll coalescing (set-poll-coalescing; ?polls=0 turns it off). */
+let pollCoalescing = true;
+/** Free-running guest cores (set-free-running; ?free=N): from slice N on,
+ * one run_for call per burst instead of a loop of slices. 0 = off. */
+let freeFromSlice = 0;
+/** Wall-clock pacing (set-pacing; ?pacing=0 turns it off): the game runs at
+ * real speed with fewer frames instead of in slow motion. */
+let pacing = true;
+let freeRunning = false;
 
 function applyHostCores(target: SwitchCoreExports): void {
-  const hostCores = requestedHostCores ?? defaultHostCores(target);
+  const hostCores = requestedHostCores ?? DEFAULT_HOST_CORES;
   const inEffect = target._emulator_set_host_cores_ffi(hostCores);
   log("info", `guest threads on ${inEffect === 0 ? "the serial scheduler" : `${inEffect} host core(s)`}`);
 }
@@ -283,7 +288,14 @@ function runBurst(): void {
   const deadline = burstStart + BURST_MS;
   let now = burstStart;
   while (now < deadline) {
-    const status = core._emulator_run_slice_ffi(SLICE_CYCLES);
+    if (!freeRunning && freeFromSlice > 0 && perf.slices >= freeFromSlice - 1) {
+      freeRunning = true;
+      core._emulator_set_free_running_ffi(1);
+      log("info", `free-running guest cores from slice ${perf.slices + 1}`);
+    }
+    const status = freeRunning
+      ? core._emulator_run_for_ffi(Math.max(1, Math.ceil(deadline - now)), SLICE_CYCLES)
+      : core._emulator_run_slice_ffi(SLICE_CYCLES);
     const after = performance.now();
     perf.slices++;
     perf.sliceMs += after - now;
@@ -311,6 +323,7 @@ function startRunning(): void {
   lastBurstEnd = 0;
   running = true;
   paused = false;
+  core?._emulator_pacing_resync_ffi();
   postRunState("running", "");
   scheduleBurst();
 }
@@ -467,7 +480,11 @@ async function mirrorSdChanges(): Promise<void> {
   try {
     const after = readSdManifest();
     if (!after) return;
-    const { changed, removed } = diffManifests(mirrorManifest, after);
+    const diff = diffManifests(mirrorManifest, after);
+    /* Saves persist when the game commits them (mirrorCommittedSaves),
+     * whole; the live save trees are not mirrored file by file. */
+    const changed = diff.changed.filter((path) => !path.startsWith(SAVE_PATH_PREFIX));
+    const removed = diff.removed.filter((path) => !path.startsWith(SAVE_PATH_PREFIX));
     for (const path of changed) {
       const bytes = readSdFile(path);
       if (bytes) await persistSdFile(path, bytes);
@@ -480,6 +497,109 @@ async function mirrorSdChanges(): Promise<void> {
   } finally {
     mirroring = false;
   }
+}
+
+/* ------------------------------------------------------------------ */
+/* Committed saves -> OPFS (§15, save-store.ts): whenever the game      */
+/* commits a save, its whole archive is stored, atomically.            */
+/* ------------------------------------------------------------------ */
+
+const SAVE_PATH_PREFIX = "save:";
+const COMMIT_PATH_PREFIX = "commit:/";
+const SAVE_COMMIT_POLL_MS = 250;
+let savedCommits = -1;
+let savedArchives: ReadonlyMap<string, string> = new Map();
+let savingCommits = false;
+
+function readCommittedManifest(): ReadonlyMap<string, string> | null {
+  if (!core || !coreMemory) return null;
+  const need = core._emulator_save_committed_manifest_ffi(0n, 0);
+  const buffer = core._malloc(need + 1);
+  if (buffer === 0) return null;
+  try {
+    const written = core._emulator_save_committed_manifest_ffi(BigInt(buffer), need + 1);
+    if (written > need + 1) return null;
+    return parseManifest(new TextDecoder().decode(new Uint8Array(coreMemory.buffer, buffer, written).slice()));
+  } finally {
+    core._free(buffer);
+  }
+}
+
+/** Records what the core holds as already stored (after a restore). */
+function baselineCommittedSaves(): void {
+  if (!core) return;
+  savedArchives = readCommittedManifest() ?? new Map();
+  savedCommits = core._emulator_save_commits_ffi();
+}
+
+async function mirrorCommittedSaves(): Promise<void> {
+  if (!core || savingCommits || savedCommits < 0) return;
+  const commits = core._emulator_save_commits_ffi();
+  if (commits === savedCommits) return;
+  savingCommits = true;
+  try {
+    const after = readCommittedManifest();
+    if (!after) return;
+    for (const [path, key] of after) {
+      if (savedArchives.get(path) === key || !path.startsWith(COMMIT_PATH_PREFIX)) continue;
+      const bytes = readSdFile(path);
+      const name = path.slice(COMMIT_PATH_PREFIX.length);
+      if (bytes && !(await storeSaveArchive(name, bytes))) log("warn", "saves: no browser storage - progress will not survive a reload");
+    }
+    savedArchives = after;
+    savedCommits = commits;
+  } catch (e) {
+    log("warn", `saves: could not store a commit: ${e instanceof Error ? e.message : String(e)}`);
+  } finally {
+    savingCommits = false;
+  }
+}
+
+/** Loads one archive into the core's save `name`. */
+function restoreSaveArchive(name: string, bytes: Uint8Array): boolean {
+  if (!core || !coreMemory) return false;
+  const saveCore = core;
+  let ok = false;
+  withCString(name, (namePointer) => {
+    const buffer = saveCore._malloc(bytes.byteLength || 1);
+    if (buffer === 0 || !coreMemory) return;
+    new Uint8Array(coreMemory.buffer, buffer, bytes.byteLength).set(bytes);
+    ok = saveCore._emulator_save_restore_archive_ffi(namePointer, BigInt(buffer), bytes.byteLength) === CoreResult.Ok;
+    saveCore._free(buffer);
+  });
+  return ok;
+}
+
+async function restoreSaves(): Promise<void> {
+  const archives = await loadSaveArchives();
+  let restored = 0;
+  for (const [name, bytes] of archives) if (restoreSaveArchive(name, bytes)) restored++;
+  if (restored > 0) log("info", `saves: restored ${restored} game save(s) from browser storage`);
+  if (restored < archives.size) log("warn", `saves: ${archives.size - restored} stored save(s) could not be loaded`);
+}
+
+async function exportSaves(): Promise<CPUToMainMessage> {
+  await mirrorCommittedSaves(); /* the latest commit first */
+  const archives = await loadSaveArchives();
+  const files = new Map<string, Uint8Array>();
+  for (const [name, bytes] of archives) files.set(tarNameOfSave(name), bytes);
+  const tar = writeTar(files);
+  return { type: "saves-exported", tar: tar.buffer as ArrayBuffer, count: archives.size };
+}
+
+async function importSaves(tarBytes: ArrayBuffer): Promise<CPUToMainMessage> {
+  let imported = 0;
+  let rejected = 0;
+  for (const [entry, bytes] of readTar(new Uint8Array(tarBytes))) {
+    const name = saveNameOfTar(entry);
+    if (!name) continue;
+    /* Into the core first: it validates the archive; only good ones are stored. */
+    if (restoreSaveArchive(name, bytes) && (await storeSaveArchive(name, bytes))) imported++;
+    else rejected++;
+  }
+  baselineCommittedSaves();
+  log("info", `saves: imported ${imported}${rejected ? `, ${rejected} rejected (damaged, or in use by the running game)` : ""}`);
+  return { type: "saves-imported", imported, rejected };
 }
 
 async function clearSdCard(): Promise<CPUToMainMessage> {
@@ -507,6 +627,10 @@ function loadGame(file: File): CPUToMainMessage {
   loadingCore._emulator_set_frame_skip_ffi(frameSkip);
   loadingCore._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
   applyHostCores(loadingCore);
+  loadingCore._emulator_set_poll_coalescing_ffi(pollCoalescing ? 1 : 0);
+  freeRunning = false;
+  loadingCore._emulator_set_free_running_ffi(0);
+  loadingCore._emulator_set_pacing_ffi(pacing ? 1 : 0);
   withCString(`/${sdName(file.name)}`, (path) => loadingCore._emulator_set_program_path_ffi(path));
   const code = core._emulator_load_program_ffi(BigInt(file.size), randomAslrSeed());
 
@@ -554,8 +678,15 @@ async function init(memory: WebAssembly.Memory): Promise<void> {
   } catch (e) {
     log("warn", `SD card: could not restore stored files: ${e instanceof Error ? e.message : String(e)}`);
   }
+  try {
+    await restoreSaves();
+  } catch (e) {
+    log("warn", `saves: could not restore stored saves: ${e instanceof Error ? e.message : String(e)}`);
+  }
   baselineSdMirror();
+  baselineCommittedSaves();
   setInterval(() => void mirrorSdChanges(), SD_MIRROR_MS);
+  setInterval(() => void mirrorCommittedSaves(), SAVE_COMMIT_POLL_MS);
 
   const layoutPtr = core._layout_get_ffi();
   const layout = readMemoryLayout(memory, layoutPtr);
@@ -603,6 +734,14 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     void clearSdCard().then((reply) => self.postMessage(reply));
     return;
   }
+  if (msg.type === "export-saves") {
+    void exportSaves().then((reply) => self.postMessage(reply, reply.type === "saves-exported" ? [reply.tar] : []));
+    return;
+  }
+  if (msg.type === "import-saves") {
+    void importSaves(msg.tar).then((reply) => self.postMessage(reply));
+    return;
+  }
 
   if (msg.type === "controller-connected") {
     log("info", `controller connected in slot ${msg.index} (profile ${msg.profileId})`);
@@ -629,6 +768,26 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     return;
   }
 
+  if (msg.type === "set-pacing") {
+    pacing = msg.on;
+    core?._emulator_set_pacing_ffi(pacing ? 1 : 0);
+    log("info", `wall-clock pacing ${pacing ? "on" : "off"}`);
+    return;
+  }
+
+  if (msg.type === "set-free-running") {
+    freeFromSlice = msg.fromSlice;
+    log("info", freeFromSlice > 0 ? `free-running guest cores from slice ${freeFromSlice}` : "free-running guest cores off");
+    return;
+  }
+
+  if (msg.type === "set-poll-coalescing") {
+    pollCoalescing = msg.on;
+    core?._emulator_set_poll_coalescing_ffi(pollCoalescing ? 1 : 0);
+    log("info", `poll coalescing ${pollCoalescing ? "on" : "off"}`);
+    return;
+  }
+
   if (msg.type === "set-host-cores") {
     requestedHostCores = msg.cores;
     /* Takes effect between slices; a running game switches at once. */
@@ -650,6 +809,7 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   if (msg.type === "resume") {
     if (paused && running) {
       paused = false;
+      core?._emulator_pacing_resync_ffi(); /* paused time does not count */
       postRunState("running", "");
       scheduleBurst();
     }

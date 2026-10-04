@@ -11,7 +11,7 @@
  * frames), +8 float32 stereo frames.
  */
 import { nextRatio, type RateState } from "./ring-control";
-import { RateMeter, type RingAccess, SLOW_ENTER, SLOW_FLOOR, SLOW_LEAVE, SlowStretch } from "./slow-stretch";
+import { RateMeter, RING_NEARLY_FULL, type RingAccess, SLOW_ENTER, SLOW_FLOOR, SLOW_LEAVE, SlowStretch } from "./slow-stretch";
 
 /* The AudioWorkletGlobalScope surface this module uses (not in lib.dom). */
 declare abstract class AudioWorkletProcessor {
@@ -71,7 +71,8 @@ class RingProcessor extends AudioWorkletProcessor {
     const speed = this.meter.sample(write, left.length);
     if (!this.slow && speed < SLOW_ENTER && speed > SLOW_FLOOR) {
       this.slow = true;
-    } else if (this.slow && (speed > SLOW_LEAVE || speed < SLOW_FLOOR)) {
+    } else if (this.slow && (speed > SLOW_LEAVE || speed < SLOW_FLOOR ||
+               ((write - (Atomics.load(this.indices, 1) >>> 0)) >>> 0) > RING_NEARLY_FULL)) {
       this.slow = false;
       this.stretch.reset();
     }

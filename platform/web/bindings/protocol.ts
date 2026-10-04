@@ -30,6 +30,11 @@ export type MainToCPUMessage =
   /* Empty the SD card (and its stored copy). Answered by sd-files-added
    * with nothing added. */
   | { readonly type: "sd-clear" }
+  /* Game saves (§15, workers/save-store.ts): a tar of every stored save,
+   * answered by saves-exported; or a tar to store (and load into the
+   * core), answered by saves-imported. */
+  | { readonly type: "export-saves" }
+  | { readonly type: "import-saves"; readonly tar: ArrayBuffer }
   /* §18: slot connect/disconnect is a lifecycle event; the state itself
    * travels through the input region, never postMessage. */
   | { readonly type: "controller-connected"; readonly index: number; readonly profileId: number }
@@ -45,6 +50,12 @@ export type MainToCPUMessage =
   | { readonly type: "set-gpu-mode"; readonly on: boolean }
   /* Host threads for guest threads (docs/PARALLEL.md; 0 = serial). */
   | { readonly type: "set-host-cores"; readonly cores: number }
+  /* Poll coalescing (docs/PARALLEL.md "Polling threads"); on by default. */
+  | { readonly type: "set-poll-coalescing"; readonly on: boolean }
+  /* Free-running guest cores (docs/PARALLEL.md; prototype, off by default). */
+  | { readonly type: "set-free-running"; readonly fromSlice: number } /* 0 = off */
+  /* Wall-clock pacing (virtual time keeps up with wall time); on by default. */
+  | { readonly type: "set-pacing"; readonly on: boolean }
   | { readonly type: "halt" };
 
 /** A software-keyboard prompt (§12 library applets): a title waits for
@@ -68,6 +79,8 @@ export type CPUToMainMessage =
   | { readonly type: "game-loaded"; readonly titleId: string; readonly entryPoint: bigint }
   | { readonly type: "load-failed"; readonly failure: LoadFailure }
   | { readonly type: "sd-files-added"; readonly added: readonly string[]; readonly failed: readonly string[] }
+  | { readonly type: "saves-exported"; readonly tar: ArrayBuffer; readonly count: number }
+  | { readonly type: "saves-imported"; readonly imported: number; readonly rejected: number }
   /* Guest debug text (svcOutputDebugString) and run-state changes: both
    * happen at guest pace, never per frame (§6). */
   | { readonly type: "guest-output"; readonly text: string }

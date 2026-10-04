@@ -55,6 +55,11 @@ EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
 EXPORT void emulator_set_frame_skip_ffi(uint32_t frames);
 EXPORT void emulator_set_gpu_mode_ffi(uint32_t on);
 EXPORT uint32_t emulator_set_host_cores_ffi(uint32_t cores);
+EXPORT void emulator_set_poll_coalescing_ffi(uint32_t on);
+EXPORT void emulator_set_free_running_ffi(uint32_t on);
+EXPORT void emulator_set_pacing_ffi(uint32_t on);
+EXPORT void emulator_pacing_resync_ffi(void);
+EXPORT int emulator_run_for_ffi(uint32_t host_ms, uint64_t cycle_budget);
 EXPORT void emulator_set_shared_font_ffi(uint64_t bytes, uint32_t size);
 EXPORT int emulator_sd_write_file_ffi(uint64_t path, uint64_t bytes, uint64_t size);
 EXPORT int emulator_sd_clear_ffi(void);
@@ -63,6 +68,9 @@ EXPORT int emulator_text_request_ffi(uint64_t out, double max);
 EXPORT void emulator_text_respond_ffi(uint64_t text, int accepted);
 EXPORT double emulator_sd_manifest_ffi(uint64_t out, double max);
 EXPORT double emulator_sd_read_file_ffi(uint64_t path, uint64_t out, double max);
+EXPORT double emulator_save_commits_ffi(void);
+EXPORT double emulator_save_committed_manifest_ffi(uint64_t out, double max);
+EXPORT int emulator_save_restore_archive_ffi(uint64_t name, uint64_t bytes, double size);
 
 /* The Switch's handheld resolution. */
 #define BOOT_FRAME_WIDTH 1280u
@@ -352,6 +360,39 @@ EXPORT uint32_t emulator_set_host_cores_ffi(uint32_t cores)
   return g_initialised ? emulator_set_host_cores(&g_emulator, cores) : 0;
 }
 
+/* Wall-clock pacing (emulator_set_pacing): on in the web by default. */
+EXPORT void emulator_set_pacing_ffi(uint32_t on)
+{
+  if (g_initialised) emulator_set_pacing(&g_emulator, on != 0);
+}
+
+/* Restart the pacing clock (run start, resume: paused time does not count). */
+EXPORT void emulator_pacing_resync_ffi(void)
+{
+  if (g_initialised) emulator_pacing_resync(&g_emulator);
+}
+
+/* Free-running mode (emulator_set_free_running; prototype, off by default). */
+EXPORT void emulator_set_free_running_ffi(uint32_t on)
+{
+  if (g_initialised) emulator_set_free_running(&g_emulator, on != 0);
+}
+
+/* About `host_ms` of guest execution in one call (emulator_run_for);
+ * returns Emulator_Status. The CPU worker's burst in free-running mode. */
+EXPORT int emulator_run_for_ffi(uint32_t host_ms, uint64_t cycle_budget)
+{
+  if (!g_initialised)
+    return (int)EMULATOR_NOT_LOADED;
+  return (int)emulator_run_for(&g_emulator, host_ms, cycle_budget);
+}
+
+/* Poll coalescing (emulator_set_poll_coalescing; on by default). */
+EXPORT void emulator_set_poll_coalescing_ffi(uint32_t on)
+{
+  if (g_initialised) emulator_set_poll_coalescing(&g_emulator, on != 0);
+}
+
 /* GPU mode (emulator_set_gpu_mode): the GPU worker consumes the stream. */
 EXPORT void emulator_set_gpu_mode_ffi(uint32_t on)
 {
@@ -393,6 +434,28 @@ EXPORT double emulator_sd_read_file_ffi(uint64_t path, uint64_t out, double max)
   if (!g_initialised || !path) return -1.0;
   return (double)emulator_sd_card_read_file(&g_emulator, (const char *)(uintptr_t)path, (void *)(uintptr_t)out,
                                             (uint64_t)max);
+}
+
+/* Committed save archives (§15): commit counter, their manifest, and a
+ * restore from host storage. */
+EXPORT double emulator_save_commits_ffi(void)
+{
+  return g_initialised ? (double)emulator_save_commits(&g_emulator) : 0.0;
+}
+
+EXPORT double emulator_save_committed_manifest_ffi(uint64_t out, double max)
+{
+  if (!g_initialised) return 0.0;
+  return (double)emulator_save_committed_manifest(&g_emulator, (char *)(uintptr_t)out, (uint64_t)max);
+}
+
+EXPORT int emulator_save_restore_archive_ffi(uint64_t name, uint64_t bytes, double size)
+{
+  if (!g_initialised || !name) return (int)RESULT_INVALID_ARGUMENT;
+  const Error err = emulator_save_restore_archive(&g_emulator, (const char *)(uintptr_t)name,
+                                                  (const void *)(uintptr_t)bytes, (uint64_t)size);
+  g_last_error_message = err.message;
+  return (int)err.code;
 }
 
 /* Software keyboard: writes the pending request as UTF-8 fields joined by

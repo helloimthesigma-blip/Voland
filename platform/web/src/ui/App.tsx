@@ -10,6 +10,7 @@ import { For, createSignal, onCleanup, onMount } from "solid-js";
 import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
 import type { LogEntry } from "../log";
 import { getLogHistory, getStatus, subscribeLogs, subscribeStatus } from "../log";
+import SavesPanel from "./SavesPanel";
 import ControlsLegend from "./ControlsLegend";
 import TextInputDialog from "./TextInputDialog";
 import LoadPanel from "./LoadPanel";
@@ -59,6 +60,7 @@ function App(props: AppProps) {
           <p>Load a game you dumped (a decrypted Program NCA) or a homebrew NRO, or run the built-in demo. Homebrew you add to the SD card appears in a homebrew menu such as hbmenu.</p>
           <div class="voland-screen" data-voland-screen data-testid="screen" />
           <LoadPanel loadGame={props.loadGame} addToSdCard={props.addToSdCard} clearSdCard={props.clearSdCard} setPaused={props.setPaused} />
+          <SavesPanel />
           <FrameSkipSetting setFrameSkip={props.setFrameSkip} />
           <ControlsLegend />
           <TextInputDialog respond={props.respondText} />
