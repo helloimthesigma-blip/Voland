@@ -322,9 +322,14 @@ EM_JS(uint32_t, jit_js_take_ready, (uint32_t *out, uint32_t max_pairs), {
   return count;
 })
 
-/* In a browser (not Node, whose CLI loop never yields to the event loop). */
+/* In a browser (not Node, whose CLI loop never yields to the event loop),
+ * and only if asked for: measured at Silksong's title (perf.mjs, similar
+ * load) asynchronous compilation lost to synchronous - 14.9 vs 18.0 fps,
+ * 4.7M vs 5.7M ticks/s, a slower warm-up - so it is opt-in
+ * (globalThis.volandJitAsync = true in the CPU worker) for experiments. */
 EM_JS(int, jit_js_event_loop_turns, (void), {
-  return (typeof process === 'undefined' || !process.versions || !process.versions.node) ? 1 : 0;
+  const browser = typeof process === 'undefined' || !process.versions || !process.versions.node;
+  return browser && globalThis.volandJitAsync === true ? 1 : 0;
 })
 
 static uint64_t install(const uint8_t *bytes, uint32_t length) {
