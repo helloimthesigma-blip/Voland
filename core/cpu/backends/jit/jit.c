@@ -302,9 +302,12 @@ EM_JS(void, jit_js_compile_async,
         });
         /* addFunction returns a BigInt in wasm64 builds; the queue feeds a u32 array. */
         ready.push(id, Number(addFunction(instance.exports.b, 'ip')));
+        /* Worker-global counters for browser checks (e2e / perf.mjs). */
+        globalThis.volandJitAsyncInstalled = (globalThis.volandJitAsyncInstalled || 0) + 1;
       },
       (error) => {
         console.error('[jit] module rejected:', error);
+        globalThis.volandJitAsyncFailed = (globalThis.volandJitAsyncFailed || 0) + 1;
         ready.push(id, 0);
       });
 })
@@ -314,7 +317,7 @@ EM_JS(uint32_t, jit_js_take_ready, (uint32_t *out, uint32_t max_pairs), {
   if (!ready || ready.length === 0) return 0;
   const count = Math.min(max_pairs, ready.length / 2);
   const base = Number(out) / 4;
-  for (let i = 0; i < 2 * count; i++) HEAPU32[base + i] = ready[i];
+  for (let i = 0; i < 2 * count; i++) HEAPU32[base + i] = Number(ready[i]);
   ready.splice(0, 2 * count);
   return count;
 })
