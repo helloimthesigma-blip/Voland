@@ -51,6 +51,7 @@
  *     expectations, 64 usage, 66 load failure.
  *
  *   voland-cli verify-dump <file>
+ *       --restore-save FILE.vsave    load a save archive (as "Back up saves" exports them) first
  *   voland-cli romfs <file.nca> [SUBSTRING [OUTDIR]]
  *     Lists the program's RomFS files whose path contains SUBSTRING (all
  *     without one), with sizes; with OUTDIR, copies them there (flat).
@@ -696,6 +697,33 @@ static void time_stats_print(const Emulator *emu) {
   }
 }
 
+/* --restore-save FILE.vsave: loads a save archive (hle/fs/save_archive.h)
+ * into save "<SS>-<attribute hex>" (the file's name) before the program
+ * boots - a fixture, or a save exported from the browser ("Back up saves"). */
+#define MAX_RESTORE_SAVES 8u
+static bool restore_save_archive(Emulator *emu, const char *path) {
+  static uint8_t bytes[1u << 24];
+  FILE *f = fopen(path, "rb");
+  if (!f) {
+    fprintf(stderr, "voland-cli: cannot read %s\n", path);
+    return false;
+  }
+  const size_t size = fread(bytes, 1, sizeof(bytes), f);
+  fclose(f);
+  char name[256];
+  const char *base = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
+  snprintf(name, sizeof(name), "%s", base);
+  char *dot = strstr(name, ".vsave");
+  if (dot) *dot = '\0';
+  const Error err = emulator_save_restore_archive(emu, name, bytes, size);
+  if (!error_is_ok(err)) {
+    fprintf(stderr, "voland-cli: %s: %s\n", path, err.message ? err.message : "restore failed");
+    return false;
+  }
+  fprintf(stderr, "voland-cli: restored save %s (%zu bytes)\n", name, size);
+  return true;
+}
+
 /* VOLAND_DUMP_SAVES=DIR: at exit, each committed save archive
  * (hle/fs/save_archive.h) as DIR/<SS>-<attribute hex>.vsave - what the
  * web build would store. */
@@ -756,6 +784,8 @@ static int run(int argc, char **argv) {
   uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES, dump_every = 0, snapshot_at = 0;
   const char *snapshot_dir = NULL, *gpu_stream_path = NULL;
   uint32_t frame_skip = 0, host_cores = 0;
+  const char *restore_saves[MAX_RESTORE_SAVES];
+  uint32_t restore_save_count = 0;
   /* --free-running-from N; --measure-from N --measure-seconds S */
   uint64_t free_from = 0, measure_from = 0, measure_seconds = 0;
   bool poll_coalescing = true;
@@ -815,6 +845,8 @@ static int run(int argc, char **argv) {
       swkbd_cancel = true;
     } else if (!strcmp(argv[i], "--svc-stats")) {
       svc_stats = true;
+    } else if (!strcmp(argv[i], "--restore-save") && has_value) {
+      if (restore_save_count < MAX_RESTORE_SAVES) restore_saves[restore_save_count++] = argv[++i];
     } else if (!strcmp(argv[i], "--dump-audio") && has_value) {
       audio_path = argv[++i];
     } else if (!strcmp(argv[i], "--font") && has_value) {
@@ -892,6 +924,9 @@ static int run(int argc, char **argv) {
   emulator_set_program_path(&emu, base ? base + 1 : path);
   /* The file stays open while the program runs: fsp-srv reads its RomFS. */
   emulator_set_frame_skip(&emu, frame_skip);
+  for (uint32_t r = 0; r < restore_save_count; r++) { /* before the program: it opens its saves at boot */
+    if (!restore_save_archive(&emu, restore_saves[r])) return EXIT_LOAD_FAILED;
+  }
   err = emulator_load(&emu, &source, 0);
   if (!error_is_ok(err)) {
     fprintf(stderr, "voland-cli: load failed: %s\n", err.message ? err.message : "(no message)");

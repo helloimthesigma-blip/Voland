@@ -192,3 +192,19 @@ Owner: bot 2. The coordinator reads this when merging.
   - Silksong only writes slot progress at its first save point (a bench), which the recipe doesn't reach, so the profile screen correctly still says New Game.
   - Tests: `tests/save_archive_test.c`, `tests/unit/save-store.test.ts`.
 - `voland-cli`: `VOLAND_DUMP_SAVES=DIR` writes the committed archives at exit.
+
+## Bench fixture and Continue, end to end (2026-10-04)
+
+- **Silksong's Switch slot file** (`user1.dat` … `user4.dat`) is plain JSON: the bare save object `{"playerData":{…},"sceneData":{…}}`. Wrapped forms crash the game at boot: it deserialises them, finds `playerData` null, and faults at main+0x241f6ec.
+  - Restore points (`Restore_Points1/NODELrestoreData1.dat`) are `{"data": base64(<{"saveGameData": <the save object>}>), "date", "version", "number"}`. That's an encoding, not encryption.
+  - Silksong writes no `user1.dat` until the first bench; the walking recipe to 5.65M doesn't reach one.
+- **Fixture** (derived from the owner's game data, so outside the repo): `~/WORKSPACE/bot2-work/fixtures/`.
+  - `D/01-…vsave`, a save archive for `--restore-save`.
+  - `bench-fixture.tar`, the same as a browser backup for "Restore saves…".
+  - Built from the New-Game restore point: `user1.dat` = its save object, with `playerData.respawnScene` "Tut_01" → **"Bonetown"**, `respawnMarkerName` "Death Respawn Marker Init" → **"RestBench"**, `respawnType` 0 → **1**. Nothing else changed.
+- **Verified:**
+  - Native: `--restore-save` + A at title and profile → Continue → Hornet sits at the Bone Bottom bench. The unedited slot continues into `Tut_01`.
+  - Browser, persistent profile, two sessions with a browser restart in between:
+    - session 1 imported the tar through the UI ("Imported 1 save"), loaded the game, and Continue reached the bench;
+    - session 2 logged "saves: restored 1 game save(s) from browser storage", and Continue reached the same bench.
+- **Deeper test routes** can now start at the bench: `voland-cli run NCA --restore-save fixtures/D/01-….vsave --input 860000:1:3000 --input 945000:1:3000 …`. The bench is on screen by ~1.1M slices natively.
