@@ -292,6 +292,11 @@ async function main() {
     await waitForUrl(baseUrl, 60_000);
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     page.on("console", (m) => {
+      /* The configuration actually in effect, as the CPU worker logs it. */
+      const backend = /backend=(\w+)/.exec(m.text());
+      if (backend) results.backend = backend[1];
+      const cores = /guest threads on (?:the serial scheduler|(\d+) host core)/.exec(m.text());
+      if (cores) results.hostCores = cores[1] ? Number(cores[1]) : 0;
       if (m.type() === "error" && /\[(ERROR|WARN )\]|failed|crash/i.test(m.text())) console.log(`  console: ${m.text()}`);
     });
     const pageUrl = opts.urlParams ? `${baseUrl}?${opts.urlParams}` : baseUrl;

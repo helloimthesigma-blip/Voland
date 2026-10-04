@@ -9,7 +9,8 @@
  *
  * - Checks the commit out (detached) in a dedicated worktree (default
  *   ../../../Voland-perf beside this checkout), builds the shipping web core
- *   (`cmake --preset web`), installs the web dependencies if needed, and
+ *   (`cmake --preset web --fresh`, so a stale cache never keeps an old
+ *   backend), installs the web dependencies if needed, and
  *   runs this checkout's perf.mjs against it (--web-dir) twice:
  *     (a) the title: warm up to slice 860,000, measure 30 s;
  *     (b) the gameplay recipe (BOTS.md presses) with load phases
@@ -37,7 +38,7 @@ const PHASES = "boot:0,title:860000,menus:1100000,newgame:3000000,end:4800000";
 
 /* CSV columns, in order. "*_cpu_per_vs" are the normalised figures. */
 const COLUMNS = [
-  "commit", "date", "preset", "load_avg_start", "load_avg_end",
+  "commit", "date", "preset", "backend", "host_cores", "load_avg_start", "load_avg_end",
   "worker_s_to_title", "worker_s_to_gameplay", "cpu_s_to_gameplay", "virtual_s_to_gameplay",
   "title_fps", "title_slices_per_s", "title_ticks_per_s",
   "gameplay_fps", "gameplay_slices_per_s", "gameplay_ticks_per_s", "jit_modules_to_gameplay",
@@ -103,7 +104,7 @@ function main() {
   git(["checkout", "-q", "--detach", sha], opts.worktree);
   console.log(`perf-track: ${opts.ref} = ${sha.slice(0, 7)} in ${opts.worktree}`);
 
-  sh(`source ~/emsdk/emsdk_env.sh >/dev/null 2>&1 && cmake --preset ${opts.preset} >/dev/null && cmake --build --preset ${opts.preset} 2>&1 | tail -1`,
+  sh(`source ~/emsdk/emsdk_env.sh >/dev/null 2>&1 && cmake --preset ${opts.preset} --fresh >/dev/null && cmake --build --preset ${opts.preset} 2>&1 | tail -1`,
      opts.worktree);
   const webDir = join(opts.worktree, "platform/web");
   if (!existsSync(join(webDir, "node_modules"))) sh("npx --yes pnpm install --frozen-lockfile 2>&1 | tail -1", webDir);
@@ -120,6 +121,8 @@ function main() {
     commit: sha.slice(0, 10),
     date: new Date().toISOString().slice(0, 16),
     preset: opts.preset + (opts.urlParams ? `?${opts.urlParams}` : ""),
+    backend: play.backend ?? "?",
+    host_cores: String(play.hostCores ?? "?"),
     load_avg_start: title.loadAvgStart.toFixed(1),
     load_avg_end: play.loadAvgEnd.toFixed(1),
     worker_s_to_title: (play.phases[0]?.workerS ?? 0).toFixed(1),
