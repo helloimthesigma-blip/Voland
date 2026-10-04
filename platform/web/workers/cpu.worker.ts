@@ -241,6 +241,9 @@ let pollCoalescing = true;
 /** Free-running guest cores (set-free-running; ?free=N): from slice N on,
  * one run_for call per burst instead of a loop of slices. 0 = off. */
 let freeFromSlice = 0;
+/** Wall-clock pacing (set-pacing; ?pacing=0 turns it off): the game runs at
+ * real speed with fewer frames instead of in slow motion. */
+let pacing = true;
 let freeRunning = false;
 
 function applyHostCores(target: SwitchCoreExports): void {
@@ -320,6 +323,7 @@ function startRunning(): void {
   lastBurstEnd = 0;
   running = true;
   paused = false;
+  core?._emulator_pacing_resync_ffi();
   postRunState("running", "");
   scheduleBurst();
 }
@@ -626,6 +630,7 @@ function loadGame(file: File): CPUToMainMessage {
   loadingCore._emulator_set_poll_coalescing_ffi(pollCoalescing ? 1 : 0);
   freeRunning = false;
   loadingCore._emulator_set_free_running_ffi(0);
+  loadingCore._emulator_set_pacing_ffi(pacing ? 1 : 0);
   withCString(`/${sdName(file.name)}`, (path) => loadingCore._emulator_set_program_path_ffi(path));
   const code = core._emulator_load_program_ffi(BigInt(file.size), randomAslrSeed());
 
@@ -763,6 +768,13 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     return;
   }
 
+  if (msg.type === "set-pacing") {
+    pacing = msg.on;
+    core?._emulator_set_pacing_ffi(pacing ? 1 : 0);
+    log("info", `wall-clock pacing ${pacing ? "on" : "off"}`);
+    return;
+  }
+
   if (msg.type === "set-free-running") {
     freeFromSlice = msg.fromSlice;
     log("info", freeFromSlice > 0 ? `free-running guest cores from slice ${freeFromSlice}` : "free-running guest cores off");
@@ -797,6 +809,7 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   if (msg.type === "resume") {
     if (paused && running) {
       paused = false;
+      core?._emulator_pacing_resync_ffi(); /* paused time does not count */
       postRunState("running", "");
       scheduleBurst();
     }

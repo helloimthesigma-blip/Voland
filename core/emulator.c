@@ -705,10 +705,48 @@ static Emulator_Status status_of(Emulator* emulator, Scheduler_Status tick) {
   }
 }
 
+static uint64_t host_now_ns(void);
+
+/* Wall-clock pacing (emulator.h): move virtual time up to wall time. Runs
+ * only while no guest code does (before a slice or a burst). */
+static void pace(Emulator* emulator) {
+  if (!emulator->pacing) return;
+  Scheduler* sched = &emulator->scheduler;
+  const uint64_t now = host_now_ns();
+  if (!emulator->pacing_origin_ns) {
+    emulator->pacing_origin_ns = now;
+    emulator->pacing_origin_ticks = sched->ticks;
+    return;
+  }
+  const uint64_t wall_ticks =
+      emulator->pacing_origin_ticks + scheduler_ns_to_ticks(now - emulator->pacing_origin_ns);
+  if (wall_ticks <= sched->ticks) return; /* not behind */
+  const uint64_t max_jump = scheduler_ns_to_ticks((uint64_t)EMULATOR_PACING_MAX_JUMP_MS * 1000000ull);
+  uint64_t behind = wall_ticks - sched->ticks;
+  if (behind > max_jump) { /* a stall: catch up the cap, forget the rest */
+    behind = max_jump;
+    emulator->pacing_origin_ns = now;
+    emulator->pacing_origin_ticks = sched->ticks + behind;
+  }
+  sched->ticks += behind;
+  emulator->paced_ticks += behind;
+}
+
+void emulator_set_pacing(Emulator* emulator, bool on) {
+  if (!emulator) return;
+  emulator->pacing = on;
+  emulator->pacing_origin_ns = 0;
+}
+
+void emulator_pacing_resync(Emulator* emulator) {
+  if (emulator) emulator->pacing_origin_ns = 0;
+}
+
 Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
   SWITCH_ASSERT_ALWAYS(emulator != NULL, "emulator_run_slice: emulator is NULL");
   if (!emulator->program_loaded) return EMULATOR_NOT_LOADED;
   CPU_ExitReason reason = CPU_EXIT_CYCLES_ELAPSED;
+  pace(emulator);
   update_devices(emulator);
   const Scheduler_Status tick = emulator->parallel
                                     ? parallel_tick(emulator->parallel, cycle_budget)
@@ -727,6 +765,7 @@ Emulator_Status emulator_run_for(Emulator* emulator, uint64_t host_ms, uint64_t 
   SWITCH_ASSERT_ALWAYS(emulator != NULL, "emulator_run_for: emulator is NULL");
   if (!emulator->program_loaded) return EMULATOR_NOT_LOADED;
   if (emulator->parallel && emulator->free_running) {
+    pace(emulator);
     update_devices(emulator);
     return status_of(emulator, parallel_run_for(emulator->parallel, host_ms * EMULATOR_NS_PER_MS, cycle_budget));
   }

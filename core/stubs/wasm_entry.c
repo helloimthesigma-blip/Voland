@@ -57,6 +57,8 @@ EXPORT void emulator_set_gpu_mode_ffi(uint32_t on);
 EXPORT uint32_t emulator_set_host_cores_ffi(uint32_t cores);
 EXPORT void emulator_set_poll_coalescing_ffi(uint32_t on);
 EXPORT void emulator_set_free_running_ffi(uint32_t on);
+EXPORT void emulator_set_pacing_ffi(uint32_t on);
+EXPORT void emulator_pacing_resync_ffi(void);
 EXPORT int emulator_run_for_ffi(uint32_t host_ms, uint64_t cycle_budget);
 EXPORT void emulator_set_shared_font_ffi(uint64_t bytes, uint32_t size);
 EXPORT int emulator_sd_write_file_ffi(uint64_t path, uint64_t bytes, uint64_t size);
@@ -356,6 +358,18 @@ EXPORT void emulator_set_frame_skip_ffi(uint32_t frames)
 EXPORT uint32_t emulator_set_host_cores_ffi(uint32_t cores)
 {
   return g_initialised ? emulator_set_host_cores(&g_emulator, cores) : 0;
+}
+
+/* Wall-clock pacing (emulator_set_pacing): on in the web by default. */
+EXPORT void emulator_set_pacing_ffi(uint32_t on)
+{
+  if (g_initialised) emulator_set_pacing(&g_emulator, on != 0);
+}
+
+/* Restart the pacing clock (run start, resume: paused time does not count). */
+EXPORT void emulator_pacing_resync_ffi(void)
+{
+  if (g_initialised) emulator_pacing_resync(&g_emulator);
 }
 
 /* Free-running mode (emulator_set_free_running; prototype, off by default). */

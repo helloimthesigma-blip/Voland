@@ -28,6 +28,7 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 static Guest_Run g_run; /* Emulator is large; keep it off the stack */
 
@@ -237,6 +238,35 @@ static void test_free_running(void) {
   printf("[parallel_test] free-running: every program on 2-3 cores; atomics, condvar, polls 20 rounds on 3\n");
 }
 
+/* Wall-clock pacing (emulator_set_pacing): virtual time keeps up with wall
+ * time, so a CPU-bound program ends with at least ~all of the wall time
+ * it took in virtual ticks; unpaced it falls far behind. The programs'
+ * own checks (sleeps, tick deltas) still pass. Serial and 3 cores. */
+static uint64_t wall_ns(void) {
+  struct timespec ts;
+  timespec_get(&ts, TIME_UTC);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+static void test_pacing(void) {
+  for (uint32_t cores = 0; cores <= 3; cores += 3) {
+    for (int paced = 0; paced <= 1; paced++) {
+      guest_boot(&g_run, TEST_BACKEND, k_programs[3].code, k_programs[3].size);
+      if (cores) CHECK(emulator_set_host_cores(&g_run.emu, cores) == cores);
+      emulator_set_pacing(&g_run.emu, paced != 0);
+      const uint64_t t0 = wall_ns();
+      const Emulator_Status status = guest_run(&g_run, 997, MAX_SLICES);
+      const uint64_t wall_ticks = scheduler_ns_to_ticks(wall_ns() - t0);
+      const uint64_t ticks = g_run.emu.scheduler.ticks;
+      CHECK(status == EMULATOR_EXITED && strstr(g_run.output, k_programs[3].expected) != NULL);
+      printf("[parallel_test] pacing %s, %u core(s): %llu virtual ticks for %llu wall ticks\n", paced ? "on" : "off",
+             cores, (unsigned long long)ticks, (unsigned long long)wall_ticks);
+      if (paced) CHECK(ticks * 10u >= wall_ticks * 8u); /* keeps up (the first slice sets the origin) */
+      guest_shutdown(&g_run);
+    }
+  }
+}
+
 static pthread_t g_driver;
 static bool g_ran_on_driver;
 static void note_thread(void *ctx) {
@@ -282,6 +312,7 @@ int main(void) {
   test_yield_alone();
   test_poll_coalescing();
   test_free_running();
+  test_pacing();
   test_host_calls();
   printf("[parallel_test] passed\n");
   return 0;

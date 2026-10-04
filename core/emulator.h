@@ -137,6 +137,12 @@ typedef struct Emulator
   Parallel *parallel;  /* emulator_set_host_cores; NULL = serial */
   bool no_poll_coalescing; /* emulator_set_poll_coalescing(false); survives reloads */
   bool free_running;   /* emulator_set_free_running; with host cores only */
+  /* Wall-clock pacing (emulator_set_pacing): virtual time never falls
+   * behind wall time since the origin. */
+  bool pacing;
+  uint64_t pacing_origin_ns;    /* host ns at the origin; 0 = take it at the next slice */
+  uint64_t pacing_origin_ticks; /* virtual ticks at the origin */
+  uint64_t paced_ticks;         /* virtual time added by pacing (statistics) */
   /* GPU mode (emulator_set_gpu_mode): the renderer's stream to the GPU
    * worker, in the layout's gpu_ring region. */
   Gpu_Stream gpu_stream;
@@ -217,6 +223,20 @@ uint32_t emulator_set_host_cores(Emulator *emulator, uint32_t cores);
  * barriers and devices update as they come due (docs/PARALLEL.md
  * "Free-running mode"). Guest code runs only inside the call either way. */
 Emulator_Status emulator_run_for(Emulator *emulator, uint64_t host_ms, uint64_t cycle_budget);
+
+/* Wall-clock pacing (off by default; the web turns it on): before each
+ * slice (or free-running burst) virtual time that has fallen behind wall
+ * time since the origin jumps forward to it, as an idle jump does, and
+ * due timers and device events fire at the new time. The guest sees large
+ * frame deltas and runs at real speed with fewer frames when the host is
+ * slower than the Switch. A jump is capped at EMULATOR_PACING_MAX_JUMP_MS;
+ * further behind (a stall: a hidden tab, GC), the origin resyncs instead
+ * of skipping the gap. Virtual time stays monotonic. */
+#define EMULATOR_PACING_MAX_JUMP_MS 100u
+void emulator_set_pacing(Emulator *emulator, bool on);
+/* Restarts the pacing clock at the current virtual time (run start, resume
+ * after a pause: paused time does not count). */
+void emulator_pacing_resync(Emulator *emulator);
 
 /* Free-running mode (prototype, off by default): emulator_run_for lets the
  * host cores run continuously. Needs emulator_set_host_cores >= 1. */

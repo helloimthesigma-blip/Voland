@@ -293,6 +293,11 @@ async function boot(): Promise<BootResult | null> {
         if (new URLSearchParams(location.search).get("polls") === "0") {
           cpuWorker.postMessage({ type: "set-poll-coalescing", on: false } satisfies MainToCPUMessage);
         }
+        /* ?pacing=0: no wall-clock pacing (the game runs in slow motion when
+         * the host is slower than the Switch). */
+        if (new URLSearchParams(location.search).get("pacing") === "0") {
+          cpuWorker.postMessage({ type: "set-pacing", on: false } satisfies MainToCPUMessage);
+        }
         /* ?free=N: free-running guest cores (prototype) from scheduler
          * slice N on (1 = from the start); slice-counted warm-ups and input
          * recipes then still mean what they did. */

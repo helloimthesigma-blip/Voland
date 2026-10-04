@@ -54,6 +54,8 @@ export type MainToCPUMessage =
   | { readonly type: "set-poll-coalescing"; readonly on: boolean }
   /* Free-running guest cores (docs/PARALLEL.md; prototype, off by default). */
   | { readonly type: "set-free-running"; readonly fromSlice: number } /* 0 = off */
+  /* Wall-clock pacing (virtual time keeps up with wall time); on by default. */
+  | { readonly type: "set-pacing"; readonly on: boolean }
   | { readonly type: "halt" };
 
 /** A software-keyboard prompt (§12 library applets): a title waits for
