@@ -157,6 +157,37 @@ process CPU time on the gameplay recipe:
 | span every callee | 836 s | 25.8 s | 660 MB |
 | span small callees | **492 s** | **19.5 s** | 352 MB |
 
+### Region cache: 4-way set associative
+
+The per-thread region cache was direct mapped (2^17 slots). Hot regions
+that hashed to one slot evicted each other forever: as many evictions as
+compiles in steady gameplay, and many block runs fell back to the
+interpreter while a region waited to get hot again.
+
+The cache is now 32K sets × 4 ways, which is the same 2^17 entries and the
+same memory per core.
+- A new region takes an empty way. Otherwise it takes, by second chance,
+  a way not entered since the replacement hand last passed.
+- Both chained jumps and the dispatcher mark a way as entered.
+- Chained code checks all four ways before it falls back to the
+  dispatcher.
+
+Node, the gameplay recipe to slice 3.5M, single core:
+
+| cache | regions compiled | evicted | modules | interpreted block runs |
+|---|---|---|---|---|
+| direct mapped, 2^17 | 111,896 | 64,760 | 813 MB | 34.7 M |
+| direct mapped, 2^19 (4× memory) | 71,781 | 19,381 | 468 MB | 24.4 M |
+| **4-way, 2^17** | **54,782** | **1,278** | **415 MB** | **20.1 M** |
+
+The thrashing came from slot conflicts, not from a lack of capacity:
+4 ways at the old size beat a direct-mapped cache 4× larger. Virtual
+time (5,646,834,491 ticks) and the SVC count (1,893,415) are identical
+in all three runs. Draw counts vary from run to run even with the same
+binary: the 4-way binary gave 928,752 draws once and 928,737 (the
+direct-mapped count) the next time. That variation is host-side and does
+not come from the cache.
+
 ## Merge status (for the coordinator)
 
 - `local/dev` 8d4eb35 (parallel guest threads) is merged into `local/jit`.
