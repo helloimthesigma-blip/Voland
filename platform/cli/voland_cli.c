@@ -688,6 +688,32 @@ static void time_stats_print(const Emulator *emu) {
   }
 }
 
+/* VOLAND_DUMP_SAVES=DIR: at exit, each committed save archive
+ * (hle/fs/save_archive.h) as DIR/<SS>-<attribute hex>.vsave - what the
+ * web build would store. */
+static void dump_saves(Emulator *emu, const char *dir) {
+  static char manifest[1u << 16];
+  static uint8_t bytes[1u << 24];
+  const uint64_t n = emulator_save_committed_manifest(emu, manifest, sizeof(manifest) - 1u);
+  manifest[n < sizeof(manifest) ? n : sizeof(manifest) - 1u] = '\0';
+  for (char *line = strtok(manifest, "\n"); line; line = strtok(NULL, "\n")) {
+    const char *path = strchr(line, ' ');
+    path = path ? strchr(path + 1, ' ') : NULL;
+    if (!path) continue;
+    path++;
+    const int64_t size = emulator_sd_card_read_file(emu, path, bytes, sizeof(bytes));
+    if (size < 0 || (uint64_t)size > sizeof(bytes)) continue;
+    char out[1024];
+    snprintf(out, sizeof(out), "%s/%s.vsave", dir, strrchr(path, '/') ? strrchr(path, '/') + 1 : path);
+    FILE *f = fopen(out, "wb");
+    if (f) {
+      fwrite(bytes, 1, (size_t)size, f);
+      fclose(f);
+      fprintf(stderr, "voland-cli: save %s (%lld bytes)\n", out, (long long)size);
+    }
+  }
+}
+
 /* --gpu-stream: the ring the GPU-mode producer writes, drained into a file
  * whenever it fills and after every slice. */
 #define CLI_GPU_RING_BYTES ((uint64_t)4 * 1024 * 1024)
@@ -1011,6 +1037,7 @@ static int run(int argc, char **argv) {
   if (stats_from) time_stats_print(&emu);
   if (g_pc_samples) fclose(g_pc_samples);
   if (getenv("VOLAND_DUMP_MODULES")) dump_modules(&emu, getenv("VOLAND_DUMP_MODULES"));
+  if (getenv("VOLAND_DUMP_SAVES")) dump_saves(&emu, getenv("VOLAND_DUMP_SAVES"));
 #ifdef __APPLE__
   {
     /* Host work, independent of machine load (a forked snapshot job counts
