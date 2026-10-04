@@ -188,6 +188,13 @@ binary: the 4-way binary gave 928,752 draws once and 928,737 (the
 direct-mapped count) the next time. That variation is host-side and does
 not come from the cache.
 
+**Oracle check:** the interpreter in the same Node build reaches the same
+virtual time and SVC count as every JIT run, so the JIT is exact here.
+The native interpreter is deterministic too, but it ends elsewhere
+(5,646,695,218 ticks, 1,893,530 SVCs). It also writes a GPU stream of
+15.8 GB, against 8.8 GB in Node. The difference is between the native
+and Node builds, and the JIT is not involved.
+
 ## Merge status (for the coordinator)
 
 - `local/dev` 8d4eb35 (parallel guest threads) is merged into `local/jit`.
