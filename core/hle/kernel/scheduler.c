@@ -146,6 +146,7 @@ void scheduler_poll_sleep(Scheduler *sched, Sched_Thread *self, int64_t ns, uint
     return;
   }
   if (!self->spinning || event <= self->wake_at) return;
+  if (self->work_epoch_seen != sched->work_epoch) return; /* work finished while it polled */
   self->poll_wake_at = self->wake_at; /* what it asked for, restored if a worker wakes */
   self->wake_at = event;
   sched->coalesced_polls++;
@@ -261,6 +262,7 @@ Scheduler_Status scheduler_finish_run(Scheduler *sched, const CPU_Backend *backe
   }
   thread->last_run = ++sched->run_counter;
   if (exit_reason != CPU_EXIT_SVC) thread->spinning = false; /* it ran its budget: real work */
+  if (!thread->spinning) sched->work_epoch++;
 
   if (exit_reason == CPU_EXIT_FAULT || exit_reason == CPU_EXIT_BREAKPOINT) {
     if (!sched->process_crashed) {
@@ -299,6 +301,7 @@ Scheduler_Status scheduler_tick(Scheduler *sched, const CPU_Backend *backend, ui
   Sched_Thread *thread = &sched->threads[index];
   sched->current = index;
   const uint64_t start_ticks = sched->ticks;
+  thread->work_epoch_seen = sched->work_epoch;
   backend->set_sys_reg(thread->thread.cpu_state, CPU_SYSREG_CNTVCT_EL0, start_ticks);
   const CPU_ExitReason exit_reason = backend->run(thread->thread.cpu_state, budget);
   sched->current = -1;
