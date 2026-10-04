@@ -49,6 +49,8 @@ export interface SwitchCoreExports {
   readonly _emulator_set_gpu_mode_ffi:     (on: number) => void;
   readonly _emulator_set_host_cores_ffi:   (cores: number) => number; /* cores in effect */
   readonly _emulator_set_poll_coalescing_ffi: (on: number) => void;
+  readonly _emulator_set_free_running_ffi: (on: number) => void;
+  readonly _emulator_run_for_ffi:          (hostMs: number, cycleBudget: bigint) => number; /* Emulator_Status */
   readonly _emulator_set_shared_font_ffi:  (bytes: bigint, size: number) => void;
   readonly _emulator_sd_write_file_ffi:    (path: bigint, bytes: bigint, size: bigint) => number; /* Result */
   readonly _emulator_sd_clear_ffi:         () => number; /* Result */

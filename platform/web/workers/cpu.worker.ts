@@ -238,6 +238,9 @@ let requestedHostCores: number | null = null;
 
 /** Poll coalescing (set-poll-coalescing; ?polls=0 turns it off). */
 let pollCoalescing = true;
+/** Free-running guest cores (set-free-running; ?free=1): one run_for call
+ * per burst instead of a loop of slices. */
+let freeRunning = false;
 
 function applyHostCores(target: SwitchCoreExports): void {
   const hostCores = requestedHostCores ?? DEFAULT_HOST_CORES;
@@ -281,7 +284,9 @@ function runBurst(): void {
   const deadline = burstStart + BURST_MS;
   let now = burstStart;
   while (now < deadline) {
-    const status = core._emulator_run_slice_ffi(SLICE_CYCLES);
+    const status = freeRunning
+      ? core._emulator_run_for_ffi(Math.max(1, Math.ceil(deadline - now)), SLICE_CYCLES)
+      : core._emulator_run_slice_ffi(SLICE_CYCLES);
     const after = performance.now();
     perf.slices++;
     perf.sliceMs += after - now;
@@ -613,6 +618,7 @@ function loadGame(file: File): CPUToMainMessage {
   loadingCore._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
   applyHostCores(loadingCore);
   loadingCore._emulator_set_poll_coalescing_ffi(pollCoalescing ? 1 : 0);
+  loadingCore._emulator_set_free_running_ffi(freeRunning ? 1 : 0);
   withCString(`/${sdName(file.name)}`, (path) => loadingCore._emulator_set_program_path_ffi(path));
   const code = core._emulator_load_program_ffi(BigInt(file.size), randomAslrSeed());
 
@@ -747,6 +753,13 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     gpuMode = msg.on;
     core?._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
     log("info", `renderer: ${gpuMode ? "WebGPU (GPU worker)" : "software reference"}`);
+    return;
+  }
+
+  if (msg.type === "set-free-running") {
+    freeRunning = msg.on;
+    core?._emulator_set_free_running_ffi(freeRunning ? 1 : 0);
+    log("info", `free-running guest cores ${freeRunning ? "on" : "off"}`);
     return;
   }
 

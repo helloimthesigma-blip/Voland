@@ -293,6 +293,10 @@ async function boot(): Promise<BootResult | null> {
         if (new URLSearchParams(location.search).get("polls") === "0") {
           cpuWorker.postMessage({ type: "set-poll-coalescing", on: false } satisfies MainToCPUMessage);
         }
+        /* ?free=1: free-running guest cores (prototype). */
+        if (new URLSearchParams(location.search).get("free") === "1") {
+          cpuWorker.postMessage({ type: "set-free-running", on: true } satisfies MainToCPUMessage);
+        }
         gpuSlot = "ready";
         updateStatus();
         resolve();
