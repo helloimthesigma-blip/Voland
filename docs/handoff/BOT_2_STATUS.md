@@ -160,3 +160,21 @@ Owner: bot 2. The coordinator reads this when merging.
     IDR.
 - The VUI declares `max_num_reorder_frames = 2`. Zero makes ffmpeg drop
   frames; a large value delays output.
+
+## Gameplay performance analysis (2026-10-03)
+
+- Browser CPU worker in gameplay: 84% JIT-compiled guest code, ~16% everything else. Native virtual time: 70.6% executed, 29.4% idle jumps. The game is at 60 fps in virtual time, so browser fps = host execution speed.
+- Fixed: the HID npad LIFO sequence was odd half the time and the SDK reader spun on it (9% of guest cycles).
+- Found for others: scalar FMIN/FMAX interpreter fallback (fixed by the JIT agent); Unity job-system workers yield-spinning (bot 1's scheduler rule); instruction mix (34% memory accesses) for the JIT.
+- Tools: `tools/profiling/README.md`.
+
+## Playability pass (2026-10-03)
+
+- **No controller at boot → controller-applet loop.** The game launched applet 0xC 974 times before the first key press, restarting audout each time (silent title, wasted work). The web keyboard is now player 1 from page load. The CLI is unchanged, for determinism.
+  - Worker time to the title (860k slices) went 149.5 s → 173.6 s, because the game's audio engine now really runs (before, it never got past the applet loop). Title fps is unchanged (9.9 → 9.8).
+- **Audio below real time** is now time-stretched in the worklet (`src/audio/slow-stretch.ts`): Hann-grain overlap-add, pitch kept, fades out when the core stops producing.
+  - Offline on real game audio at 22% speed: silence 83.8% → 27.1% (the source is 27% silent); large sample jumps 1.7/s → 0.7/s.
+  - Full speed takes the old path (no added latency); a core producing nothing stays on the old path.
+- **Short taps** are held for at least 2 guest frames (40–300 ms); presses are immediate.
+- The underrun log is rate-limited to once a minute; plain-language copy, a boot hint and a keyboard hint in the legend.
+- **Latency**, keydown → title-menu cursor visibly moving: 0.78–1.7 s (median ~0.9 s ≈ 10 guest frames at 11–13 fps). Being split into game-internal and pipeline parts natively.
