@@ -32,6 +32,17 @@
  *   --press 3000000:z:3000 --press 3100000:z:3000 --press 3200000:z:3000
  *   with --warmup-slices 4800000. Presses land within ~250 ms of their
  *   slice, so a browser run is close to, not identical with, the CLI's.
+ * - --clock slices|ticks|presents picks the unit of --warmup-slices and
+ *   --press points (default slices). With wall-clock pacing on (the web
+ *   default), slices and virtual ticks follow the wall clock rather than
+ *   game progress, so slice-counted recipes mis-time: use presents (frames
+ *   the game presented) - or pass --url-params pacing=0 to keep slices.
+ *   No counter tracks game progress exactly under pacing (timed screens
+ *   take fewer frames), so menus are best driven by --mash KEY:EVERY_MS:
+ *   KEY is pressed (200 ms) every EVERY_MS during the warm-up. Silksong to
+ *   gameplay under pacing: --clock presents --warmup-slices 6500 --mash z:4000
+ *   (A through title, profile, New Game, the opening video and the bind
+ *   prompt).
  * - --phases profiles the run from load in phases that start at the given
  *   slices (the last entry only ends the previous one), and prints per
  *   phase: worker time, slices, virtual time, file reads, GPU stream bytes,
@@ -73,7 +84,7 @@ const SOFTWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swift
 
 function parseArgs(argv) {
   const opts = {
-    game: "", warmupSlices: 860_000, seconds: 30, profile: 0, port: 0, debugPort: 0,
+    game: "", clock: "slices", warmupSlices: 860_000, seconds: 30, profile: 0, port: 0, debugPort: 0,
     build: true, software: false, urlParams: "", outDir: tmpdir(), browserArgs: [], presses: [], shot: "", phases: [], json: "", expectJitAsync: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -81,6 +92,15 @@ function parseArgs(argv) {
     const next = () => argv[++i] ?? "";
     if (a === "--game") opts.game = next();
     else if (a === "--warmup-slices") opts.warmupSlices = Number(next());
+    else if (a === "--clock") {
+      opts.clock = next();
+      if (!["slices", "ticks", "presents"].includes(opts.clock)) throw new Error("--clock wants slices, ticks or presents");
+    }
+    else if (a === "--mash") {
+      const [key, every] = next().split(":");
+      if (!key || !(Number(every) > 0)) throw new Error("--mash wants KEY:EVERY_MS");
+      opts.mash = { key, every: Number(every), last: 0 };
+    }
     else if (a === "--seconds") opts.seconds = Number(next());
     else if (a === "--profile") opts.profile = Number(next());
     else if (a === "--port") opts.port = Number(next());
@@ -354,7 +374,10 @@ async function main() {
                  jitAsyncFailed: globalThis.volandJitAsyncFailed ?? 0 };
       }),
       fps: await page.evaluate(() => window.__VOLAND_STATS__?.fps ?? 0),
+      presents: await page.evaluate(() => window.__VOLAND_STATS__?.presents ?? 0),
     });
+    /* The recipe clock (--clock): what --warmup-slices and --press count. */
+    const progress = (s) => opts.clock === "ticks" ? s.perf.ticks : opts.clock === "presents" ? s.presents : s.perf.slices;
 
     /* Scripted input: press and release keys at slice counts. */
     const servicePresses = async (slices) => {
@@ -414,14 +437,20 @@ async function main() {
     let s = await sample();
     await servicePhases(s);
     let lastPrint = 0;
-    while (s.perf.slices < opts.warmupSlices) {
+    while (progress(s) < opts.warmupSlices) {
       const state = await page.getByTestId("run-state").getAttribute("data-state");
       if (state === "crashed" || state === "deadlock" || state === "exited") throw new Error(`run state ${state}`);
       if (s.at - lastPrint > 15_000) {
         lastPrint = s.at;
-        console.log(`warmup: ${s.perf.slices} slices, ${(s.perf.ticks / TICKS_PER_SECOND).toFixed(1)} s virtual`);
+        console.log(`warmup: ${s.perf.slices} slices, ${(s.perf.ticks / TICKS_PER_SECOND).toFixed(1)} s virtual, ${s.presents} frames`);
       }
-      await servicePresses(s.perf.slices);
+      await servicePresses(progress(s));
+      if (opts.mash && Date.now() - opts.mash.last >= opts.mash.every) {
+        opts.mash.last = Date.now();
+        await page.keyboard.down(opts.mash.key);
+        await sleep(200);
+        await page.keyboard.up(opts.mash.key);
+      }
       await sleep(250);
       s = await sample();
       await servicePhases(s);
@@ -451,7 +480,7 @@ async function main() {
     for (let t = 0; t < opts.seconds; t++) {
       for (let q = 0; q < 4; q++) {
         await sleep(250);
-        if (opts.presses.length) await servicePresses((await sample()).perf.slices);
+        if (opts.presses.length) await servicePresses(progress(await sample()));
       }
       fpsSamples.push(await page.evaluate(() => window.__VOLAND_STATS__?.fps ?? 0));
     }

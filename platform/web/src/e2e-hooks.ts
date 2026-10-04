@@ -27,6 +27,9 @@ export interface VolandAudioReport {
 /** Once-a-second performance sample (main.ts frame-rate meter). */
 export interface VolandStats {
   readonly fps: number;
+  /** Frames presented since the page loaded (a game-progress clock that
+   * wall-clock pacing does not distort; tools/perf.mjs --clock presents). */
+  readonly presents: number;
 }
 
 declare global {

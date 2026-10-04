@@ -370,7 +370,7 @@ async function boot(): Promise<BootResult | null> {
     const fps = lastPublished < 0 ? 0 : (published - lastPublished) | 0;
     lastPublished = published;
     setGuestFps(fps);
-    window.__VOLAND_STATS__ = { fps };
+    window.__VOLAND_STATS__ = { fps, presents: published };
   }, 1000);
 
   function loadGame(file: File): Promise<GameLoadOutcome> {
