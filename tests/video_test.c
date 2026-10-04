@@ -154,10 +154,41 @@ static void test_slots(void) {
   CHECK(!video_frame_for(&v, 1, &f));
 }
 
+/* No consumer (Node, no WebCodecs): the producer must never wait. A
+ * ring filled to the brim drops further requests and counts them; once
+ * the consumer frees room, a pending CONFIGURE goes out first. */
+static void test_no_consumer_never_blocks(void) {
+  static uint8_t au[256 * 1024];
+  memset(au, 0x5A, sizeof(au));
+  Video_Stream v;
+  video_stream_init(&v, g_region, NULL, NULL); /* NULL wait: a blocked producer would spin forever */
+  video_configure(&v, 1280, 720, "avc1.640033");
+  for (uint32_t i = 0; i < 64; i++) (void)video_decode(&v, i == 0, au, sizeof(au)); /* 16 MiB into a 4 MiB ring */
+  CHECK(v.dropped > 0 && v.decodes == 64u);
+  for (uint32_t i = 0; i < 200000; i++) (void)video_decode(&v, false, au, 8); /* top it up to the brim */
+  /* A new stream while full: its CONFIGURE is owed, not lost. */
+  video_configure(&v, 1920, 1080, "avc1.640033");
+  CHECK(v.configure_pending);
+  /* The consumer drains everything; the next decode sends CONFIGURE then DECODE. */
+  uint64_t write = 0;
+  memcpy(&write, g_region + GPU_STREAM_OFF_WRITE, 8);
+  memcpy(g_region + GPU_STREAM_OFF_READ, &write, 8);
+  const uint64_t before = write;
+  (void)video_decode(&v, true, au, 1024);
+  CHECK(!v.configure_pending);
+  memcpy(&write, g_region + GPU_STREAM_OFF_WRITE, 8);
+  const uint8_t *ring = g_region + VIDEO_RING_OFFSET;
+  uint64_t at = before % VIDEO_RING_BYTES;
+  if (rd32(ring + at) == 0u) at = 0; /* a pad record to the end */
+  CHECK(rd32(ring + at) == VIDEO_REC_CONFIGURE && rd32(ring + at + 8 + 4) == 1920u && rd32(ring + at + 8) == 2u);
+  CHECK(write > before);
+}
+
 int main(void) {
   test_h264_params();
   test_stream_ring();
   test_slots();
+  test_no_consumer_never_blocks();
   printf("[video_test] passed\n");
   return 0;
 }

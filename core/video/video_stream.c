@@ -43,6 +43,35 @@ static void release_old_generations(Video_Stream *v) {
   }
 }
 
+/* Room for one record of `payload` bytes without waiting: the request
+ * ring may have no consumer at all (no WebCodecs, a Node or headless
+ * build), so the producer never blocks on it - a request that does not
+ * fit is dropped (counted), and the guest's syncpoints never wait on it.
+ * Twice the record covers the padding to the ring's end. */
+static bool has_room(const Video_Stream *v, uint32_t payload) {
+  const uint64_t read = __atomic_load_n((const uint64_t *)(const void *)(v->region + GPU_STREAM_OFF_READ),
+                                        __ATOMIC_ACQUIRE);
+  const uint64_t record = ((uint64_t)payload + GPU_STREAM_RECORD_HEADER_BYTES + GPU_STREAM_ALIGN - 1u) &
+                          ~(uint64_t)(GPU_STREAM_ALIGN - 1u);
+  return v->requests.write - read + 2u * record <= v->requests.capacity;
+}
+
+/* Writes the current generation's CONFIGURE if it is still owed. */
+static bool send_configure(Video_Stream *v) {
+  if (!v->configure_pending) return true;
+  if (!has_room(v, VIDEO_CONFIGURE_BYTES)) return false;
+  uint8_t *p = gpu_stream_begin(&v->requests, VIDEO_REC_CONFIGURE, VIDEO_CONFIGURE_BYTES);
+  memset(p, 0, VIDEO_CONFIGURE_BYTES);
+  memcpy(p, &v->generation, 4);
+  memcpy(p + 4, &v->width, 4);
+  memcpy(p + 8, &v->height, 4);
+  memcpy(p + 16, v->codec, VIDEO_CODEC_STRING_BYTES);
+  gpu_stream_end(&v->requests);
+  gpu_stream_publish(&v->requests);
+  v->configure_pending = false;
+  return true;
+}
+
 void video_configure(Video_Stream *v, uint32_t width, uint32_t height, const char *codec) {
   v->generation++;
   v->sequence = 0;
@@ -51,14 +80,12 @@ void video_configure(Video_Stream *v, uint32_t width, uint32_t height, const cha
     v->backend->configure(v->backend->user, v->generation, width, height, codec);
     return;
   }
-  uint8_t *p = gpu_stream_begin(&v->requests, VIDEO_REC_CONFIGURE, VIDEO_CONFIGURE_BYTES);
-  memset(p, 0, VIDEO_CONFIGURE_BYTES);
-  memcpy(p, &v->generation, 4);
-  memcpy(p + 4, &width, 4);
-  memcpy(p + 8, &height, 4);
-  strncpy((char *)p + 16, codec, VIDEO_CODEC_STRING_BYTES - 1u);
-  gpu_stream_end(&v->requests);
-  gpu_stream_publish(&v->requests);
+  v->width = width;
+  v->height = height;
+  memset(v->codec, 0, sizeof(v->codec));
+  strncpy(v->codec, codec, VIDEO_CODEC_STRING_BYTES - 1u);
+  v->configure_pending = true;
+  (void)send_configure(v);
 }
 
 uint32_t video_decode(Video_Stream *v, bool key, const uint8_t *data, uint32_t bytes) {
@@ -68,8 +95,9 @@ uint32_t video_decode(Video_Stream *v, bool key, const uint8_t *data, uint32_t b
     v->backend->decode(v->backend->user, v->generation, sequence, key, data, bytes);
     return sequence;
   }
-  if ((uint64_t)bytes + VIDEO_DECODE_HEADER_BYTES > gpu_stream_max_payload(&v->requests)) {
-    v->dropped++;
+  if ((uint64_t)bytes + VIDEO_DECODE_HEADER_BYTES > gpu_stream_max_payload(&v->requests) || !send_configure(v) ||
+      !has_room(v, VIDEO_DECODE_HEADER_BYTES + bytes)) {
+    v->dropped++; /* no consumer, or it is far behind: the frame shows late or not at all, nothing waits */
     return sequence;
   }
   uint8_t *p = gpu_stream_begin(&v->requests, VIDEO_REC_DECODE, VIDEO_DECODE_HEADER_BYTES + bytes);

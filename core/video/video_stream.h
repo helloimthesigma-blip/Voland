@@ -27,6 +27,10 @@
  *     +12 generation  +16 width  +20 height  +24 luma pitch (bytes)
  *     +28 chroma offset (bytes from the slot's pixels; interleaved UV, same pitch)
  *
+ * The producer never waits on the ring: with no consumer (no WebCodecs, a
+ * Node or headless build) or one far behind, requests that do not fit are
+ * dropped and counted, and video shows black - the guest never stalls.
+ *
  * The decoder is asynchronous: NVDEC's syncpoints complete at once, and
  * VIC converts the newest decoded frame meant for its input surface
  * (video_frame_for), so a late frame shows a frame late, never blocks.
@@ -93,6 +97,10 @@ typedef struct Video_Stream {
   const Video_Backend *backend; /* NULL: the ring (web) */
   uint32_t generation;
   uint32_t sequence;
+  /* The current stream's CONFIGURE, until it fits in the ring. */
+  bool configure_pending;
+  uint32_t width, height;
+  char codec[VIDEO_CODEC_STRING_BYTES];
   uint32_t shown_output[VIDEO_SLOT_COUNT]; /* the output index a slot held when it was shown (core-side) */
   uint64_t decodes, dropped; /* diagnostics */
 } Video_Stream;
