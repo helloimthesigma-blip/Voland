@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L /* clock_gettime under -std=c11 */
 /**
  * CPU_BACKEND_JIT (jit.h, docs/JIT.md): the mixed-mode run loop, the
  * compiled-block cache and the wasm module installer.
@@ -29,6 +30,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <time.h>
 #include <string.h>
 
 #include "common/assert.h"
@@ -94,6 +96,13 @@ static bool source_peek64(void *context, uint64_t address, uint64_t *value) {
   if (!host) return false;
   memcpy(value, host, sizeof(*value));
   return true;
+}
+
+/* Host time for the compile counters (Jit_Stats). */
+static uint64_t jit_now_ns(void) {
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
 /* Everything compiled code depends on, per host thread. Compiled
@@ -662,9 +671,13 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
   link.count_entries = g_hot_profile;
   link.span_calls = g_span_calls;
   Jit_Compiled compiled;
+  const uint64_t lock_start = jit_now_ns();
   compiler_lock();
+  const uint64_t codegen_start = jit_now_ns();
+  t->stats.compile_lock_ns += codegen_start - lock_start;
   const bool built = jit_compile_block(pc, &source, memory_pages(), &link, t->module, JIT_MODULE_BYTES, &compiled);
   compiler_unlock();
+  t->stats.codegen_ns += jit_now_ns() - codegen_start;
   if (!built) {
     t->stats.compile_failures++;
     return;
@@ -704,7 +717,10 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
     install_async(t->module, compiled.module_bytes, id);
     return;
   }
+  const uint64_t install_start = jit_now_ns();
   const uint64_t function = install(t->module, compiled.module_bytes);
+  t->stats.sync_installs++;
+  t->stats.sync_install_ns += jit_now_ns() - install_start;
   if (!function) {
     t->stats.compile_failures++;
     return;

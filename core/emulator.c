@@ -16,6 +16,9 @@
 #include "common/workers.h"
 #include "hle/kernel/handle_table.h"
 #include "hle/kernel/parallel.h"
+#ifdef SWITCH_CPU_BACKEND_JIT
+#include "cpu/backends/jit/jit.h"
+#endif
 #include "hle/kernel/thread.h"
 
 #include <stdio.h>
@@ -703,6 +706,25 @@ void emulator_set_poll_coalescing(Emulator* emulator, bool on) {
   emulator->scheduler.poll_coalescing = on;
 }
 
+#ifdef SWITCH_CPU_BACKEND_JIT
+/* The JIT's compile costs since the last parallel report (all threads). */
+static void report_jit(void) {
+  static Jit_Stats last;
+  const Jit_Stats now = *jit_stats();
+  const double ms = 1e6;
+  log_info("[parallel] jit: %llu regions compiled, %llu evicted, %llu interpreted / %llu compiled block runs; "
+           "codegen %.0f ms, compile-lock wait %.0f ms, %llu sync installs %.0f ms",
+           (unsigned long long)(now.blocks_compiled - last.blocks_compiled),
+           (unsigned long long)(now.evictions - last.evictions),
+           (unsigned long long)(now.interpreted_blocks - last.interpreted_blocks),
+           (unsigned long long)(now.block_entries - last.block_entries), (double)(now.codegen_ns - last.codegen_ns) / ms,
+           (double)(now.compile_lock_ns - last.compile_lock_ns) / ms,
+           (unsigned long long)(now.sync_installs - last.sync_installs),
+           (double)(now.sync_install_ns - last.sync_install_ns) / ms);
+  last = now;
+}
+#endif
+
 uint32_t emulator_set_host_cores(Emulator* emulator, uint32_t cores) {
   if (!emulator) return 0;
   if (cores > PARALLEL_MAX_CORES) cores = PARALLEL_MAX_CORES;
@@ -727,6 +749,9 @@ uint32_t emulator_set_host_cores(Emulator* emulator, uint32_t cores) {
 #endif
   emulator->parallel = parallel_create(&emulator->scheduler, emulator->cpu_backend, cores);
   if (!emulator->parallel) return 0;
+#ifdef SWITCH_CPU_BACKEND_JIT
+  if (emulator->cpu_backend == &CPU_BACKEND_JIT) parallel_set_report_hook(emulator->parallel, report_jit);
+#endif
   cpu_set_multicore(parallel_core_count(emulator->parallel) >= 2u);
   return parallel_core_count(emulator->parallel);
 }

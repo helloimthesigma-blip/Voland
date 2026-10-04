@@ -67,6 +67,10 @@ void parallel_kernel_exit(Parallel *p);
  * driver itself, or with no parallel scheduler active, calls fn directly. */
 void parallel_on_driver(void (*fn)(void *ctx), void *ctx);
 
+/* Called after each periodic timing report (every 10 s of host time,
+ * from the driver): e.g. the JIT's own counters. */
+void parallel_set_report_hook(Parallel *p, void (*hook)(void));
+
 /* True on a core thread. */
 bool parallel_on_core_thread(void);
 

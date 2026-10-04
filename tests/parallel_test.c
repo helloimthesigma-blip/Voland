@@ -142,18 +142,23 @@ static void test_stress(void) {
 /* A yield with nothing else runnable sleeps until the next wake
  * (svc_thread.c): the spinner waits out the worker's 1ms sleep in a few
  * SVCs, not one per spin. */
-#define YIELDSPIN_MAX_SVCS 100u /* a few polls race the marks with real cores */
+/* Without the rule: ~204,000 SVCs. Serially the bound is tight; with real
+ * cores spinners race each other's poll marks for a while, so the bound
+ * only checks the order of magnitude. */
+#define YIELDSPIN_MAX_SVCS 32u
+#define YIELDSPIN_MAX_SVCS_MULTICORE 2000u
 static void test_yield_alone(void) {
   static Outcome o;
   for (uint32_t cores = 0; cores <= 3; cores++) {
     run_program(&k_programs[4], cores, 997, &o);
     check_completes(&k_programs[4], cores, 997, &o);
-    if (o.svcs > YIELDSPIN_MAX_SVCS) {
+    if (o.svcs > (cores >= 2u ? YIELDSPIN_MAX_SVCS_MULTICORE : YIELDSPIN_MAX_SVCS)) {
       fprintf(stderr, "yieldspin, %u core(s): %llu SVCs\n", cores, (unsigned long long)o.svcs);
       CHECK(false);
     }
   }
-  printf("[parallel_test] a lone yield sleeps to the next wake (<= %u SVCs, 0-3 cores)\n", YIELDSPIN_MAX_SVCS);
+  printf("[parallel_test] a lone yield sleeps to the next wake (<= %u SVCs serially, <= %u on 2-3 cores)\n",
+         YIELDSPIN_MAX_SVCS, YIELDSPIN_MAX_SVCS_MULTICORE);
   /* Serially, a polling worker waits for the computing main thread rather
    * than taking a turn every rotation (997-cycle slices: ~3000 rotations). */
   run_program(&k_programs[5], 0, 997, &o);
