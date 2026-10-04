@@ -32,6 +32,11 @@ function ControlsLegend() {
   return (
     <details class="voland-controls" data-testid="controls">
       <summary>Controls (keyboard; gamepads work too)</summary>
+      <p class="voland-controls-hint" data-testid="controls-hint">
+        Easiest on a keyboard: move with the arrow keys (the D-pad) and use Z X C V for A B X Y.
+        W A S D is the left stick (use it if a game ignores the D-pad for movement). Prompts in games
+        show Switch buttons; this list maps them to keys.
+      </p>
       <dl>
         <For each={rows()}>
           {([button, keys]) => (

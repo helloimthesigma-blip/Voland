@@ -3,12 +3,15 @@
  * audio ring straight out of the shared WebAssembly memory on the
  * real-time audio thread. Never waits; outputs silence on underrun (and
  * counts it); resamples by the §14 PI-controlled ratio (ring-control.ts)
- * with linear interpolation.
+ * with linear interpolation. Below full speed (the core producing less
+ * than real time), it time-stretches instead (slow-stretch.ts): continuous
+ * sound at the original pitch instead of clicking bursts and gaps.
  *
  * Ring (core/audio/audio_ring.h): +0 write index, +4 read index (u32
  * frames), +8 float32 stereo frames.
  */
 import { nextRatio, type RateState } from "./ring-control";
+import { RateMeter, type RingAccess, SLOW_ENTER, SLOW_FLOOR, SLOW_LEAVE, SlowStretch } from "./slow-stretch";
 
 /* The AudioWorkletGlobalScope surface this module uses (not in lib.dom). */
 declare abstract class AudioWorkletProcessor {
@@ -36,6 +39,10 @@ class RingProcessor extends AudioWorkletProcessor {
   private phase = 0; // fractional position past the read index
   private underruns = 0;
   private blocks = 0;
+  private readonly meter = new RateMeter();
+  private readonly stretch = new SlowStretch();
+  private readonly ring: RingAccess;
+  private slow = false;
 
   constructor(options: { processorOptions: RingOptions }) {
     super(options);
@@ -43,6 +50,14 @@ class RingProcessor extends AudioWorkletProcessor {
     this.capacity = capacityFrames;
     this.indices = new Int32Array(memory.buffer, ringBase, HEADER_WORDS);
     this.frames = new Float32Array(memory.buffer, ringBase + HEADER_WORDS * 4, capacityFrames * CHANNELS);
+    const indices = this.indices;
+    this.ring = {
+      frames: this.frames,
+      capacity: capacityFrames,
+      writeIndex: () => Atomics.load(indices, 0) >>> 0,
+      readIndex: () => Atomics.load(indices, 1) >>> 0,
+      setReadIndex: (index) => { Atomics.store(indices, 1, index | 0); },
+    };
   }
 
   process(_inputs: Float32Array[][], outputs: Float32Array[][]): boolean {
@@ -51,6 +66,22 @@ class RingProcessor extends AudioWorkletProcessor {
     const right = out?.[1] ?? left;
     if (!left || !right) return true;
     const write = Atomics.load(this.indices, 0) >>> 0;
+    /* Below full speed: stretch (no gaps or clicks). At full speed the
+     * plain path below runs, adding no latency. */
+    const speed = this.meter.sample(write, left.length);
+    if (!this.slow && speed < SLOW_ENTER && speed > SLOW_FLOOR) {
+      this.slow = true;
+    } else if (this.slow && (speed > SLOW_LEAVE || speed < SLOW_FLOOR)) {
+      this.slow = false;
+      this.stretch.reset();
+    }
+    if (this.slow) {
+      this.stretch.render(this.ring, left, right, speed);
+      if (++this.blocks % REPORT_EVERY_BLOCKS === 0) {
+        this.port.postMessage({ blocks: this.blocks, underruns: this.underruns, fill: (write - (Atomics.load(this.indices, 1) >>> 0)) >>> 0, ratio: 1, speed, stretching: true });
+      }
+      return true;
+    }
     let read = Atomics.load(this.indices, 1) >>> 0;
     const fill = (write - read) >>> 0;
     const step = nextRatio(this.rate, fill, this.capacity);

@@ -238,6 +238,7 @@
 .voland-player-bar button:hover { background: #2d3150; }
 .voland-controls { margin: 8px 0 12px; font-size: 13px; color: #c9cbd6; }
 .voland-controls summary { cursor: pointer; }
+.voland-controls-hint { margin: 8px 0 0; color: #9da0ad; max-width: 60ch; }
 .voland-controls dl { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 16px; margin: 8px 0 0; }
 .voland-controls dl div { display: flex; justify-content: space-between; gap: 8px; }
 .voland-controls dt { color: #9da3c0; }

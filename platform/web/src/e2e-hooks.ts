@@ -18,6 +18,10 @@ export interface VolandAudioReport {
   readonly underruns: number;
   readonly fill: number;
   readonly ratio: number;
+  /** Below full speed the worklet time-stretches (src/audio/slow-stretch.ts). */
+  readonly stretching?: boolean;
+  /** Frames the core produced per frame played (while stretching). */
+  readonly speed?: number;
 }
 
 /** Once-a-second performance sample (main.ts frame-rate meter). */

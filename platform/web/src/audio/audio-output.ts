@@ -8,6 +8,7 @@ import type { VolandAudioReport } from "../e2e-hooks";
 import processorUrl from "./ring-processor.ts?worker&url";
 
 const SAMPLE_RATE = 48_000;
+const UNDERRUN_LOG_MS = 60_000;
 
 let context: AudioContext | null = null;
 
@@ -25,13 +26,23 @@ export async function startAudioOutput(memory: WebAssembly.Memory, ringBase: num
     });
     node.connect(context.destination);
     let reportedUnderruns = 0;
+    let lastUnderrunLog = -UNDERRUN_LOG_MS;
+    let wasStretching = false;
     node.port.onmessage = (event: MessageEvent<VolandAudioReport>) => {
       window.__VOLAND_AUDIO__ = event.data;
-      /* Underruns are normal while nothing plays; log only bursts during playback. */
-      if (event.data.fill > 0 && event.data.underruns > reportedUnderruns) {
+      /* Underruns are normal while nothing plays; during playback the
+       * first burst is logged, then at most once a minute (not spam). */
+      const now = Date.now();
+      if (event.data.fill > 0 && event.data.underruns > reportedUnderruns && now - lastUnderrunLog >= UNDERRUN_LOG_MS) {
         onLog(`audio underruns so far: ${event.data.underruns}`);
+        lastUnderrunLog = now;
       }
       reportedUnderruns = event.data.underruns;
+      const stretching = event.data.stretching === true;
+      if (stretching !== wasStretching) {
+        onLog(stretching ? "audio: below full speed - time-stretching" : "audio: full speed");
+        wasStretching = stretching;
+      }
     };
     if (context.state === "suspended") {
       const resume = (): void => { void context?.resume(); };

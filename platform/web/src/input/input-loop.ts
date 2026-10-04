@@ -6,7 +6,13 @@
  * is paused by the visibility handler in main.ts at the same time.
  *
  * Slot policy: slot N is navigator.getGamepads()[N]. The keyboard drives
- * slot 0 while no gamepad occupies it, from the first mapped key press.
+ * slot 0 while no gamepad occupies it - connected from the start, as a
+ * Switch always has its handheld controller (games that find none keep
+ * asking for one with the controller applet, and stay silent meanwhile).
+ *
+ * Short taps: a press shows at once, but its release waits until the
+ * press has lasted a minimum hold (two guest frames at the measured frame
+ * rate), so a tap between two of the game's input reads still registers.
  */
 import {
   type ControllerState,
@@ -26,6 +32,40 @@ export interface ConnectionChange {
   readonly profileId: number;
 }
 
+/* Minimum hold, as guest frames, and its bounds (ms). */
+const HOLD_FRAMES = 2;
+const HOLD_MIN_MS = 40;
+const HOLD_MAX_MS = 300;
+const BUTTON_BITS = 32;
+
+/** The minimum hold for taps (ms) at a guest frame rate (0 = unknown). Pure. */
+export function minimumHoldMs(fps: number): number {
+  if (!(fps > 0)) return HOLD_MAX_MS;
+  return Math.max(HOLD_MIN_MS, Math.min(HOLD_MAX_MS, (HOLD_FRAMES * 1000) / fps));
+}
+
+/** When each held button bit of a slot was pressed (ms), or absent. */
+export type HoldState = ReadonlyMap<number, number>;
+
+/** Buttons as the guest should see them: presses at once, releases only
+ * once the press has lasted `holdMs`. Pure. */
+export function applyMinimumHold(state: HoldState, buttons: number, now: number, holdMs: number):
+  { buttons: number; state: HoldState } {
+  const next = new Map<number, number>();
+  let out = buttons;
+  for (let bit = 0; bit < BUTTON_BITS; bit++) {
+    const mask = (1 << bit) >>> 0;
+    const pressedAt = state.get(bit);
+    if (buttons & mask) {
+      next.set(bit, pressedAt ?? now);
+    } else if (pressedAt !== undefined && now - pressedAt < holdMs) {
+      out |= mask; /* released too soon: keep it down a little longer */
+      next.set(bit, pressedAt);
+    }
+  }
+  return { buttons: out >>> 0, state: next };
+}
+
 export interface InputLoopOptions {
   readonly buffer: ArrayBufferLike;
   readonly regionBase: number;
@@ -34,6 +74,8 @@ export interface InputLoopOptions {
   /** The element showing the guest screen; pointer presses on it are
    * the touch screen. */
   readonly touchTarget?: HTMLElement;
+  /** The guest's frames per second (for the tap minimum hold); 0 = unknown. */
+  readonly guestFps?: () => number;
 }
 
 export interface ScreenBox {
@@ -82,13 +124,13 @@ function isTextEntry(target: EventTarget | null): boolean {
 export function startInputLoop(options: InputLoopOptions): () => void {
   const writer = createInputRegionWriter(options.buffer, options.regionBase);
   const pressedKeys = new Set<string>();
-  let keyboardActive = false;
+  const keyboardActive = true;
   let previous: readonly ControllerState[] = Array.from({ length: INPUT_REGION_SLOT_COUNT }, () => DISCONNECTED);
   let frame = 0;
+  const holds: HoldState[] = Array.from({ length: INPUT_REGION_SLOT_COUNT }, () => new Map<number, number>());
 
   const onKeyDown = (event: KeyboardEvent): void => {
     if (isTextEntry(event.target) || !isMappedKey(event.code)) return;
-    keyboardActive = true;
     pressedKeys.add(event.code);
     event.preventDefault();
   };
@@ -130,7 +172,13 @@ export function startInputLoop(options: InputLoopOptions): () => void {
   }
 
   const tick = (): void => {
-    const states = collectSlotStates(options.getGamepads(), keyboardActive, pressedKeys);
+    const now = performance.now();
+    const holdMs = minimumHoldMs(options.guestFps?.() ?? 0);
+    const states = collectSlotStates(options.getGamepads(), keyboardActive, pressedKeys).map((state, slot) => {
+      const held = applyMinimumHold(holds[slot] ?? new Map(), state.buttons, now, holdMs);
+      holds[slot] = held.state;
+      return held.buttons === state.buttons ? state : { ...state, buttons: held.buttons };
+    });
     states.forEach((state, slot) => {
       writer.writeSlot(slot, state);
       const before = previous[slot];

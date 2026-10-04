@@ -48,15 +48,15 @@ function App(props: AppProps) {
       <header class="voland-header">
         <div class="voland-brand">
           <span class="voland-title">Voland</span>
-          <span class="voland-subtitle">Phase 4 · first boot</span>
+          <span class="voland-subtitle">Switch emulator in your browser</span>
         </div>
         <div class="voland-status">{status()}</div>
       </header>
 
       <section class="voland-main">
         <div class="voland-hero">
-          <h2>Runtime online.</h2>
-          <p>Both workers initialised. Load a decrypted Program NCA or a homebrew NRO, or run the built-in demo. Homebrew you add to the SD card appears in a homebrew menu such as hbmenu.</p>
+          <h2>Ready.</h2>
+          <p>Load a game you dumped (a decrypted Program NCA) or a homebrew NRO, or run the built-in demo. Homebrew you add to the SD card appears in a homebrew menu such as hbmenu.</p>
           <div class="voland-screen" data-voland-screen data-testid="screen" />
           <LoadPanel loadGame={props.loadGame} addToSdCard={props.addToSdCard} clearSdCard={props.clearSdCard} setPaused={props.setPaused} />
           <FrameSkipSetting setFrameSkip={props.setFrameSkip} />

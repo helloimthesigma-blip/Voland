@@ -24,6 +24,8 @@ type LoadState =
   | { readonly kind: "failed";  readonly fileName: string; readonly failure: LoadFailure };
 
 const DEMO_URL = "/demo/hello.nro";
+/* How long the "starting up" hint stays after a game loads. */
+const BOOT_HINT_MS = 10 * 60 * 1000;
 
 const RUN_STATE_LABELS: Readonly<Record<GuestConsoleState["runState"], string>> = {
   idle: "loaded",
@@ -40,6 +42,9 @@ function LoadPanel(props: LoadPanelProps) {
   let input: HTMLInputElement | undefined;
   let sdInput: HTMLInputElement | undefined;
   const [sd, setSd] = createSignal<SdImportOutcome | null>(null);
+  const [bootHint, setBootHint] = createSignal(false);
+  let bootHintTimer = 0;
+  onCleanup(() => window.clearTimeout(bootHintTimer));
 
   async function onSdFilesChosen(event: Event & { currentTarget: HTMLInputElement }): Promise<void> {
     const files = Array.from(event.currentTarget.files ?? []);
@@ -63,6 +68,9 @@ function LoadPanel(props: LoadPanelProps) {
     setState(outcome.success
       ? { kind: "loaded", fileName: file.name, titleId: outcome.titleId, entryPoint: outcome.entryPoint }
       : { kind: "failed", fileName: file.name, failure: outcome.failure });
+    window.clearTimeout(bootHintTimer);
+    setBootHint(outcome.success);
+    if (outcome.success) bootHintTimer = window.setTimeout(() => setBootHint(false), BOOT_HINT_MS);
   }
 
   async function onFileChosen(event: Event & { currentTarget: HTMLInputElement }): Promise<void> {
@@ -179,6 +187,13 @@ function LoadPanel(props: LoadPanelProps) {
                 <pre class="voland-guest-console" data-testid="guest-console">
                   <For each={guest().lines}>{(line) => <>{line}{"\n"}</>}</For>
                 </pre>
+              </Show>
+              <Show when={bootHint() && guest().runState === "running"}>
+                <p class="voland-load-note" data-testid="boot-hint">
+                  Starting up: big games run well below full speed here, so the first
+                  logos and the title screen can take several minutes. The frame counter
+                  shows it is working; sound is slowed down to match.
+                </p>
               </Show>
               <Show when={guest().runState === "crashed" || guest().runState === "deadlock"}>
                 <p class="voland-load-detail">{guest().detail}</p>

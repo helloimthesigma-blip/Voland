@@ -315,6 +315,7 @@ async function boot(): Promise<BootResult | null> {
       regionBase: toByteOffset(inputLayout.inputRegionBase),
       getGamepads: () => navigator.getGamepads(),
       touchTarget: canvas,
+      guestFps: () => window.__VOLAND_STATS__?.fps ?? 0,
       onConnectionChange: (change) => {
         const msg: MainToCPUMessage = change.connected
           ? { type: "controller-connected", index: change.slot, profileId: change.profileId }
