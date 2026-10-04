@@ -117,6 +117,7 @@ void hle_svc_sleep_thread(HLE_Context *c, CPU_State *s) {
     /* A short run ending in a yield is a poll (scheduler.h). Every other
      * SVC clears the mark (hle_on_svc). */
     if (t) t->spinning = c->cpu_backend->get_cycles_consumed(s) <= SCHEDULER_SPIN_RUN_CYCLES;
+    if (t && t->spinning) c->scheduler->polling_yields++;
     /* A yield: the scheduler rotates on the SVC exit. With nothing else
      * to run, spinning only burns virtual time until the next timeout or
      * device event; sleep until then instead (the idle jump follows). */

@@ -91,6 +91,7 @@ typedef struct Scheduler {
   uint64_t run_counter;
   uint64_t wait_counter;
   uint64_t lone_yields;     /* yields slept to the next wake (scheduler_alone) */
+  uint64_t polling_yields;  /* yields after a short run (marked spinning) */
   uint64_t next_thread_id;
   /* Index of the running thread, -1 outside run. In parallel mode it
    * names the thread whose SVC holds the kernel lock (scheduler_kernel_enter). */

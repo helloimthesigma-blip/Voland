@@ -1026,8 +1026,8 @@ static int run(int argc, char **argv) {
   video_vt_report();
 #endif
   if (svc_stats) {
-    fprintf(stderr, "voland-cli: %llu lone yields slept to the next wake\n",
-            (unsigned long long)emu.scheduler.lone_yields);
+    fprintf(stderr, "voland-cli: %llu lone yields slept to the next wake, %llu polling yields\n",
+            (unsigned long long)emu.scheduler.lone_yields, (unsigned long long)emu.scheduler.polling_yields);
     for (uint32_t i = 0; i < HLE_SVC_COUNT; i++) {
       if (emu.hle.svc_counts[i]) fprintf(stderr, "voland-cli: svc 0x%02x x %llu\n", i, (unsigned long long)emu.hle.svc_counts[i]);
     }
