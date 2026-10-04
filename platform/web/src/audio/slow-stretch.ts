@@ -24,6 +24,14 @@ const RATE_ALPHA = 0.005;
 const MIN_SPEED = 0.03;
 /** Output frames without any new input before fading out (the core paused or loading). */
 const STALL_FRAMES = 14400; // 300 ms at 48 kHz
+/** Most frames kept behind the newest (latency) - well under the ring's
+ * 4096, so the core's next ~25 ms buffer always fits: a full ring would
+ * drop samples and starve the rate meter, which then never sees full
+ * speed again. */
+const MAX_BACKLOG = GRAIN + HOP / 2;
+/** Fill (frames) above which the producer is outpacing us, whatever the
+ * meter says: back to normal playback. */
+export const RING_NEARLY_FULL = 3584;
 /** Gain change per hop while fading in/out. */
 const FADE_STEP = 0.25;
 
@@ -65,6 +73,10 @@ export class SlowStretch {
 
   /** Fills `left`/`right` from the ring at `speed` (0..1]. */
   render(ring: RingAccess, left: Float32Array, right: Float32Array, speed: number): void {
+    /* Grains are summed into `acc` when made, so frames further back than
+     * the backlog can be released now - every block, not just per grain. */
+    const write = ring.writeIndex() >>> 0;
+    if (((write - ring.readIndex()) >>> 0) > MAX_BACKLOG) ring.setReadIndex((write - MAX_BACKLOG) >>> 0);
     for (let i = 0; i < left.length; i++) {
       if (this.pos >= HOP) this.nextGrain(ring, Math.max(MIN_SPEED, Math.min(1, speed)));
       left[i] = this.acc[this.pos * CHANNELS] ?? 0;
@@ -95,7 +107,7 @@ export class SlowStretch {
     let start = this.source;
     const ahead = (write - start) | 0;
     if (ahead < GRAIN) start = (write - GRAIN) >>> 0;
-    else if (ahead > 2 * GRAIN) start = (write - 2 * GRAIN) >>> 0;
+    else if (ahead > MAX_BACKLOG) start = (write - MAX_BACKLOG) >>> 0;
     if (((start - read) | 0) < 0) start = read;
     if (((write - start) | 0) < GRAIN) return; // not enough in the ring yet
     /* Fade out when the core stopped producing; back in when it resumes. */
