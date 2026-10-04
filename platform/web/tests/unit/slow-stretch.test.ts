@@ -79,3 +79,17 @@ test("the rate meter follows production", () => {
   }
   assert.ok(Math.abs(rate - 0.25) < 0.01, `rate ${rate}`);
 });
+
+test("the stretcher never lets the ring fill up (the core would drop samples)", () => {
+  const { ring, write } = makeRing();
+  const stretch = new SlowStretch();
+  const left = new Float32Array(BLOCK);
+  const right = new Float32Array(BLOCK);
+  let worst = 0;
+  for (let t = 0; t < 2000; t++) {
+    write(300, () => 0.25); /* producing faster than the 25% the stretcher assumes */
+    stretch.render(ring, left, right, 0.25);
+    worst = Math.max(worst, (ring.writeIndex() - ring.readIndex()) >>> 0);
+  }
+  assert.ok(worst <= 4096 - 1024, `fill reached ${worst}`);
+});
