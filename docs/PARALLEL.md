@@ -166,6 +166,31 @@ bound by two busy threads runs its frames in less virtual time, and
 virtual time advances with the slowest-progressing host core rather than
 the sum of all of them. Vsync stays 60 Hz of virtual time.
 
+### Wall-clock pacing
+
+Virtual time advances with guest work. When the host is slower than the
+Switch, the game therefore runs in slow motion: Silksong renders 60 fps of
+virtual time at ~16 per wall second, so its world moves at ~27% speed.
+`emulator_set_pacing` (on by default in the web, `?pacing=0` opts out)
+makes virtual time keep up with wall time.
+
+- **Where it acts.** Before each slice, and at the start of each
+  free-running burst, when no guest code runs.
+- **What it does.** Virtual time that has fallen behind the wall clock
+  (since the pacing origin) jumps forward, as an idle jump does. Due
+  timers and device events (vsync, audio) then fire at the new time. The
+  guest sees large frame deltas and runs at real speed with fewer
+  rendered frames.
+- **Cap.** One jump is at most 100 ms (`EMULATOR_PACING_MAX_JUMP_MS`).
+  Further behind - a hidden tab, a GC pause - the origin resyncs, so the
+  game never skips a big chunk at once.
+- **Resync.** The origin also resyncs at run start and on resume, so
+  paused time does not count.
+- **Never slows the guest down.** Virtual time only moves forward and stays
+  monotonic; a guest running ahead of wall time is left alone.
+- **Deterministic runs.** The core default, the CLI and the tests stay
+  unpaced, so they remain deterministic and the goldens are unchanged.
+
 ## Free-running mode (prototype)
 
 The slice mode above pays a handoff on every slice: about 110 us to wake
