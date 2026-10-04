@@ -7,7 +7,7 @@
  *                       [--profile S] [--port P] [--debug-port P] [--no-build] [--software]
  *                       [--url-params "a=1&b=2"] [--browser-arg ARG]...
  *                       [--press SLICE:KEY:SLICES]... [--shot FILE.png]
- *                       [--phases NAME:SLICE,NAME:SLICE,...,end:SLICE]
+ *                       [--phases NAME:SLICE,NAME:SLICE,...,end:SLICE] [--json FILE]
  *
  * - Builds the app (vite build; the core must already be staged by
  *   `cmake --build --preset web`) and serves it with `vite preview` on a
@@ -38,6 +38,14 @@
  *   and the CPU worker's profile by code kind and top functions. Warmup
  *   then runs to the last slice. For load time, e.g.
  *   --phases boot:0,menus:860000,newgame:3200000,end:4800000
+ * - CPU time: alongside wall time the harness samples the page's renderer
+ *   process CPU seconds (ps; it hosts the CPU worker, the GPU worker and the
+ *   core's pthreads), and reports CPU seconds per virtual second - a
+ *   figure much less sensitive to a busy machine than wall time.
+ * - --web-dir DIR builds and serves another checkout's platform/web (its
+ *   core staged there), so this harness can measure older commits.
+ * - --json FILE writes the results (measurement window and phases) as JSON
+ *   (used by tools/perf-track.mjs).
  * - --browser-arg passes a Chromium switch (repeatable), e.g.
  *   --browser-arg=--js-flags=--no-liftoff for a V8 tiering experiment.
  *
@@ -46,7 +54,7 @@
  *   voland-cli run FILE --backend interpreter --budget 200000 \
  *     --max-slices N --gpu-stream /dev/null
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createServer } from "node:net";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -55,7 +63,7 @@ import { fileURLToPath } from "node:url";
 
 import { chromium } from "@playwright/test";
 
-const WEB_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+let WEB_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /* Virtual ticks per second (the Switch's 19.2 MHz counter). */
 const TICKS_PER_SECOND = 19_200_000;
 const HARDWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"];
@@ -64,7 +72,7 @@ const SOFTWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swift
 function parseArgs(argv) {
   const opts = {
     game: "", warmupSlices: 860_000, seconds: 30, profile: 0, port: 0, debugPort: 0,
-    build: true, software: false, urlParams: "", outDir: tmpdir(), browserArgs: [], presses: [], shot: "", phases: [],
+    build: true, software: false, urlParams: "", outDir: tmpdir(), browserArgs: [], presses: [], shot: "", phases: [], json: "",
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -80,6 +88,8 @@ function parseArgs(argv) {
     else if (a === "--url-params") opts.urlParams = next();
     else if (a === "--out-dir") opts.outDir = next();
     else if (a === "--shot") opts.shot = next();
+    else if (a === "--json") opts.json = next();
+    else if (a === "--web-dir") WEB_DIR = resolve(next()); /* another checkout's platform/web */
     else if (a === "--phases") {
       opts.phases = next().split(",").map((entry) => {
         const [name, slice] = entry.split(":");
@@ -121,6 +131,34 @@ async function waitForUrl(url, timeoutMs) {
     await new Promise((r) => setTimeout(r, 250));
   }
   throw new Error(`${url} did not come up`);
+}
+
+/* CPU seconds of the renderer process(es) under `browserPid` (ps TIME). */
+function rendererCpuSeconds(browserPid) {
+  const table = execFileSync("ps", ["-A", "-o", "pid=,ppid=,time=,command="], { encoding: "utf8", maxBuffer: 64 << 20 });
+  let total = 0;
+  for (const line of table.split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
+    if (!m || Number(m[2]) !== browserPid || !/--type=renderer/.test(m[4]) || /--extension-process/.test(m[4])) continue;
+    const [clock, days] = m[3].split("-").reverse();
+    const parts = clock.split(":").map(Number).reverse(); /* ss.cc, mm, hh */
+    total += (parts[0] ?? 0) + 60 * (parts[1] ?? 0) + 3600 * (parts[2] ?? 0) + 86400 * Number(days ?? 0);
+  }
+  return total;
+}
+
+/* The browser process Playwright started: our child running Chromium. */
+function chromiumChildPid() {
+  const table = execFileSync("ps", ["-A", "-o", "pid=,ppid=,command="], { encoding: "utf8", maxBuffer: 64 << 20 });
+  for (const line of table.split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (m && Number(m[2]) === process.pid && /chrom/i.test(m[3]) && !/--type=/.test(m[3])) return Number(m[1]);
+  }
+  return 0;
+}
+
+function loadAverage() {
+  return execFileSync("sysctl", ["-n", "vm.loadavg"], { encoding: "utf8" }).replace(/[{}]/g, "").trim().split(/\s+/).map(Number)[0] ?? 0;
 }
 
 /* A free TCP port, so several checkouts can run the harness at once. */
@@ -248,6 +286,8 @@ async function main() {
     args: [...(opts.software ? SOFTWARE_GPU_ARGS : HARDWARE_GPU_ARGS), `--remote-debugging-port=${opts.debugPort}`,
            ...opts.browserArgs],
   });
+  const browserPid = chromiumChildPid();
+  const results = { loadAvgStart: loadAverage(), phases: [], window: null };
   try {
     await waitForUrl(baseUrl, 60_000);
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
@@ -294,6 +334,7 @@ async function main() {
     });
     const sample = async () => ({
       at: Date.now(),
+      cpuS: browserPid ? rendererCpuSeconds(browserPid) : 0,
       perf: await worker.evaluate(() => {
         const c = globalThis.__VOLAND_WASM_COMPILES__ ?? { modules: 0, bytes: 0, moduleMs: 0, instanceMs: 0 };
         return { ...globalThis.__VOLAND_CPU_PERF__, wasmModules: c.modules, wasmBytes: c.bytes,
@@ -339,6 +380,7 @@ async function main() {
           phaseState.rows.push({
             name: phase.name, from: a.slices, to: b.slices, workerS,
             wallS: (current.at - phaseState.startSample.at) / 1000,
+            cpuS: current.cpuS - phaseState.startSample.cpuS,
             virtualS: (b.ticks - a.ticks) / TICKS_PER_SECOND,
             fileReads: b.fileReads - a.fileReads, fileMiB: (b.fileReadBytes - a.fileReadBytes) / 1048576,
             fileS: (b.fileReadMs - a.fileReadMs) / 1000, gpuMiB: (b.gpuBytes - a.gpuBytes) / 1048576,
@@ -374,10 +416,11 @@ async function main() {
     const warm = s;
     if (opts.phases.length) {
       phaseState.cdp.close();
+      results.phases = phaseState.rows.map(({ kinds, top, ...row }) => row);
       console.log("");
-      console.log("phase       slices                 worker s   wall s  virtual s  file reads (MiB, s)     GPU MiB  stalls (s)  wasm modules (MiB, s)  new chunks");
+      console.log("phase       slices                 worker s   wall s   CPU s  virtual s  file reads (MiB, s)     GPU MiB  stalls (s)  wasm modules (MiB, s)  new chunks");
       for (const r of phaseState.rows) {
-        console.log(`${r.name.padEnd(10)}  ${String(r.from).padStart(8)}-${String(r.to).padEnd(9)}  ${r.workerS.toFixed(1).padStart(9)}  ${r.wallS.toFixed(1).padStart(7)}` +
+        console.log(`${r.name.padEnd(10)}  ${String(r.from).padStart(8)}-${String(r.to).padEnd(9)}  ${r.workerS.toFixed(1).padStart(9)}  ${r.wallS.toFixed(1).padStart(7)}  ${r.cpuS.toFixed(1).padStart(6)}` +
                     `  ${r.virtualS.toFixed(1).padStart(9)}  ${String(r.fileReads).padStart(6)} (${r.fileMiB.toFixed(0)}, ${r.fileS.toFixed(1)})`.padEnd(26) +
                     `  ${r.gpuMiB.toFixed(0).padStart(8)}  ${String(r.gpuStalls).padStart(6)} (${r.waitS.toFixed(1)})  ${String(r.modules).padStart(6)} (${r.moduleMiB.toFixed(1)}, ${r.compileS.toFixed(1)})  ${String(r.chunks).padStart(6)}`);
       }
@@ -420,6 +463,13 @@ async function main() {
     console.log(`  yielding        ${pct(d("yieldMs"))}  (${d("bursts")} bursts)`);
     console.log(`  stream waits    ${(d("streamWaitMs") / 1000).toFixed(1)} s`);
     console.log(`  GPU stalls      ${d("gpuStalls")}  (${(d("gpuBytes") / 1048576 / wallS).toFixed(1)} MiB/s streamed)`);
+    const cpuS = end.cpuS - warm.cpuS;
+    console.log(`  CPU s           ${cpuS.toFixed(1)} (${(cpuS / Math.max(1e-9, d("ticks") / TICKS_PER_SECOND)).toFixed(2)} CPU s per virtual s)`);
+    results.window = {
+      fromSlice: warm.perf.slices, wallS, cpuS, slicesPerS: d("slices") / wallS, ticksPerS: d("ticks") / wallS,
+      virtualS: d("ticks") / TICKS_PER_SECOND, fps: fpsAvg, wasmModules: d("wasmModules"),
+    };
+    results.warmupWorkerS = warmupWallS;
     console.log(`RESULT slices_per_s=${(d("slices") / wallS).toFixed(0)} ticks_per_s=${(d("ticks") / wallS).toFixed(0)} fps=${fpsAvg.toFixed(2)}`);
 
     if (opts.profile > 0) {
@@ -442,6 +492,8 @@ async function main() {
         cdp.close();
       }
     }
+    results.loadAvgEnd = loadAverage();
+    if (opts.json) writeFileSync(opts.json, JSON.stringify(results, null, 2));
   } finally {
     await browser.close();
     preview.kill();
