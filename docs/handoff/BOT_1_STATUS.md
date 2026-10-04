@@ -145,3 +145,26 @@ after the default 860k-slice warmup:
 |---|---|---|---|---|
 | Serial (`cores=0`) | 5.53 | 1.77M | 6541 | 3775 |
 | 3 cores (the default) | **7.68 (+39%)** | 2.46M (+38.5%) | 8572 | 6049 |
+
+## JIT + cores with poll coalescing (2026-10-04)
+
+Poll coalescing removed the 25 µs idle slices, so in gameplay the cores
+now overlap in 91% of slices (14% before). The web default under the JIT
+is 3 cores again (capped at hardwareConcurrency - 2).
+
+| Measurement | Serial JIT | JIT + 3 cores |
+|---|---|---|
+| Node, full recipe to 7M slices (frames per wall second) | 9.87 | 16.46 (1.67×) |
+| Browser gameplay, interleaved pair 1 | 14.63 fps | 16.13 fps |
+| Browser gameplay, interleaved pair 2 | 14.53 fps | 16.05 fps |
+
+The browser gain is +10% in both pairs.
+
+- **Long session.** 50 min of warm-up and 25 min of measured 3-core
+  gameplay held 15.93 fps, with no "[jit] module rejected", OOM or
+  crash. Gameplay renders correctly.
+- **Bot 2's browser A/B of poll coalescing alone:** +6.8% fps.
+- **Caveat: compile churn.** 3 cores compile about 4.7× the regions
+  (1.01M, 871k evicted) in the Node run, so the per-core caches thrash.
+  That is the next thing to look at, together with the gap between
+  Node's 1.67× and the browser's 1.10×.
