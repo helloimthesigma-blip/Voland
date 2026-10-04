@@ -47,7 +47,12 @@ struct Gpu_Stream;
  * the fixed linear memory beside guest RAM (§4), so it gets the most that
  * leaves the rest headroom. */
 #ifdef __EMSCRIPTEN__
-#define RASTER_TEXTURE_POOL_BYTES ((size_t)512 * 1024 * 1024)
+/* Web: GPU mode (the default) frees each decoded copy once it is uploaded,
+ * so the pool only holds the textures being decoded now (the largest is a
+ * 64MB atlas); 256MB leaves the fixed heap room for the game's own
+ * allocations (512MB ran Node builds out of heap at Silksong's thread
+ * creation). The software renderer evicts more at this size. */
+#define RASTER_TEXTURE_POOL_BYTES ((size_t)256 * 1024 * 1024)
 #else
 #define RASTER_TEXTURE_POOL_BYTES ((size_t)1024 * 1024 * 1024)
 #endif
