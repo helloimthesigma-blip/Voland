@@ -67,6 +67,7 @@ typedef struct Jit_Entry {
   Jit_Code_Range ranges[JIT_MAX_REGION_PAGES]; /* the code it was compiled from */
   uint64_t entries;    /* times entered (only counted with jit_set_hot_profile) */
   bool multicore;      /* compiled under cpu_multicore() (exclusives, fences) */
+  uint8_t referenced;  /* entered since the replacement hand last passed (second chance) */
   uint32_t pending;    /* an asynchronous compilation for this pc is in flight (its id) */
 } Jit_Entry;
 
@@ -78,12 +79,23 @@ static inline uint64_t jit_cache_index(uint64_t pc) {
   return ((pc >> JIT_INSN_SHIFT) * JIT_HASH_MULTIPLIER) >> (JIT_HASH_BITS - JIT_CACHE_BITS);
 }
 
+/* The cache is JIT_CACHE_WAYS-way set associative: a pc may live in any
+ * way of its set (entries set*WAYS .. set*WAYS + WAYS-1). A direct-mapped
+ * cache let hot regions that share a slot evict each other forever
+ * (measured: as many evictions as compiles in steady gameplay). */
+#define JIT_CACHE_WAY_BITS 2u
+#define JIT_CACHE_WAYS (1u << JIT_CACHE_WAY_BITS)
+#define JIT_CACHE_SET_BITS (JIT_CACHE_BITS - JIT_CACHE_WAY_BITS)
+static inline uint64_t jit_cache_set(uint64_t pc) {
+  return ((pc >> JIT_INSN_SHIFT) * JIT_HASH_MULTIPLIER) >> (JIT_HASH_BITS - JIT_CACHE_SET_BITS);
+}
+
 /* Where compiled code finds the cache and the current code generation
  * (both are statics in linear memory, so their addresses are constants). */
 typedef struct Jit_Link {
   uint64_t cache_address;      /* &Jit_Entry[0] */
   uint64_t generation_address; /* the uint64_t generation chained blocks must carry */
-  bool count_entries;          /* prologue increments its entry's `entries` */
+  bool count_entries;          /* chained entries increment the `entries` of the entry they enter */
   bool span_calls;             /* regions follow BL/RET and predicted PLT branches */
 } Jit_Link;
 

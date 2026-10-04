@@ -114,6 +114,7 @@ typedef struct Jit_Thread {
    * jit_compile.c emit_chain - so another core's mapping change stops
    * them at once. */
   uint64_t generation;
+  uint64_t hand; /* second-chance replacement: the way a full set starts its sweep at */
   uint8_t module[JIT_MODULE_BYTES];
   /* The dispatcher's last block starts (bit 63: a compiled region was
    * entered), for the crash report. */
@@ -631,7 +632,13 @@ static void finish_pending(Jit_Thread *t, const Interp_State *s, uint64_t genera
         if (p->id == id) p->id = 0;
         continue;
       }
-      Jit_Entry *e = p->id == id ? &t->cache[jit_cache_index(p->pc)] : NULL;
+      Jit_Entry *e = NULL;
+      if (p->id == id) {
+        Jit_Entry *set = &t->cache[jit_cache_set(p->pc) * JIT_CACHE_WAYS];
+        for (uint32_t w = 0; w < JIT_CACHE_WAYS; w++) {
+          if (set[w].pending == id) e = &set[w];
+        }
+      }
       uint64_t hash;
       if (!e || e->pc != p->pc || e->pending != id || p->multicore != cpu_multicore() ||
           !ranges_hash(s, p->compiled.ranges, p->compiled.range_count, &hash) || hash != p->hash) {
@@ -646,12 +653,33 @@ static void finish_pending(Jit_Thread *t, const Interp_State *s, uint64_t genera
   }
 }
 
+/* The way of pc's set to put a new region for pc in: pc's own entry if it
+ * has one, else an empty way not awaiting a compile, else - second chance
+ * - the first way not entered since the hand last passed, clearing the
+ * marks it passes (all marked: the hand's way). */
+static Jit_Entry *victim(Jit_Thread *t, uint64_t pc) {
+  Jit_Entry *set = &t->cache[jit_cache_set(pc) * JIT_CACHE_WAYS];
+  for (uint32_t w = 0; w < JIT_CACHE_WAYS; w++) {
+    if (set[w].pc == pc && (set[w].function || set[w].pending)) return &set[w];
+  }
+  for (uint32_t w = 0; w < JIT_CACHE_WAYS; w++) {
+    if (!set[w].function && !set[w].pending) return &set[w];
+  }
+  const uint32_t hand = (uint32_t)(t->hand++ % JIT_CACHE_WAYS);
+  for (uint32_t i = 0; i < JIT_CACHE_WAYS; i++) {
+    Jit_Entry *e = &set[(hand + i) % JIT_CACHE_WAYS];
+    if (!e->referenced && !e->pending) return e;
+    e->referenced = 0;
+  }
+  return &set[hand];
+}
+
 /* Compiles the block at `pc` into its cache slot (evicting whatever is
  * there). */
 static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t generation) {
   if (!block_code(s, pc)) return;
   const bool async = async_compile_possible();
-  Jit_Entry *slot = &t->cache[jit_cache_index(pc)];
+  Jit_Entry *slot = victim(t, pc);
   if (async && slot->pc == pc && slot->pending) return; /* already on its way */
   const Jit_Code_Source source = {source_page_code, source_peek64, (void *)(uintptr_t)s};
   Jit_Link link;
@@ -715,8 +743,13 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
 /* The compiled block for `pc`, valid in `generation`, or NULL. A block
  * from an older generation is revalidated here. */
 static Jit_Entry *find(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t generation) {
-  Jit_Entry *e = &t->cache[jit_cache_index(pc)];
-  if (e->pc != pc || !e->function) return NULL;
+  Jit_Entry *set = &t->cache[jit_cache_set(pc) * JIT_CACHE_WAYS], *e = NULL;
+  for (uint32_t w = 0; w < JIT_CACHE_WAYS; w++) {
+    if (set[w].pc == pc && set[w].function) e = &set[w];
+  }
+  if (!e) return NULL;
+  e->referenced = 1;
+  if (g_hot_profile) e->entries++;
   if (e->generation == generation) return e;
   if (e->multicore != cpu_multicore()) goto stale; /* exclusives/fences were compiled for the other mode */
   uint64_t hash;

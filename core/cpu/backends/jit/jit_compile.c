@@ -3620,44 +3620,61 @@ static void emit_chain(Ctx *c) {
   op(c, WASM_OP_I64_SHR_U);
   i64c(c, JIT_HASH_MULTIPLIER);
   op(c, WASM_OP_I64_MUL);
-  i64c(c, JIT_HASH_BITS - JIT_CACHE_BITS);
+  i64c(c, JIT_HASH_BITS - JIT_CACHE_SET_BITS);
   op(c, WASM_OP_I64_SHR_U);
-  i64c(c, sizeof(Jit_Entry));
+  i64c(c, sizeof(Jit_Entry) * JIT_CACHE_WAYS);
   op(c, WASM_OP_I64_MUL);
   state_load64(c, OFF_THREAD_CACHE); /* this host thread's cache */
   op(c, WASM_OP_I64_ADD);
-  lset(c, L_HOST); /* the entry */
-  open_block(c);
+  lset(c, L_HOST); /* the set */
+  open_block(c);   /* $miss: no way holds an enterable region */
   const uint32_t miss = c->depth;
-  lget(c, L_HOST);
-  mem(c, WASM_OP_I64_LOAD, ALIGN_8, ENTRY_OFFSET(pc));
-  lget(c, L_NPC);
-  op(c, WASM_OP_I64_NE);
-  br_if(c, miss);
-  lget(c, L_HOST);
-  mem(c, WASM_OP_I64_LOAD, ALIGN_8, ENTRY_OFFSET(generation));
-  i64c(c, c->link->generation_address);
-  mem(c, WASM_OP_I64_LOAD, ALIGN_8, 0);
-  op(c, WASM_OP_I64_NE);
-  br_if(c, miss);
-  lget(c, L_T0);
-  lget(c, L_HOST);
-  mem(c, WASM_OP_I64_LOAD32_U, ALIGN_4, ENTRY_OFFSET(length));
-  op(c, WASM_OP_I64_ADD);
-  state_load64(c, OFF_BUDGET);
-  op(c, WASM_OP_I64_GT_U);
-  br_if(c, miss);
-  lget(c, L_HOST);
-  mem(c, WASM_OP_I64_LOAD, ALIGN_8, ENTRY_OFFSET(function));
-  ltee(c, L_ADDR);
-  op(c, WASM_OP_I64_EQZ);
-  br_if(c, miss);
-  lget(c, L_STATE);
-  lget(c, L_ADDR);
-  op(c, WASM_OP_RETURN_CALL_INDIRECT);
-  wasm_uleb(c->b, TYPE_BLOCK);
-  wasm_uleb(c->b, TABLE_INDEX);
-  end_(c);
+  for (uint32_t way = 0; way < JIT_CACHE_WAYS; way++) {
+    const uint64_t at = (uint64_t)way * sizeof(Jit_Entry);
+    open_block(c); /* $other: not this way */
+    lget(c, L_HOST);
+    mem(c, WASM_OP_I64_LOAD, ALIGN_8, at + ENTRY_OFFSET(pc));
+    lget(c, L_NPC);
+    op(c, WASM_OP_I64_NE);
+    br_if(c, c->depth);
+    /* The pc is in this way (it is in at most one): enter it or give up. */
+    lget(c, L_HOST);
+    mem(c, WASM_OP_I64_LOAD, ALIGN_8, at + ENTRY_OFFSET(generation));
+    i64c(c, c->link->generation_address);
+    mem(c, WASM_OP_I64_LOAD, ALIGN_8, 0);
+    op(c, WASM_OP_I64_NE);
+    br_if(c, miss);
+    lget(c, L_T0);
+    lget(c, L_HOST);
+    mem(c, WASM_OP_I64_LOAD32_U, ALIGN_4, at + ENTRY_OFFSET(length));
+    op(c, WASM_OP_I64_ADD);
+    state_load64(c, OFF_BUDGET);
+    op(c, WASM_OP_I64_GT_U);
+    br_if(c, miss);
+    lget(c, L_HOST);
+    mem(c, WASM_OP_I64_LOAD, ALIGN_8, at + ENTRY_OFFSET(function));
+    ltee(c, L_ADDR);
+    op(c, WASM_OP_I64_EQZ);
+    br_if(c, miss);
+    lget(c, L_HOST); /* second chance: entered */
+    i32c(c, 1);
+    mem(c, WASM_OP_I32_STORE8, ALIGN_1, at + ENTRY_OFFSET(referenced));
+    if (c->link->count_entries) {
+      lget(c, L_HOST);
+      lget(c, L_HOST);
+      mem(c, WASM_OP_I64_LOAD, ALIGN_8, at + ENTRY_OFFSET(entries));
+      i64c(c, 1);
+      op(c, WASM_OP_I64_ADD);
+      mem(c, WASM_OP_I64_STORE, ALIGN_8, at + ENTRY_OFFSET(entries));
+    }
+    lget(c, L_STATE);
+    lget(c, L_ADDR);
+    op(c, WASM_OP_RETURN_CALL_INDIRECT);
+    wasm_uleb(c->b, TYPE_BLOCK);
+    wasm_uleb(c->b, TABLE_INDEX);
+    end_(c); /* $other */
+  }
+  end_(c); /* $miss */
 }
 
 static void emit_function(Ctx *c) {
@@ -3684,19 +3701,6 @@ static void emit_function(Ctx *c) {
   }
 
   /* Prologue. The caller checked that block 0 fits the budget. */
-  if (c->link->count_entries) {
-    const uint64_t entry = jit_cache_index(c->blocks[0].pc) * sizeof(Jit_Entry);
-    state_load64(c, OFF_THREAD_CACHE);
-    i64c(c, entry);
-    op(c, WASM_OP_I64_ADD);
-    lset(c, L_HOST);
-    lget(c, L_HOST);
-    lget(c, L_HOST);
-    mem(c, WASM_OP_I64_LOAD, ALIGN_8, ENTRY_OFFSET(entries));
-    i64c(c, 1);
-    op(c, WASM_OP_I64_ADD);
-    mem(c, WASM_OP_I64_STORE, ALIGN_8, ENTRY_OFFSET(entries));
-  }
   state_load64(c, OFF_L1);
   lset(c, L_L1);
   i64c(c, TLB_EMPTY);
