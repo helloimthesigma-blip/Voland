@@ -15,6 +15,7 @@ import type { CPUToMainMessage, GPUToMainMessage, MainToCPUMessage, MainToGPUMes
 import { AUDIO_RING_CAPACITY_FRAMES, type MemoryLayout, toByteOffset } from "@bindings/layout";
 import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
 import type { MainToVideoMessage, VideoToMainMessage } from "@bindings/video";
+import { handleSavesMessage, registerSavesWorker } from "./saves";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
 import { PUBLISH_INDEX } from "@bindings/framebuffer";
@@ -203,6 +204,7 @@ async function boot(): Promise<BootResult | null> {
   const offscreen = canvas.transferControlToOffscreen();
 
   const cpuWorker = new Worker(new URL("../workers/cpu.worker.ts", import.meta.url), { type: "module" });
+  registerSavesWorker(cpuWorker);
   const gpuWorker = new Worker(new URL("../workers/gpu.worker.ts", import.meta.url), { type: "module" });
 
   type Slot = "pending" | "ready" | "failed";
@@ -258,6 +260,8 @@ async function boot(): Promise<BootResult | null> {
       } else if (msg.type === "run-state") {
         appendLogLine(msg.state === "crashed" ? "error" : "info", `guest ${msg.state}${msg.detail ? `: ${msg.detail}` : ""}`);
         setGuestRunState(msg.state, msg.detail);
+      } else if (handleSavesMessage(msg)) {
+        /* game-save backup replies (src/saves.ts) */
       } else if (msg.type === "sd-files-added") {
         appendLogLine(msg.failed.length ? "warn" : "info",
           `SD card: added ${msg.added.length} file(s)${msg.failed.length ? `, failed: ${msg.failed.join(", ")}` : ""}`);

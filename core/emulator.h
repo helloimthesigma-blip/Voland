@@ -278,6 +278,15 @@ void emulator_text_respond(Emulator *emulator, const char *utf8, bool accepted);
 /* Reads up to `max` bytes of an SD file; returns its size, or -1. */
 int64_t emulator_sd_card_read_file(Emulator *emulator, const char *path, void *out, uint64_t max);
 
+/* Committed saves (§15, hle/fs/save_archive.h): the guest's IFileSystem::
+ * Commit snapshots a save as one archive, "commit:/SS-<attribute hex>"
+ * (read with emulator_sd_card_read_file). The host persists those - one
+ * file per save, atomically - rather than the live tree. */
+uint64_t emulator_save_commits(const Emulator *emulator);
+uint64_t emulator_save_committed_manifest(const Emulator *emulator, char *out, uint64_t max);
+/* Replaces save `name` ("SS-<attribute hex>") with an archive's contents. */
+Error emulator_save_restore_archive(Emulator *emulator, const char *name, const void *bytes, uint64_t size);
+
 /* Where the next NRO loaded from the host appears on the SD card (and so
  * its argv[0], "sdmc:<path>"); default EMULATOR_DEFAULT_NRO_PATH. Platforms
  * pass "/" + the file's name. */

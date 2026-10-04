@@ -1,4 +1,5 @@
 #include "emulator.h"
+#include "hle/fs/save_archive.h"
 
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
@@ -767,7 +768,16 @@ static bool parse_hex_bytes(const char* text, uint8_t* out, size_t count) {
   return true;
 }
 
+#define COMMIT_PATH_PREFIX "commit:"
+#define COMMIT_PATH_PREFIX_BYTES 7u
+
 static uint32_t host_root(Emulator* emulator, const char* path, bool create, uint32_t* root, const char** rest) {
+  if (strncmp(path, COMMIT_PATH_PREFIX, COMMIT_PATH_PREFIX_BYTES) == 0) { /* committed save archives (read-only use) */
+    if (emulator->fs.committed_root == RAMFS_NO_NODE) return FS_RESULT_TARGET_NOT_FOUND;
+    *root = emulator->fs.committed_root;
+    *rest = path[COMMIT_PATH_PREFIX_BYTES] ? path + COMMIT_PATH_PREFIX_BYTES : "/";
+    return 0;
+  }
   if (strncmp(path, SAVE_PATH_PREFIX, SAVE_PATH_PREFIX_BYTES) != 0) {
     *root = emulator->fs.sd_root;
     *rest = path;
@@ -921,6 +931,30 @@ uint64_t emulator_sd_card_manifest(const Emulator* emulator, char* out, uint64_t
     need = manifest_tree(&emulator->ramfs, save->root, prefix, NULL, out, max, need);
   }
   return need;
+}
+
+uint64_t emulator_save_commits(const Emulator* emulator) {
+  return emulator && emulator->ramfs_ready ? emulator->fs.save_commits : 0;
+}
+
+uint64_t emulator_save_committed_manifest(const Emulator* emulator, char* out, uint64_t max) {
+  if (!emulator || !emulator->ramfs_ready || emulator->fs.committed_root == RAMFS_NO_NODE) return 0;
+  return manifest_tree(&emulator->ramfs, emulator->fs.committed_root, COMMIT_PATH_PREFIX, NULL, out, max, 0);
+}
+
+Error emulator_save_restore_archive(Emulator* emulator, const char* name, const void* bytes, uint64_t size) {
+  if (!emulator || !name || !emulator->ramfs_ready) return ERR(RESULT_INVALID_ARGUMENT, "saves unavailable");
+  /* "SS-<attribute hex>" -> the save (created if new). */
+  uint8_t space = 0;
+  uint8_t key[FS_SAVE_ATTRIBUTE_BYTES];
+  if (strlen(name) != FS_SAVE_NAME_BYTES - 1u || !parse_hex_bytes(name, &space, 1) || name[2] != '-' ||
+      !parse_hex_bytes(name + 3, key, sizeof(key)))
+    return ERR(RESULT_INVALID_ARGUMENT, "save archive: bad name");
+  uint32_t root = 0;
+  uint32_t rc = fs_save_root(&emulator->fs, space, key, true, &root);
+  if (!rc) rc = save_archive_restore(&emulator->ramfs, root, (const uint8_t*)bytes, size);
+  if (!rc) rc = fs_commit_save(&emulator->fs, root); /* what is stored is what is committed */
+  return sd_result(rc, "save archive: restore failed");
 }
 
 int64_t emulator_sd_card_read_file(Emulator* emulator, const char* path, void* out, uint64_t max) {

@@ -3,6 +3,8 @@
  */
 #include "hle/services/fs/fs.h"
 
+#include "hle/fs/save_archive.h"
+
 #include "common/log.h"
 #include "hle/services/service_util.h"
 
@@ -89,6 +91,72 @@ uint32_t fs_save_root(Fs_State *s, uint8_t space, const uint8_t key[FS_SAVE_ATTR
   memcpy(free_slot->key, key, FS_SAVE_ATTRIBUTE_BYTES);
   *root = free_slot->root;
   return 0;
+}
+
+void fs_save_name(const Fs_Save *save, char out[FS_SAVE_NAME_BYTES]) {
+  static const char hex[] = "0123456789abcdef";
+  out[0] = hex[save->space >> 4];
+  out[1] = hex[save->space & 0xFu];
+  out[2] = '-';
+  for (uint32_t i = 0; i < FS_SAVE_ATTRIBUTE_BYTES; i++) {
+    out[3u + 2u * i] = hex[save->key[i] >> 4];
+    out[4u + 2u * i] = hex[save->key[i] & 0xFu];
+  }
+  out[FS_SAVE_NAME_BYTES - 1u] = '\0';
+}
+
+typedef struct Commit_Sink {
+  Ramfs_Pool *pool;
+  uint32_t node;
+  uint64_t at;
+} Commit_Sink;
+
+static bool commit_sink_write(void *user, const void *bytes, uint64_t size) {
+  Commit_Sink *c = (Commit_Sink *)user;
+  if (ramfs_write(c->pool, c->node, c->at, bytes, size)) return false;
+  c->at += size;
+  return true;
+}
+
+#define COMMIT_TEMP_PATH "/.commit"
+
+uint32_t fs_commit_save(Fs_State *s, uint32_t root) {
+  const Fs_Save *save = NULL;
+  for (uint32_t i = 0; i < FS_MAX_SAVES; i++)
+    if (s->saves[i].used && s->saves[i].root == root) save = &s->saves[i];
+  if (!save || !s->pool || s->committed_root == RAMFS_NO_NODE) return 0; /* the SD card or a BIS partition */
+  char path[FS_SAVE_NAME_BYTES + 1u];
+  path[0] = '/';
+  fs_save_name(save, path + 1);
+  /* Into a temporary file, then over the old snapshot: a full pool keeps
+   * the previous commit intact. */
+  (void)ramfs_delete_file(s->pool, s->committed_root, COMMIT_TEMP_PATH);
+  uint32_t rc = ramfs_create_file(s->pool, s->committed_root, COMMIT_TEMP_PATH, 0);
+  Commit_Sink sink = {s->pool, 0, 0};
+  if (!rc) rc = ramfs_lookup(s->pool, s->committed_root, COMMIT_TEMP_PATH, &sink.node);
+  const Save_Archive_Sink archive = {&sink, commit_sink_write};
+  if (!rc && !save_archive_write(s->pool, root, &archive)) rc = FS_RESULT_USABLE_SPACE_NOT_ENOUGH;
+  if (!rc) {
+    (void)ramfs_delete_file(s->pool, s->committed_root, path);
+    rc = ramfs_rename(s->pool, s->committed_root, COMMIT_TEMP_PATH, path, false);
+  }
+  if (rc) {
+    (void)ramfs_delete_file(s->pool, s->committed_root, COMMIT_TEMP_PATH);
+    log_warn("[fs] save commit not snapshotted (0x%x): it will not survive a reload", rc);
+    return rc;
+  }
+  s->save_commits++;
+  return 0;
+}
+
+/* IFileSystem::Commit: the save's current tree becomes what persists. */
+static HLE_ServiceResult cmd_commit(HLE_Context *c, Service_Object *self, const IPC_Request *req, IPC_Response *res) {
+  (void)c;
+  (void)req;
+  (void)res;
+  Fs_State *s = (Fs_State *)self->interface->service_state;
+  (void)fs_commit_save(s, (uint32_t)self->state);
+  return HLE_RESULT_SUCCESS;
 }
 
 /* {u8 space, pad[7], SaveDataAttribute attr (0x40)}: find or create. */
@@ -601,7 +669,7 @@ static const Service_Command k_filesystem_commands[] = {
     {7, cmd_get_entry_type, "GetEntryType"},
     {8, cmd_open_file, "OpenFile"},
     {9, cmd_open_directory, "OpenDirectory"},
-    {10, service_cmd_ok, "Commit"},
+    {10, cmd_commit, "Commit"},
     {11, cmd_get_free_space, "GetFreeSpaceSize"},
     {12, cmd_get_total_space, "GetTotalSpaceSize"},
     {13, cmd_clean_directory_recursively, "CleanDirectoryRecursively"},
@@ -644,6 +712,9 @@ void fs_init(Fs_State *s, Ramfs_Pool *pool) {
   s->device_operator = SERVICE_INTERFACE("IDeviceOperator", k_device_operator_commands, 0, s);
   s->sd_root = RAMFS_NO_NODE;
   if (pool && ramfs_create_filesystem(pool, &s->sd_root) != 0) s->sd_root = RAMFS_NO_NODE;
+  s->committed_root = RAMFS_NO_NODE;
+  if (pool && ramfs_create_filesystem(pool, &s->committed_root) != 0) s->committed_root = RAMFS_NO_NODE;
+  s->save_commits = 0;
 }
 
 void fs_reset_process(Fs_State *s, const Byte_Source *romfs) {

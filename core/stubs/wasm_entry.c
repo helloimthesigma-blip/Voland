@@ -64,6 +64,9 @@ EXPORT int emulator_text_request_ffi(uint64_t out, double max);
 EXPORT void emulator_text_respond_ffi(uint64_t text, int accepted);
 EXPORT double emulator_sd_manifest_ffi(uint64_t out, double max);
 EXPORT double emulator_sd_read_file_ffi(uint64_t path, uint64_t out, double max);
+EXPORT double emulator_save_commits_ffi(void);
+EXPORT double emulator_save_committed_manifest_ffi(uint64_t out, double max);
+EXPORT int emulator_save_restore_archive_ffi(uint64_t name, uint64_t bytes, double size);
 
 /* The Switch's handheld resolution. */
 #define BOOT_FRAME_WIDTH 1280u
@@ -400,6 +403,28 @@ EXPORT double emulator_sd_read_file_ffi(uint64_t path, uint64_t out, double max)
   if (!g_initialised || !path) return -1.0;
   return (double)emulator_sd_card_read_file(&g_emulator, (const char *)(uintptr_t)path, (void *)(uintptr_t)out,
                                             (uint64_t)max);
+}
+
+/* Committed save archives (§15): commit counter, their manifest, and a
+ * restore from host storage. */
+EXPORT double emulator_save_commits_ffi(void)
+{
+  return g_initialised ? (double)emulator_save_commits(&g_emulator) : 0.0;
+}
+
+EXPORT double emulator_save_committed_manifest_ffi(uint64_t out, double max)
+{
+  if (!g_initialised) return 0.0;
+  return (double)emulator_save_committed_manifest(&g_emulator, (char *)(uintptr_t)out, (uint64_t)max);
+}
+
+EXPORT int emulator_save_restore_archive_ffi(uint64_t name, uint64_t bytes, double size)
+{
+  if (!g_initialised || !name) return (int)RESULT_INVALID_ARGUMENT;
+  const Error err = emulator_save_restore_archive(&g_emulator, (const char *)(uintptr_t)name,
+                                                  (const void *)(uintptr_t)bytes, (uint64_t)size);
+  g_last_error_message = err.message;
+  return (int)err.code;
 }
 
 /* Software keyboard: writes the pending request as UTF-8 fields joined by

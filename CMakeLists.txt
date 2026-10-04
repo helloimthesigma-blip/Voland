@@ -115,6 +115,7 @@ if(EMSCRIPTEN)
                             '_emulator_set_program_path_ffi','_emulator_set_rtc_ffi','_emulator_set_frame_skip_ffi','_emulator_set_gpu_mode_ffi','_emulator_set_host_cores_ffi','_emulator_set_poll_coalescing_ffi',
                             '_emulator_set_shared_font_ffi','_emulator_sd_write_file_ffi','_emulator_sd_clear_ffi',
                             '_emulator_sd_generation_ffi','_emulator_sd_manifest_ffi','_emulator_sd_read_file_ffi',
+                            '_emulator_save_commits_ffi','_emulator_save_committed_manifest_ffi','_emulator_save_restore_archive_ffi',
                             '_emulator_text_request_ffi','_emulator_text_respond_ffi',
                             '_malloc','_free']"
     "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap']"
