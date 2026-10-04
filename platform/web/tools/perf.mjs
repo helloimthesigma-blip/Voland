@@ -48,6 +48,8 @@
  *   (used by tools/perf-track.mjs).
  * - --browser-arg passes a Chromium switch (repeatable), e.g.
  *   --browser-arg=--js-flags=--no-liftoff for a V8 tiering experiment.
+ * - --expect-jit-async fails the run unless the JIT installed modules it
+ *   compiled asynchronously (WebAssembly.compile) and none failed.
  *
  * Slices are deterministic for a given game and input, so the same
  * --warmup-slices reaches the same point natively:
@@ -72,7 +74,7 @@ const SOFTWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swift
 function parseArgs(argv) {
   const opts = {
     game: "", warmupSlices: 860_000, seconds: 30, profile: 0, port: 0, debugPort: 0,
-    build: true, software: false, urlParams: "", outDir: tmpdir(), browserArgs: [], presses: [], shot: "", phases: [], json: "",
+    build: true, software: false, urlParams: "", outDir: tmpdir(), browserArgs: [], presses: [], shot: "", phases: [], json: "", expectJitAsync: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -84,6 +86,7 @@ function parseArgs(argv) {
     else if (a === "--port") opts.port = Number(next());
     else if (a === "--debug-port") opts.debugPort = Number(next());
     else if (a === "--no-build") opts.build = false;
+    else if (a === "--expect-jit-async") opts.expectJitAsync = true;
     else if (a === "--software") opts.software = true;
     else if (a === "--url-params") opts.urlParams = next();
     else if (a === "--out-dir") opts.outDir = next();
@@ -343,7 +346,10 @@ async function main() {
       perf: await worker.evaluate(() => {
         const c = globalThis.__VOLAND_WASM_COMPILES__ ?? { modules: 0, bytes: 0, moduleMs: 0, instanceMs: 0 };
         return { ...globalThis.__VOLAND_CPU_PERF__, wasmModules: c.modules, wasmBytes: c.bytes,
-                 wasmModuleMs: c.moduleMs, wasmInstanceMs: c.instanceMs };
+                 wasmModuleMs: c.moduleMs, wasmInstanceMs: c.instanceMs,
+                 /* the JIT's asynchronous compiles (WebAssembly.compile, not counted above) */
+                 jitAsyncInstalled: globalThis.volandJitAsyncInstalled ?? 0,
+                 jitAsyncFailed: globalThis.volandJitAsyncFailed ?? 0 };
       }),
       fps: await page.evaluate(() => window.__VOLAND_STATS__?.fps ?? 0),
     });
@@ -476,6 +482,14 @@ async function main() {
     };
     results.warmupWorkerS = warmupWallS;
     console.log(`RESULT slices_per_s=${(d("slices") / wallS).toFixed(0)} ticks_per_s=${(d("ticks") / wallS).toFixed(0)} fps=${fpsAvg.toFixed(2)}`);
+    {
+      const finalPerf = (await sample()).perf;
+      console.log(`JIT async compiles: ${finalPerf.jitAsyncInstalled} installed, ${finalPerf.jitAsyncFailed} failed`);
+      if (opts.expectJitAsync && (finalPerf.jitAsyncInstalled === 0 || finalPerf.jitAsyncFailed > 0)) {
+        console.error("FAIL: --expect-jit-async: the JIT's asynchronous compiles did not install cleanly");
+        process.exitCode = 1;
+      }
+    }
 
     if (opts.profile > 0) {
       const cdp = await Cdp.connect(opts.debugPort);
