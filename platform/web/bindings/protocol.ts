@@ -52,6 +52,8 @@ export type MainToCPUMessage =
   | { readonly type: "set-host-cores"; readonly cores: number }
   /* Poll coalescing (docs/PARALLEL.md "Polling threads"); on by default. */
   | { readonly type: "set-poll-coalescing"; readonly on: boolean }
+  /* Free-running guest cores (docs/PARALLEL.md; prototype, off by default). */
+  | { readonly type: "set-free-running"; readonly fromSlice: number } /* 0 = off */
   | { readonly type: "halt" };
 
 /** A software-keyboard prompt (§12 library applets): a title waits for

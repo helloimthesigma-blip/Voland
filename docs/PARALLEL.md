@@ -166,6 +166,68 @@ bound by two busy threads runs its frames in less virtual time, and
 virtual time advances with the slowest-progressing host core rather than
 the sum of all of them. Vsync stays 60 Hz of virtual time.
 
+## Free-running mode (prototype)
+
+The slice mode above pays a handoff on every slice: about 110 us to wake
+the cores and 50 us for the driver to notice the end, at ~1,100 slices/s
+in Silksong gameplay - about 18% of host time, the cores' "park" share.
+Free-running mode removes the per-slice barrier and keeps everything else.
+The slice mode stays the default for the CLI, the tests and the goldens
+(it is deterministic); free-running is opt-in.
+
+### Shape
+
+- **One call per burst.** `emulator_run_for(emu, host_ms, budget)`
+  replaces many `emulator_run_slice` calls. The web CPU worker makes one
+  call per ~12 ms burst.
+- **Inside the call.**
+  - The cores run continuously: pick, run up to `budget` cycles,
+    account, pick again. There is no slice and no barrier.
+  - The driver only serves host calls (`parallel_on_driver`) and waits
+    for the host deadline or for the process to stop.
+- **Before the call returns** the driver pauses the cores: each finishes
+  its current run, at most one budget, and parks. So guest code still
+  runs only inside the call, and loads, snapshots, input and settings
+  between calls see a quiescent machine.
+  - That is one handoff per burst instead of one per slice: about
+    160 us per 12 ms, ~1.3%.
+
+### Devices and time
+
+- **Device updates run on a core,** under the kernel lock, whenever they
+  are due:
+  - `nvdrv_poll_completions`, `hid_update`, `vi_update` (vsync,
+    composite, GPU present), `audout`/`audren`;
+  - then `device_wake_at` is recomputed (`emulator_update_devices`, the
+    serial run loop's preamble factored out).
+  - They are plain core-side C with no JS hooks.
+- **When updates are due:**
+  - after any run that leaves `scheduler.ticks >= device_wake_at`;
+  - when a core finds nothing runnable while no core is busy.
+- **That second case is the idle path.**
+  - The core does the serial scheduler's idle step: jump time to the
+    earliest wake or device event.
+  - It then runs the device updates, and the cores continue.
+  - DEADLOCK and EXITED stop the call, which returns that status.
+- **Virtual time:** the same rule as slice mode. A run starts at the global
+  time and ends at `max(time, start + cycles)`. Timeouts expire before
+  every pick. A device event is handled by the first core to see time
+  pass it, so it lands at most one run (≤ budget cycles) late in virtual
+  time, as in slice mode, where it waits for the next slice.
+- **Everything else is unchanged:** poll coalescing, its revert-before-pick
+  and work epoch, the exclusive monitor, SVCs under the kernel lock, and
+  affinity.
+
+### Status
+
+A prototype behind `emulator_set_free_running`, the web `?free=1` and the
+CLI `--free-running`. Before it can become a default:
+
+- `parallel_test` on 2–3 cores, including polls and the
+  exclusive-monitor stress, 20+ rounds;
+- a long browser gameplay session with no gaps in presents or ticks;
+- an interleaved browser A/B showing a clear win.
+
 ## Memory model
 
 `cpu_set_multicore(true)` is set when two or more cores are on. With one

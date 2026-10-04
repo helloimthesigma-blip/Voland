@@ -56,6 +56,8 @@ EXPORT void emulator_set_frame_skip_ffi(uint32_t frames);
 EXPORT void emulator_set_gpu_mode_ffi(uint32_t on);
 EXPORT uint32_t emulator_set_host_cores_ffi(uint32_t cores);
 EXPORT void emulator_set_poll_coalescing_ffi(uint32_t on);
+EXPORT void emulator_set_free_running_ffi(uint32_t on);
+EXPORT int emulator_run_for_ffi(uint32_t host_ms, uint64_t cycle_budget);
 EXPORT void emulator_set_shared_font_ffi(uint64_t bytes, uint32_t size);
 EXPORT int emulator_sd_write_file_ffi(uint64_t path, uint64_t bytes, uint64_t size);
 EXPORT int emulator_sd_clear_ffi(void);
@@ -354,6 +356,21 @@ EXPORT void emulator_set_frame_skip_ffi(uint32_t frames)
 EXPORT uint32_t emulator_set_host_cores_ffi(uint32_t cores)
 {
   return g_initialised ? emulator_set_host_cores(&g_emulator, cores) : 0;
+}
+
+/* Free-running mode (emulator_set_free_running; prototype, off by default). */
+EXPORT void emulator_set_free_running_ffi(uint32_t on)
+{
+  if (g_initialised) emulator_set_free_running(&g_emulator, on != 0);
+}
+
+/* About `host_ms` of guest execution in one call (emulator_run_for);
+ * returns Emulator_Status. The CPU worker's burst in free-running mode. */
+EXPORT int emulator_run_for_ffi(uint32_t host_ms, uint64_t cycle_budget)
+{
+  if (!g_initialised)
+    return (int)EMULATOR_NOT_LOADED;
+  return (int)emulator_run_for(&g_emulator, host_ms, cycle_budget);
 }
 
 /* Poll coalescing (emulator_set_poll_coalescing; on by default). */

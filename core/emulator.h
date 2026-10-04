@@ -136,6 +136,7 @@ typedef struct Emulator
   uint32_t frame_skip; /* emulator_set_frame_skip; survives process reloads */
   Parallel *parallel;  /* emulator_set_host_cores; NULL = serial */
   bool no_poll_coalescing; /* emulator_set_poll_coalescing(false); survives reloads */
+  bool free_running;   /* emulator_set_free_running; with host cores only */
   /* GPU mode (emulator_set_gpu_mode): the renderer's stream to the GPU
    * worker, in the layout's gpu_ring region. */
   Gpu_Stream gpu_stream;
@@ -209,6 +210,17 @@ Emulator_Status emulator_run_slice(Emulator *emulator, uint64_t cycle_budget);
  * no longer deterministic. Returns the core count in effect (0 when the
  * build or the backend cannot run in parallel). Call between slices. */
 uint32_t emulator_set_host_cores(Emulator *emulator, uint32_t cores);
+
+/* Runs guest code for about `host_ms` of host time (or until the program
+ * stops). In slice mode: slices of `cycle_budget` until the deadline. In
+ * free-running mode (with host cores): the cores run without per-slice
+ * barriers and devices update as they come due (docs/PARALLEL.md
+ * "Free-running mode"). Guest code runs only inside the call either way. */
+Emulator_Status emulator_run_for(Emulator *emulator, uint64_t host_ms, uint64_t cycle_budget);
+
+/* Free-running mode (prototype, off by default): emulator_run_for lets the
+ * host cores run continuously. Needs emulator_set_host_cores >= 1. */
+void emulator_set_free_running(Emulator *emulator, bool on);
 
 /* Poll coalescing (scheduler.h, docs/PARALLEL.md "Polling threads"): on
  * by default. Off runs the plain scheduler, bit for bit. */

@@ -43,6 +43,10 @@ typedef struct Jit_Stats {
   uint64_t helper_memory;      /* ...other loads/stores (faults, LSE...) */
   uint64_t helper_system;      /* ...system, exceptions */
   uint64_t helper_other;       /* ...everything else */
+  uint64_t codegen_ns;         /* host time generating module bytes (jit_compile_block) */
+  uint64_t compile_lock_ns;    /* ...waiting for another thread's codegen */
+  uint64_t sync_installs;      /* modules compiled and instantiated synchronously */
+  uint64_t sync_install_ns;    /* ...and the host time that took (cores always; async is the CPU worker's) */
 } Jit_Stats;
 const Jit_Stats *jit_stats(void);
 

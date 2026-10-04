@@ -92,6 +92,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 
 #define EXIT_EXITED 0
@@ -104,6 +105,13 @@
 #define EXIT_LOAD_FAILED 66
 
 #define DEFAULT_BUDGET 100000ull
+#define CLI_FREE_BURST_MS 10u
+
+static uint64_t cli_now_ns(void) {
+  struct timespec ts; /* C11's clock: fine for measuring host durations */
+  timespec_get(&ts, TIME_UTC);
+  return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
 #define DEFAULT_MAX_SLICES 10000000ull
 #define TEST_CARD_WIDTH 1280u
 #define TEST_CARD_HEIGHT 720u
@@ -748,6 +756,8 @@ static int run(int argc, char **argv) {
   uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES, dump_every = 0, snapshot_at = 0;
   const char *snapshot_dir = NULL, *gpu_stream_path = NULL;
   uint32_t frame_skip = 0, host_cores = 0;
+  /* --free-running-from N; --measure-from N --measure-seconds S */
+  uint64_t free_from = 0, measure_from = 0, measure_seconds = 0;
   bool poll_coalescing = true;
   bool test_card = false, svc_stats = false, swkbd_cancel = false, jit_fallbacks = false;
   uint64_t jit_fallbacks_from = 0;
@@ -811,6 +821,12 @@ static int run(int argc, char **argv) {
       font_path = argv[++i];
     } else if (!strcmp(argv[i], "--frame-skip") && has_value) {
       frame_skip = (uint32_t)strtoul(argv[++i], NULL, 0);
+    } else if (!strcmp(argv[i], "--free-running-from") && has_value) {
+      free_from = strtoull(argv[++i], NULL, 0);
+    } else if (!strcmp(argv[i], "--measure-from") && has_value) {
+      measure_from = strtoull(argv[++i], NULL, 0);
+    } else if (!strcmp(argv[i], "--measure-seconds") && has_value) {
+      measure_seconds = strtoull(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--no-poll-coalescing")) {
       poll_coalescing = false;
     } else if (!strcmp(argv[i], "--host-cores") && has_value) {
@@ -947,6 +963,7 @@ static int run(int argc, char **argv) {
     trace_start = strtoull(getenv("VOLAND_TRACE_DRAWS"), &end, 0);
     trace_length = (end && *end == ':') ? strtoull(end + 1, NULL, 0) : 1u;
   }
+  uint64_t measure_start_ns = 0, measure_ticks = 0, measure_presents = 0;
   while (slices < max_slices && (status == EMULATOR_RUNNING || status == EMULATOR_IDLE)) {
     if (jit_fallbacks_from && slices == jit_fallbacks_from) jit_set_fallback_profile(true);
 #ifndef _WIN32
@@ -987,7 +1004,25 @@ static int run(int argc, char **argv) {
     if (input_count) apply_input(inputs, input_count, slices);
     emu.renderer.trace_draws = slices >= trace_start && slices - trace_start < trace_length;
     const uint64_t ticks_before = emu.scheduler.ticks, run_before = emu.scheduler.run_counter;
-    status = emulator_run_slice(&emu, budget);
+    if (free_from && slices == free_from) {
+      emulator_set_free_running(&emu, true);
+      fprintf(stderr, "voland-cli: free-running from slice %llu\n", (unsigned long long)slices);
+    }
+    if (measure_seconds && slices == measure_from) {
+      measure_start_ns = cli_now_ns();
+      measure_ticks = emu.scheduler.ticks;
+      measure_presents = emu.renderer.gpu_stats.presents;
+    }
+    /* Free-running: one call per 10 ms burst (each counts as a slice). */
+    status = emu.free_running ? emulator_run_for(&emu, CLI_FREE_BURST_MS, budget) : emulator_run_slice(&emu, budget);
+    if (measure_start_ns && cli_now_ns() - measure_start_ns >= measure_seconds * 1000000000ull) {
+      const double secs = (double)(cli_now_ns() - measure_start_ns) / 1e9;
+      fprintf(stderr, "voland-cli: measured %.1f s from slice %llu: %.0f virtual ticks/s, %.2f frames/s (%s)\n", secs,
+              (unsigned long long)measure_from, (double)(emu.scheduler.ticks - measure_ticks) / secs,
+              (double)(emu.renderer.gpu_stats.presents - measure_presents) / secs,
+              emu.free_running ? "free-running" : "slices");
+      break;
+    }
     if (pc_profile && slices >= pc_profile_from) pc_profile_sample(&emu);
     if (stats_from && slices >= stats_from) time_stats_sample(&emu, status, ticks_before, run_before, budget);
     else if (stats_from) memcpy(g_time_stats.last_svcs, emu.hle.svc_counts, sizeof(g_time_stats.last_svcs));

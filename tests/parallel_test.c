@@ -142,18 +142,23 @@ static void test_stress(void) {
 /* A yield with nothing else runnable sleeps until the next wake
  * (svc_thread.c): the spinner waits out the worker's 1ms sleep in a few
  * SVCs, not one per spin. */
-#define YIELDSPIN_MAX_SVCS 100u /* a few polls race the marks with real cores */
+/* Without the rule: ~204,000 SVCs. Serially the bound is tight; with real
+ * cores spinners race each other's poll marks for a while, so the bound
+ * only checks the order of magnitude. */
+#define YIELDSPIN_MAX_SVCS 32u
+#define YIELDSPIN_MAX_SVCS_MULTICORE 2000u
 static void test_yield_alone(void) {
   static Outcome o;
   for (uint32_t cores = 0; cores <= 3; cores++) {
     run_program(&k_programs[4], cores, 997, &o);
     check_completes(&k_programs[4], cores, 997, &o);
-    if (o.svcs > YIELDSPIN_MAX_SVCS) {
+    if (o.svcs > (cores >= 2u ? YIELDSPIN_MAX_SVCS_MULTICORE : YIELDSPIN_MAX_SVCS)) {
       fprintf(stderr, "yieldspin, %u core(s): %llu SVCs\n", cores, (unsigned long long)o.svcs);
       CHECK(false);
     }
   }
-  printf("[parallel_test] a lone yield sleeps to the next wake (<= %u SVCs, 0-3 cores)\n", YIELDSPIN_MAX_SVCS);
+  printf("[parallel_test] a lone yield sleeps to the next wake (<= %u SVCs serially, <= %u on 2-3 cores)\n",
+         YIELDSPIN_MAX_SVCS, YIELDSPIN_MAX_SVCS_MULTICORE);
   /* Serially, a polling worker waits for the computing main thread rather
    * than taking a turn every rotation (997-cycle slices: ~3000 rotations). */
   run_program(&k_programs[5], 0, 997, &o);
@@ -189,6 +194,47 @@ static void test_poll_coalescing(void) {
   }
   printf("[parallel_test] poll coalescing: %llu SVCs vs %llu plain, work still picked up promptly (0-3 cores)\n",
          (unsigned long long)on.svcs, (unsigned long long)off.svcs);
+}
+
+/* Free-running mode (docs/PARALLEL.md): no slices; the program runs in
+ * bursts of host time until it stops. */
+#define FREE_BURST_MS 5u
+#define FREE_MAX_BURSTS 20000u
+static void run_free(const Program *program, uint32_t cores, uint64_t budget, Outcome *out) {
+  guest_boot(&g_run, TEST_BACKEND, program->code, program->size);
+  CHECK(emulator_set_host_cores(&g_run.emu, cores) == cores);
+  emulator_set_free_running(&g_run.emu, true);
+  Emulator_Status status = EMULATOR_RUNNING;
+  uint64_t bursts = 0;
+  while ((status == EMULATOR_RUNNING || status == EMULATOR_IDLE) && bursts < FREE_MAX_BURSTS) {
+    status = emulator_run_for(&g_run.emu, FREE_BURST_MS, budget);
+    bursts++;
+  }
+  out->status = status;
+  out->slices = bursts;
+  out->svcs = g_run.emu.hle.svc_call_count;
+  out->ticks = g_run.emu.scheduler.ticks;
+  memcpy(out->output, g_run.output, sizeof(out->output));
+  guest_shutdown(&g_run);
+}
+
+static void test_free_running(void) {
+  static Outcome o;
+  static const uint64_t budgets[] = {997, 100000};
+  for (uint32_t cores = 2; cores <= 3; cores++)
+  for (size_t p = 0; p < PROGRAM_COUNT; p++)
+  for (size_t i = 0; i < sizeof(budgets) / sizeof(budgets[0]); i++) {
+    run_free(&k_programs[p], cores, budgets[i], &o);
+    check_completes(&k_programs[p], cores, budgets[i], &o);
+  }
+  static const size_t stressed[] = {3, 1, 6}; /* atomics, condvar, polls */
+  for (size_t k = 0; k < sizeof(stressed) / sizeof(stressed[0]); k++) {
+    for (uint32_t round = 0; round < 20u; round++) {
+      run_free(&k_programs[stressed[k]], 3, 997, &o);
+      check_completes(&k_programs[stressed[k]], 3, 997, &o);
+    }
+  }
+  printf("[parallel_test] free-running: every program on 2-3 cores; atomics, condvar, polls 20 rounds on 3\n");
 }
 
 static pthread_t g_driver;
@@ -235,6 +281,7 @@ int main(void) {
   test_stress();
   test_yield_alone();
   test_poll_coalescing();
+  test_free_running();
   test_host_calls();
   printf("[parallel_test] passed\n");
   return 0;
