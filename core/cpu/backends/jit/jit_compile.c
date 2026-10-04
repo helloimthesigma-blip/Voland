@@ -3390,6 +3390,23 @@ static void exit_conditional(Ctx *c, uint64_t target) {
 #define SYSREG_FIELD_MASK (0xFFFFu << 5)
 #define DC_ZVA_ENCODING 0xD50B7420u /* SYS #3, C7, C4, #1 with Rt = 0 */
 #define DC_ZVA_BYTES 64u
+#define SYS_OP1_EL0 3u
+#define SYS_CRN_CACHE 7u
+#define SYS_OP2_BY_VA 1u
+#define SYS_CRM_DC_CVAC 10u
+#define SYS_CRM_DC_CVAU 11u
+#define SYS_CRM_DC_CVAP 12u
+#define SYS_CRM_DC_CIVAC 14u
+
+/* DC CVAC/CVAU/CVAP/CIVAC: data-cache maintenance, a no-op here as in the
+ * interpreter (instruction fetch reads the vmm every time). Only IC IVAU
+ * can mean code changed. */
+static bool is_data_cache_maintenance(uint32_t insn) {
+  const uint32_t crm = bits(insn, 11, 8);
+  return !bit(insn, 21) && bits(insn, 20, 19) == 1u && bits(insn, 18, 16) == SYS_OP1_EL0 &&
+         bits(insn, 15, 12) == SYS_CRN_CACHE && bits(insn, 7, 5) == SYS_OP2_BY_VA &&
+         (crm == SYS_CRM_DC_CVAC || crm == SYS_CRM_DC_CVAU || crm == SYS_CRM_DC_CVAP || crm == SYS_CRM_DC_CIVAC);
+}
 
 static Outcome c_system(Ctx *c, uint32_t insn) {
   const bool read = bit(insn, 21);
@@ -3433,7 +3450,8 @@ static Outcome c_system(Ctx *c, uint32_t insn) {
       end_(c);
       return OUTCOME_NEXT;
     }
-    return OUTCOME_END_HELPER; /* SYS: IC IVAU (flushes code), other cache maintenance */
+    if (is_data_cache_maintenance(insn)) return OUTCOME_NEXT;
+    return OUTCOME_END_HELPER; /* SYS: IC IVAU (flushes code) */
   }
   const uint32_t reg = insn & SYSREG_FIELD_MASK;
   if (read) {
