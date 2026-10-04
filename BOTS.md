@@ -71,6 +71,12 @@ Six Claude Code agents work on this in parallel:
 
 ## Facts you will need
 
+- **Silksong to gameplay at real speed (pacing on, the web default):**
+  `cd platform/web && node tools/perf.mjs --game "$NCA" --clock presents --warmup-slices 6500 --mash z:4000`
+  reaches gameplay in about 5.4 min. Mashing A walks through the title, profile, New Game, the video skip and the bind prompt; A in gameplay is harmless. Slice-counted recipes (`--press`, `--warmup-slices` in slices) need `--url-params pacing=0`.
+  Measure emulator throughput with `pacing=0` (virtual ticks per wall second) or CPU time; with pacing on, fps at 1.00× real speed is what the owner sees.
+
+
 - **Silksong NCA:**
   `~/games/game.nca`
 - **Native run to gameplay** (deterministic, about 45 min in software
