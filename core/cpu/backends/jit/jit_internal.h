@@ -67,6 +67,7 @@ typedef struct Jit_Entry {
   Jit_Code_Range ranges[JIT_MAX_REGION_PAGES]; /* the code it was compiled from */
   uint64_t entries;    /* times entered (only counted with jit_set_hot_profile) */
   bool multicore;      /* compiled under cpu_multicore() (exclusives, fences) */
+  uint32_t pending;    /* an asynchronous compilation for this pc is in flight (its id) */
 } Jit_Entry;
 
 #define JIT_CACHE_BITS 17u

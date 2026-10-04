@@ -87,6 +87,21 @@ Six Claude Code agents work on this in parallel:
     producer, which is much faster natively than software rasterising.
   - `--dump-frame F.ppm [--dump-frames-every N]` writes frames.
   - `VOLAND_PC_PROFILE=1` prints where guest cycles go.
+- **Walking recipe (actual play, to about 5.65M slices).** After the gameplay recipe:
+  - A binds at the prompt (4.87M).
+  - Hornet walks left from 4.95M. Right is a dead end: the camera stops following.
+  - A room transition into a second area follows at about 5.25M.
+  - From 5.26M she jumps (B) and attacks (Y) every 25k slices.
+  ```
+  INPUTS=(--input 860000:1:3000 --input 940000:1:3000 --input 1020000:1:3000 \
+    --input 3000000:1:3000 --input 3100000:1:3000 --input 3200000:1:3000 \
+    --input 4870000:1:10000 --input 4950000:1000:700000)
+  for s in $(seq -f %.0f 5260000 25000 5635000); do INPUTS+=(--input $s:2:4000 --input $((s+12000)):8:1500); done
+  build/native-release/platform/cli/voland-cli run "$NCA" --backend interpreter "${INPUTS[@]}" --max-slices 5650000
+  ```
+  - Buttons (`--input` hex, `INPUT_BUTTON_*` in `core/common/input_region.h`): A 0x1 (bind / confirm), B 0x2 (jump), Y 0x8 (attack), d-pad left 0x1000, right 0x4000, up 0x2000, down 0x8000.
+  - macOS `seq` prints large numbers in exponent form: use `seq -f %.0f`, or python.
+  - Known blocker (2026-10-03): the run asserts at about 5.48M in `svc_memory.c` (`free_one_page: page_allocator_free failed`); the coordinator is on it.
 - **Builds:**
   - Native: `cmake --preset native-noop|native-release && cmake --build --preset ...`.
   - Web: `source ~/emsdk/emsdk_env.sh && cmake --preset web && cmake --build --preset web`.

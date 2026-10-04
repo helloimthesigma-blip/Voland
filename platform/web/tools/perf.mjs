@@ -4,13 +4,15 @@
  * and prints how fast the CPU worker runs it.
  *
  *   node tools/perf.mjs --game FILE [--warmup-slices N] [--seconds S]
- *                       [--profile S] [--port P] [--no-build] [--software]
+ *                       [--profile S] [--port P] [--debug-port P] [--no-build] [--software]
  *                       [--url-params "a=1&b=2"] [--browser-arg ARG]...
  *                       [--press SLICE:KEY:SLICES]... [--shot FILE.png]
+ *                       [--phases NAME:SLICE,NAME:SLICE,...,end:SLICE] [--json FILE]
  *
  * - Builds the app (vite build; the core must already be staged by
- *   `cmake --build --preset web`) and serves it with `vite preview` on its
- *   own port, so it never collides with another checkout's server.
+ *   `cmake --build --preset web`) and serves it with `vite preview` on a
+ *   free port (and a free DevTools port), so it never collides with
+ *   another checkout running it.
  * - Loads FILE through the load panel, runs until the CPU worker has done
  *   --warmup-slices scheduler slices (default 860000: Silksong's title
  *   screen), then measures for --seconds (default 30).
@@ -30,6 +32,20 @@
  *   --press 3000000:z:3000 --press 3100000:z:3000 --press 3200000:z:3000
  *   with --warmup-slices 4800000. Presses land within ~250 ms of their
  *   slice, so a browser run is close to, not identical with, the CLI's.
+ * - --phases profiles the run from load in phases that start at the given
+ *   slices (the last entry only ends the previous one), and prints per
+ *   phase: worker time, slices, virtual time, file reads, GPU stream bytes,
+ *   and the CPU worker's profile by code kind and top functions. Warmup
+ *   then runs to the last slice. For load time, e.g.
+ *   --phases boot:0,menus:860000,newgame:3200000,end:4800000
+ * - CPU time: alongside wall time the harness samples the page's renderer
+ *   process CPU seconds (ps; it hosts the CPU worker, the GPU worker and the
+ *   core's pthreads), and reports CPU seconds per virtual second - a
+ *   figure much less sensitive to a busy machine than wall time.
+ * - --web-dir DIR builds and serves another checkout's platform/web (its
+ *   core staged there), so this harness can measure older commits.
+ * - --json FILE writes the results (measurement window and phases) as JSON
+ *   (used by tools/perf-track.mjs).
  * - --browser-arg passes a Chromium switch (repeatable), e.g.
  *   --browser-arg=--js-flags=--no-liftoff for a V8 tiering experiment.
  *
@@ -38,7 +54,8 @@
  *   voland-cli run FILE --backend interpreter --budget 200000 \
  *     --max-slices N --gpu-stream /dev/null
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
+import { createServer } from "node:net";
 import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -46,7 +63,7 @@ import { fileURLToPath } from "node:url";
 
 import { chromium } from "@playwright/test";
 
-const WEB_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+let WEB_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /* Virtual ticks per second (the Switch's 19.2 MHz counter). */
 const TICKS_PER_SECOND = 19_200_000;
 const HARDWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"];
@@ -54,8 +71,8 @@ const SOFTWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swift
 
 function parseArgs(argv) {
   const opts = {
-    game: "", warmupSlices: 860_000, seconds: 30, profile: 0, port: 5190, debugPort: 9390,
-    build: true, software: false, urlParams: "", outDir: tmpdir(), browserArgs: [], presses: [], shot: "",
+    game: "", warmupSlices: 860_000, seconds: 30, profile: 0, port: 0, debugPort: 0,
+    build: true, software: false, urlParams: "", outDir: tmpdir(), browserArgs: [], presses: [], shot: "", phases: [], json: "",
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -71,6 +88,17 @@ function parseArgs(argv) {
     else if (a === "--url-params") opts.urlParams = next();
     else if (a === "--out-dir") opts.outDir = next();
     else if (a === "--shot") opts.shot = next();
+    else if (a === "--json") opts.json = next();
+    else if (a === "--web-dir") WEB_DIR = resolve(next()); /* another checkout's platform/web */
+    else if (a === "--phases") {
+      opts.phases = next().split(",").map((entry) => {
+        const [name, slice] = entry.split(":");
+        if (!name || !Number.isFinite(Number(slice))) throw new Error("--phases wants NAME:SLICE,...");
+        return { name, slice: Number(slice) };
+      });
+      if (opts.phases.length < 2) throw new Error("--phases needs at least a start and an end");
+      opts.warmupSlices = opts.phases[opts.phases.length - 1].slice;
+    }
     else if (a === "--browser-arg") opts.browserArgs.push(next());
     else if (a.startsWith("--browser-arg=")) opts.browserArgs.push(a.slice("--browser-arg=".length));
     else if (a === "--press") {
@@ -103,6 +131,46 @@ async function waitForUrl(url, timeoutMs) {
     await new Promise((r) => setTimeout(r, 250));
   }
   throw new Error(`${url} did not come up`);
+}
+
+/* CPU seconds of the renderer process(es) under `browserPid` (ps TIME). */
+function rendererCpuSeconds(browserPid) {
+  const table = execFileSync("ps", ["-A", "-o", "pid=,ppid=,time=,command="], { encoding: "utf8", maxBuffer: 64 << 20 });
+  let total = 0;
+  for (const line of table.split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
+    if (!m || Number(m[2]) !== browserPid || !/--type=renderer/.test(m[4]) || /--extension-process/.test(m[4])) continue;
+    const [clock, days] = m[3].split("-").reverse();
+    const parts = clock.split(":").map(Number).reverse(); /* ss.cc, mm, hh */
+    total += (parts[0] ?? 0) + 60 * (parts[1] ?? 0) + 3600 * (parts[2] ?? 0) + 86400 * Number(days ?? 0);
+  }
+  return total;
+}
+
+/* The browser process Playwright started: our child running Chromium. */
+function chromiumChildPid() {
+  const table = execFileSync("ps", ["-A", "-o", "pid=,ppid=,command="], { encoding: "utf8", maxBuffer: 64 << 20 });
+  for (const line of table.split("\n")) {
+    const m = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    if (m && Number(m[2]) === process.pid && /chrom/i.test(m[3]) && !/--type=/.test(m[3])) return Number(m[1]);
+  }
+  return 0;
+}
+
+function loadAverage() {
+  return execFileSync("sysctl", ["-n", "vm.loadavg"], { encoding: "utf8" }).replace(/[{}]/g, "").trim().split(/\s+/).map(Number)[0] ?? 0;
+}
+
+/* A free TCP port, so several checkouts can run the harness at once. */
+function freePort() {
+  return new Promise((resolvePort, reject) => {
+    const server = createServer();
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      const { port } = server.address();
+      server.close(() => resolvePort(port));
+    });
+  });
 }
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -207,6 +275,8 @@ function categoriseProfile(profile) {
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
+  if (!opts.port) opts.port = await freePort();
+  if (!opts.debugPort) opts.debugPort = await freePort();
   if (opts.build) await run("npx", ["vite", "build", "--logLevel", "warn"]);
   const preview = spawn("npx", ["vite", "preview", "--port", String(opts.port), "--strictPort"], { cwd: WEB_DIR, stdio: "ignore" });
   const baseUrl = `http://localhost:${opts.port}/`;
@@ -216,10 +286,17 @@ async function main() {
     args: [...(opts.software ? SOFTWARE_GPU_ARGS : HARDWARE_GPU_ARGS), `--remote-debugging-port=${opts.debugPort}`,
            ...opts.browserArgs],
   });
+  const browserPid = chromiumChildPid();
+  const results = { loadAvgStart: loadAverage(), phases: [], window: null };
   try {
     await waitForUrl(baseUrl, 60_000);
     const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
     page.on("console", (m) => {
+      /* The configuration actually in effect, as the CPU worker logs it. */
+      const backend = /backend=(\w+)/.exec(m.text());
+      if (backend) results.backend = backend[1];
+      const cores = /guest threads on (?:the serial scheduler|(\d+) host core)/.exec(m.text());
+      if (cores) results.hostCores = cores[1] ? Number(cores[1]) : 0;
       if (m.type() === "error" && /\[(ERROR|WARN )\]|failed|crash/i.test(m.text())) console.log(`  console: ${m.text()}`);
     });
     const pageUrl = opts.urlParams ? `${baseUrl}?${opts.urlParams}` : baseUrl;
@@ -235,9 +312,39 @@ async function main() {
       }
       throw new Error("CPU worker not found");
     })();
+    /* Count run-time wasm compiles (the JIT's modules) inside the CPU worker:
+     * wraps WebAssembly.Module/Instance there; read back with each sample. */
+    await worker.evaluate(() => {
+      const g = globalThis;
+      if (g.__VOLAND_WASM_COMPILES__) return;
+      const stats = { modules: 0, bytes: 0, moduleMs: 0, instanceMs: 0 };
+      g.__VOLAND_WASM_COMPILES__ = stats;
+      const RealModule = WebAssembly.Module, RealInstance = WebAssembly.Instance;
+      const ModuleProxy = new Proxy(RealModule, { construct(target, args) {
+        const t = performance.now();
+        const m = Reflect.construct(target, args);
+        stats.moduleMs += performance.now() - t;
+        stats.modules++;
+        stats.bytes += args[0]?.byteLength ?? 0;
+        return m;
+      } });
+      const InstanceProxy = new Proxy(RealInstance, { construct(target, args) {
+        const t = performance.now();
+        const i = Reflect.construct(target, args);
+        stats.instanceMs += performance.now() - t;
+        return i;
+      } });
+      Object.defineProperty(WebAssembly, "Module", { value: ModuleProxy, configurable: true, writable: true });
+      Object.defineProperty(WebAssembly, "Instance", { value: InstanceProxy, configurable: true, writable: true });
+    });
     const sample = async () => ({
       at: Date.now(),
-      perf: await worker.evaluate(() => ({ ...globalThis.__VOLAND_CPU_PERF__ })),
+      cpuS: browserPid ? rendererCpuSeconds(browserPid) : 0,
+      perf: await worker.evaluate(() => {
+        const c = globalThis.__VOLAND_WASM_COMPILES__ ?? { modules: 0, bytes: 0, moduleMs: 0, instanceMs: 0 };
+        return { ...globalThis.__VOLAND_CPU_PERF__, wasmModules: c.modules, wasmBytes: c.bytes,
+                 wasmModuleMs: c.moduleMs, wasmInstanceMs: c.instanceMs };
+      }),
       fps: await page.evaluate(() => window.__VOLAND_STATS__?.fps ?? 0),
     });
 
@@ -255,8 +362,49 @@ async function main() {
       }
     };
 
+    /* Phase profiling: one CDP profile per phase, switched at slice counts. */
+    const phaseState = { cdp: null, session: "", index: -1, startSample: null, rows: [] };
+    if (opts.phases.length) {
+      phaseState.cdp = await Cdp.connect(opts.debugPort);
+      phaseState.session = await attachToCpuWorker(phaseState.cdp, baseUrl);
+      await phaseState.cdp.send("Profiler.enable", {}, phaseState.session);
+      await phaseState.cdp.send("Profiler.setSamplingInterval", { interval: 1000 }, phaseState.session);
+    }
+    const servicePhases = async (current) => {
+      if (!opts.phases.length) return;
+      while (phaseState.index + 1 < opts.phases.length && current.perf.slices >= opts.phases[phaseState.index + 1].slice) {
+        const { cdp, session } = phaseState;
+        if (phaseState.index >= 0) {
+          const { profile } = await cdp.send("Profiler.stop", {}, session);
+          const phase = opts.phases[phaseState.index];
+          const a = phaseState.startSample.perf, b = current.perf;
+          const file = join(opts.outDir, `phase-${phase.name}-${Date.now()}.cpuprofile`);
+          mkdirSync(opts.outDir, { recursive: true });
+          writeFileSync(file, JSON.stringify(profile));
+          const workerS = (b.sliceMs + b.yieldMs - a.sliceMs - a.yieldMs) / 1000;
+          phaseState.rows.push({
+            name: phase.name, from: a.slices, to: b.slices, workerS,
+            wallS: (current.at - phaseState.startSample.at) / 1000,
+            cpuS: current.cpuS - phaseState.startSample.cpuS,
+            virtualS: (b.ticks - a.ticks) / TICKS_PER_SECOND,
+            fileReads: b.fileReads - a.fileReads, fileMiB: (b.fileReadBytes - a.fileReadBytes) / 1048576,
+            fileS: (b.fileReadMs - a.fileReadMs) / 1000, gpuMiB: (b.gpuBytes - a.gpuBytes) / 1048576,
+            gpuStalls: b.gpuStalls - a.gpuStalls, waitS: ((b.streamWaitMs ?? 0) - (a.streamWaitMs ?? 0)) / 1000,
+            chunks: (b.fileChunks ?? 0) - (a.fileChunks ?? 0), modules: b.wasmModules - a.wasmModules,
+            moduleMiB: (b.wasmBytes - a.wasmBytes) / 1048576,
+            compileS: (b.wasmModuleMs + b.wasmInstanceMs - a.wasmModuleMs - a.wasmInstanceMs) / 1000,
+            kinds: categoriseProfile(profile), top: summariseProfile(profile, 25), file,
+          });
+        }
+        phaseState.index++;
+        phaseState.startSample = current;
+        if (phaseState.index + 1 < opts.phases.length) await cdp.send("Profiler.start", {}, session);
+      }
+    };
+
     /* Warm up to a known slice count. */
     let s = await sample();
+    await servicePhases(s);
     let lastPrint = 0;
     while (s.perf.slices < opts.warmupSlices) {
       const state = await page.getByTestId("run-state").getAttribute("data-state");
@@ -268,8 +416,25 @@ async function main() {
       await servicePresses(s.perf.slices);
       await sleep(250);
       s = await sample();
+      await servicePhases(s);
     }
     const warm = s;
+    if (opts.phases.length) {
+      phaseState.cdp.close();
+      results.phases = phaseState.rows.map(({ kinds, top, ...row }) => row);
+      console.log("");
+      console.log("phase       slices                 worker s   wall s   CPU s  virtual s  file reads (MiB, s)     GPU MiB  stalls (s)  wasm modules (MiB, s)  new chunks");
+      for (const r of phaseState.rows) {
+        console.log(`${r.name.padEnd(10)}  ${String(r.from).padStart(8)}-${String(r.to).padEnd(9)}  ${r.workerS.toFixed(1).padStart(9)}  ${r.wallS.toFixed(1).padStart(7)}  ${r.cpuS.toFixed(1).padStart(6)}` +
+                    `  ${r.virtualS.toFixed(1).padStart(9)}  ${String(r.fileReads).padStart(6)} (${r.fileMiB.toFixed(0)}, ${r.fileS.toFixed(1)})`.padEnd(26) +
+                    `  ${r.gpuMiB.toFixed(0).padStart(8)}  ${String(r.gpuStalls).padStart(6)} (${r.waitS.toFixed(1)})  ${String(r.modules).padStart(6)} (${r.moduleMiB.toFixed(1)}, ${r.compileS.toFixed(1)})  ${String(r.chunks).padStart(6)}`);
+      }
+      for (const r of phaseState.rows) {
+        console.log(`\n[${r.name}] profile (${r.file}):`);
+        for (const line of r.kinds) console.log(`  ${line}`);
+        for (const line of r.top) console.log(`    ${line}`);
+      }
+    }
     const warmupWallS = (warm.perf.sliceMs + warm.perf.yieldMs) / 1000;
     console.log(`warmup done: ${warm.perf.slices} slices in ${warmupWallS.toFixed(1)} s worker time ` +
                 `(${(warm.perf.slices / warmupWallS).toFixed(0)} slices/s)`);
@@ -301,7 +466,15 @@ async function main() {
     console.log(`  in run_slice    ${pct(d("sliceMs"))}`);
     console.log(`    file reads    ${pct(d("fileReadMs"))}  (${d("fileReads")} reads, ${(d("fileReadBytes") / 1048576).toFixed(1)} MiB)`);
     console.log(`  yielding        ${pct(d("yieldMs"))}  (${d("bursts")} bursts)`);
+    console.log(`  stream waits    ${(d("streamWaitMs") / 1000).toFixed(1)} s`);
     console.log(`  GPU stalls      ${d("gpuStalls")}  (${(d("gpuBytes") / 1048576 / wallS).toFixed(1)} MiB/s streamed)`);
+    const cpuS = end.cpuS - warm.cpuS;
+    console.log(`  CPU s           ${cpuS.toFixed(1)} (${(cpuS / Math.max(1e-9, d("ticks") / TICKS_PER_SECOND)).toFixed(2)} CPU s per virtual s)`);
+    results.window = {
+      fromSlice: warm.perf.slices, wallS, cpuS, slicesPerS: d("slices") / wallS, ticksPerS: d("ticks") / wallS,
+      virtualS: d("ticks") / TICKS_PER_SECOND, fps: fpsAvg, wasmModules: d("wasmModules"),
+    };
+    results.warmupWorkerS = warmupWallS;
     console.log(`RESULT slices_per_s=${(d("slices") / wallS).toFixed(0)} ticks_per_s=${(d("ticks") / wallS).toFixed(0)} fps=${fpsAvg.toFixed(2)}`);
 
     if (opts.profile > 0) {
@@ -324,6 +497,8 @@ async function main() {
         cdp.close();
       }
     }
+    results.loadAvgEnd = loadAverage();
+    if (opts.json) writeFileSync(opts.json, JSON.stringify(results, null, 2));
   } finally {
     await browser.close();
     preview.kill();

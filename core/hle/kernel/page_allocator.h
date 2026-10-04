@@ -41,13 +41,12 @@ typedef struct Page_Run {
   uint64_t page_count;
 } Page_Run;
 
-/* Freelist capacity. Fixed and small: Phase 1's only source of frees is
- * svcSetHeapSize shrinking (at most one run per call) and process
- * teardown (one run for the whole committed heap) - this is not a
- * general-purpose allocator. page_allocator_free() returns
- * RESULT_OUT_OF_MEMORY, unchanged, if a caller ever exceeds this; revisit
- * the cap if that fires for real. */
-#define PAGE_ALLOCATOR_MAX_FREE_RUNS 16u
+/* Freelist capacity. Frees come from svcSetHeapSize shrinking and process
+ * teardown; a heap that shrinks and regrows many times (Silksong does in
+ * gameplay) frees runs that are physically scattered, so the list must
+ * hold many. Frees merge with both neighbours. page_allocator_free()
+ * returns RESULT_OUT_OF_MEMORY if it is still exceeded. */
+#define PAGE_ALLOCATOR_MAX_FREE_RUNS 4096u
 
 typedef struct Page_Allocator {
   uint64_t base_pa;    /* first allocatable guest physical address */

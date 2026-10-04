@@ -302,8 +302,8 @@ EXPORT uint64_t emulator_virtual_ticks_ffi(void)
 /* Perf counters for the browser harness (platform/web/tools/perf.mjs):
  * writes up to `capacity` uint64 values at `out` and returns how many.
  * Order: virtual ticks, SVCs, GPU stream bytes, GPU stream stalls (the
- * producer waited for the GPU worker). */
-enum { PERF_TICKS, PERF_SVCS, PERF_GPU_BYTES, PERF_GPU_STALLS, PERF_COUNT };
+ * producer waited for the GPU worker), host ns spent in those waits. */
+enum { PERF_TICKS, PERF_SVCS, PERF_GPU_BYTES, PERF_GPU_STALLS, PERF_STREAM_WAIT_NS, PERF_COUNT };
 
 EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity)
 {
@@ -313,6 +313,7 @@ EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity)
     [PERF_SVCS] = g_emulator.hle.svc_call_count,
     [PERF_GPU_BYTES] = g_emulator.gpu_stream.bytes,
     [PERF_GPU_STALLS] = g_emulator.gpu_stream.stalls,
+    [PERF_STREAM_WAIT_NS] = emulator_stream_wait_ns(),
   };
   const uint32_t count = capacity < PERF_COUNT ? capacity : PERF_COUNT;
   memcpy((void *)(uintptr_t)out, values, count * sizeof(uint64_t));

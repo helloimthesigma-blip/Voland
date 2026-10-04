@@ -23,6 +23,7 @@
 /* Process-wide counters, for measurement (voland-cli prints them). */
 typedef struct Jit_Stats {
   uint64_t blocks_compiled;    /* regions, each a wasm function */
+  uint64_t async_compiles;     /* of those requested, compiled off-thread (browser) */
   uint64_t region_blocks;      /* guest blocks in them */
   uint64_t compile_failures;
   uint64_t block_entries;      /* compiled-block calls */

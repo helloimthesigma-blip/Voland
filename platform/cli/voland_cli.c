@@ -111,7 +111,7 @@
 #define FNV_PRIME 0x100000001B3ull
 #define FINGERPRINT_CHUNK 65536u
 #define SDMC_PATH_BYTES 0x301u
-#define MAX_INPUT_EVENTS 32u
+#define MAX_INPUT_EVENTS 256u
 #define WAV_HEADER_BYTES 44u
 #define WAV_DRAIN_FRAMES 4096u
 
@@ -643,8 +643,10 @@ static int run(int argc, char **argv) {
     } else if (!strcmp(argv[i], "--input") && has_value) {
       unsigned long long start = 0, length = 0;
       unsigned buttons = 0;
-      if (input_count == MAX_INPUT_EVENTS || sscanf(argv[++i], "%llu:%x:%llu", &start, &buttons, &length) != 3) {
-        fprintf(stderr, "voland-cli: bad --input %s (want SLICE:HEXBUTTONS:SLICES)\n", argv[i]);
+      const char *spec = argv[++i];
+      if (input_count == MAX_INPUT_EVENTS || sscanf(spec, "%llu:%x:%llu", &start, &buttons, &length) != 3) {
+        fprintf(stderr, "voland-cli: bad --input %s (want SLICE:HEXBUTTONS:SLICES, at most %u)\n", spec,
+                MAX_INPUT_EVENTS);
         return EXIT_USAGE;
       }
       inputs[input_count++] = (Input_Event){start, buttons, length};
