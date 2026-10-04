@@ -241,6 +241,9 @@ function defaultHostCores(target: SwitchCoreExports): number {
   return CPU_BACKEND_DISPLAY_NAMES[target._cpu_backend_id_ffi()] === "jit" ? 0 : DEFAULT_HOST_CORES;
 }
 
+/** Poll coalescing (set-poll-coalescing; ?polls=0 turns it off). */
+let pollCoalescing = true;
+
 function applyHostCores(target: SwitchCoreExports): void {
   const hostCores = requestedHostCores ?? defaultHostCores(target);
   const inEffect = target._emulator_set_host_cores_ffi(hostCores);
@@ -507,6 +510,7 @@ function loadGame(file: File): CPUToMainMessage {
   loadingCore._emulator_set_frame_skip_ffi(frameSkip);
   loadingCore._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
   applyHostCores(loadingCore);
+  loadingCore._emulator_set_poll_coalescing_ffi(pollCoalescing ? 1 : 0);
   withCString(`/${sdName(file.name)}`, (path) => loadingCore._emulator_set_program_path_ffi(path));
   const code = core._emulator_load_program_ffi(BigInt(file.size), randomAslrSeed());
 
@@ -626,6 +630,13 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     gpuMode = msg.on;
     core?._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
     log("info", `renderer: ${gpuMode ? "WebGPU (GPU worker)" : "software reference"}`);
+    return;
+  }
+
+  if (msg.type === "set-poll-coalescing") {
+    pollCoalescing = msg.on;
+    core?._emulator_set_poll_coalescing_ffi(pollCoalescing ? 1 : 0);
+    log("info", `poll coalescing ${pollCoalescing ? "on" : "off"}`);
     return;
   }
 
