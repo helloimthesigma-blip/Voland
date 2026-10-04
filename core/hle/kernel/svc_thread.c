@@ -16,7 +16,6 @@
 #define HLE_APPLICATION_MEMORY_BYTES ((uint64_t)0xCD500000) /* the application pool, ~3.2GB */
 #define HLE_ALL_CORES_MASK 0xFull
 #define HLE_ALL_PRIORITIES_MASK 0xFFFFFFFFFFFFFFFFull
-#define SLEEP_YIELD_LIMIT 0 /* SleepThread(<= 0): 0, -1, -2 are yield variants */
 #define RANDOM_ENTROPY_WORDS 4u
 
 static CPU_Register_File *regs(HLE_Context *c, CPU_State *s) { return c->cpu_backend->get_register_file(s); }
@@ -112,9 +111,12 @@ void hle_svc_sleep_thread(HLE_Context *c, CPU_State *s) {
   CPU_Register_File *r = regs(c, s);
   const int64_t ns = (int64_t)r->x[0];
   r->x[0] = HLE_RESULT_SUCCESS;
-  if (ns <= SLEEP_YIELD_LIMIT) return; /* yield: the scheduler rotates on the SVC exit */
   Sched_Thread *t = current(c, s);
-  if (t) scheduler_block(c->scheduler, t, WAIT_SLEEP, (uint64_t)ns);
+  /* SleepThread(<= 0) yields: the scheduler rotates on the SVC exit.
+   * Yields and short sleeps after a short run are polls, which the
+   * scheduler may coalesce (scheduler_poll_sleep). Every other SVC clears
+   * the poll mark (hle_on_svc). */
+  if (t) scheduler_poll_sleep(c->scheduler, t, ns, c->cpu_backend->get_cycles_consumed(s));
 }
 
 void hle_svc_get_thread_priority(HLE_Context *c, CPU_State *s) {

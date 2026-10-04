@@ -109,9 +109,10 @@ int main(void) {
    * top page stays allocated so the cursor never retracts); one more is
    * rejected and changes nothing. --- */
   Page_Allocator spread;
-  CHECK_OK(page_allocator_init(&spread, 0x200000, 34 * VMM_PAGE_SIZE));
+  const uint64_t spread_pages = 2u * PAGE_ALLOCATOR_MAX_FREE_RUNS + 2u;
+  CHECK_OK(page_allocator_init(&spread, 0x200000, spread_pages * VMM_PAGE_SIZE));
   uint64_t spread_pa = 0;
-  CHECK_OK(page_allocator_allocate(&spread, 34, &spread_pa));
+  CHECK_OK(page_allocator_allocate(&spread, spread_pages, &spread_pa));
   for (uint32_t i = 0; i < PAGE_ALLOCATOR_MAX_FREE_RUNS; i++) {
     CHECK_OK(page_allocator_free(&spread, spread_pa + (uint64_t)(2 * i) * VMM_PAGE_SIZE, 1));
   }
@@ -120,6 +121,19 @@ int main(void) {
       page_allocator_free(&spread, spread_pa + (uint64_t)(2 * PAGE_ALLOCATOR_MAX_FREE_RUNS) * VMM_PAGE_SIZE, 1),
       RESULT_OUT_OF_MEMORY);
   CHECK(spread.free_run_count == PAGE_ALLOCATOR_MAX_FREE_RUNS);
+
+  /* --- A free that fills the gap between two free runs merges all
+   * three into one entry. --- */
+  Page_Allocator gap;
+  CHECK_OK(page_allocator_init(&gap, 0x200000, 8 * VMM_PAGE_SIZE));
+  uint64_t gap_pa = 0;
+  CHECK_OK(page_allocator_allocate(&gap, 8, &gap_pa));
+  CHECK_OK(page_allocator_free(&gap, gap_pa + 1 * VMM_PAGE_SIZE, 1));
+  CHECK_OK(page_allocator_free(&gap, gap_pa + 3 * VMM_PAGE_SIZE, 1));
+  CHECK(gap.free_run_count == 2);
+  CHECK_OK(page_allocator_free(&gap, gap_pa + 2 * VMM_PAGE_SIZE, 1));
+  CHECK(gap.free_run_count == 1);
+  CHECK(gap.free_runs[0].pa == gap_pa + VMM_PAGE_SIZE && gap.free_runs[0].page_count == 3);
 
   layout_destroy();
   return 0;

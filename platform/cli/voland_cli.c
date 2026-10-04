@@ -17,6 +17,7 @@
  *       --sdmc DIR                   seed the emulated SD card with DIR's contents
  *       --dump-frame FILE            write the newest frame as a binary PPM (P6)
  *       --frame-skip N               rasterise and show one of every N + 1 frames
+ *       --no-poll-coalescing         plain scheduler: pollers re-poll on their own schedule
  *       --host-cores N               run guest threads on N host threads
  *                                    (docs/PARALLEL.md; 0 = serial, the default)
  *       --dump-frames-every N        with --dump-frame: also write FILE.<slice>.ppm
@@ -111,7 +112,7 @@
 #define FNV_PRIME 0x100000001B3ull
 #define FINGERPRINT_CHUNK 65536u
 #define SDMC_PATH_BYTES 0x301u
-#define MAX_INPUT_EVENTS 32u
+#define MAX_INPUT_EVENTS 256u
 #define WAV_HEADER_BYTES 44u
 #define WAV_DRAIN_FRAMES 4096u
 
@@ -416,6 +417,7 @@ typedef struct Snapshot_Job {
   Input_Event inputs[MAX_INPUT_EVENTS];
   uint32_t input_count;
   int32_t host_cores; /* "cores N": --host-cores for this job; -1 = unchanged */
+  int32_t poll_coalescing; /* "polls 0|1": poll coalescing for this job; -1 = unchanged */
 } Snapshot_Job;
 
 static bool read_job(const char *path, Snapshot_Job *job) {
@@ -427,6 +429,7 @@ static bool read_job(const char *path, Snapshot_Job *job) {
     unsigned buttons = 0;
     if (sscanf(line, "max_slices %llu", &a) == 1) job->max_slices = a;
     else if (sscanf(line, "cores %llu", &a) == 1) job->host_cores = (int32_t)a;
+    else if (sscanf(line, "polls %llu", &a) == 1) job->poll_coalescing = (int32_t)a;
     else if (sscanf(line, "every %llu", &a) == 1) job->dump_every = a;
     else if (sscanf(line, "trace %llu:%llu", &a, &b) == 2) {
       job->trace_start = a;
@@ -719,6 +722,7 @@ static int run(int argc, char **argv) {
   uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES, dump_every = 0, snapshot_at = 0;
   const char *snapshot_dir = NULL, *gpu_stream_path = NULL;
   uint32_t frame_skip = 0, host_cores = 0;
+  bool poll_coalescing = true;
   bool test_card = false, svc_stats = false, swkbd_cancel = false, jit_fallbacks = false;
   uint64_t jit_fallbacks_from = 0;
   uint32_t jit_hot_top = 0;
@@ -762,8 +766,10 @@ static int run(int argc, char **argv) {
     } else if (!strcmp(argv[i], "--input") && has_value) {
       unsigned long long start = 0, length = 0;
       unsigned buttons = 0;
-      if (input_count == MAX_INPUT_EVENTS || sscanf(argv[++i], "%llu:%x:%llu", &start, &buttons, &length) != 3) {
-        fprintf(stderr, "voland-cli: bad --input %s (want SLICE:HEXBUTTONS:SLICES)\n", argv[i]);
+      const char *spec = argv[++i];
+      if (input_count == MAX_INPUT_EVENTS || sscanf(spec, "%llu:%x:%llu", &start, &buttons, &length) != 3) {
+        fprintf(stderr, "voland-cli: bad --input %s (want SLICE:HEXBUTTONS:SLICES, at most %u)\n", spec,
+                MAX_INPUT_EVENTS);
         return EXIT_USAGE;
       }
       inputs[input_count++] = (Input_Event){start, buttons, length};
@@ -779,6 +785,8 @@ static int run(int argc, char **argv) {
       font_path = argv[++i];
     } else if (!strcmp(argv[i], "--frame-skip") && has_value) {
       frame_skip = (uint32_t)strtoul(argv[++i], NULL, 0);
+    } else if (!strcmp(argv[i], "--no-poll-coalescing")) {
+      poll_coalescing = false;
     } else if (!strcmp(argv[i], "--host-cores") && has_value) {
       host_cores = (uint32_t)strtoul(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--snapshot-at") && has_value) {
@@ -849,6 +857,7 @@ static int run(int argc, char **argv) {
     fclose(file);
     return EXIT_LOAD_FAILED;
   }
+  emulator_set_poll_coalescing(&emu, poll_coalescing);
   if (host_cores) {
     const uint32_t cores = emulator_set_host_cores(&emu, host_cores);
     fprintf(stderr, "voland-cli: %u host core(s) for guest threads\n", cores);
@@ -921,6 +930,7 @@ static int run(int argc, char **argv) {
       job.max_slices = max_slices;
       job.trace_start = UINT64_MAX;
       job.host_cores = -1;
+      job.poll_coalescing = -1;
       (void)emulator_set_host_cores(&emu, 0); /* fork() keeps no other thread */
       snapshot_serve(snapshot_dir, &job); /* returns in a job's child */
 #ifdef VOLAND_CLI_VIDEO
@@ -928,6 +938,7 @@ static int run(int argc, char **argv) {
 #endif
       raster3d_restart_workers_after_fork(&emu.renderer);
       if (job.host_cores >= 0) host_cores = (uint32_t)job.host_cores;
+      if (job.poll_coalescing >= 0) emulator_set_poll_coalescing(&emu, job.poll_coalescing != 0);
       if (host_cores)
         fprintf(stderr, "voland-cli: %u host core(s) for guest threads\n", emulator_set_host_cores(&emu, host_cores));
       max_slices = job.max_slices;
@@ -1152,6 +1163,9 @@ static int run(int argc, char **argv) {
   video_vt_report();
 #endif
   if (svc_stats) {
+    fprintf(stderr, "voland-cli: %llu lone yields slept to the next wake, %llu polling yields, %llu coalesced poll sleeps\n",
+            (unsigned long long)emu.scheduler.lone_yields, (unsigned long long)emu.scheduler.polling_yields,
+            (unsigned long long)emu.scheduler.coalesced_polls);
     for (uint32_t i = 0; i < HLE_SVC_COUNT; i++) {
       if (emu.hle.svc_counts[i]) fprintf(stderr, "voland-cli: svc 0x%02x x %llu\n", i, (unsigned long long)emu.hle.svc_counts[i]);
     }

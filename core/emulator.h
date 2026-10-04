@@ -135,6 +135,7 @@ typedef struct Emulator
   int64_t rtc;       /* Unix seconds the next process boots at (emulator_set_rtc) */
   uint32_t frame_skip; /* emulator_set_frame_skip; survives process reloads */
   Parallel *parallel;  /* emulator_set_host_cores; NULL = serial */
+  bool no_poll_coalescing; /* emulator_set_poll_coalescing(false); survives reloads */
   /* GPU mode (emulator_set_gpu_mode): the renderer's stream to the GPU
    * worker, in the layout's gpu_ring region. */
   Gpu_Stream gpu_stream;
@@ -208,6 +209,10 @@ Emulator_Status emulator_run_slice(Emulator *emulator, uint64_t cycle_budget);
  * no longer deterministic. Returns the core count in effect (0 when the
  * build or the backend cannot run in parallel). Call between slices. */
 uint32_t emulator_set_host_cores(Emulator *emulator, uint32_t cores);
+
+/* Poll coalescing (scheduler.h, docs/PARALLEL.md "Polling threads"): on
+ * by default. Off runs the plain scheduler, bit for bit. */
+void emulator_set_poll_coalescing(Emulator *emulator, bool on);
 
 /* Compatibility wrapper: one slice, reported as the backend's exit reason
  * (CPU_EXIT_HALT when no thread ran). With nothing loaded it runs the

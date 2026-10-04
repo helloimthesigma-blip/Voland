@@ -73,6 +73,8 @@ typedef struct Sched_Thread {
   bool paused;              /* svcSetThreadActivity(Paused): never picked until resumed */
   bool on_core;             /* inside backend->run on some host thread (parallel mode, docs/PARALLEL.md) */
   uint32_t last_core;       /* parallel mode: the core it last ran on (affinity) */
+  bool spinning;            /* its last run was a short poll ending in a yield or short sleep (scheduler_alone) */
+  uint64_t poll_wake_at;    /* a coalesced poll sleep: the wake it asked for; 0 = not coalesced */
   uint64_t last_run;        /* round-robin stamp */
 } Sched_Thread;
 
@@ -89,6 +91,14 @@ typedef struct Scheduler {
   uint64_t cycle_remainder; /* sub-tick cycles carried between runs */
   uint64_t run_counter;
   uint64_t wait_counter;
+  uint64_t lone_yields;     /* yields slept to the next wake (scheduler_alone) */
+  uint64_t polling_yields;  /* yields after a short run (marked spinning) */
+  uint64_t coalesced_polls; /* short poll sleeps stretched to the next real event */
+  uint32_t coalesced_waiting; /* threads sleeping a coalesced poll now */
+  /* Poll coalescing (docs/PARALLEL.md "Polling threads"), on by default:
+   * pollers wait for real events instead of re-polling while nothing that
+   * works can run. Off = the plain scheduler, bit for bit. */
+  bool poll_coalescing;
   uint64_t next_thread_id;
   /* Index of the running thread, -1 outside run. In parallel mode it
    * names the thread whose SVC holds the kernel lock (scheduler_kernel_enter). */
@@ -129,6 +139,30 @@ void scheduler_block(Scheduler *sched, Sched_Thread *thread, Wait_Kind kind, uin
 /* Wakes `thread` with `result` in W0 (and leaves the rest of its
  * registers to the caller, who sets e.g. the WaitSynchronization index). */
 void scheduler_wake(Scheduler *sched, Sched_Thread *thread, uint32_t result);
+
+/* Runs this short (in cycles) that end in a yield or a short sleep are
+ * polls: the thread is waiting for work, not doing it (Unity's job
+ * workers: ~2k cycles a turn, then SleepThread(25us)). */
+#define SCHEDULER_SPIN_RUN_CYCLES 16384u
+/* The longest SleepThread treated as a poll interval. */
+#define SCHEDULER_POLL_SLEEP_MAX_NS 100000u
+
+/* SleepThread(ns) by `self` (svc_thread.c): yields and short sleeps after
+ * a short run are polls. With poll coalescing on and nothing but pollers
+ * runnable or on a core, the poller sleeps until the next real event -
+ * another thread's wake or a device event - instead of polling until
+ * then; scheduler_expire_timeouts undoes that the moment anything else can
+ * run, so nothing a working thread enqueues is noticed later than before. */
+void scheduler_poll_sleep(Scheduler *sched, Sched_Thread *self, int64_t ns, uint64_t run_cycles);
+
+/* A yield with nothing else to run (svc_thread.c, SleepThread(0)): true if
+ * no thread but `self` is runnable or on a core - other than threads that
+ * are only spinning themselves (Sched_Thread.spinning: two idle job
+ * workers would otherwise keep each other awake) - and *wake_at is then the
+ * earliest time anything can change - the next timeout or device event,
+ * SCHEDULER_WAIT_FOREVER if none. Sleeping `self` until then is what the
+ * idle jump would do anyway, minus the spinning (docs/PARALLEL.md). */
+bool scheduler_alone(const Scheduler *sched, const Sched_Thread *self, uint64_t *wake_at);
 
 /* `thread` left its core (parallel mode): wakes the WAIT_OFF_CORE waiters on it. */
 void scheduler_wake_off_core_waiters(Scheduler *sched, const Sched_Thread *thread);

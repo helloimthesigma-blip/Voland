@@ -85,20 +85,28 @@ static bool vmm_run_covers(const VMM_Region_Info *info, uint64_t gva, uint64_t s
   return address_region_contains(&run, gva, size);
 }
 
-/* Releases one page's physical backing. Its own borrow scope, not the
+/* One page's guest physical address. Its own borrow scope, not the
  * caller's: vmm's debug borrow cap (VMM_DEBUG_MAX_BORROWS=64, vmm.c)
  * exists to catch a handler that LEAKS borrows, not to size a loop that
  * calls this hundreds of times - scoping tightly here keeps at most one
  * borrow live at a time no matter how many pages the caller walks. */
-static void free_one_page(VMM_Context *vmm, Page_Allocator *pages, uint64_t gva) {
+static uint64_t page_pa_of(VMM_Context *vmm, uint64_t gva) {
   vmm_borrow_scope_begin(vmm);
   void *host_ptr = NULL;
   const Error got = vmm_guest_to_host(vmm, gva, VMM_PAGE_SIZE, VMM_PERM_R, &host_ptr);
-  SWITCH_ASSERT_ALWAYS(error_is_ok(got), "free_one_page: heap page not readable");
-  const uint64_t guest_pa = (uint64_t)(uintptr_t)host_ptr - layout_get()->guest_ram_base;
   vmm_borrow_scope_end(vmm);
-  const Error freed = page_allocator_free(pages, guest_pa, 1);
-  SWITCH_ASSERT_ALWAYS(error_is_ok(freed), "free_one_page: page_allocator_free failed");
+  if (!error_is_ok(got)) log_error("heap release: page 0x%llx unreadable: %s", (unsigned long long)gva, got.message);
+  SWITCH_ASSERT_ALWAYS(error_is_ok(got), "heap release: heap page not readable");
+  return (uint64_t)(uintptr_t)host_ptr - layout_get()->guest_ram_base;
+}
+
+static void free_run(Page_Allocator *pages, uint64_t pa, uint64_t page_count) {
+  const Error freed = page_allocator_free(pages, pa, page_count);
+  if (!error_is_ok(freed)) {
+    /* Leaking the pages is survivable; stopping the game is not. */
+    log_error("heap release: page_allocator_free(pa=0x%llx, %llu pages) failed: %s - pages leaked",
+              (unsigned long long)pa, (unsigned long long)page_count, freed.message);
+  }
 }
 
 /* Releases the physical pages backing [gva, gva + size), then unmaps the
@@ -127,13 +135,21 @@ static void free_and_unmap_heap_range(VMM_Context *vmm, Page_Allocator *pages,
   const Error got = vmm_guest_to_host(vmm, gva, size, VMM_PERM_R, &host_ptr);
   vmm_borrow_scope_end(vmm);
   if (error_is_ok(got)) {
-    const uint64_t guest_pa = (uint64_t)(uintptr_t)host_ptr - layout_get()->guest_ram_base;
-    const Error freed = page_allocator_free(pages, guest_pa, size >> VMM_PAGE_BITS);
-    SWITCH_ASSERT_ALWAYS(error_is_ok(freed), "free_and_unmap_heap_range: page_allocator_free failed");
+    free_run(pages, (uint64_t)(uintptr_t)host_ptr - layout_get()->guest_ram_base, size >> VMM_PAGE_BITS);
   } else {
+    /* Fragmented backing: release maximal physically contiguous runs. */
+    uint64_t run_pa = 0, run_pages = 0;
     for (uint64_t offset = 0; offset < size; offset += VMM_PAGE_SIZE) {
-      free_one_page(vmm, pages, gva + offset);
+      const uint64_t pa = page_pa_of(vmm, gva + offset);
+      if (run_pages && pa == run_pa + (run_pages << VMM_PAGE_BITS)) {
+        run_pages++;
+        continue;
+      }
+      if (run_pages) free_run(pages, run_pa, run_pages);
+      run_pa = pa;
+      run_pages = 1;
     }
+    if (run_pages) free_run(pages, run_pa, run_pages);
   }
   const Error unmapped = vmm_unmap(vmm, gva, size);
   SWITCH_ASSERT_ALWAYS(error_is_ok(unmapped), "free_and_unmap_heap_range: vmm_unmap failed");
@@ -255,13 +271,24 @@ void hle_svc_unmap_physical_memory(HLE_Context *context, CPU_State *cpu_state) {
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
     return;
   }
+  /* Release the backing in maximal physically contiguous runs (page by
+   * page, scattered single frees exhaust the allocator's freelist). */
+  uint64_t run_pa = 0, run_pages = 0;
   for (uint64_t offset = 0; offset < size; offset += VMM_PAGE_SIZE) {
     VMM_Region_Info info;
     if (!error_is_ok(vmm_query(context->vmm, base + offset, &info)) || !info.is_mapped || !(info.perms & VMM_PERM_R))
       continue;
-    free_one_page(context->vmm, context->pages, base + offset);
+    const uint64_t pa = page_pa_of(context->vmm, base + offset);
     (void)vmm_unmap(context->vmm, base + offset, VMM_PAGE_SIZE);
+    if (run_pages && pa == run_pa + (run_pages << VMM_PAGE_BITS)) {
+      run_pages++;
+      continue;
+    }
+    if (run_pages) free_run(context->pages, run_pa, run_pages);
+    run_pa = pa;
+    run_pages = 1;
   }
+  if (run_pages) free_run(context->pages, run_pa, run_pages);
   regs->x[0] = HLE_RESULT_SUCCESS;
 }
 

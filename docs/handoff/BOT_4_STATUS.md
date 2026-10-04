@@ -239,6 +239,73 @@ machine; the screenshot shows the first room):
   one staging buffer (on `local/jit`); batching regions per module is next
   on their list.
 
+**After the JIT agent's threshold-256 / small-callee / staging-buffer
+changes** (bot4 4befdf9 = local/dev 0c5d993, which contains everything in
+c7ac43c; JIT core, `?cores=0`):
+
+| Phase (slices) | Worker s | Virtual s | File reads (s) | wasm modules (MiB, s compiling) | Stream waits (s) |
+|---|---|---|---|---|---|
+| boot | 71.0 | 20.0 | 2.2 | 36,995 (218, 3.8 s) | 0.0 |
+| title | 35.9 | 8.3 | 0.2 | 8,757 (52, 1.7 s) | 0.1 |
+| menus | 104.7 | 34.6 | 0.6 | 10,408 (55, 2.4 s) | 0.0 |
+| New Game → room | 156.8 | 41.3 | 0.1 | 18,141 (102, 5.5 s) | 0.4 |
+| **total** | **368.5** (was 580, and 791–824 before that) | 104 | 3.1 | **74,301 (426 MiB, 13.4 s)** (was 283k, 71 s) | 0.5 |
+
+- **Gameplay right after: 11.10 fps** (12k–13k slices/s; 6.7k over the
+  measured window, which includes a dip). With the interpreter it was
+  3.12.
+- **What remains in menus and New Game** (CDP self time):
+  - JIT-compiled guest code: 77–79%.
+  - `jit_run` 2.4%, `interp_execute` 2%, FP helpers (`round_value`,
+    `exact_add`, `fp_sqrt`, `fp_misc`) about 3%, `jit_helper_simd` 0.5%.
+  - Run-time compiles ("Module"): 2.2–3.4%.
+  - GPU producer: `texture_load` 1.4%, `run_vertices` 0.9%, `sm_run`
+    (Maxwell vertex programs) 1.1%.
+  - `scheduler_tick` 0.7%, `vmm_read_block` 0.5%.
+  - The worker's JS (`runBurst`) 0.5%; idle under 1%; GC 0.1%.
+  - Load time is now guest execution. The virtual-time phase lengths come
+    from the scripted recipe's waits; the emulator runs at 26–33% of real
+    time during them.
+- **Caching compiled code across sessions (coordinator's idea):**
+  - Chromium 149 cannot store a `WebAssembly.Module` in IndexedDB
+    (`DataCloneError: A WebAssembly.Module can not be serialized for
+    storage`; probed). A cross-session cache would have to store the
+    emitted bytes (OPFS/IndexedDB, keyed by guest-code hash + JIT version)
+    and compile them again. That saves the emit, which is small, but not
+    V8's compile.
+  - V8's own wasm code cache works only for `compileStreaming` of
+    HTTP-cached responses of 128 KB or more, and only for TurboFan-tiered
+    code. It would need the cached regions batched into one big module
+    served through the service worker's Cache Storage. I have not verified
+    that it hits.
+  - At 13.4 s (3.6% of load), the bigger, simpler win is **asynchronous
+    compilation**: `WebAssembly.compile` runs on V8 background threads, the
+    block keeps interpreting until its module resolves between bursts, and
+    the worker never blocks. Proposed to the JIT agent.
+
+## Perf tracker (2026-10-04)
+
+- **Tools.**
+  - `platform/web/tools/perf-track.mjs` measures one commit and appends a
+    row to `docs/perf/silksong.csv`; see `docs/perf/README.md`.
+  - It configures with `cmake --preset web --fresh` and records the backend
+    and host cores in effect.
+  - The CPU-normalised columns are renderer CPU seconds per guest second.
+- **Default page vs. `?cores=0` (coordinator's question).**
+  - The logic is right. Every row logs `backend=jit` with 0 host cores, so
+    the JIT defaults to serial (`defaultHostCores()`).
+  - A direct A/B on the same build (c7ac43c, `perf.mjs --web-dir`) gives the
+    same gameplay: 11.07 fps vs. 10.97, and 5.76 vs. 5.80 CPU s per guest
+    second.
+  - **Still unexplained:** both tracker runs of the default config measured
+    7.00 fps in gameplay (8.4–9.4 CPU s per guest second) against 11.8–12.1
+    for `cores=0`. In each pair the default ran first, right after the
+    fresh build. Suspect the order or that first run rather than the page
+    config. Next step: run the pair in the opposite order.
+- **Watcher stopped** (the owner asked to go idle). Restart it with
+  `zsh $SCRATCH/watch-dev.sh` (a scratch script); it
+  polls `local/dev` and runs both configs.
+
 ## Next
 
 - Re-measure load phases once the JIT's threshold and staging changes are

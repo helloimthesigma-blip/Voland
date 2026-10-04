@@ -123,21 +123,28 @@ Error page_allocator_free(Page_Allocator *allocator, uint64_t pa, uint64_t page_
     return OK;
   }
 
-  /* Not adjacent to the cursor: coalesce with at most one existing
-   * freelist entry directly before or after this run, else push a new
-   * entry. No general neighbor search beyond that one check each way -
-   * same minimal-coalescing policy as above. */
+  /* Not adjacent to the cursor: merge with the freelist entries directly
+   * after and before this run (both, when the run fills the gap between
+   * them), else push a new entry. */
+  uint32_t after = UINT32_MAX, before = UINT32_MAX;
   for (uint32_t i = 0; i < allocator->free_run_count; i++) {
-    Page_Run *run = &allocator->free_runs[i];
-    if (run->pa == end) {
-      run->pa = pa;
-      run->page_count += page_count;
-      return OK;
-    }
-    if (run->pa + (run->page_count << VMM_PAGE_BITS) == pa) {
-      run->page_count += page_count;
-      return OK;
-    }
+    const Page_Run *run = &allocator->free_runs[i];
+    if (run->pa == end) after = i;
+    if (run->pa + (run->page_count << VMM_PAGE_BITS) == pa) before = i;
+  }
+  if (before != UINT32_MAX && after != UINT32_MAX) {
+    allocator->free_runs[before].page_count += page_count + allocator->free_runs[after].page_count;
+    allocator->free_runs[after] = allocator->free_runs[--allocator->free_run_count];
+    return OK;
+  }
+  if (after != UINT32_MAX) {
+    allocator->free_runs[after].pa = pa;
+    allocator->free_runs[after].page_count += page_count;
+    return OK;
+  }
+  if (before != UINT32_MAX) {
+    allocator->free_runs[before].page_count += page_count;
+    return OK;
   }
   if (allocator->free_run_count >= PAGE_ALLOCATOR_MAX_FREE_RUNS) {
     return ERR(RESULT_OUT_OF_MEMORY, "page_allocator_free: freelist full");
