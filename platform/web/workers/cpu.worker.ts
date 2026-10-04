@@ -235,18 +235,12 @@ const DEFAULT_HOST_CORES = Math.max(
 /** Cores chosen with ?cores=N (set-host-cores); null = the default. */
 let requestedHostCores: number | null = null;
 
-/** The default for this core: serial under the JIT for now - each core
- * compiles its own code cache, which costs more than the cores win
- * (docs/PARALLEL.md "JIT"). */
-function defaultHostCores(target: SwitchCoreExports): number {
-  return CPU_BACKEND_DISPLAY_NAMES[target._cpu_backend_id_ffi()] === "jit" ? 0 : DEFAULT_HOST_CORES;
-}
 
 /** Poll coalescing (set-poll-coalescing; ?polls=0 turns it off). */
 let pollCoalescing = true;
 
 function applyHostCores(target: SwitchCoreExports): void {
-  const hostCores = requestedHostCores ?? defaultHostCores(target);
+  const hostCores = requestedHostCores ?? DEFAULT_HOST_CORES;
   const inEffect = target._emulator_set_host_cores_ffi(hostCores);
   log("info", `guest threads on ${inEffect === 0 ? "the serial scheduler" : `${inEffect} host core(s)`}`);
 }

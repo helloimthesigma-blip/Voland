@@ -247,10 +247,12 @@ installed them (every wasm thread has its own table). So:
 - **Default and override.** `cpu.worker.ts` applies `DEFAULT_HOST_CORES` on
   every load: 3 (the Switch's application cores), capped at
   `navigator.hardwareConcurrency - 2` and at least 1.
-  - **Under the JIT backend the default is serial (0) for now.** Every
-    core compiles its own JIT code cache, and in the browser 3 cores were
-    about 2.6× slower than serial with the JIT (title screen, 6.6k vs
-    17.3k slices/s). `?cores=N` still forces a count. `?cores=N` on the page URL overrides it through a
+  - The same default applies under the JIT.
+    - Browser, Silksong gameplay recipe, two interleaved pairs: serial
+      14.63 / 14.53 fps vs 3 cores 16.13 / 16.05 fps (+10%).
+    - Node, full recipe: 9.87 vs 16.46 frames per wall second (1.67×), now
+      that poll coalescing lets the cores overlap in 91% of slices (14%
+      before). `?cores=N` on the page URL overrides it through a
   `set-host-cores` message; `?cores=0` is serial.
 - **The CPU worker is Emscripten's main runtime thread.** A core's
   syscalls (stderr, anything else not marked `__proxy: none`) are proxied
