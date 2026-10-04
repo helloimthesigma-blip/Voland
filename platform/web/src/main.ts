@@ -293,9 +293,12 @@ async function boot(): Promise<BootResult | null> {
         if (new URLSearchParams(location.search).get("polls") === "0") {
           cpuWorker.postMessage({ type: "set-poll-coalescing", on: false } satisfies MainToCPUMessage);
         }
-        /* ?free=1: free-running guest cores (prototype). */
-        if (new URLSearchParams(location.search).get("free") === "1") {
-          cpuWorker.postMessage({ type: "set-free-running", on: true } satisfies MainToCPUMessage);
+        /* ?free=N: free-running guest cores (prototype) from scheduler
+         * slice N on (1 = from the start); slice-counted warm-ups and input
+         * recipes then still mean what they did. */
+        const free = new URLSearchParams(location.search).get("free");
+        if (free !== null && /^[0-9]+$/.test(free) && Number(free) > 0) {
+          cpuWorker.postMessage({ type: "set-free-running", fromSlice: Number(free) } satisfies MainToCPUMessage);
         }
         gpuSlot = "ready";
         updateStatus();

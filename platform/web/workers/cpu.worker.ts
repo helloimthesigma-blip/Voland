@@ -238,8 +238,9 @@ let requestedHostCores: number | null = null;
 
 /** Poll coalescing (set-poll-coalescing; ?polls=0 turns it off). */
 let pollCoalescing = true;
-/** Free-running guest cores (set-free-running; ?free=1): one run_for call
- * per burst instead of a loop of slices. */
+/** Free-running guest cores (set-free-running; ?free=N): from slice N on,
+ * one run_for call per burst instead of a loop of slices. 0 = off. */
+let freeFromSlice = 0;
 let freeRunning = false;
 
 function applyHostCores(target: SwitchCoreExports): void {
@@ -284,6 +285,11 @@ function runBurst(): void {
   const deadline = burstStart + BURST_MS;
   let now = burstStart;
   while (now < deadline) {
+    if (!freeRunning && freeFromSlice > 0 && perf.slices >= freeFromSlice - 1) {
+      freeRunning = true;
+      core._emulator_set_free_running_ffi(1);
+      log("info", `free-running guest cores from slice ${perf.slices + 1}`);
+    }
     const status = freeRunning
       ? core._emulator_run_for_ffi(Math.max(1, Math.ceil(deadline - now)), SLICE_CYCLES)
       : core._emulator_run_slice_ffi(SLICE_CYCLES);
@@ -618,7 +624,8 @@ function loadGame(file: File): CPUToMainMessage {
   loadingCore._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
   applyHostCores(loadingCore);
   loadingCore._emulator_set_poll_coalescing_ffi(pollCoalescing ? 1 : 0);
-  loadingCore._emulator_set_free_running_ffi(freeRunning ? 1 : 0);
+  freeRunning = false;
+  loadingCore._emulator_set_free_running_ffi(0);
   withCString(`/${sdName(file.name)}`, (path) => loadingCore._emulator_set_program_path_ffi(path));
   const code = core._emulator_load_program_ffi(BigInt(file.size), randomAslrSeed());
 
@@ -757,9 +764,8 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   }
 
   if (msg.type === "set-free-running") {
-    freeRunning = msg.on;
-    core?._emulator_set_free_running_ffi(freeRunning ? 1 : 0);
-    log("info", `free-running guest cores ${freeRunning ? "on" : "off"}`);
+    freeFromSlice = msg.fromSlice;
+    log("info", freeFromSlice > 0 ? `free-running guest cores from slice ${freeFromSlice}` : "free-running guest cores off");
     return;
   }
 
