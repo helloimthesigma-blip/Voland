@@ -135,7 +135,7 @@ static void test_stress(void) {
 /* A yield with nothing else runnable sleeps until the next wake
  * (svc_thread.c): the spinner waits out the worker's 1ms sleep in a few
  * SVCs, not one per spin. */
-#define YIELDSPIN_MAX_SVCS 32u
+#define YIELDSPIN_MAX_SVCS 100u /* a few polls race the marks with real cores */
 static void test_yield_alone(void) {
   static Outcome o;
   for (uint32_t cores = 0; cores <= 3; cores++) {

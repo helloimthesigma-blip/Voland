@@ -73,6 +73,7 @@ typedef struct Sched_Thread {
   bool paused;              /* svcSetThreadActivity(Paused): never picked until resumed */
   bool on_core;             /* inside backend->run on some host thread (parallel mode, docs/PARALLEL.md) */
   uint32_t last_core;       /* parallel mode: the core it last ran on (affinity) */
+  bool spinning;            /* its last run was a short poll ending in a yield (scheduler_alone) */
   uint64_t last_run;        /* round-robin stamp */
 } Sched_Thread;
 
@@ -89,6 +90,7 @@ typedef struct Scheduler {
   uint64_t cycle_remainder; /* sub-tick cycles carried between runs */
   uint64_t run_counter;
   uint64_t wait_counter;
+  uint64_t lone_yields;     /* yields slept to the next wake (scheduler_alone) */
   uint64_t next_thread_id;
   /* Index of the running thread, -1 outside run. In parallel mode it
    * names the thread whose SVC holds the kernel lock (scheduler_kernel_enter). */
@@ -130,8 +132,14 @@ void scheduler_block(Scheduler *sched, Sched_Thread *thread, Wait_Kind kind, uin
  * registers to the caller, who sets e.g. the WaitSynchronization index). */
 void scheduler_wake(Scheduler *sched, Sched_Thread *thread, uint32_t result);
 
+/* Runs this short (in cycles) that end in a yield are polls: the thread is
+ * waiting for work, not doing it (Unity's job workers: ~2k cycles a turn). */
+#define SCHEDULER_SPIN_RUN_CYCLES 16384u
+
 /* A yield with nothing else to run (svc_thread.c, SleepThread(0)): true if
- * no thread but `self` is runnable or on a core, and *wake_at is then the
+ * no thread but `self` is runnable or on a core - other than threads that
+ * are only spinning themselves (Sched_Thread.spinning: two idle job
+ * workers would otherwise keep each other awake) - and *wake_at is then the
  * earliest time anything can change - the next timeout or device event,
  * SCHEDULER_WAIT_FOREVER if none. Sleeping `self` until then is what the
  * idle jump would do anyway, minus the spinning (docs/PARALLEL.md). */

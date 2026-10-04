@@ -100,7 +100,7 @@ bool scheduler_alone(const Scheduler *sched, const Sched_Thread *self, uint64_t 
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     const Sched_Thread *t = &sched->threads[i];
     if (t == self) continue;
-    if (t->on_core || (t->state == THREAD_STATE_RUNNABLE && !t->paused)) return false;
+    if (!t->spinning && (t->on_core || (t->state == THREAD_STATE_RUNNABLE && !t->paused))) return false;
     if (t->state == THREAD_STATE_WAITING && t->wake_at < earliest) earliest = t->wake_at;
   }
   *wake_at = earliest;
@@ -191,6 +191,7 @@ Scheduler_Status scheduler_finish_run(Scheduler *sched, const CPU_Backend *backe
     if (end > sched->ticks) sched->ticks = end;
   }
   thread->last_run = ++sched->run_counter;
+  if (exit_reason != CPU_EXIT_SVC) thread->spinning = false; /* it ran its budget: real work */
 
   if (exit_reason == CPU_EXIT_FAULT || exit_reason == CPU_EXIT_BREAKPOINT) {
     if (!sched->process_crashed) {
