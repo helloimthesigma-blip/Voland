@@ -45,6 +45,8 @@ export type MainToCPUMessage =
   | { readonly type: "set-gpu-mode"; readonly on: boolean }
   /* Host threads for guest threads (docs/PARALLEL.md; 0 = serial). */
   | { readonly type: "set-host-cores"; readonly cores: number }
+  /* Poll coalescing (docs/PARALLEL.md "Polling threads"); on by default. */
+  | { readonly type: "set-poll-coalescing"; readonly on: boolean }
   | { readonly type: "halt" };
 
 /** A software-keyboard prompt (§12 library applets): a title waits for
