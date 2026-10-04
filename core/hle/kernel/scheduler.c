@@ -18,6 +18,7 @@
 void scheduler_init(Scheduler *sched, const CPU_Backend *backend) {
   memset(sched, 0, sizeof(*sched));
   sched->poll_coalescing = true;
+  sched->time_limit = SCHEDULER_WAIT_FOREVER;
   sched->backend = backend;
   sched->current = -1;
   sched->next_thread_id = 1;
@@ -220,6 +221,17 @@ static int32_t pick(Scheduler *sched, bool affine, uint32_t core) {
 int32_t scheduler_pick(Scheduler *sched) { return pick(sched, false, 0); }
 int32_t scheduler_pick_for_core(Scheduler *sched, uint32_t core) { return pick(sched, true, core); }
 
+/* Jumps time to `target`, or only up to the pacing limit: true if the
+ * target was reached (its event is due). */
+static bool jump_to(Scheduler *sched, uint64_t target) {
+  if (target > sched->time_limit) {
+    if (sched->time_limit > sched->ticks) sched->ticks = sched->time_limit;
+    return false;
+  }
+  if (target > sched->ticks) sched->ticks = target;
+  return true;
+}
+
 Scheduler_Status scheduler_idle(Scheduler *sched) {
   uint64_t earliest = SCHEDULER_WAIT_FOREVER;
   bool alive = false;
@@ -235,12 +247,19 @@ Scheduler_Status scheduler_idle(Scheduler *sched) {
   if (!alive) return SCHEDULER_EXITED;
   if (sched->device_wake_at < earliest) {
     /* A device signals first: jump there; its update runs next slice. */
-    if (sched->device_wake_at > sched->ticks) sched->ticks = sched->device_wake_at;
+    (void)jump_to(sched, sched->device_wake_at);
     return SCHEDULER_IDLE;
   }
-  if (earliest == SCHEDULER_WAIT_FOREVER) return SCHEDULER_DEADLOCK;
-  sched->ticks = earliest;
-  scheduler_expire_timeouts(sched);
+  if (earliest == SCHEDULER_WAIT_FOREVER) {
+    /* Nothing will wake on its own - unless a host-side event (a GPU
+     * fence) does, which pacing waits for in wall time. */
+    if (sched->time_limit != SCHEDULER_WAIT_FOREVER) {
+      (void)jump_to(sched, sched->time_limit);
+      return SCHEDULER_IDLE;
+    }
+    return SCHEDULER_DEADLOCK;
+  }
+  if (jump_to(sched, earliest)) scheduler_expire_timeouts(sched);
   return SCHEDULER_IDLE;
 }
 

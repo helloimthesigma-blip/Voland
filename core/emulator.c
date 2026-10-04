@@ -709,17 +709,26 @@ static uint64_t host_now_ns(void);
 
 /* Wall-clock pacing (emulator.h): move virtual time up to wall time. Runs
  * only while no guest code does (before a slice or a burst). */
+/* How far idle jumps may run ahead of wall time under pacing: about a
+ * quarter of a 60 Hz frame, so a due vsync is not held back needlessly. */
+#define EMULATOR_PACING_LEAD_MS 4u
+
 static void pace(Emulator* emulator) {
-  if (!emulator->pacing) return;
   Scheduler* sched = &emulator->scheduler;
+  if (!emulator->pacing) {
+    sched->time_limit = SCHEDULER_WAIT_FOREVER;
+    return;
+  }
   const uint64_t now = host_now_ns();
   if (!emulator->pacing_origin_ns) {
     emulator->pacing_origin_ns = now;
     emulator->pacing_origin_ticks = sched->ticks;
-    return;
   }
   const uint64_t wall_ticks =
       emulator->pacing_origin_ticks + scheduler_ns_to_ticks(now - emulator->pacing_origin_ns);
+  /* Idle jumps stop at the wall clock (plus a lead): host-side events
+   * such as GPU fences arrive in wall time. */
+  sched->time_limit = wall_ticks + scheduler_ns_to_ticks((uint64_t)EMULATOR_PACING_LEAD_MS * 1000000ull);
   if (wall_ticks <= sched->ticks) return; /* not behind */
   const uint64_t max_jump = scheduler_ns_to_ticks((uint64_t)EMULATOR_PACING_MAX_JUMP_MS * 1000000ull);
   uint64_t behind = wall_ticks - sched->ticks;
@@ -727,6 +736,8 @@ static void pace(Emulator* emulator) {
     behind = max_jump;
     emulator->pacing_origin_ns = now;
     emulator->pacing_origin_ticks = sched->ticks + behind;
+    sched->time_limit = emulator->pacing_origin_ticks +
+                        scheduler_ns_to_ticks((uint64_t)EMULATOR_PACING_LEAD_MS * 1000000ull);
   }
   sched->ticks += behind;
   emulator->paced_ticks += behind;
@@ -736,6 +747,7 @@ void emulator_set_pacing(Emulator* emulator, bool on) {
   if (!emulator) return;
   emulator->pacing = on;
   emulator->pacing_origin_ns = 0;
+  if (!on) emulator->scheduler.time_limit = SCHEDULER_WAIT_FOREVER;
 }
 
 void emulator_pacing_resync(Emulator* emulator) {

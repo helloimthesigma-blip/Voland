@@ -186,8 +186,17 @@ makes virtual time keep up with wall time.
   game never skips a big chunk at once.
 - **Resync.** The origin also resyncs at run start and on resume, so
   paused time does not count.
-- **Never slows the guest down.** Virtual time only moves forward and stays
-  monotonic; a guest running ahead of wall time is left alone.
+- **Waiting is paced too.** Idle jumps, when every guest thread waits, stop
+  at the wall clock plus a 4 ms lead (`Scheduler.time_limit`); the slice
+  then returns idle until wall time catches up.
+  - Without this, waiting raced ahead of wall time (1.5× in Silksong). The
+    guest's timeouts on host-side events, such as GPU fences signalled by
+    the GPU worker in wall time, expired before the events could arrive.
+    The game stopped presenting (0 fps) while virtual time kept running.
+  - With nothing to wake on its own, a paced run waits rather than
+    reporting a deadlock, since a host-side event may still come.
+  - Guest code that runs ahead of wall time is not slowed down; virtual
+    time only moves forward and stays monotonic.
 - **Deterministic runs.** The core default, the CLI and the tests stay
   unpaced, so they remain deterministic and the goldens are unchanged.
 

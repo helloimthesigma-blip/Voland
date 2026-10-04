@@ -264,6 +264,21 @@ static void test_pacing(void) {
       if (paced) CHECK(ticks * 10u >= wall_ticks * 8u); /* keeps up (the first slice sets the origin) */
       guest_shutdown(&g_run);
     }
+    /* Waiting is paced too: a program that sleeps 11 ms must not race
+     * ahead of wall time (host-side events, e.g. GPU fences, arrive in wall
+     * time); unpaced it finishes in well under a millisecond. */
+    guest_boot(&g_run, TEST_BACKEND, k_programs[6].code, k_programs[6].size); /* polls: sleeps 1 + 10 ms */
+    if (cores) CHECK(emulator_set_host_cores(&g_run.emu, cores) == cores);
+    emulator_set_pacing(&g_run.emu, true);
+    const uint64_t t0 = wall_ns();
+    CHECK(guest_run(&g_run, 997, MAX_SLICES) == EMULATOR_EXITED);
+    const uint64_t wall_ticks = scheduler_ns_to_ticks(wall_ns() - t0);
+    const uint64_t ticks = g_run.emu.scheduler.ticks;
+    CHECK(strstr(g_run.output, k_programs[6].expected) != NULL);
+    printf("[parallel_test] paced waits, %u core(s): %llu virtual ticks for %llu wall ticks\n", cores,
+           (unsigned long long)ticks, (unsigned long long)wall_ticks);
+    CHECK(ticks <= wall_ticks + scheduler_ns_to_ticks(6000000ull)); /* the 4 ms lead, plus 2 ms slack */
+    guest_shutdown(&g_run);
   }
 }
 

@@ -309,6 +309,7 @@ static void run_free_on_core(Parallel *p, Core *core) {
     if (index < 0) {
       if (p->busy == 0 && p->free_status == SCHEDULER_RAN) {
         /* Nothing runnable anywhere: the serial idle step, then devices. */
+        const uint64_t before = sched->ticks;
         const Scheduler_Status idle = scheduler_idle(sched);
         if (idle == SCHEDULER_EXITED || idle == SCHEDULER_DEADLOCK) {
           stop_free_run(p, idle);
@@ -316,6 +317,9 @@ static void run_free_on_core(Parallel *p, Core *core) {
         }
         if (p->devices && sched->ticks >= sched->device_wake_at) p->devices(p->devices_ctx);
         pthread_cond_broadcast(&p->core_cv);
+        /* Held at the pacing limit (wall time): wait for work or the end of
+         * the burst instead of spinning on the lock. */
+        if (sched->ticks == before && scheduler_pick(sched) < 0) wait_core_cv(p, &core->time.idle_ns);
         continue;
       }
       wait_core_cv(p, &core->time.idle_ns);
