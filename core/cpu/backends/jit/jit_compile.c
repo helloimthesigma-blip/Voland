@@ -66,29 +66,33 @@ enum {
   L_FA = 50,   /* lazy flags: AddWithCarry's operands and result, width-masked */
   L_FB = 51,
   L_FR = 52,
-  L_LAST_I64 = 52,
-  L_NZCV = 53,
-  L_STATUS = 54,
-  L_IDX = 55,    /* the region target to dispatch to */
-  L_HINSN = 56,  /* the handlers' instruction word */
-  L_RESUME = 57, /* $helper: the region block to resume in */
-  L_PASS = 58,   /* store-exclusive: did the monitor pass */
-  L_LAST_I32 = 58,
-  L_FS = 59,     /* FP fast paths: f32 */
-  L_FS2 = 60,
-  L_FS3 = 61,
-  L_LAST_F32 = 61,
-  L_FD = 62,     /* ...f64 */
-  L_FD2 = 63,
-  L_FD3 = 64,
-  L_LAST_F64 = 64,
-  L_VA = 65,     /* vector FP fast paths: v128 */
-  L_VB = 66,
-  L_VD = 67,
-  L_VR = 68,
-  L_VR2 = 69,
-  L_VT = 70,
-  L_LAST_V128 = 70,
+  L_TLB_RBASE = 53, /* one-entry translation caches (per function): the guest page last read... */
+  L_TLB_RDELTA = 54, /* ...and host - guest for it */
+  L_TLB_WBASE = 55, /* the same for writes */
+  L_TLB_WDELTA = 56,
+  L_LAST_I64 = 56,
+  L_NZCV = 57,
+  L_STATUS = 58,
+  L_IDX = 59,    /* the region target to dispatch to */
+  L_HINSN = 60,  /* the handlers' instruction word */
+  L_RESUME = 61, /* $helper: the region block to resume in */
+  L_PASS = 62,   /* store-exclusive: did the monitor pass */
+  L_LAST_I32 = 62,
+  L_FS = 63,     /* FP fast paths: f32 */
+  L_FS2 = 64,
+  L_FS3 = 65,
+  L_LAST_F32 = 65,
+  L_FD = 66,     /* ...f64 */
+  L_FD2 = 67,
+  L_FD3 = 68,
+  L_LAST_F64 = 68,
+  L_VA = 69,     /* vector FP fast paths: v128 */
+  L_VB = 70,
+  L_VD = 71,
+  L_VR = 72,
+  L_VR2 = 73,
+  L_VT = 74,
+  L_LAST_V128 = 74,
 };
 #define I64_LOCALS (L_LAST_I64 - L_STATE)
 #define I32_LOCALS (L_LAST_I32 - L_LAST_I64)
@@ -1595,7 +1599,50 @@ static bool shared_walk(void) {
   return choice != 0;
 }
 
+/* The full walk (below) behind a one-entry translation cache per
+ * permission, in locals: an access within the page last translated for
+ * the same permission is `host = gva + delta`. Exact in serial mode -
+ * mappings only change in SVCs, which leave compiled code, and each call
+ * starts with an empty cache - so it is compiled out when guest threads
+ * run on several host threads (another core may remap mid-function). */
+#define TLB_EMPTY ((uint64_t)1 << 63) /* a page base no address matches */
+static bool g_no_tlb_set, g_no_tlb;
+static void emit_walk_full(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow);
 static void emit_walk(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) {
+  if (!g_no_tlb_set) {
+    g_no_tlb = getenv("JIT_NO_TLB") != NULL;
+    g_no_tlb_set = true;
+  }
+  if (cpu_multicore() || g_no_tlb) {
+    emit_walk_full(c, size, perm, slow);
+    return;
+  }
+  const bool write = perm == VMM_PERM_W;
+  const uint32_t base = write ? L_TLB_WBASE : L_TLB_RBASE, delta = write ? L_TLB_WDELTA : L_TLB_RDELTA;
+  lget(c, L_ADDR);
+  lget(c, base);
+  op(c, WASM_OP_I64_SUB);
+  i64c(c, VMM_PAGE_SIZE - size + 1u); /* in the page, and the access does not cross it */
+  op(c, WASM_OP_I64_LT_U);
+  open_if(c, WASM_BLOCK_VOID);
+  lget(c, L_ADDR);
+  lget(c, delta);
+  op(c, WASM_OP_I64_ADD);
+  lset(c, L_HOST);
+  else_(c);
+  emit_walk_full(c, size, perm, slow);
+  lget(c, L_ADDR);
+  i64c(c, ~(uint64_t)VMM_PAGE_OFFSET_MASK);
+  op(c, WASM_OP_I64_AND);
+  lset(c, base);
+  lget(c, L_HOST);
+  lget(c, L_ADDR);
+  op(c, WASM_OP_I64_SUB);
+  lset(c, delta);
+  end_(c);
+}
+
+static void emit_walk_full(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) {
   if (shared_walk()) {
     lget(c, L_L1);
     lget(c, L_ADDR);
@@ -3652,6 +3699,10 @@ static void emit_function(Ctx *c) {
   }
   state_load64(c, OFF_L1);
   lset(c, L_L1);
+  i64c(c, TLB_EMPTY);
+  lset(c, L_TLB_RBASE);
+  i64c(c, TLB_EMPTY);
+  lset(c, L_TLB_WBASE);
   reload(c);
   i64c(c, c->blocks[0].length);
   lset(c, L_CYC);

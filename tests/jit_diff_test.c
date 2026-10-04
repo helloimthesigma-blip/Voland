@@ -575,7 +575,12 @@ int main(int argc, char **argv) {
   CHECK(g_vmm != NULL);
   CHECK_OK(vmm_map(g_vmm, CODE_GVA, CODE_PA, VMM_PAGE_SIZE, VMM_PERM_RX));
   CHECK_OK(vmm_map(g_vmm, CODE2_GVA, CODE2_PA, VMM_PAGE_SIZE, VMM_PERM_RX));
-  CHECK_OK(vmm_map(g_vmm, DATA_GVA, DATA_PA, DATA_BYTES, VMM_PERM_RW));
+  /* Data pages in reverse physical order: a page-crossing access that
+   * wrongly kept going in host memory reads the wrong bytes. */
+  for (uint64_t page = 0; page < DATA_BYTES / VMM_PAGE_SIZE; page++) {
+    const uint64_t physical = DATA_PA + (DATA_BYTES / VMM_PAGE_SIZE - 1u - page) * VMM_PAGE_SIZE;
+    CHECK_OK(vmm_map(g_vmm, DATA_GVA + page * VMM_PAGE_SIZE, physical, VMM_PAGE_SIZE, VMM_PERM_RW));
+  }
   g_ref_cpu = &CPU_BACKEND_INTERPRETER;
   g_jit_cpu = &CPU_BACKEND_JIT;
   jit_set_hot_threshold(1);

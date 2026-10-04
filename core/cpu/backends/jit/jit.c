@@ -39,6 +39,7 @@
 #ifdef __EMSCRIPTEN__
 #include <emscripten.h>
 #include <emscripten/heap.h>
+#include <emscripten/threading.h>
 #endif
 
 #define JIT_CACHE_ENTRIES (1u << JIT_CACHE_BITS)
@@ -230,6 +231,9 @@ static void dump_code(uint64_t pc, uint64_t start, const uint32_t *words, uint32
 /* Installing modules.                                                 */
 /* ------------------------------------------------------------------ */
 
+/* Asynchronous compilations requested / completed (browser CPU worker). */
+static uint32_t g_async_requested, g_async_completed;
+
 #ifdef __EMSCRIPTEN__
 EM_JS_DEPS(voland_jit, "$addFunction,$removeFunction")
 
@@ -268,6 +272,52 @@ EM_JS(int64_t, jit_js_install,
 
 EM_JS(void, jit_js_remove, (int64_t index), { removeFunction(Number(index)); })
 
+/* Asynchronous compilation (browser CPU worker only): V8 compiles on its
+ * background threads while the block keeps running in the interpreter;
+ * the promise resolves between the worker's bursts, instantiates, and
+ * queues (id, table index) for jit_js_take_ready. */
+EM_JS(void, jit_js_compile_async,
+      (const uint8_t *bytes, size_t length, uint32_t id, void *interpret, void *read, void *store, void *write,
+       void *simd), {
+  const start = Number(bytes);
+  const copy = HEAPU8.slice(start, start + Number(length));
+  const ready = (globalThis.volandJitReady = globalThis.volandJitReady || []);
+  WebAssembly.compile(copy).then(
+      (module) => {
+        const instance = new WebAssembly.Instance(module, {
+          env: {
+            memory: wasmMemory,
+            table: wasmTable,
+            interpret: wasmTable.get(interpret),
+            read: wasmTable.get(read),
+            store: wasmTable.get(store),
+            write: wasmTable.get(write),
+            simd: wasmTable.get(simd),
+          },
+        });
+        ready.push(id, addFunction(instance.exports.b, 'ip'));
+      },
+      (error) => {
+        console.error('[jit] module rejected:', error);
+        ready.push(id, 0);
+      });
+})
+
+EM_JS(uint32_t, jit_js_take_ready, (uint32_t *out, uint32_t max_pairs), {
+  const ready = globalThis.volandJitReady;
+  if (!ready || ready.length === 0) return 0;
+  const count = Math.min(max_pairs, ready.length / 2);
+  const base = Number(out) / 4;
+  for (let i = 0; i < 2 * count; i++) HEAPU32[base + i] = ready[i];
+  ready.splice(0, 2 * count);
+  return count;
+})
+
+/* In a browser (not Node, whose CLI loop never yields to the event loop). */
+EM_JS(int, jit_js_event_loop_turns, (void), {
+  return (typeof process === 'undefined' || !process.versions || !process.versions.node) ? 1 : 0;
+})
+
 static uint64_t install(const uint8_t *bytes, uint32_t length) {
   return (uint64_t)jit_js_install(bytes, length, (void *)jit_helper_interpret, (void *)jit_helper_read,
                                   (void *)jit_helper_store, (void *)jit_helper_write, (void *)jit_helper_simd);
@@ -275,6 +325,28 @@ static uint64_t install(const uint8_t *bytes, uint32_t length) {
 static void uninstall(uint64_t function) { jit_js_remove((int64_t)function); }
 static uint64_t memory_pages(void) { return (uint64_t)emscripten_get_heap_size() / WASM_PAGE_BYTES; }
 static bool can_install(void) { return true; }
+static void install_async(const uint8_t *bytes, uint32_t length, uint32_t id) {
+  jit_js_compile_async(bytes, length, id, (void *)jit_helper_interpret, (void *)jit_helper_read,
+                       (void *)jit_helper_store, (void *)jit_helper_write, (void *)jit_helper_simd);
+}
+static uint32_t take_ready(uint32_t *pairs, uint32_t max_pairs) { return jit_js_take_ready(pairs, max_pairs); }
+/* Only the thread that yields between bursts (the CPU worker's own) can
+ * see a promise resolve; parallel cores compile synchronously. */
+/* Safety net: if compilations are requested but none ever completes
+ * (the event loop is not turning after all), go synchronous for good. */
+#define JIT_ASYNC_GIVE_UP 512u
+static bool g_async_disabled;
+static bool async_compile_possible(void) {
+  static int browser = -1;
+  if (browser < 0) browser = jit_js_event_loop_turns();
+  if (g_async_disabled) return false;
+  if (g_async_completed == 0 && g_async_requested >= JIT_ASYNC_GIVE_UP) {
+    g_async_disabled = true;
+    log_warn("[jit] asynchronous compilation never completed; compiling synchronously");
+    return false;
+  }
+  return browser && emscripten_is_main_runtime_thread();
+}
 #else
 static uint64_t install(const uint8_t *bytes, uint32_t length) {
   (void)bytes;
@@ -284,6 +356,17 @@ static uint64_t install(const uint8_t *bytes, uint32_t length) {
 static void uninstall(uint64_t function) { (void)function; }
 static uint64_t memory_pages(void) { return 0; }
 static bool can_install(void) { return false; } /* no wasm engine natively */
+static void install_async(const uint8_t *bytes, uint32_t length, uint32_t id) {
+  (void)bytes;
+  (void)length;
+  (void)id;
+}
+static uint32_t take_ready(uint32_t *pairs, uint32_t max_pairs) {
+  (void)pairs;
+  (void)max_pairs;
+  return 0;
+}
+static bool async_compile_possible(void) { return false; }
 #endif
 
 /* ------------------------------------------------------------------ */
@@ -483,10 +566,79 @@ uint32_t jit_helper_store(Jit_State *state, uint64_t address, uint32_t shape, ui
 /* Compilation.                                                        */
 /* ------------------------------------------------------------------ */
 
+/* Asynchronous compilations in flight (CPU worker thread only). */
+#define JIT_PENDING_SLOTS 1024u
+typedef struct Jit_Pending {
+  uint32_t id; /* 0 = free */
+  uint64_t pc;
+  Jit_Compiled compiled;
+  uint64_t hash;
+  bool multicore;
+} Jit_Pending;
+static Jit_Pending g_pending[JIT_PENDING_SLOTS];
+static uint32_t g_next_pending_id = 1;
+
+/* Fills `e` with a compiled region for `pc`. */
+static void install_entry(Jit_Thread *t, Jit_Entry *e, uint64_t pc, uint64_t generation, uint64_t function,
+                          const Jit_Compiled *compiled, uint64_t hash, bool multicore) {
+  if (e->function) {
+    uninstall(e->function);
+    t->stats.evictions++;
+  }
+  e->pc = pc;
+  e->generation = generation;
+  e->function = function;
+  e->length = compiled->instructions;
+  e->range_count = compiled->range_count;
+  memcpy(e->ranges, compiled->ranges, sizeof(e->ranges));
+  e->entries = 0;
+  e->multicore = multicore;
+  e->code_hash = hash;
+  e->pending = 0;
+  t->stats.blocks_compiled++;
+  t->stats.region_blocks += compiled->blocks;
+  t->stats.module_bytes += compiled->module_bytes;
+}
+
+/* Installs asynchronous compilations that have finished, if the code they
+ * were compiled from is still what is mapped (and nothing replaced them). */
+#define JIT_READY_BATCH 64u
+static void finish_pending(Jit_Thread *t, const Interp_State *s, uint64_t generation) {
+  uint32_t pairs[2u * JIT_READY_BATCH];
+  for (;;) {
+    const uint32_t count = take_ready(pairs, JIT_READY_BATCH);
+    for (uint32_t i = 0; i < count; i++) {
+      const uint32_t id = pairs[2u * i];
+      const uint64_t function = pairs[2u * i + 1u];
+      g_async_completed++;
+      Jit_Pending *p = &g_pending[id % JIT_PENDING_SLOTS];
+      if (!function) {
+        t->stats.compile_failures++;
+        if (p->id == id) p->id = 0;
+        continue;
+      }
+      Jit_Entry *e = p->id == id ? &t->cache[jit_cache_index(p->pc)] : NULL;
+      uint64_t hash;
+      if (!e || e->pc != p->pc || e->pending != id || p->multicore != cpu_multicore() ||
+          !ranges_hash(s, p->compiled.ranges, p->compiled.range_count, &hash) || hash != p->hash) {
+        uninstall(function); /* superseded or stale */
+        if (e && e->pending == id) e->pending = 0;
+      } else {
+        install_entry(t, e, p->pc, generation, function, &p->compiled, p->hash, p->multicore);
+      }
+      if (p->id == id) p->id = 0;
+    }
+    if (count < JIT_READY_BATCH) return;
+  }
+}
+
 /* Compiles the block at `pc` into its cache slot (evicting whatever is
  * there). */
 static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t generation) {
   if (!block_code(s, pc)) return;
+  const bool async = async_compile_possible();
+  Jit_Entry *slot = &t->cache[jit_cache_index(pc)];
+  if (async && slot->pc == pc && slot->pending) return; /* already on its way */
   const Jit_Code_Source source = {source_page_code, source_peek64, (void *)(uintptr_t)s};
   Jit_Link link;
   link.cache_address = (uint64_t)(uintptr_t)t->cache;
@@ -514,28 +666,36 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
     t->stats.compile_failures++;
     return;
   }
+  if (async) {
+    uint32_t id = g_next_pending_id++;
+    if (id == 0) id = g_next_pending_id++; /* 0 means "none" */
+    Jit_Pending *p = &g_pending[id % JIT_PENDING_SLOTS];
+    p->id = id; /* a slot still in flight is simply abandoned */
+    p->pc = pc;
+    p->compiled = compiled;
+    p->hash = hash;
+    p->multicore = cpu_multicore();
+    /* The slot now waits for this pc (whatever compiled code was there stays usable until replaced). */
+    if (slot->pc != pc) {
+      if (slot->function) {
+        uninstall(slot->function);
+        t->stats.evictions++;
+      }
+      slot->function = 0;
+      slot->pc = pc;
+    }
+    slot->pending = id;
+    t->stats.async_compiles++;
+    g_async_requested++;
+    install_async(t->module, compiled.module_bytes, id);
+    return;
+  }
   const uint64_t function = install(t->module, compiled.module_bytes);
   if (!function) {
     t->stats.compile_failures++;
     return;
   }
-  Jit_Entry *e = &t->cache[jit_cache_index(pc)];
-  if (e->function) {
-    uninstall(e->function);
-    t->stats.evictions++;
-  }
-  e->pc = pc;
-  e->generation = generation;
-  e->function = function;
-  e->length = compiled.instructions;
-  e->range_count = compiled.range_count;
-  memcpy(e->ranges, compiled.ranges, sizeof(e->ranges));
-  e->entries = 0;
-  e->multicore = cpu_multicore();
-  e->code_hash = hash;
-  t->stats.blocks_compiled++;
-  t->stats.region_blocks += compiled.blocks;
-  t->stats.module_bytes += compiled.module_bytes;
+  install_entry(t, slot, pc, generation, function, &compiled, hash, cpu_multicore());
 }
 
 /* The compiled block for `pc`, valid in `generation`, or NULL. A block
@@ -575,6 +735,7 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
   if (!t || !interp_predecode_enabled() || !can_install()) {
     return CPU_BACKEND_INTERPRETER.run(state, cycle_budget);
   }
+  if (async_compile_possible()) finish_pending(t, s, interp_code_generation());
   s->cycles_consumed = 0;
   s->exclusive_valid = false; /* a potential context switch (§7) */
   j->cycle_budget = cycle_budget;
