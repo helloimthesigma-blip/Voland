@@ -149,7 +149,8 @@ static uint32_t gen_branch(void) {
   }
 }
 static uint32_t gen_system(void) {
-  switch (pick(8)) {
+  static const uint32_t crms[6] = {10, 11, 12, 14, 13, 5}; /* DC CVAC/CVAU/CVAP/CIVAC; 13: undefined; IC IVAU */
+  switch (pick(9)) {
   case 0: return 0xD503201Fu;                                   /* NOP */
   case 1: return 0xD5033BBFu;                                   /* DMB ISH */
   case 2: return 0xD503305Fu;                                   /* CLREX */
@@ -157,6 +158,8 @@ static uint32_t gen_system(void) {
   case 4: return 0xD51B4200u | reg();                           /* MSR NZCV, xN */
   case 5: return 0xD53BD040u | dst();                           /* MRS xN, TPIDR_EL0 */
   case 6: return pick(2) ? 0xD53BE040u | dst() : 0xD50B7420u | (pick(4) ? 20u + pick(4) : reg()); /* MRS CNTVCT / DC ZVA */
+  case 7: /* SYS #3, C7, Cm, #op2, xN: cache maintenance by VA (op2 != 1: undefined) */
+    return 0xD50B7000u | (crms[pick(6)] << 8) | ((pick(4) ? 1u : pick(8)) << 5) | reg();
   default: return 0xD51BD040u | reg();                          /* MSR TPIDR_EL0, xN */
   }
 }
