@@ -47,13 +47,11 @@ adjacent.
    empty. **Mod repos: mechanism only** — no shipped/curated repos, no CORS
    proxy, and no host-side plugin execution (JS/wasm/UI). Mods are
    guest-side data only (§19).
-10. **Ballistic stays off-limits; a homegrown JIT is unlocked (this fork).**
-    `core/cpu/backends/ballistic/**` and `recompiler/` are still not to be
-    touched, and Ballistic's IR/headers are not used. The owner of this
-    private fork lifted the rest of this rule on 2026-10-03: Voland's own
-    ARM64 -> WebAssembly JIT (`core/cpu/backends/jit/`) and a WebGPU
-    renderer are the speed path. The interpreter remains the reference
-    every JIT block is differentially tested against.
+10. **The JIT is Voland's own.** The speed path is the ARM64 -> WebAssembly
+    JIT in `core/cpu/backends/jit/` (docs/JIT.md) plus the WebGPU renderer.
+    `core/cpu/backends/ballistic/**` and `recompiler/` are not touched and
+    Ballistic's IR/headers are not used. The interpreter remains the
+    reference every JIT block is differentially tested against.
 
 ## Workflow
 
@@ -97,7 +95,7 @@ ctest --preset native-noop
 cmake --preset web && cmake --build --preset web
 
 # Web platform
-npm ci && npm run typecheck && npm test
+npx pnpm@12.8.1 install --frozen-lockfile && npm run typecheck && npm test
 npm run e2e     # headless Chrome: boots, asserts crossOriginIsolated,
                 # asserts the full memory allocation succeeds
 ```

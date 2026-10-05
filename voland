@@ -1,0 +1,180 @@
+#!/usr/bin/env bash
+# Voland launcher: builds what is missing and starts the emulator.
+#
+#   ./voland            build (if needed) and open the web app in your browser
+#   ./voland dev        same, but with Vite's live-reloading dev server
+#   ./voland build      build everything, start nothing
+#   ./voland cli ARGS   build and run the native command-line runner
+#                       (e.g. ./voland cli run game.nca --backend interpreter)
+#   ./voland test       run the native and web test suites
+#
+# Needs: CMake >= 3.24, Ninja, Node.js >= 22.6, a C compiler, and (for the
+# web app) the Emscripten SDK >= 6.0.9. If no Emscripten is found, the
+# launcher offers to install it into .emsdk/ inside this checkout.
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WEB="$ROOT/platform/web"
+EMSDK_VERSION="6.0.10"
+PNPM="pnpm@12.8.1"
+PORT="${VOLAND_PORT:-5174}"
+
+say()  { printf '\033[1m==>\033[0m %s\n' "$*"; }
+die()  { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
+have() { command -v "$1" >/dev/null 2>&1; }
+
+install_hint() {
+  case "$(uname -s)" in
+    Darwin) echo "  brew install $1" ;;
+    Linux)  echo "  sudo apt install $1   (or your distribution's package manager)" ;;
+    *)      echo "  install $1 and make sure it is on PATH" ;;
+  esac
+}
+
+need_tools() {
+  local missing=0
+  for tool in "$@"; do
+    if ! have "$tool"; then
+      echo "missing: $tool"
+      case "$tool" in
+        ninja) install_hint ninja ;;
+        node)  echo "  https://nodejs.org (version 22.6 or newer)" ;;
+        *)     install_hint "$tool" ;;
+      esac
+      missing=1
+    fi
+  done
+  [ "$missing" = 0 ] || die "install the tools above, then run ./voland again"
+  if have node; then
+    local major minor
+    IFS=. read -r major minor _ <<<"$(node --version | sed 's/^v//')"
+    if [ "$major" -lt 22 ] || { [ "$major" = 22 ] && [ "$minor" -lt 6 ]; }; then
+      die "Node.js $(node --version) is too old; Voland needs 22.6 or newer"
+    fi
+  fi
+}
+
+# Puts emcc on PATH: an already-activated SDK, $EMSDK, ~/emsdk, or ./.emsdk.
+find_emsdk() {
+  if have emcc && [ -n "${EMSDK:-}" ]; then return 0; fi
+  local dir
+  for dir in "${EMSDK:-}" "$HOME/emsdk" "$ROOT/.emsdk"; do
+    if [ -n "$dir" ] && [ -f "$dir/emsdk_env.sh" ]; then
+      # shellcheck disable=SC1091
+      source "$dir/emsdk_env.sh" >/dev/null 2>&1
+      have emcc && return 0
+    fi
+  done
+  return 1
+}
+
+install_emsdk() {
+  echo "The web app is compiled with the Emscripten SDK, which was not found."
+  echo "It can be installed into $ROOT/.emsdk (about 1 GB download, used only by Voland)."
+  if [ -t 0 ]; then
+    read -r -p "Install Emscripten $EMSDK_VERSION now? [y/N] " answer
+  else
+    answer=n
+  fi
+  case "$answer" in
+    y|Y|yes) ;;
+    *) die "Emscripten is required for the web app. Install it (https://emscripten.org/docs/getting_started/downloads.html) or re-run ./voland and answer y." ;;
+  esac
+  have git || die "git is required to install Emscripten"
+  git clone --depth 1 https://github.com/emscripten-core/emsdk.git "$ROOT/.emsdk"
+  "$ROOT/.emsdk/emsdk" install "$EMSDK_VERSION"
+  "$ROOT/.emsdk/emsdk" activate "$EMSDK_VERSION"
+  find_emsdk || die "Emscripten install finished but emcc is still not usable"
+}
+
+build_core_web() {
+  find_emsdk || install_emsdk
+  say "Building the emulator core for the web (first build takes a few minutes)"
+  if [ ! -f "$ROOT/build/web/build.ninja" ]; then
+    (cd "$ROOT" && cmake --preset web >/dev/null)
+  fi
+  (cd "$ROOT" && cmake --build --preset web)
+}
+
+install_web_deps() {
+  if [ ! -d "$WEB/node_modules/.pnpm" ] || [ "$WEB/pnpm-lock.yaml" -nt "$WEB/node_modules/.modules.yaml" ]; then
+    say "Installing web dependencies"
+    (cd "$WEB" && npx --yes "$PNPM" install --frozen-lockfile)
+  fi
+}
+
+open_browser() {
+  local url="$1"
+  case "$(uname -s)" in
+    Darwin) open "$url" >/dev/null 2>&1 || true ;;
+    Linux)  have xdg-open && xdg-open "$url" >/dev/null 2>&1 || true ;;
+  esac
+}
+
+# Starts a server, opens the browser once it answers, and waits on the server.
+serve() {
+  local url="$1"; shift
+  say "Starting Voland at $url  (Ctrl+C to stop)"
+  echo "    Use Chrome or Edge (WebGPU + 64-bit WebAssembly). Load your decrypted .nca from the page."
+  (cd "$WEB" && "$@") &
+  local server=$!
+  trap 'kill "$server" 2>/dev/null || true' EXIT INT TERM
+  local i
+  for i in $(seq 1 60); do
+    if curl -fsS -o /dev/null "$url" 2>/dev/null; then open_browser "$url"; break; fi
+    sleep 0.5
+  done
+  wait "$server"
+}
+
+build_cli() {
+  need_tools cmake ninja
+  if [ ! -f "$ROOT/build/native-release/build.ninja" ]; then
+    (cd "$ROOT" && cmake --preset native-release >/dev/null)
+  fi
+  (cd "$ROOT" && cmake --build --preset native-release) >&2
+}
+
+cmd="${1:-start}"
+[ $# -gt 0 ] && shift
+case "$cmd" in
+  start|web)
+    need_tools cmake ninja node curl
+    build_core_web
+    install_web_deps
+    say "Building the web app"
+    (cd "$WEB" && npm run build --silent)
+    serve "http://localhost:$PORT/" npx vite preview --port "$PORT" --strictPort
+    ;;
+  dev)
+    need_tools cmake ninja node curl
+    build_core_web
+    install_web_deps
+    serve "http://localhost:5173/" npx vite --port 5173 --strictPort
+    ;;
+  build)
+    need_tools cmake ninja node
+    build_core_web
+    install_web_deps
+    (cd "$WEB" && npm run build --silent)
+    build_cli
+    say "Built: web app in platform/web/dist, CLI at build/native-release/platform/cli/voland-cli"
+    ;;
+  cli)
+    build_cli
+    exec "$ROOT/build/native-release/platform/cli/voland-cli" "$@"
+    ;;
+  test)
+    need_tools cmake ninja node
+    (cd "$ROOT" && cmake --preset native-noop >/dev/null && cmake --build --preset native-noop && ctest --preset native-noop)
+    build_core_web
+    install_web_deps
+    (cd "$WEB" && npm run typecheck && npm test && npm run e2e)
+    ;;
+  -h|--help|help)
+    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    ;;
+  *)
+    die "unknown command '$cmd' (try ./voland help)"
+    ;;
+esac

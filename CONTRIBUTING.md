@@ -41,10 +41,12 @@ Minimum tool versions are tracked in [`global.json`](global.json):
 | Clang | ≥16 |
 | Emscripten (emsdk) | ≥6.0.9 — the version the §24 flag spellings (`-m64`, `-pthread`) are verified against; older releases are unsupported and CMake refuses them |
 | Node.js | ≥22.6 (required for `--experimental-strip-types`, used by `npm run test`) |
-| pnpm | ≥9 |
+| pnpm | 12.x (run through `npx pnpm@12.8.1`; no global install needed) |
 
-For the web build, install and activate the Emscripten SDK, then source its
-environment script before configuring CMake:
+The quickest setup is `./voland` at the repository root: it checks these
+tools, offers to install Emscripten into `.emsdk/`, builds and starts the
+app. To set things up by hand, install and activate the Emscripten SDK, then
+source its environment script before configuring CMake:
 
 ```bash
 git clone https://github.com/emscripten-core/emsdk.git
@@ -150,8 +152,10 @@ summarized:
 9. No aggregation servers, no cloud cache, no telemetry, no code that
    connects to Nintendo's servers or ships Nintendo endpoints/DNS
    names/certificates (§1.6, §15, §20). Mod repos are mechanism only.
-10. `core/cpu/backends/ballistic/**` and `recompiler/` are off-limits until
-    unlocked by the maintainer.
+10. The CPU speed path is Voland's own ARM64 → WebAssembly JIT
+    (`core/cpu/backends/jit/`, [docs/JIT.md](docs/JIT.md)). The interpreter
+    is the reference every JIT block is differentially tested against.
+    `core/cpu/backends/ballistic/**` and `recompiler/` are not used.
 
 ## Review tripwires
 
@@ -183,9 +187,10 @@ and the guest thread scheduler (§7) — they gate almost everything else —
 followed by HLE services from the §12 priority list. Use Ryubing's C#
 implementations as a behavioral reference only (see hard rule 2).
 
-**Compiler engineering:** the Ballistic WASM backend, once unlocked (see
-hard rule 10). Join the Pound Discord and engage on IR design before it
-solidifies; the integration contract is §10.
+**Compiler engineering:** the ARM64 → WebAssembly JIT
+([docs/JIT.md](docs/JIT.md)). Every change is checked against the
+interpreter by `jit_diff_test` (native and in a real wasm engine); speed is
+measured with `tests/jit_bench.c` and `platform/web/tools/perf.mjs`.
 
 ## Code review requirements
 

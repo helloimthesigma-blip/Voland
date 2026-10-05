@@ -8,6 +8,7 @@
  *                       [--url-params "a=1&b=2"] [--browser-arg ARG]...
  *                       [--press SLICE:KEY:SLICES]... [--shot FILE.png]
  *                       [--phases NAME:SLICE,NAME:SLICE,...,end:SLICE] [--json FILE]
+ *                       [--restore-saves BACKUP.tar]
  *
  * - Builds the app (vite build; the core must already be staged by
  *   `cmake --build --preset web`) and serves it with `vite preview` on a
@@ -55,6 +56,9 @@
  *   figure much less sensitive to a busy machine than wall time.
  * - --web-dir DIR builds and serves another checkout's platform/web (its
  *   core staged there), so this harness can measure older commits.
+ * - --restore-saves BACKUP.tar imports a saves backup (the Saves panel's
+ *   "Back up saves" file) before the game loads, so a run can start from
+ *   any save point.
  * - --json FILE writes the results (measurement window and phases) as JSON
  *   (used by tools/perf-track.mjs).
  * - --browser-arg passes a Chromium switch (repeatable), e.g.
@@ -85,7 +89,7 @@ const SOFTWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swift
 function parseArgs(argv) {
   const opts = {
     game: "", clock: "slices", warmupSlices: 860_000, seconds: 30, profile: 0, port: 0, debugPort: 0,
-    build: true, software: false, urlParams: "", outDir: tmpdir(), browserArgs: [], presses: [], shot: "", phases: [], json: "", expectJitAsync: false,
+    build: true, software: false, urlParams: "", outDir: tmpdir(), browserArgs: [], presses: [], shot: "", restoreSaves: "", phases: [], json: "", expectJitAsync: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -111,6 +115,7 @@ function parseArgs(argv) {
     else if (a === "--url-params") opts.urlParams = next();
     else if (a === "--out-dir") opts.outDir = next();
     else if (a === "--shot") opts.shot = next();
+    else if (a === "--restore-saves") opts.restoreSaves = next();
     else if (a === "--json") opts.json = next();
     else if (a === "--web-dir") WEB_DIR = resolve(next()); /* another checkout's platform/web */
     else if (a === "--phases") {
@@ -320,13 +325,20 @@ async function main() {
       if (backend) results.backend = backend[1];
       const cores = /guest threads on (?:the serial scheduler|(\d+) host core)/.exec(m.text());
       if (cores) results.hostCores = cores[1] ? Number(cores[1]) : 0;
-      if (m.type() === "error" && /\[(ERROR|WARN )\]|failed|crash/i.test(m.text())) console.log(`  console: ${m.text()}`);
+      if ((m.type() === "error" && /\[(ERROR|WARN )\]|failed|crash/i.test(m.text())) || /core: |svcBreak/.test(m.text()))
+        console.log(`  console: ${m.text()}`);
       /* Parallel guest threads' periodic timing report (docs/PARALLEL.md "Measuring"). */
       if (/\[parallel\] /.test(m.text())) console.log(`  ${m.text().replace(/^\[INFO \] /, "")}`);
     });
     const pageUrl = opts.urlParams ? `${baseUrl}?${opts.urlParams}` : baseUrl;
     await page.goto(pageUrl);
     await page.getByTestId("load-panel").waitFor({ timeout: 30_000 });
+    if (opts.restoreSaves) {
+      await page.getByTestId("saves-import-input").setInputFiles(opts.restoreSaves);
+      const note = page.getByTestId("saves-note");
+      await note.waitFor({ timeout: 30_000 });
+      console.log(`restore saves: ${await note.textContent()}`);
+    }
     await page.getByTestId("load-input").setInputFiles(opts.game);
     await page.getByTestId("load-success").waitFor({ timeout: 120_000 });
     const worker = await (async () => {

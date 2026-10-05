@@ -156,7 +156,7 @@ async function boot(): Promise<BootResult | null> {
   if ("serviceWorker" in navigator) {
     // Vite serves sw.ts directly (on-the-fly transform) in dev; the
     // production build emits it as a stable, unhashed sw.js (vite.config.ts).
-    const swUrl = import.meta.env.DEV ? "/sw.ts" : "/sw.js";
+    const swUrl = `${import.meta.env.BASE_URL}${import.meta.env.DEV ? "sw.ts" : "sw.js"}`;
     try {
       await navigator.serviceWorker.register(swUrl, { type: "module" });
     } catch (e) {

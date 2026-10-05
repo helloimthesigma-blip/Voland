@@ -31,7 +31,12 @@ const crossOriginIsolationHeaders = {
   "Content-Security-Policy":     "frame-ancestors 'none'",
 };
 
+/* The URL path the app is served under. "/" for local use; a GitHub Pages
+ * project site sets VOLAND_BASE=/<repo>/ at build time. Must end in "/". */
+const base = process.env["VOLAND_BASE"] ?? "/";
+
 export default defineConfig({
+  base,
   plugins: [solid()],
   resolve: {
     alias,

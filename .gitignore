@@ -37,3 +37,6 @@ Thumbs.db
 
 # Local scratch notes
 BUGREPORT_*.md
+
+# Emscripten SDK installed by ./voland
+.emsdk/

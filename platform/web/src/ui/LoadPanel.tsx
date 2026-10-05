@@ -23,7 +23,7 @@ type LoadState =
   | { readonly kind: "loaded";  readonly fileName: string; readonly titleId: string; readonly entryPoint: bigint }
   | { readonly kind: "failed";  readonly fileName: string; readonly failure: LoadFailure };
 
-const DEMO_URL = "/demo/hello.nro";
+const DEMO_URL = `${import.meta.env.BASE_URL}demo/hello.nro`;
 /* How long the "starting up" hint stays after a game loads. */
 const BOOT_HINT_MS = 10 * 60 * 1000;
 

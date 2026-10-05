@@ -1350,10 +1350,16 @@ static int verify_dump(const char *path) {
 
 static void usage(void) {
   fprintf(stderr,
-          "usage: voland-cli run <file.nca|file.nro> [--backend interpreter|jit|noop] [--budget N]\n"
-          "                      [--max-slices N] [--test-card] [--expect-output TEXT]\n"
-          "                      [--dump-frame FILE [--dump-frames-every N]]\n"
-          "                      [--expect-frame-hash HEX]\n"
+          "usage: voland-cli run <file.nca|file.nro> [options]\n"
+          "  running:   --backend interpreter|jit|noop  --budget N  --max-slices N\n"
+          "             --host-cores N  --sdmc DIR  --restore-save FILE.vsave\n"
+          "             --input SLICE:BUTTONS_HEX:SLICES (repeatable; hold buttons)\n"
+          "             --swkbd TEXT | --swkbd-cancel  --font FILE.ttf\n"
+          "  output:    --dump-frame FILE.ppm [--dump-frames-every N]  --dump-audio FILE\n"
+          "             --gpu-stream FILE (GPU records; /dev/null renders nothing)\n"
+          "             --snapshot-at SLICE --snapshot-dir DIR  --frame-skip N\n"
+          "  checking:  --test-card  --expect-output TEXT  --expect-frame-hash HEX\n"
+          "             --svc-stats  --measure-from SLICE [--measure-seconds S]\n"
           "       voland-cli verify-dump <file>\n"
           "       voland-cli romfs <file.nca> [SUBSTRING [OUTDIR]]\n");
 }

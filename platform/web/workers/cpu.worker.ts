@@ -41,11 +41,13 @@ interface CoreModuleOptions {
 }
 type CoreModuleFactory = (options: CoreModuleOptions) => Promise<SwitchCoreExports>;
 
-const CORE_MODULE_URL = "/core/switch_core.js";
+/* Under the app's base path (vite.config.ts `base`), so a build served
+ * from a subdirectory (e.g. a GitHub Pages project site) finds its files. */
+const CORE_MODULE_URL = `${import.meta.env.BASE_URL}core/switch_core.js`;
 
 /* pl:u's system font (§1.6: an openly licensed font - Noto Sans, SIL OFL
  * 1.1, see public/fonts/OFL.txt - never Nintendo's). */
-const SHARED_FONT_URL = "/fonts/NotoSans-Regular.ttf";
+const SHARED_FONT_URL = `${import.meta.env.BASE_URL}fonts/NotoSans-Regular.ttf`;
 
 /** Upper bound on a core Error message (static strings, all short). */
 const CORE_ERROR_MESSAGE_MAX_BYTES = 1024;
@@ -337,7 +339,7 @@ function startRunning(): void {
 }
 
 async function loadCoreModule(memory: WebAssembly.Memory): Promise<SwitchCoreExports> {
-  /* An absolute URL, not the bare "/core/..." path: Vite's dev server
+  /* An absolute URL, not the bare root-relative path: Vite's dev server
    * appends `?import` to root-relative dynamic imports and then refuses
    * to serve files under public/ as modules ("can only be referenced via
    * HTML tags"). A full URL bypasses that rewrite in dev and is

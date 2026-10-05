@@ -24,7 +24,10 @@ const sw: ServiceWorkerGlobalScope = globalThis as unknown as ServiceWorkerGloba
 const SHELL_CACHE = "voland-shell-v2";
 const WASM_CACHE = "voland-wasm-v2";
 const CURRENT_CACHES: ReadonlySet<string> = new Set([SHELL_CACHE, WASM_CACHE]);
-const SHELL_URL = "/index.html";
+/* Relative to the registration scope: the app may be served from a
+ * subdirectory (vite.config.ts `base`). */
+const SCOPE_PATH = new URL(sw.registration.scope).pathname;
+const SHELL_URL = `${SCOPE_PATH}index.html`;
 
 /* COOP must be strict "same-origin" - "same-origin-allow-popups" never
  * yields crossOriginIsolated in shipping Chromium regardless of COEP (see
@@ -77,7 +80,7 @@ sw.addEventListener("fetch", (event: FetchEvent) => {
   const url = new URL(event.request.url);
   if (url.origin !== location.origin) return; // let cross-origin requests through untouched
 
-  if (url.pathname.startsWith("/api/")) {
+  if (url.pathname.startsWith(`${SCOPE_PATH}api/`)) {
     event.respondWith(fetch(event.request).then(addCrossOriginIsolationHeaders));
     return;
   }

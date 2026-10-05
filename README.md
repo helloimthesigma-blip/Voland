@@ -1,194 +1,162 @@
 # Voland
 
-A Nintendo Switch emulator targeting the web as a primary platform, with native apps on iOS, Android, macOS, tvOS, Windows, Linux, and Xbox.
+A Nintendo Switch emulator that runs in your browser. A C11 core compiled to
+WebAssembly, an ARM64 → WebAssembly JIT, and a WebGPU renderer. Nothing to
+install to play, and no keys or firmware.
 
-Play Switch games in your browser. No installation. No setup beyond providing your own keys and games.
-
-> **Status:** Early development — **Phase 4 (First Boot)** of [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Real libnx homebrew runs in the browser with input, audio and persistent SD/save data. A first commercial title (Hollow Knight: Silksong, from the user's own decrypted NCA) boots, renders its menus and reaches gameplay through a WebGPU renderer that translates Maxwell pixel shaders to WGSL and matches the software reference; guest threads run on up to 3 host cores. ARM code runs through an ARM64→WebAssembly JIT. In the browser on a real GPU it now runs at full game speed (wall-clock pacing) while rendering about 13 fps in gameplay on 3 host cores (the Switch renders 60), its cutscenes play through WebCodecs hardware decoding, and saves persist across sessions (with backup/restore). Next is more JIT speed and testing deeper into the game.
-
----
-
-## Why web-first
-
-Every existing Switch emulator requires installation, driver configuration, and technical setup that eliminates most potential users before they ever reach a game. Voland's primary target is a browser tab - click a link, provide your decrypted game files, play.
-
-The web version is not a port of a native emulator. It is designed from the ground up for the browser, using a WASM-compiled C core, WebGPU rendering, SharedArrayBuffer for guest RAM, and a dedicated Worker per emulator subsystem.
-
-Native apps on iOS, Android, macOS, tvOS, Windows, Linux, and Xbox share the same C core with thin platform-specific UI and renderer layers on top.
+> **Status:** Early development, **Phase 4 (First Boot)** of [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Homebrew runs in the browser with input, audio and persistent SD/save data. A first commercial game boots, plays its cutscenes and reaches gameplay through the WebGPU renderer, running at full game speed but rendering about 10-15 fps on a fast desktop. Next is JIT speed and wider game testing. Most games are untested and many will not boot yet.
 
 ---
 
-## Requirements
+## Quick start
 
-To play games you must provide:
+### Use it in the browser
 
-- **prod.keys** - cryptographic keys dumped from your own Nintendo Switch using [Lockpick_RCM](https://github.com/s1204IT/Lockpick_RCM)
-- **Game files** - NSP or XCI files dumped from cartridges or digital purchases you own
+Open **https://helloimthesigma-blip.github.io/Voland/** in Chrome or Edge, then load
+a decrypted game file (see [What you need](#what-you-need)). The first visit
+reloads itself once to turn on the browser features the emulator needs.
 
-Voland does not and will never distribute keys, firmware, or game files. These must come from hardware you own. See the [dumping guide](docs/DUMP.md) for instructions.
-
----
-
-## Architecture
-
-A single C11 core compiles to every target platform via CMake. The CPU backend is an abstract vtable - the recompiler slots in without touching anything else.
-
-```
-core/
-  cpu/          ← abstract backend interface + no-op, interpreter, dynarmic, ballistic
-  hle/          ← Switch OS service implementations
-  gpu/          ← Maxwell GPU emulation
-  audio/        ← DSP emulation and audio pipeline
-  common/       ← arena allocator, ring buffer, trace buffer, logging
-
-platform/
-  web/          ← Solid.js frontend, Workers, Service Worker, WebGPU
-  ios/          ← SwiftUI + Metal
-  android/      ← Jetpack Compose + Vulkan
-  macos/        ← SwiftUI + Metal
-  tvos/         ← SwiftUI + Metal + focus engine
-  windows/      ← Qt + Vulkan/D3D12
-  linux/        ← Qt + Vulkan
-  xbox/         ← WinUI 2 + D3D12 (Developer Mode)
-
-recompiler/     ← Ballistic (git submodule)
-```
-
-Full architecture documentation: [DESIGN.md](docs/DESIGN.md)
-
----
-
-## Recompiler
-
-The primary recompiler target is [Ballistic](https://github.com/pound-emu/ballistic), a C rewrite of dynarmic currently in early development. Ballistic targets the specific performance bottlenecks in dynarmic - JIT state cache line overflow, block eviction pathology, heavy IR memory footprint, and missing peephole optimisation.
-
-The CPU backend vtable means Voland is not blocked on Ballistic. Current backend status:
-
-| Backend | Status | Notes |
-|---|---|---|
-| noop | Complete | Default - everything except game execution is testable |
-| interpreter | Working | ARMv8.0 user ISA (no crypto), hardware-verified; the web execution path |
-| dynarmic | Planned | Interim desktop backend - archived upstream, requires patching for GCC 14 |
-| ballistic | Planned | Primary target, wired in when instruction coverage is sufficient |
-
-The WASM JIT pipeline - ARM bytecode → WASM bytecode → `WebAssembly.compile()` → cached module - is architecturally proven. Ballistic providing a WASM bytecode emission backend makes Voland the only Switch emulator that runs natively in a browser, on iOS without App Store restrictions, and on Xbox UWP. No other ARM recompiler targets this deployment surface.
-
----
-
-## Platform targets
-
-| Platform | UI | Renderer | Distribution |
-|---|---|---|---|
-| Web | Solid.js | WebGPU | URL / PWA |
-| iOS | SwiftUI | Metal | Sideload |
-| iPadOS | SwiftUI | Metal | Sideload |
-| tvOS | SwiftUI + focus engine | Metal | Sideload |
-| visionOS | SwiftUI + RealityKit | Metal | Sideload |
-| Android | Jetpack Compose | Vulkan | APK sideload |
-| Android TV | Jetpack Compose | Vulkan | APK sideload |
-| macOS | SwiftUI | Metal | Direct download |
-| Windows | Qt | Vulkan / D3D12 | Direct download |
-| Linux | Qt | Vulkan | Direct download |
-| Xbox | WinUI 2 | D3D12 | Developer Mode |
-
----
-
-## Building
-
-### Dependencies
-
-- CMake 3.16+
-- C11 compiler (GCC 12+, Clang 15+, MSVC 2022+)
-- For web: Emscripten SDK ≥6.0.9 (see [`global.json`](global.json) for all minimum tool versions)
-- For dynarmic backend: see `externals/dynarmic/`
-
-### Web (requires Emscripten)
+### Run it on your own machine
 
 ```bash
-git clone https://github.com/Voland-emu/Voland
+git clone https://github.com/helloimthesigma-blip/Voland
 cd Voland
-git submodule update --init --recursive
-
-emcmake cmake -B build/web \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCPU_BACKEND=noop \
-  -DGPU_BACKEND=webgpu \
-  -DPLATFORM=web
-
-cmake --build build/web -j$(nproc)
+./voland
 ```
 
-### Desktop
+`./voland` checks your tools, builds what is missing, and opens the app at
+`http://localhost:5174`. The first build takes a few minutes; later runs
+start in seconds. It needs:
+
+- **CMake** 3.24+, **Ninja**, a C compiler (Clang 16+ or GCC 12+)
+- **Node.js** 22.6+
+- **Emscripten** 6.0.9+. If it is missing, `./voland` offers to install it
+  into `.emsdk/` inside the checkout.
+
+On macOS: `brew install cmake ninja node`. On Debian/Ubuntu:
+`sudo apt install cmake ninja-build clang nodejs`.
+
+Other commands: `./voland dev` (live-reloading dev server), `./voland build`,
+`./voland test`, `./voland cli ...` (native command-line runner), and
+`./voland help`.
+
+### Browser and hardware
+
+- **Chrome or Edge** (desktop, recent). The emulator needs WebGPU, 64-bit
+  WebAssembly memory and cross-origin isolation. Other browsers are untested.
+- About **6 GB of free memory**. The emulator reserves the Switch's full
+  memory up front.
+- A fast CPU. Speed comes mostly from single-thread performance plus up to
+  3 extra cores for game threads.
+
+---
+
+## What you need
+
+Voland loads **decrypted NCA files only**: the game's *Program* NCA, the
+largest one in a dump. It never asks for keys, never reads NSP or XCI files,
+and contains no decryption code. You dump and decrypt the game yourself,
+from a Switch you own, with separate tools. The [dumping guide](docs/DUMP.md)
+walks through it.
+
+Homebrew `.nro` files load directly. The app also has a built-in demo.
+
+**Controls:** gamepads work out of the box (standard layout). Keyboard:
+
+| Switch | Key | Switch | Key |
+|---|---|---|---|
+| A / B / X / Y | Z / X / C / V | Left stick | W A S D |
+| L / R | E / U | Right stick | I J K L |
+| ZL / ZR | Q / O | D-pad | Arrow keys |
+| + / − | = / - | Stick clicks | F / N |
+
+**Saves** are kept in the browser automatically. Use *Back up saves* in the
+app to download them and *Restore saves…* to bring them back, for example
+on another machine.
+
+**Options** (add to the URL): `?pacing=0` runs as fast as possible instead of
+at game speed, which is useful for benchmarking.
+
+---
+
+## How it works
+
+```
+core/                 C11, compiled to wasm64 (web) or native
+  cpu/                backend interface + interpreter + ARM64→wasm JIT
+  hle/                Horizon OS: kernel (threads, sync, memory, IPC) and services
+  gpu/                Maxwell command processing, shader → WGSL translation
+  video/, audio/      NVDEC/VIC video path, audio output
+  common/             fixed memory layout, softmmu, arena, logging
+platform/
+  web/                Solid.js app, workers, service worker, WebGPU executor
+  cli/                native command-line runner (tests, benchmarks)
+tests/                C unit and integration tests (ctest)
+docs/                 design and reference documents
+```
+
+Three decisions shape everything ([DESIGN.md §1](docs/DESIGN.md)):
+
+1. **One linear memory.** Guest RAM is a region inside a single fixed-size
+   WebAssembly memory shared by all workers.
+2. **A softmmu.** Every guest memory access goes through page-table
+   translation, because WebAssembly cannot alias pages.
+3. **Budgeted CPU backends.** A backend runs a guest thread for a cycle
+   budget and returns. Nothing blocks; guest threads are green threads,
+   spread over up to 3 host cores.
+
+| CPU backend | Status | Notes |
+|---|---|---|
+| noop | Complete | Default for native builds; tests everything except guest code |
+| interpreter | Working | ARMv8.0 user ISA; the reference every JIT block is tested against |
+| jit | Working | ARM64 → WebAssembly, the web default ([docs/JIT.md](docs/JIT.md)) |
+
+More detail: [DESIGN.md](docs/DESIGN.md) (architecture),
+[JIT.md](docs/JIT.md), [PARALLEL.md](docs/PARALLEL.md) (multi-core guest
+threads), [GPU_COMMAND_STREAM.md](docs/GPU_COMMAND_STREAM.md).
+
+---
+
+## Building by hand
+
+`./voland` wraps these steps.
 
 ```bash
-cmake -B build/desktop \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DCPU_BACKEND=noop \
-  -DPLATFORM=desktop
+# Native (no CPU emulation; runs the test suite)
+cmake --preset native-noop && cmake --build --preset native-noop
+ctest --preset native-noop
 
-cmake --build build/desktop -j$(nproc)
+# Native command-line runner (interpreter)
+cmake --preset native-release && cmake --build --preset native-release
+build/native-release/platform/cli/voland-cli run game.nca --backend interpreter
+
+# Web core (needs Emscripten activated: source <emsdk>/emsdk_env.sh)
+cmake --preset web && cmake --build --preset web
+
+# Web app
+cd platform/web
+npx pnpm@12.8.1 install --frozen-lockfile
+npm run typecheck && npm test   # unit tests
+npm run e2e                     # browser tests (headless Chromium)
+npm run build && npm run preview
 ```
 
-### Backend selection
-
-```bash
-# No-op (default) - for frontend and HLE development
-cmake -B build -DCPU_BACKEND=noop
-
-# Interpreter - slow but executes ARM code
-cmake -B build -DCPU_BACKEND=interpreter
-
-# Dynarmic - desktop only, requires GCC 13 or patched GCC 14
-cmake -B build -DCPU_BACKEND=dynarmic
-
-# Ballistic - when available
-cmake -B build -DCPU_BACKEND=ballistic
-```
+The production build is static files plus a service worker that supplies
+the required cross-origin isolation headers, so it can be hosted anywhere,
+including in a subdirectory: `VOLAND_BASE=/path/ npm run build`.
 
 ---
 
 ## Contributing
 
-### Where to start
+Read [CONTRIBUTING.md](CONTRIBUTING.md) first. The short version:
 
-**If you know TypeScript / JavaScript:** The web platform layer is the right entry point. The CPU backend is a no-op stub - the entire frontend, storage layer, Worker architecture, and Service Worker can be built and tested without any emulation knowledge. Start with `platform/web/`.
-
-**If you know C:** The HLE service layer needs contributors. Pick any unimplemented service from the priority list in [DESIGN.md](docs/DESIGN.md#8-hle-service-layer) and implement it in C. Study [Ryubing](https://github.com/Ryubing) as a reference for service behaviour - reimplement in C, do not copy code.
-
-**If you know compiler engineering:** The highest-leverage contribution is the Ballistic WASM bytecode emission backend. Join the [Pound Discord](https://discord.gg/aMmTmKsVC7) and engage on IR design before it solidifies. The three requirements are documented in [DESIGN.md](docs/DESIGN.md#7-ballistic-integration-plan).
-
-### Standards
-
-- C11 for core - no C++ except the dynarmic wrapper
-- TypeScript strict mode - no `any`, no implicit returns
-- No third-party dependencies not listed in DESIGN.md
-- HLE services must be validated against known-good game output before merge
-- No keys, firmware, or game files in the repository or commit history - ever
-
-### Reference implementations
-
-These are studied as reference, not forked:
-
-| Project | What to study |
-|---|---|
-| [Ryubing](https://github.com/Ryubing) | HLE service implementations |
-| yuzu (archived) | GPU emulation approach |
-| dynarmic | ARM instruction semantics and test cases |
-| [Emscripten Relooper](https://github.com/WebAssembly/binaryen/blob/main/src/cfg/Relooper.h) | CFG → structured control flow |
-
----
-
-## Proof of concept
-
-`poc/` contains three standalone demonstrations built to validate the architecture and make the case for Ballistic WASM support:
-
-**`01_dynarmic_bottlenecks/`** - a synthetic ARM64 benchmark fed directly to dynarmic with no ROM, no HLE, no game. Measures the three performance pathologies documented in Ballistic's own README: JIT state cache line overflow, prologue/epilogue overhead per Run() call, and block eviction cost under cache invalidation.
-
-Note: dynarmic is archived and no longer builds cleanly on GCC 14 without patching. This is expected behaviour from an unmaintained codebase and is itself evidence for why an actively maintained alternative matters.
-
-**`02_wasm_pipeline/`** - a single self-contained HTML file. Open in Chrome. Hand-crafted WASM bytecode for an ARM ADD instruction is passed to `WebAssembly.compile()`, instantiated, and executed. Proves the browser-side JIT pipeline works today with no build system and no dependencies.
-
-**`03_backend_interface/`** - the CPU backend vtable in C, a no-op implementation, a dynarmic wrapper, and a Ballistic stub. Shows exactly where Ballistic plugs in and what it needs to implement.
+- **No decryption code, keys, firmware or game files**, in the tree or in
+  history, ever.
+- **No code copied from other emulators.** Study them for behavior,
+  reimplement from that.
+- Core is C11 with explicit `Error` returns. TypeScript is strict with no `any`.
+- Tests land with the code. The interpreter is the reference for the JIT.
 
 ---
 
@@ -196,7 +164,12 @@ Note: dynarmic is archived and no longer builds cleanly on GCC 14 without patchi
 
 Voland is open source software released under the [GPL-2.0 license](LICENSE).
 
-Voland does not include, distribute, or facilitate obtaining Nintendo's copyrighted material. Game files must be dumped and decrypted by the user, with separate tools, from hardware they own; Voland accepts only the resulting decrypted NCA files and never consumes keys or firmware (see [DESIGN.md §1.6](docs/DESIGN.md#16-legal-scope-boundaries)). Forks or distributions that bundle Nintendo's IP are not affiliated with this project and are solely responsible for their own legal compliance.
+Voland does not include, distribute, or help obtain Nintendo's copyrighted
+material. Users dump and decrypt game files themselves, with separate tools,
+from hardware they own. Voland accepts only the resulting decrypted NCA
+files and never consumes keys or firmware (see
+[DESIGN.md §1.6](docs/DESIGN.md#16-legal-scope-boundaries)). Voland never
+connects to Nintendo's servers.
 
 Voland is not affiliated with Nintendo Co., Ltd.
 
@@ -204,13 +177,19 @@ Voland is not affiliated with Nintendo Co., Ltd.
 
 ## About the name
 
-Voland is named for Völundr (Old Norse, also Wayland the Smith in Anglo-Saxon tradition) — the legendary craftsman of Germanic and Norse mythology, master of the forge.
-
-The name has a second well-known association: Voland is also Mikhail Bulgakov's name for the devil in *The Master and Margarita*, drawn from Goethe's *Faust*. The Norse origin is the substantive reason for the name; the literary echo is welcome.
+Voland is named for Völundr (Old Norse, also Wayland the Smith in
+Anglo-Saxon tradition), the legendary craftsman of Germanic and Norse
+mythology and master of the forge. It is also Mikhail Bulgakov's name for the
+devil in *The Master and Margarita*. The Norse origin is the reason for the
+name; the literary echo is welcome.
 
 ## Acknowledgements
 
-- [Ballistic](https://github.com/pound-emu/ballistic) - the planned primary recompiler
-- [Ryubing](https://github.com/Ryubing) - HLE reference implementation
-- [dynarmic](https://github.com/merryhime/dynarmic) - interim recompiler and benchmark baseline
-- The Switch homebrew and emulation community for reverse engineering documentation
+- [voland-emu/Voland](https://github.com/voland-emu/Voland), the project
+  this repository grew from (design, web platform and early core)
+- [Ryubing](https://github.com/Ryubing), yuzu and
+  [dynarmic](https://github.com/merryhime/dynarmic): behavior references
+- [libnx](https://github.com/switchbrew/libnx) and
+  [switchbrew](https://switchbrew.org): documentation of the Switch's
+  interfaces
+- [Noto Sans](https://fonts.google.com/noto) (SIL OFL 1.1) as the system font

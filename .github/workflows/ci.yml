@@ -1,0 +1,63 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  EMSDK_VERSION: 6.0.10
+
+jobs:
+  native:
+    name: Native build + tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Build (noop backend)
+        run: cmake --preset native-noop && cmake --build --preset native-noop
+      - name: Test (noop backend)
+        run: ctest --preset native-noop --output-on-failure
+      - name: Build (interpreter, release CLI)
+        run: cmake --preset native-release && cmake --build --preset native-release
+
+  web:
+    name: Web build + tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Build the core (wasm)
+        run: cmake --preset web && cmake --build --preset web
+      - name: Install web dependencies
+        working-directory: platform/web
+        run: npx --yes pnpm@12.8.1 install --frozen-lockfile
+      - name: Typecheck + unit tests
+        working-directory: platform/web
+        run: npm run typecheck && npm test
+      - name: Browser smoke tests
+        working-directory: platform/web
+        run: npx playwright install --with-deps chromium && npm run e2e
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: playwright-traces
+          path: platform/web/test-results
+          retention-days: 7

@@ -10,19 +10,16 @@ We will acknowledge receipt within 7 days and provide an estimated timeline for 
 
 ## Scope
 
-Voland is currently pre-alpha. There is no production deployment, no shipped binaries, no users running emulator code from this repo. The "security surface" right now is small — primarily the build process and any code that gets executed during compilation or testing.
+Voland is pre-alpha, but it runs untrusted guest code (games and homebrew) in the browser, so these are in scope:
 
-Once Voland has runnable code, this policy will expand to cover:
-
-- Memory safety issues in the JIT-compiled output
-- Sandbox escapes from the emulator
-- Issues in dependency handling or build tooling
-- Anything that could compromise users running compiled emulator builds
+- Memory safety issues in the core or in JIT-compiled output
+- Guest code escaping the emulator (reaching the page, other origins, or the host)
+- Issues in dependency handling, build tooling or the CI/deploy workflows
+- Anything that could compromise users running Voland builds, including the hosted web app
 
 ## Out of Scope
 
 - Issues in upstream dependencies (report to the relevant upstream)
-- Issues in Ballistic specifically (report to [pound-emu/ballistic](https://github.com/pound-emu/ballistic))
 - Theoretical issues with the project's design that haven't been implemented yet
 - Issues in the Switch 2 console itself or Nintendo's software
 

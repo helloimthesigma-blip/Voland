@@ -1,0 +1,59 @@
+# Builds the web app and publishes it with GitHub Pages, so anyone can use
+# Voland from a link with nothing to install. One-time setup: repository
+# Settings -> Pages -> Source: "GitHub Actions". The app's service worker
+# supplies the cross-origin isolation headers Pages cannot set (DESIGN.md
+# §16), at the cost of one automatic reload on the first visit.
+name: Deploy web app
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  EMSDK_VERSION: 6.0.10
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: mymindstorm/setup-emsdk@v14
+        with:
+          version: ${{ env.EMSDK_VERSION }}
+      - name: Install Ninja
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+      - name: Build the core (wasm)
+        run: cmake --preset web && cmake --build --preset web
+      - name: Build the app
+        working-directory: platform/web
+        env:
+          VOLAND_BASE: /${{ github.event.repository.name }}/
+        run: npx --yes pnpm@12.8.1 install --frozen-lockfile && npm run build
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: platform/web/dist
+
+  deploy:
+    # Pages needs a public repository (or a paid plan): skip while private.
+    if: ${{ !github.event.repository.private }}
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
