@@ -49,6 +49,8 @@ const SHARED_FONT_URL = "/fonts/NotoSans-Regular.ttf";
 
 /** Upper bound on a core Error message (static strings, all short). */
 const CORE_ERROR_MESSAGE_MAX_BYTES = 1024;
+/** core/common/log.h LOG_RECENT_LINES x (LOG_RECENT_LINE_BYTES + 1). */
+const RECENT_PROBLEMS_MAX_BYTES = 32 * 241;
 
 let core: SwitchCoreExports | null = null;
 let coreMemory: WebAssembly.Memory | null = null;
@@ -307,6 +309,12 @@ function runBurst(): void {
       const detail = finished === "crashed"
         ? `stopped at pc=0x${core._emulator_crash_pc_ffi().toString(16)}`
         : `virtual time ${ticks} ticks`;
+      if (finished !== "exited") {
+        /* The core's own recent warnings/errors (e.g. svcBreak's reason),
+         * which otherwise only reach the developer console. */
+        const recent = readCString((coreMemory as WebAssembly.Memory).buffer, Number(core._emulator_recent_problems_ffi()), RECENT_PROBLEMS_MAX_BYTES);
+        for (const line of recent.split("\n").filter((l) => l.length > 0)) log("warn", `core: ${line}`);
+      }
       postRunState(finished, detail);
       return;
     }

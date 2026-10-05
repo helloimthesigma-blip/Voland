@@ -19,6 +19,8 @@
 #  define SWITCH_PRINTF_FORMAT(format_index, first_arg_index)
 #endif
 
+#include <stddef.h>
+
 typedef enum Log_Level
 {
   LOG_LEVEL_TRACE = 0,
@@ -29,6 +31,14 @@ typedef enum Log_Level
 } Log_Level;
 
 void log_set_minimum_level(Log_Level level);
+
+/* The most recent warning and error lines (oldest first, one per line),
+ * kept whatever the minimum level, so a platform can show why a guest
+ * stopped (the web event log never sees the core's own log). Returns the
+ * bytes written to `out` (NUL-terminated). */
+#define LOG_RECENT_LINES 32u
+#define LOG_RECENT_LINE_BYTES 240u
+size_t log_recent_problems(char *out, size_t capacity);
 
 void log_message(Log_Level level, const char *format, ...)
     SWITCH_PRINTF_FORMAT(2, 3);

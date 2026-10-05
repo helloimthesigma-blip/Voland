@@ -62,7 +62,41 @@ static bool log_from_helper_thread(Log_Level level, const char* format, va_list 
 }
 #endif
 
+/* The recent-problems ring: slots claimed with an atomic counter, so
+ * logging from several host threads at once tears at worst one line. */
+static char g_recent[LOG_RECENT_LINES][LOG_RECENT_LINE_BYTES];
+static unsigned g_recent_next;
+
+static void remember_problem(Log_Level level, const char* format, va_list args) {
+  const unsigned slot = __atomic_fetch_add(&g_recent_next, 1u, __ATOMIC_RELAXED) % LOG_RECENT_LINES;
+  char *line = g_recent[slot];
+  const int used = snprintf(line, LOG_RECENT_LINE_BYTES, "[%s] ", level_name(level));
+  if (used > 0 && (size_t)used < LOG_RECENT_LINE_BYTES)
+    (void)vsnprintf(line + used, LOG_RECENT_LINE_BYTES - (size_t)used, format, args);
+}
+
+size_t log_recent_problems(char *out, size_t capacity) {
+  if (!out || !capacity) return 0;
+  size_t used = 0;
+  out[0] = '\0';
+  const unsigned next = __atomic_load_n(&g_recent_next, __ATOMIC_RELAXED);
+  const unsigned count = next < LOG_RECENT_LINES ? next : LOG_RECENT_LINES;
+  for (unsigned i = 0; i < count; i++) {
+    const char *line = g_recent[(next - count + i) % LOG_RECENT_LINES];
+    const int n = snprintf(out + used, capacity - used, "%s\n", line);
+    if (n < 0 || (size_t)n >= capacity - used) break;
+    used += (size_t)n;
+  }
+  return used;
+}
+
 void log_message(Log_Level level, const char* format, ...) {
+  if (level >= LOG_LEVEL_WARN) {
+    va_list args;
+    va_start(args, format);
+    remember_problem(level, format, args);
+    va_end(args);
+  }
   if (level < g_minimum_level) return;
   {
     va_list args;

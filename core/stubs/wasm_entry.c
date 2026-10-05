@@ -50,6 +50,7 @@ EXPORT int emulator_run_slice_ffi(uint64_t cycle_budget);
 EXPORT uint64_t emulator_virtual_ticks_ffi(void);
 EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity);
 EXPORT uint64_t emulator_crash_pc_ffi(void);
+EXPORT uint64_t emulator_recent_problems_ffi(void);
 EXPORT void emulator_set_program_path_ffi(uint64_t path);
 EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
 EXPORT void emulator_set_frame_skip_ffi(uint32_t frames);
@@ -391,6 +392,15 @@ EXPORT int emulator_run_for_ffi(uint32_t host_ms, uint64_t cycle_budget)
 EXPORT void emulator_set_poll_coalescing_ffi(uint32_t on)
 {
   if (g_initialised) emulator_set_poll_coalescing(&g_emulator, on != 0);
+}
+
+/* The core's recent warning/error lines (common/log.h), NUL-terminated:
+ * the page shows them when a guest stops, e.g. why it called svcBreak. */
+EXPORT uint64_t emulator_recent_problems_ffi(void)
+{
+  static char text[LOG_RECENT_LINES * (LOG_RECENT_LINE_BYTES + 1u) + 1u];
+  (void)log_recent_problems(text, sizeof(text));
+  return (uint64_t)(uintptr_t)text;
 }
 
 /* GPU mode (emulator_set_gpu_mode): the GPU worker consumes the stream. */

@@ -46,6 +46,7 @@ export interface SwitchCoreExports {
   readonly _emulator_set_program_path_ffi: (path: bigint) => void;
   readonly _emulator_set_rtc_ffi:          (unixSeconds: bigint) => void;
   readonly _emulator_set_frame_skip_ffi:   (frames: number) => void;
+  readonly _emulator_recent_problems_ffi: () => bigint;
   readonly _emulator_set_gpu_mode_ffi:     (on: number) => void;
   readonly _emulator_set_host_cores_ffi:   (cores: number) => number; /* cores in effect */
   readonly _emulator_set_poll_coalescing_ffi: (on: number) => void;
