@@ -59,7 +59,7 @@ function App(props: AppProps) {
           <h2>Ready.</h2>
           <p>Load a game you dumped (a decrypted Program NCA) or a homebrew NRO, or run the built-in demo. Homebrew you add to the SD card appears in a homebrew menu such as hbmenu.</p>
           <div class="voland-screen" data-voland-screen data-testid="screen" />
-          <LoadPanel loadGame={props.loadGame} addToSdCard={props.addToSdCard} clearSdCard={props.clearSdCard} setPaused={props.setPaused} />
+          <LoadPanel loadGame={props.loadGame} addToSdCard={props.addToSdCard} clearSdCard={props.clearSdCard} setPaused={props.setPaused} gpuAdapter={props.adapterLabel} />
           <SavesPanel />
           <FrameSkipSetting setFrameSkip={props.setFrameSkip} />
           <ControlsLegend />

@@ -51,6 +51,8 @@ EXPORT uint64_t emulator_virtual_ticks_ffi(void);
 EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity);
 EXPORT uint64_t emulator_crash_pc_ffi(void);
 EXPORT uint64_t emulator_recent_problems_ffi(void);
+EXPORT uint64_t emulator_distinct_problems_ffi(void);
+EXPORT uint64_t emulator_render_stats_ffi(void);
 EXPORT void emulator_set_program_path_ffi(uint64_t path);
 EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
 EXPORT void emulator_set_frame_skip_ffi(uint32_t frames);
@@ -400,6 +402,33 @@ EXPORT void emulator_set_poll_coalescing_ffi(uint32_t on)
 
 /* The core's recent warning/error lines (common/log.h), NUL-terminated:
  * the page shows them when a guest stops, e.g. why it called svcBreak. */
+/* The compatibility report: every distinct warning/error with its count
+ * ("count<TAB>line" lines), as a static NUL-terminated string. */
+EXPORT uint64_t emulator_distinct_problems_ffi(void)
+{
+  static char text[LOG_DISTINCT_PROBLEMS * (LOG_RECENT_LINE_BYTES + 24u) + 64u];
+  (void)log_distinct_problems(text, sizeof(text));
+  return (uint64_t)(uintptr_t)text;
+}
+
+/* Renderer counters for the compatibility report, as u64s: draws, skipped
+ * draws, shader faults, unknown shader ops, texture misses, GPU-mode draws,
+ * untranslated (not drawn) GPU draws, translated shaders, texture uploads,
+ * presents. */
+#define RENDER_STATS_COUNT 10u
+EXPORT uint64_t emulator_render_stats_ffi(void)
+{
+  static uint64_t stats[RENDER_STATS_COUNT];
+  const Raster3d *r = &g_emulator.renderer;
+  const uint64_t values[RENDER_STATS_COUNT] = {
+    r->stats.draws, r->stats.skipped_draws, r->stats.shader_faults, r->stats.unknown_ops, r->stats.texture_misses,
+    r->gpu_stats.draws, r->gpu_stats.untranslated_draws, r->gpu_stats.shaders, r->gpu_stats.texture_uploads,
+    r->gpu_stats.presents,
+  };
+  memcpy(stats, values, sizeof(stats));
+  return (uint64_t)(uintptr_t)stats;
+}
+
 EXPORT uint64_t emulator_recent_problems_ffi(void)
 {
   static char text[LOG_RECENT_LINES * (LOG_RECENT_LINE_BYTES + 1u) + 1u];

@@ -11,6 +11,7 @@ import { type GuestConsoleState, getGuestConsole, subscribeGuestConsole } from "
 import { describeLoadFailure } from "./load-failure-copy";
 import GameLibrary from "./GameLibrary";
 import SaveStates from "./SaveStates";
+import CompatReport from "./CompatReport";
 import {
   type LibraryGame, canKeepFiles, forgetGame, listGames, markPlayed, openGameFile, pickGameFile, rememberGame,
 } from "../library";
@@ -20,6 +21,7 @@ interface LoadPanelProps {
   readonly addToSdCard: (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard: () => Promise<SdImportOutcome>;
   readonly setPaused: (paused: boolean) => void;
+  readonly gpuAdapter: string;
 }
 
 type LoadState =
@@ -249,6 +251,7 @@ function LoadPanel(props: LoadPanelProps) {
               <Show when={guest().runState !== "idle"}>
                 <SaveStates titleId={loaded().titleId} />
               </Show>
+              <CompatReport titleId={loaded().titleId} fileName={loaded().fileName} gpuAdapter={props.gpuAdapter} />
               <p>
                 Title <code>{loaded().titleId}</code>, entry point{" "}
                 <code>0x{loaded().entryPoint.toString(16)}</code>.

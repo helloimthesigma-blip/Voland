@@ -17,6 +17,7 @@ import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
 import type { MainToVideoMessage, VideoToMainMessage } from "@bindings/video";
 import { handleSavesMessage, registerSavesWorker, rememberTitleName } from "./saves";
 import { handleSavestateMessage, registerSavestateWorker } from "./savestates";
+import { handleReportMessage, registerReportWorker } from "./compat-report";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
 import { PUBLISH_INDEX } from "@bindings/framebuffer";
@@ -208,6 +209,7 @@ async function boot(): Promise<BootResult | null> {
   const cpuWorker = new Worker(new URL("../workers/cpu.worker.ts", import.meta.url), { type: "module" });
   registerSavesWorker(cpuWorker);
   registerSavestateWorker(cpuWorker);
+  registerReportWorker(cpuWorker);
   const gpuWorker = new Worker(new URL("../workers/gpu.worker.ts", import.meta.url), { type: "module" });
 
   type Slot = "pending" | "ready" | "failed";
@@ -268,6 +270,8 @@ async function boot(): Promise<BootResult | null> {
         setGuestRunState(msg.state, msg.detail);
       } else if (handleSavesMessage(msg)) {
         /* game-save backup replies (src/saves.ts) */
+      } else if (handleReportMessage(msg)) {
+        /* compatibility report (src/compat-report.ts) */
       } else if (handleSavestateMessage(msg)) {
         /* save-state replies (src/savestates.ts) */
       } else if (msg.type === "sd-files-added") {

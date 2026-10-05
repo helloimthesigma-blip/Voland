@@ -51,3 +51,15 @@ test("fullscreen shows the game canvas", async ({ page }) => {
   expect(box.clip).toBe("none");
   expect(box.visibility).toBe("visible");
 });
+
+test("the compatibility report collects the core's view of a run", async ({ page }) => {
+  await page.goto("/");
+  await expect(page.getByTestId("load-panel")).toBeVisible({ timeout: 20_000 });
+  await page.getByTestId("run-demo").click();
+  await expect(page.getByTestId("load-success")).toBeVisible({ timeout: 20_000 });
+  await page.getByTestId("compat-build").click();
+  const report = page.getByTestId("compat-text");
+  await expect(report).toContainText("Voland compatibility report");
+  await expect(report).toContainText("CPU backend:");
+  await expect(report).toContainText("Renderer: draws=");
+});

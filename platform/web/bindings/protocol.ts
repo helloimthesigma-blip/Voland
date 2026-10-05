@@ -44,6 +44,8 @@ export type MainToCPUMessage =
   /* Save states (workers/savestate.ts): freeze the running game into a new
    * state (state-saved), resume one (state-loaded), list (states-listed)
    * or delete (state-deleted) them. */
+  /* The compatibility report's core half (answered by compat-report). */
+  | { readonly type: "compat-report" }
   | { readonly type: "save-state" }
   | { readonly type: "load-state"; readonly id: string }
   | { readonly type: "list-states" }
@@ -83,6 +85,19 @@ export interface TextInputRequest {
   readonly password: boolean;
 }
 
+/** What the core knows about how a title is running (compatibility report). */
+export interface CoreReport {
+  readonly titleId: string | null;
+  readonly backend: string;
+  readonly slices: number;
+  readonly virtualSeconds: number;
+  readonly wallSeconds: number;
+  /** "count<TAB>line" per distinct warning/error, first seen first. */
+  readonly problems: string;
+  /** emulator_render_stats_ffi's counters, by name. */
+  readonly render: Readonly<Record<string, number>>;
+}
+
 /** One stored save state, as the UI lists it. */
 export interface SavestateInfo {
   readonly id: string;
@@ -113,6 +128,7 @@ export type CPUToMainMessage =
   | { readonly type: "saves-listed"; readonly saves: readonly StoredSave[] }
   | { readonly type: "save-put"; readonly name: string; readonly ok: boolean }
   | { readonly type: "save-deleted"; readonly name: string; readonly ok: boolean }
+  | { readonly type: "compat-report"; readonly report: CoreReport }
   | { readonly type: "state-saved"; readonly info: SavestateInfo | null; readonly error: string }
   | { readonly type: "state-loaded"; readonly ok: boolean; readonly error: string }
   | { readonly type: "states-listed"; readonly states: readonly SavestateInfo[] }

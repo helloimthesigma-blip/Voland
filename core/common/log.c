@@ -2,6 +2,8 @@
 
 #include <stdarg.h>
 #include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
 #include <stdio.h>
 
 #ifdef __EMSCRIPTEN__
@@ -65,6 +67,7 @@ static bool log_from_helper_thread(Log_Level level, const char* format, va_list 
 /* The recent-problems ring: slots claimed with an atomic counter, so
  * logging from several host threads at once tears at worst one line. */
 static char g_recent[LOG_RECENT_LINES][LOG_RECENT_LINE_BYTES];
+static void count_problem(const char *line);
 static unsigned g_recent_next;
 
 static void remember_problem(Log_Level level, const char* format, va_list args) {
@@ -73,6 +76,71 @@ static void remember_problem(Log_Level level, const char* format, va_list args) 
   const int used = snprintf(line, LOG_RECENT_LINE_BYTES, "[%s] ", level_name(level));
   if (used > 0 && (size_t)used < LOG_RECENT_LINE_BYTES)
     (void)vsnprintf(line + used, LOG_RECENT_LINE_BYTES - (size_t)used, format, args);
+  count_problem(line);
+}
+
+/* Distinct problems: open addressing by FNV-1a of the line, under a spin
+ * lock (warnings are rare; several host threads may log at once). */
+typedef struct Distinct_Problem {
+  uint32_t hash;
+  uint32_t order;   /* first-seen rank + 1; 0 = empty */
+  uint64_t count;
+  char line[LOG_RECENT_LINE_BYTES];
+} Distinct_Problem;
+#define DISTINCT_SLOTS (LOG_DISTINCT_PROBLEMS * 2u)
+static Distinct_Problem g_distinct[DISTINCT_SLOTS];
+static uint32_t g_distinct_count;
+static uint64_t g_distinct_dropped;
+static bool g_distinct_lock;
+
+static void count_problem(const char *line) {
+  uint32_t hash = 0x811c9dc5u;
+  for (const char *p = line; *p; p++) hash = (hash ^ (uint8_t)*p) * 0x01000193u;
+  while (__atomic_test_and_set(&g_distinct_lock, __ATOMIC_ACQUIRE)) {
+  }
+  for (uint32_t probe = 0; probe < DISTINCT_SLOTS; probe++) {
+    Distinct_Problem *slot = &g_distinct[(hash + probe) % DISTINCT_SLOTS];
+    if (slot->order && slot->hash == hash && strcmp(slot->line, line) == 0) {
+      slot->count++;
+      break;
+    }
+    if (!slot->order) {
+      if (g_distinct_count >= LOG_DISTINCT_PROBLEMS) {
+        g_distinct_dropped++;
+        break;
+      }
+      slot->hash = hash;
+      slot->order = ++g_distinct_count;
+      slot->count = 1;
+      snprintf(slot->line, sizeof(slot->line), "%s", line);
+      break;
+    }
+  }
+  __atomic_clear(&g_distinct_lock, __ATOMIC_RELEASE);
+}
+
+size_t log_distinct_problems(char *out, size_t capacity) {
+  if (!out || !capacity) return 0;
+  size_t used = 0;
+  out[0] = '\0';
+  while (__atomic_test_and_set(&g_distinct_lock, __ATOMIC_ACQUIRE)) {
+  }
+  for (uint32_t rank = 1; rank <= g_distinct_count; rank++) {
+    for (uint32_t i = 0; i < DISTINCT_SLOTS; i++) {
+      if (g_distinct[i].order != rank) continue;
+      const int n = snprintf(out + used, capacity - used, "%llu\t%s\n", (unsigned long long)g_distinct[i].count,
+                             g_distinct[i].line);
+      if (n > 0 && (size_t)n < capacity - used) used += (size_t)n;
+      break;
+    }
+  }
+  if (g_distinct_dropped) {
+    const int n = snprintf(out + used, capacity - used, "%llu\t(other distinct problems not kept)\n",
+                           (unsigned long long)g_distinct_dropped);
+    if (n > 0 && (size_t)n < capacity - used) used += (size_t)n;
+  }
+  __atomic_clear(&g_distinct_lock, __ATOMIC_RELEASE);
+  return used;
 }
 
 size_t log_recent_problems(char *out, size_t capacity) {

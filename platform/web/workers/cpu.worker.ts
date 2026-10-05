@@ -659,6 +659,35 @@ async function deleteSave(name: string): Promise<CPUToMainMessage> {
 
 let stateBusy = false;
 
+const RENDER_STAT_NAMES = [
+  "draws", "skippedDraws", "shaderFaults", "unknownShaderOps", "textureMisses",
+  "gpuDraws", "untranslatedGpuDraws", "translatedShaders", "textureUploads", "presents",
+] as const;
+const DISTINCT_PROBLEMS_MAX_BYTES = 256 * 1024;
+const TIMER_HZ = 19_200_000;
+
+function compatReport(): CPUToMainMessage {
+  if (!core || !coreMemory) {
+    return { type: "compat-report", report: { titleId: null, backend: "", slices: 0, virtualSeconds: 0, wallSeconds: 0, problems: "", render: {} } };
+  }
+  const buffer = coreMemory.buffer;
+  const problems = readCString(buffer, Number(core._emulator_distinct_problems_ffi()), DISTINCT_PROBLEMS_MAX_BYTES);
+  const stats = new BigUint64Array(buffer, Number(core._emulator_render_stats_ffi()), RENDER_STAT_NAMES.length);
+  const render = Object.fromEntries(RENDER_STAT_NAMES.map((name, i) => [name, Number(stats[i] ?? 0n)]));
+  return {
+    type: "compat-report",
+    report: {
+      titleId: loadedTitleId,
+      backend: CPU_BACKEND_DISPLAY_NAMES[core._cpu_backend_id_ffi() as CpuBackendId] ?? "unknown",
+      slices: perf.slices,
+      virtualSeconds: Number(core._emulator_virtual_ticks_ffi()) / TIMER_HZ,
+      wallSeconds: perf.startedMs ? (performance.now() - perf.startedMs) / 1000 : 0,
+      problems,
+      render,
+    },
+  };
+}
+
 function corePlan(address: number): ReturnType<typeof parsePlan> | null {
   if (!coreMemory || address === 0) return null;
   return parsePlan(new Uint8Array(coreMemory.buffer, address, PLAN_BYTES).slice());
@@ -887,6 +916,10 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   }
   if (msg.type === "import-saves") {
     void importSaves(msg.tar).then((reply) => self.postMessage(reply));
+    return;
+  }
+  if (msg.type === "compat-report") {
+    self.postMessage(compatReport());
     return;
   }
   if (msg.type === "save-state") {

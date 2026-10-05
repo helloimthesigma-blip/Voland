@@ -36,6 +36,14 @@ void log_set_minimum_level(Log_Level level);
  * kept whatever the minimum level, so a platform can show why a guest
  * stopped (the web event log never sees the core's own log). Returns the
  * bytes written to `out` (NUL-terminated). */
+/* Every distinct warning/error line with how often it was logged (first
+ * seen first), as "count<TAB>line" lines - the compatibility report's
+ * core (what a title needs that Voland lacks). The first
+ * LOG_DISTINCT_PROBLEMS distinct lines are kept; later new ones are only
+ * counted. Returns the bytes written to `out` (NUL-terminated). */
+#define LOG_DISTINCT_PROBLEMS 256u
+size_t log_distinct_problems(char *out, size_t capacity);
+
 #define LOG_RECENT_LINES 32u
 #define LOG_RECENT_LINE_BYTES 240u
 size_t log_recent_problems(char *out, size_t capacity);
