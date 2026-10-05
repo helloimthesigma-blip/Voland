@@ -160,6 +160,13 @@ if(NOT EMSCRIPTEN AND NOT WIN32)
   target_link_libraries(switch_core PUBLIC Threads::Threads)
 endif()
 
+# libm (lrintf, sqrtf, ...): separate from libc on Linux; macOS's libSystem
+# and Emscripten's libc already include it.
+find_library(SWITCH_CORE_LIBM m)
+if(SWITCH_CORE_LIBM AND NOT EMSCRIPTEN)
+  target_link_libraries(switch_core PUBLIC ${SWITCH_CORE_LIBM})
+endif()
+
 #
 # Backend selection. Every backend obeys CPU_Backend; a single define wires
 # cpu_get_active_backend() to the compiled-in choice. Additional backends

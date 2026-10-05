@@ -12,7 +12,13 @@ import { defineConfig, devices } from "@playwright/test";
  * (it once refused to serve the staged core from public/), and only a
  * dev-server run catches that class of bug.
  */
-const WEBGPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"];
+/* Linux (CI) has no GPU: headless Chromium composites the WebGPU canvas
+ * into screenshots only when its compositor also runs on SwiftShader. */
+const LINUX_SOFTWARE_ARGS = process.platform === "linux"
+  ? ["--use-angle=swiftshader", "--use-vulkan=swiftshader", "--enable-unsafe-swiftshader"]
+  : [];
+const WEBGPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan",
+                     ...LINUX_SOFTWARE_ARGS];
 /* The host's real GPU (headless Chromium otherwise falls back to
  * SwiftShader): for measuring the WebGPU renderer's speed, not for CI. */
 const HARDWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"];

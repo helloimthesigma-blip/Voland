@@ -4,7 +4,7 @@ A Nintendo Switch emulator that runs in your browser. A C11 core compiled to
 WebAssembly, an ARM64 → WebAssembly JIT, and a WebGPU renderer. Nothing to
 install to play, and no keys or firmware.
 
-> **Status:** Early development, **Phase 4 (First Boot)** of [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Homebrew runs in the browser with input, audio and persistent SD/save data. A first commercial game boots, plays its cutscenes and reaches gameplay through the WebGPU renderer, running at full game speed but rendering about 10-15 fps on a fast desktop. Next is JIT speed and wider game testing. Most games are untested and many will not boot yet.
+> **Status:** Early development, **Phase 4 (First Boot)** of [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Homebrew runs in the browser with input, audio and persistent SD/save data. So far Voland has only been optimized and tested for **Hollow Knight: Silksong**, which boots, plays its cutscenes and reaches gameplay at full game speed (about 10-15 fps on a fast desktop). Support for more games is what we are working on next; most other games are untested and many will not boot yet.
 
 ---
 
