@@ -486,6 +486,84 @@ static void snapshot_serve(const char *dir, Snapshot_Job *job) {
 
 static void setup_call_trace(Emulator *emu);
 
+/* VOLAND_EXCEPTION_SCAN=1 (diagnostics): after a run, look on each thread's
+ * stack for IL2CPP managed objects whose class name ends in "Exception" and
+ * print their string fields (message, stack trace) - what a Unity title
+ * threw when it aborts with svcBreak(CppException). Heuristic: an object
+ * starts with its Il2CppClass*, whose name/namespace pointers sit at
+ * +0x10/+0x18; a System.String holds a u32 length at +0x10, UTF-16 at +0x14. */
+#define IL2CPP_CLASS_NAME 0x10u
+#define IL2CPP_CLASS_NAMESPACE 0x18u
+#define IL2CPP_STRING_LENGTH 0x10u
+#define IL2CPP_STRING_CHARS 0x14u
+#define IL2CPP_SCAN_STACK_BYTES 0x20000u
+#define IL2CPP_SCAN_FIELDS 24u
+#define IL2CPP_TEXT_MAX 600u
+
+static bool guest_cstring(Emulator *emu, uint64_t at, char *out, size_t cap) {
+  for (size_t i = 0; i + 1 < cap; i++) {
+    uint8_t ch = 0;
+    if (!error_is_ok(vmm_read_block(emu->vmm, at + i, &ch, 1))) return false;
+    out[i] = (char)ch;
+    if (!ch) return i > 0;
+    if (ch < 0x20 || ch > 0x7e) return false;
+  }
+  return false;
+}
+
+static bool il2cpp_class_name(Emulator *emu, uint64_t object, char *name, size_t cap, char *ns, size_t ns_cap) {
+  uint64_t klass = 0, name_ptr = 0, ns_ptr = 0;
+  if (!object || (object & 7u) || !error_is_ok(vmm_read64(emu->vmm, object, &klass)) || !klass || (klass & 7u)) return false;
+  if (!error_is_ok(vmm_read64(emu->vmm, klass + IL2CPP_CLASS_NAME, &name_ptr)) ||
+      !error_is_ok(vmm_read64(emu->vmm, klass + IL2CPP_CLASS_NAMESPACE, &ns_ptr)))
+    return false;
+  ns[0] = '\0';
+  if (ns_ptr) (void)guest_cstring(emu, ns_ptr, ns, ns_cap);
+  return guest_cstring(emu, name_ptr, name, cap);
+}
+
+static void il2cpp_exception_scan(Emulator *emu, const Sched_Thread *th) {
+  const CPU_Register_File *rf = emu->cpu_backend->get_register_file(th->thread.cpu_state);
+  uint64_t seen[32];
+  uint32_t seen_count = 0;
+  for (uint64_t at = rf->sp & ~7ull; at < rf->sp + IL2CPP_SCAN_STACK_BYTES; at += 8u) {
+    uint64_t object = 0;
+    if (!error_is_ok(vmm_read64(emu->vmm, at, &object))) break;
+    char name[128], ns[128];
+    if (!il2cpp_class_name(emu, object, name, sizeof(name), ns, sizeof(ns))) continue;
+    const size_t len = strlen(name);
+    if (len < 9u || strcmp(name + len - 9u, "Exception") != 0) continue;
+    bool dup = false;
+    for (uint32_t i = 0; i < seen_count; i++) dup = dup || seen[i] == object;
+    if (dup || seen_count == 32u) continue;
+    seen[seen_count++] = object;
+    fprintf(stderr, "    exception %s.%s at 0x%llx (stack +0x%llx)\n", ns, name, (unsigned long long)object,
+            (unsigned long long)(at - rf->sp));
+    for (uint32_t f = 0; f < IL2CPP_SCAN_FIELDS; f++) {
+      const uint64_t field_at = object + 0x10u + 8u * f;
+      uint64_t value = 0;
+      char fname[64], fns[64];
+      if (!error_is_ok(vmm_read64(emu->vmm, field_at, &value)) || !value) continue;
+      if (!il2cpp_class_name(emu, value, fname, sizeof(fname), fns, sizeof(fns))) continue;
+      if (strcmp(fname, "String") != 0) {
+        fprintf(stderr, "      +0x%x: %s.%s\n", 0x10u + 8u * f, fns, fname);
+        continue;
+      }
+      uint32_t chars = 0;
+      if (!error_is_ok(vmm_read32(emu->vmm, value + IL2CPP_STRING_LENGTH, &chars))) continue;
+      char text[IL2CPP_TEXT_MAX + 1];
+      uint32_t n = 0;
+      for (uint32_t c = 0; c < chars && n < IL2CPP_TEXT_MAX; c++) {
+        uint16_t unit = 0;
+        if (!error_is_ok(vmm_read_block(emu->vmm, value + IL2CPP_STRING_CHARS + 2u * c, &unit, 2))) break;
+        text[n++] = unit == '\n' ? '|' : (unit >= 0x20 && unit < 0x7f ? (char)unit : '?');
+      }
+      text[n] = '\0';
+      fprintf(stderr, "      +0x%x: \"%s\"\n", 0x10u + 8u * f, text);
+    }
+  }
+}
+
 /* VOLAND_PC_PROFILE=1: after every slice, the thread that ran is charged
  * the slice's cycles at the 256-byte block of guest code it stopped in;
  * the hottest blocks print at exit (module + offset) - where guest time
@@ -1190,6 +1268,7 @@ static int run(int argc, char **argv) {
         lr = next_lr;
       }
     }
+    if (getenv("VOLAND_EXCEPTION_SCAN")) il2cpp_exception_scan(&emu, th);
     if (getenv("VOLAND_DUMP_MODULE") && emu.process.module_count) {
       /* A module's whole image (VOLAND_DUMP_MODULE_INDEX, default 0), for
        * offline disassembly and symbolization. */
