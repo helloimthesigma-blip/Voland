@@ -1,10 +1,32 @@
 # Voland
 
 A Nintendo Switch emulator that runs in your browser. A C11 core compiled to
-WebAssembly, an ARM64 → WebAssembly JIT, and a WebGPU renderer. Nothing to
-install to play, and no keys or firmware.
+WebAssembly, its own ARM64 → WebAssembly JIT, and a WebGPU renderer. Nothing
+to install, and no keys or firmware.
 
-> **Status:** Early development, **Phase 4 (First Boot)** of [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Homebrew runs in the browser with input (remappable), audio, persistent SD data, a game library, save states and a per-game save browser. So far Voland has only been optimized and tested for **Hollow Knight: Silksong**, which boots, plays its cutscenes and reaches gameplay at full game speed (about 10-15 fps on a fast desktop). Support for more games is what we are working on next; most other games are untested and many will not boot yet.
+**Hollow Knight and Hollow Knight: Silksong are fully playable in a browser
+tab**: real commercial Switch games booting, running cutscenes and playing at
+full game speed, at a stable ~15 fps on a fast desktop.
+
+> **Status:** **Phase 4 (First Boot)** of [DESIGN.md §25](docs/DESIGN.md#25-development-phases). Hollow Knight and Silksong boot and play at full game speed (~15 fps), with audio, controller and keyboard input and persistent saves. On top of that come save states, a game library, a save-data browser and a persistent shader cache. Next up is broadening game support: most other titles are untested, and [docs/NEW_GAMES.md](docs/NEW_GAMES.md) is the bring-up guide.
+
+### What works today
+
+- **Commercial games in the browser.** Hollow Knight and Hollow Knight: Silksong
+  play from boot to gameplay at real game speed, with sound and video cutscenes.
+- **Save states.** Freeze the whole machine mid-fight and jump back in a second.
+  They survive a page reload.
+- **Game saves that persist.** Each game's save directory lives in your browser.
+  Browse it, drag files in, back it up and restore it.
+- **Game library.** Load a game once, then launch it from a tile with one click.
+- **Remappable controls.** Keyboard or any standard gamepad, rebound from the
+  controls panel.
+- **Fast paths.** An ARM64 → WebAssembly JIT, guest threads spread across host
+  cores, a WebGPU renderer, and a shader cache that warms up on later visits.
+- **Homebrew.** NROs run directly, or through a homebrew menu from the emulated
+  SD card.
+- **A compatibility report.** One click tells you exactly what a new game is
+  missing.
 
 ---
 
