@@ -9,6 +9,10 @@ import { For, Match, Show, Switch, createSignal, onCleanup, onMount } from "soli
 import type { GameLoadOutcome, LoadFailure, SdImportOutcome } from "@bindings/load";
 import { type GuestConsoleState, getGuestConsole, subscribeGuestConsole } from "../guest-console";
 import { describeLoadFailure } from "./load-failure-copy";
+import GameLibrary from "./GameLibrary";
+import {
+  type LibraryGame, canKeepFiles, forgetGame, listGames, markPlayed, openGameFile, pickGameFile, rememberGame,
+} from "../library";
 
 interface LoadPanelProps {
   readonly loadGame: (file: File) => Promise<GameLoadOutcome>;
@@ -43,6 +47,8 @@ function LoadPanel(props: LoadPanelProps) {
   let sdInput: HTMLInputElement | undefined;
   const [sd, setSd] = createSignal<SdImportOutcome | null>(null);
   const [bootHint, setBootHint] = createSignal(false);
+  const [games, setGames] = createSignal<readonly LibraryGame[]>([]);
+  const refreshLibrary = async (): Promise<void> => { setGames(await listGames()); };
   let bootHintTimer = 0;
   onCleanup(() => window.clearTimeout(bootHintTimer));
 
@@ -55,6 +61,7 @@ function LoadPanel(props: LoadPanelProps) {
   onMount(() => {
     const off = subscribeGuestConsole(setGuest);
     onCleanup(off);
+    void refreshLibrary();
   });
 
   /* The game canvas itself goes fullscreen: it lives in <body>, pinned over
@@ -64,9 +71,13 @@ function LoadPanel(props: LoadPanelProps) {
     void canvas?.requestFullscreen?.().catch(() => undefined);
   }
 
-  async function load(file: File): Promise<void> {
+  async function load(file: File, gameId: string | null = null): Promise<void> {
     setState({ kind: "loading", fileName: file.name });
     const outcome = await props.loadGame(file);
+    if (outcome.success && gameId) {
+      await markPlayed(gameId, outcome.titleId);
+      await refreshLibrary();
+    }
     setState(outcome.success
       ? { kind: "loaded", fileName: file.name, titleId: outcome.titleId, entryPoint: outcome.entryPoint }
       : { kind: "failed", fileName: file.name, failure: outcome.failure });
@@ -78,7 +89,52 @@ function LoadPanel(props: LoadPanelProps) {
   async function onFileChosen(event: Event & { currentTarget: HTMLInputElement }): Promise<void> {
     const file = event.currentTarget.files?.[0];
     event.currentTarget.value = ""; // picking the same file again re-triggers change
-    if (file) await load(file);
+    if (!file) return;
+    const game = await rememberGame(file, null);
+    await refreshLibrary();
+    await load(file, game.id);
+  }
+
+  /* Picks a game: through the File System Access picker where the browser
+   * has one (so the library can keep the file), else a plain file input. */
+  async function chooseGame(): Promise<void> {
+    if (!canKeepFiles()) {
+      input?.click();
+      return;
+    }
+    const picked = await pickGameFile();
+    if (!picked) return;
+    const game = await rememberGame(picked.file, picked.handle);
+    await refreshLibrary();
+    await load(picked.file, game.id);
+  }
+
+  async function launch(game: LibraryGame): Promise<void> {
+    const file = await openGameFile(game);
+    if (file) {
+      await load(file, game.id);
+      return;
+    }
+    /* No handle, permission refused, or the file changed: pick it again
+     * (it is remembered under the same entry if it is the same file). */
+    if (canKeepFiles()) await chooseGame();
+    else input?.click();
+  }
+
+  async function addDropped(items: DataTransferItemList): Promise<void> {
+    const pending = Array.from(items).filter((item) => item.kind === "file").map(async (item) => {
+      const withHandle = item as DataTransferItem & { getAsFileSystemHandle?: () => Promise<FileSystemHandle | null> };
+      const handle = await withHandle.getAsFileSystemHandle?.().catch(() => null) ?? null;
+      if (handle && handle.kind === "file") {
+        const fileHandle = handle as FileSystemFileHandle;
+        await rememberGame(await fileHandle.getFile(), fileHandle);
+        return;
+      }
+      const file = item.getAsFile();
+      if (file) await rememberGame(file, null);
+    });
+    await Promise.all(pending);
+    await refreshLibrary();
   }
 
   async function runDemo(): Promise<void> {
@@ -104,12 +160,20 @@ function LoadPanel(props: LoadPanelProps) {
         data-testid="sd-input"
         onChange={(event) => { void onSdFilesChosen(event); }}
       />
+      <GameLibrary
+        games={games()}
+        busy={state().kind === "loading"}
+        onLaunch={(game) => { void launch(game); }}
+        onForget={(game) => { void forgetGame(game.id).then(refreshLibrary); }}
+        onDropFiles={(items) => { void addDropped(items); }}
+      />
       <div class="voland-load-actions">
         <button
           type="button"
           class="voland-load-button"
           disabled={state().kind === "loading"}
-          onClick={() => input?.click()}
+          data-testid="load-game"
+          onClick={() => { void chooseGame(); }}
         >
           Load NCA or homebrew NRO…
         </button>

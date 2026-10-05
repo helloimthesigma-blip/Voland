@@ -1530,6 +1530,10 @@ Per §11: PTC entries are keyed by **content hash of the region's code bytes** +
 
 Voland never uploads cache data to any server. There is no cloud cache.
 
+### Game library (v3.74)
+
+Games the player loads are remembered in IndexedDB (`voland-library`, `src/library.ts`) as File System Access handles plus labels - never the game's bytes. The shell shows them as tiles; a click asks for read permission when the browser needs it (once per session) and loads the file again. Browsers without `showOpenFilePicker` keep the entry but ask for the file on launch. Dropped files are added too (with a handle where `getAsFileSystemHandle` exists).
+
 ### Save browser (v3.74)
 
 Each title's save is its own user save directory, as on Horizon: `fsp-srv` fills a title-save attribute's program id 0 with the running program's id (Voland before v3.74 kept them at 0, so every title shared one save; the first title to open such a save takes it over, committed archive renamed). The shell's **Save data** panel (`src/ui/SavesPanel.tsx`) lists every stored save by game (program id, named after the file it was loaded from), shows its file tree, downloads, replaces and deletes files, takes dropped files and folders, downloads one save as a tar of its files, and backs up or restores all of them. Edits rewrite the save's archive (`bindings/save-archive.ts`, the core's VSAV format) and go through the CPU worker (`put-save` / `delete-save`, lifecycle messages): the core validates and loads it first - refusing while the running game has one of its files open - then OPFS stores it.
@@ -2468,6 +2472,7 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 - **§15, per-title saves:** fsp-srv fills program id 0 in a title save's attribute with the running program's id; a save keyed with 0 by older builds is taken over by the first title that opens it (its committed archive is renamed, and the web mirror removes the old stored name).
 - **§15, save browser:** the shell's Save data panel browses, edits, adds (files and dropped folders), downloads and deletes each game's save files; `put-save` / `delete-save` / `list-saves` lifecycle messages.
+- **§15, game library:** loaded games are remembered as file handles and launch from tiles in one click.
 - **§18, remapping:** every Switch control can be rebound to a keyboard key or standard-gamepad button from the controls panel; kept per browser.
 - **Web fullscreen:** the game canvas itself goes fullscreen (the screen box it is pinned over has nothing to show, so fullscreen was black).
 - **Diagnostics:** every IPC command that fails is logged as a warning (it shows in the web crash report).
