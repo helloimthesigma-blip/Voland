@@ -358,12 +358,12 @@ int main(void) {
     exefs_image.bytes[sdk_entry->offset] = 'N';
   }
 
-  /* Unsupported address space (36-bit npdm). */
-  build_npdm(1);
-  NPDM npdm36;
-  CHECK_OK(npdm_parse(g_npdm_image.bytes, g_npdm_image.size, &npdm36));
+  /* Unsupported address space (32-bit npdm). */
+  build_npdm(0);
+  NPDM npdm32;
+  CHECK_OK(npdm_parse(g_npdm_image.bytes, g_npdm_image.size, &npdm32));
   bad = params;
-  bad.npdm = &npdm36;
+  bad.npdm = &npdm32;
   CHECK_CODE(process_bootstrap(&bad, &process), RESULT_NOT_IMPLEMENTED);
   expect_unmapped(emu.vmm, ADDRESS_SPACE_39_START);
 

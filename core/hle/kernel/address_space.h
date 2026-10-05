@@ -9,7 +9,7 @@
  * MapMemory, GetInfo - the next §25 checkboxes) reads region bases and
  * sizes from it and never recomputes them.
  *
- * Only the 39-bit layout (NPDM_ADDRESS_SPACE_64_BIT_39, every modern
+ * The 39-bit layout (NPDM_ADDRESS_SPACE_64_BIT_39, every modern
  * title) is implemented. The 36-bit and 32-bit layouts return
  * RESULT_NOT_IMPLEMENTED; they carve the same region kinds with different
  * sizes and can be added behind this interface when a title needs them.
@@ -52,6 +52,18 @@
 #define ADDRESS_SPACE_39_STACK_SIZE ((uint64_t)0x80000000)   /* 2GB */
 #define ADDRESS_SPACE_39_TLS_IO_SIZE ((uint64_t)0x1000000000) /* 64GB */
 
+/* The 36-bit layout (NPDM_ADDRESS_SPACE_64_BIT_36: early titles built
+ * before system 2.0): the same order inside [ADDRESS_SPACE_36_START,
+ * 2^36), with regions sized to fit 64GB. Guests learn every region's
+ * bounds from svcGetInfo, so what matters is that they are consistent and
+ * below 2^36. */
+#define ADDRESS_SPACE_36_START ((uint64_t)0x8000000)        /* 128MB */
+#define ADDRESS_SPACE_36_END ((uint64_t)1 << 36)            /* 64GB */
+#define ADDRESS_SPACE_36_ALIAS_SIZE ((uint64_t)0x180000000)  /* 6GB */
+#define ADDRESS_SPACE_36_HEAP_SIZE ((uint64_t)0x180000000)   /* 6GB */
+#define ADDRESS_SPACE_36_STACK_SIZE ((uint64_t)0x80000000)   /* 2GB */
+#define ADDRESS_SPACE_36_TLS_IO_SIZE ((uint64_t)0x80000000)  /* 2GB */
+
 /* ASLR shifts the code base in multiples of this (2MB: Horizon's region
  * randomization granule). */
 #define ADDRESS_SPACE_ASLR_GRANULE ((uint64_t)0x200000)
@@ -75,7 +87,7 @@ typedef struct Address_Space {
  * bytes (rounded up to a page; must be > 0).
  *   RESULT_INVALID_ARGUMENT NULL out; code_size == 0; the code region
  *                           plus the fixed regions do not fit the space
- *   RESULT_NOT_IMPLEMENTED  type other than NPDM_ADDRESS_SPACE_64_BIT_39
+ *   RESULT_NOT_IMPLEMENTED  a 32-bit (AArch32) address space type
  * Pure: no I/O, no allocation, no vmm calls. */
 Error address_space_init(NPDM_Address_Space type, uint64_t code_size,
                          uint64_t aslr_seed, Address_Space *out);

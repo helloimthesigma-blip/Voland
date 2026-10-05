@@ -30,15 +30,30 @@ Error address_space_init(NPDM_Address_Space type, uint64_t code_size,
   if (code_size == 0) {
     return ERR(RESULT_INVALID_ARGUMENT, "address_space_init: code size is zero");
   }
-  if (type != NPDM_ADDRESS_SPACE_64_BIT_39) {
+  /* Region sizes per layout; the placement below is shared. */
+  uint64_t start, end, alias_size, heap_size, stack_size, tls_io_size;
+  if (type == NPDM_ADDRESS_SPACE_64_BIT_39) {
+    start = ADDRESS_SPACE_39_START;
+    end = ADDRESS_SPACE_39_END;
+    alias_size = ADDRESS_SPACE_39_ALIAS_SIZE;
+    heap_size = ADDRESS_SPACE_39_HEAP_SIZE;
+    stack_size = ADDRESS_SPACE_39_STACK_SIZE;
+    tls_io_size = ADDRESS_SPACE_39_TLS_IO_SIZE;
+  } else if (type == NPDM_ADDRESS_SPACE_64_BIT_36) {
+    start = ADDRESS_SPACE_36_START;
+    end = ADDRESS_SPACE_36_END;
+    alias_size = ADDRESS_SPACE_36_ALIAS_SIZE;
+    heap_size = ADDRESS_SPACE_36_HEAP_SIZE;
+    stack_size = ADDRESS_SPACE_36_STACK_SIZE;
+    tls_io_size = ADDRESS_SPACE_36_TLS_IO_SIZE;
+  } else {
     return ERR(RESULT_NOT_IMPLEMENTED,
-               "address_space_init: only the 39-bit address space is implemented");
+               "address_space_init: 32-bit (AArch32) programs are not supported");
   }
   memset(out, 0, sizeof(*out));
 
-  const uint64_t span = ADDRESS_SPACE_39_END - ADDRESS_SPACE_39_START;
-  const uint64_t fixed_regions = ADDRESS_SPACE_39_ALIAS_SIZE + ADDRESS_SPACE_39_HEAP_SIZE +
-                                 ADDRESS_SPACE_39_STACK_SIZE + ADDRESS_SPACE_39_TLS_IO_SIZE;
+  const uint64_t span = end - start;
+  const uint64_t fixed_regions = alias_size + heap_size + stack_size + tls_io_size;
   const uint64_t code_bytes = align_up_page(code_size);
   if (code_bytes < code_size || code_bytes > span - fixed_regions) {
     return ERR(RESULT_INVALID_ARGUMENT, "address_space_init: code region does not fit");
@@ -56,24 +71,24 @@ Error address_space_init(NPDM_Address_Space type, uint64_t code_size,
   }
 
   out->type = type;
-  out->aslr.base = ADDRESS_SPACE_39_START;
+  out->aslr.base = start;
   out->aslr.size = span;
 
-  uint64_t cursor = ADDRESS_SPACE_39_START + aslr_offset;
+  uint64_t cursor = start + aslr_offset;
   out->code.base = cursor;
   out->code.size = code_bytes;
   cursor += code_bytes;
   out->alias.base = cursor;
-  out->alias.size = ADDRESS_SPACE_39_ALIAS_SIZE;
-  cursor += ADDRESS_SPACE_39_ALIAS_SIZE;
+  out->alias.size = alias_size;
+  cursor += alias_size;
   out->heap.base = cursor;
-  out->heap.size = ADDRESS_SPACE_39_HEAP_SIZE;
-  cursor += ADDRESS_SPACE_39_HEAP_SIZE;
+  out->heap.size = heap_size;
+  cursor += heap_size;
   out->stack.base = cursor;
-  out->stack.size = ADDRESS_SPACE_39_STACK_SIZE;
-  cursor += ADDRESS_SPACE_39_STACK_SIZE;
+  out->stack.size = stack_size;
+  cursor += stack_size;
   out->tls_io.base = cursor;
-  out->tls_io.size = ADDRESS_SPACE_39_TLS_IO_SIZE;
+  out->tls_io.size = tls_io_size;
   return OK;
 }
 

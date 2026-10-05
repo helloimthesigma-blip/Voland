@@ -9,6 +9,17 @@
 
 #define CODE_BYTES ((uint64_t)0x3000)
 
+static void check_regions(const Address_Space *as, uint64_t start, uint64_t end);
+
+static void check_well_formed_36(const Address_Space *as) {
+  check_regions(as, ADDRESS_SPACE_36_START, ADDRESS_SPACE_36_END);
+  CHECK(as->type == NPDM_ADDRESS_SPACE_64_BIT_36);
+  CHECK(as->alias.size == ADDRESS_SPACE_36_ALIAS_SIZE);
+  CHECK(as->heap.size == ADDRESS_SPACE_36_HEAP_SIZE);
+  CHECK(as->stack.size == ADDRESS_SPACE_36_STACK_SIZE);
+  CHECK(as->tls_io.size == ADDRESS_SPACE_36_TLS_IO_SIZE);
+}
+
 static bool page_aligned(const Address_Region *r) {
   return (r->base & VMM_PAGE_OFFSET_MASK) == 0 && (r->size & VMM_PAGE_OFFSET_MASK) == 0;
 }
@@ -22,17 +33,21 @@ static bool disjoint(const Address_Region *a, const Address_Region *b) {
 }
 
 /* Structural invariants every layout must satisfy. */
-static void check_well_formed(const Address_Space *as) {
+static void check_regions(const Address_Space *as, uint64_t start, uint64_t end) {
   const Address_Region *regions[] = {&as->code, &as->alias, &as->heap, &as->stack, &as->tls_io};
   const size_t n = sizeof(regions) / sizeof(regions[0]);
-  CHECK(as->aslr.base == ADDRESS_SPACE_39_START);
-  CHECK(as->aslr.base + as->aslr.size == ADDRESS_SPACE_39_END);
+  CHECK(as->aslr.base == start);
+  CHECK(as->aslr.base + as->aslr.size == end);
   for (size_t i = 0; i < n; i++) {
     CHECK(page_aligned(regions[i]));
     CHECK(regions[i]->size > 0);
     CHECK(inside(&as->aslr, regions[i]));
     for (size_t j = i + 1; j < n; j++) CHECK(disjoint(regions[i], regions[j]));
   }
+}
+
+static void check_well_formed(const Address_Space *as) {
+  check_regions(as, ADDRESS_SPACE_39_START, ADDRESS_SPACE_39_END);
   CHECK(as->alias.size == ADDRESS_SPACE_39_ALIAS_SIZE);
   CHECK(as->heap.size == ADDRESS_SPACE_39_HEAP_SIZE);
   CHECK(as->stack.size == ADDRESS_SPACE_39_STACK_SIZE);
@@ -85,12 +100,26 @@ int main(void) {
   CHECK_CODE(address_space_init(NPDM_ADDRESS_SPACE_64_BIT_39, UINT64_MAX, 0, &as),
              RESULT_INVALID_ARGUMENT);
 
+  /* The 36-bit layout: same shape, every region below 2^36. */
+  CHECK_OK(address_space_init(NPDM_ADDRESS_SPACE_64_BIT_36, CODE_BYTES, 0, &as));
+  check_well_formed_36(&as);
+  CHECK(as.code.base == ADDRESS_SPACE_36_START);
+  CHECK(as.heap.base == as.alias.base + ADDRESS_SPACE_36_ALIAS_SIZE);
+  CHECK_OK(address_space_init(NPDM_ADDRESS_SPACE_64_BIT_36, CODE_BYTES, 0x1234, &as));
+  check_well_formed_36(&as);
+  CHECK((as.code.base - ADDRESS_SPACE_36_START) % ADDRESS_SPACE_ASLR_GRANULE == 0);
+  const uint64_t fixed_36 = ADDRESS_SPACE_36_ALIAS_SIZE + ADDRESS_SPACE_36_HEAP_SIZE +
+                            ADDRESS_SPACE_36_STACK_SIZE + ADDRESS_SPACE_36_TLS_IO_SIZE;
+  const uint64_t max_code_36 = (ADDRESS_SPACE_36_END - ADDRESS_SPACE_36_START) - fixed_36;
+  CHECK_OK(address_space_init(NPDM_ADDRESS_SPACE_64_BIT_36, max_code_36, 0, &as));
+  CHECK(as.tls_io.base + as.tls_io.size == ADDRESS_SPACE_36_END);
+  CHECK_CODE(address_space_init(NPDM_ADDRESS_SPACE_64_BIT_36, max_code_36 + VMM_PAGE_SIZE, 0, &as),
+             RESULT_INVALID_ARGUMENT);
+
   /* Rejections. */
   CHECK_CODE(address_space_init(NPDM_ADDRESS_SPACE_64_BIT_39, 0, 0, &as), RESULT_INVALID_ARGUMENT);
   CHECK_CODE(address_space_init(NPDM_ADDRESS_SPACE_64_BIT_39, CODE_BYTES, 0, NULL),
              RESULT_INVALID_ARGUMENT);
-  CHECK_CODE(address_space_init(NPDM_ADDRESS_SPACE_64_BIT_36, CODE_BYTES, 0, &as),
-             RESULT_NOT_IMPLEMENTED);
   CHECK_CODE(address_space_init(NPDM_ADDRESS_SPACE_32_BIT, CODE_BYTES, 0, &as),
              RESULT_NOT_IMPLEMENTED);
   CHECK_CODE(address_space_init(NPDM_ADDRESS_SPACE_32_BIT_NO_RESERVED, CODE_BYTES, 0, &as),
