@@ -3,7 +3,7 @@
  * Perf regression tracker: measures one commit with tools/perf.mjs and
  * appends a row to a CSV (docs/perf/silksong.csv in this checkout).
  *
- *   node tools/perf-track.mjs --game FILE [--ref origin/local/dev]
+ *   node tools/perf-track.mjs --game FILE [--ref origin/main]
  *        [--worktree DIR] [--csv FILE] [--preset web] [--url-params ...]
  *        [--threshold 0.10]
  *
@@ -13,7 +13,7 @@
  *   backend), installs the web dependencies if needed, and
  *   runs this checkout's perf.mjs against it (--web-dir) twice:
  *     (a) the title: warm up to slice 860,000, measure 30 s;
- *     (b) the gameplay recipe (BOTS.md presses) with load phases
+ *     (b) the gameplay recipe (the --press list in perf.mjs's header) with load phases
  *         boot/title/menus/newgame to slice 4,800,000, then measure 30 s.
  * - Appends commit, date, load averages, worker seconds to the title and to
  *   gameplay, fps, slices/s, ticks/s, run-time wasm modules and the
@@ -48,7 +48,7 @@ const NORMALISED = ["load_cpu_per_vs", "title_cpu_per_vs", "gameplay_cpu_per_vs"
 
 function parseArgs(argv) {
   const opts = {
-    game: "", ref: "origin/local/dev", worktree: resolve(REPO, "../Voland-perf"),
+    game: "", ref: "origin/main", worktree: resolve(REPO, "../Voland-perf"),
     csv: join(REPO, "docs/perf/silksong.csv"), preset: "web", urlParams: "", threshold: 0.1,
   };
   for (let i = 0; i < argv.length; i++) {

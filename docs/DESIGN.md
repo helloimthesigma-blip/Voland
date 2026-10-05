@@ -2477,9 +2477,9 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - Gameplay at slice 4.8M with the recipe: 8.0 fps (interpreter: 3.1), rendered correctly.
   - Boot to gameplay: 609 s of worker time (interpreter: about 1,300–1,600 s).
   - Under Node the same build is 1.72× faster with identical virtual time and SVC counts.
-  - Parallel guest threads (bot 1's `parallel.c`, 3 cores by default with the interpreter) are gated by `CPU_Backend.supports_multicore`; the JIT runs serial until its code cache is per-thread.
+  - Parallel guest threads (`parallel.c`, 3 cores by default with the interpreter) are gated by `CPU_Backend.supports_multicore`; the JIT runs serial until its code cache is per-thread.
 - **Texture change detection:** a sampled hash each frame, the whole hash every 30 frames or after copy-engine writes. GPU mode releases decoded copies after upload. Gameplay with the interpreter went from 0.78 to 3.12 fps, because the 512 MB web texture pool no longer thrashes.
-- **Merged work from the parallel agents (docs/handoff/):**
+- **Also landed:**
   - Mipmaps.
   - Executor pass and bind-group batching.
   - SHFL register operands.

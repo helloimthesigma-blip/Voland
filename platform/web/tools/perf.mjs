@@ -28,7 +28,7 @@
  *
  * - --press holds keyboard KEY (a Playwright key name; "z" is the A
  *   button) from scheduler slice SLICE for SLICES slices, like
- *   voland-cli's --input. Silksong's gameplay recipe (BOTS.md) is
+ *   voland-cli's --input. Silksong's gameplay recipe is
  *   --press 860000:z:3000 --press 940000:z:3000 --press 1020000:z:3000
  *   --press 3000000:z:3000 --press 3100000:z:3000 --press 3200000:z:3000
  *   with --warmup-slices 4800000. Presses land within ~250 ms of their

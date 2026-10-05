@@ -8,7 +8,7 @@
  * address per nvmap handle, and engine methods carry those addresses
  * shifted right by 8. Mm_Iova resolves them back to guest VAs.
  *
- * NVDEC methods (as the guest drives them; docs/handoff/BOT_2_STATUS.md):
+ * NVDEC methods (as observed in the guest's submissions):
  *   0x200 application id (3 = H.264)    0x400 control params
  *   0x404 picture setup                  0x408 bitstream
  *   0x40C picture index                  0x410 slice offsets {u32 offset, u32 size}

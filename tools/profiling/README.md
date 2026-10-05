@@ -29,7 +29,7 @@ with many short slices in the PC profile are call sites, not hot code.
   JIT helpers, interpreter fallback, Maxwell shader interpretation, the
   raster3d producer, HLE and other.
 
-Example (Silksong gameplay, see docs/handoff/BOT_2_STATUS.md):
+Example (gameplay in a commercial game):
 
     VOLAND_STATS_FROM=4800000 VOLAND_PC_SAMPLES=s.bin VOLAND_DUMP_MODULES=mods \
       voland-cli run GAME.nca --gpu-stream /dev/null --max-slices 5000000 --input ...

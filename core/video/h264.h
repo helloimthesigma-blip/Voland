@@ -7,7 +7,7 @@
  * that shape slice parsing, so the guest's slices decode unchanged.
  *
  * The picture-setup layout (H264_SETUP_*) is NVIDIA's nvdec_h264_pic_s
- * as observed in the guest's submissions (docs/handoff/BOT_2_STATUS.md).
+ * as observed in the guest's submissions.
  */
 #ifndef SWITCH_VIDEO_H264_H
 #define SWITCH_VIDEO_H264_H

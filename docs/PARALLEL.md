@@ -2,8 +2,7 @@
 
 Status: opt-in scheduler mode, the default in the web build (three cores
 where the machine has room).
-The owner is bot 1 (`docs/handoff/BOT_1.md`). This document is the design;
-measurements live in `docs/handoff/BOT_1_STATUS.md`.
+This document is the design; see "Measuring" for how to measure it.
 
 ## Why
 

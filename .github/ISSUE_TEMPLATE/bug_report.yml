@@ -1,0 +1,31 @@
+name: Bug report
+description: Something in Voland itself is broken (UI, build, tests, a crash not tied to one game)
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what you expected
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. ./voland
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Logs
+      description: Page log, terminal output or test output. Never attach game files, keys or saves.
+      render: text
+  - type: input
+    id: setup
+    attributes:
+      label: Browser / OS / commit
+    validations:
+      required: true

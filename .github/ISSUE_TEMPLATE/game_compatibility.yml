@@ -1,0 +1,53 @@
+name: Game compatibility
+description: Report how far a game gets in Voland
+labels: [compatibility]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! **Never attach game files, keys, firmware or save files**, and do not link to them.
+  - type: input
+    id: game
+    attributes:
+      label: Game and title ID
+      description: The title ID is shown in the page log after loading (e.g. `loaded title 0100...`).
+      placeholder: "Example Game (0100000000000000), version 1.0.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: status
+    attributes:
+      label: How far does it get?
+      options:
+        - Does not load (error before anything runs)
+        - Crashes or hangs during boot
+        - Shows menus or intro
+        - Reaches gameplay with problems
+        - Playable
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: What happens
+      description: What you did, what you saw, and roughly how fast it ran.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Page log
+      description: Copy the log panel's last ~50 lines, especially any WARN or ERROR lines.
+      render: text
+  - type: input
+    id: setup
+    attributes:
+      label: Browser, OS and hardware
+      placeholder: "Chrome 140, macOS 14, M2 Pro, 16 GB"
+    validations:
+      required: true
+  - type: input
+    id: commit
+    attributes:
+      label: Voland version
+      description: Commit hash if built locally, or "hosted" with the date.

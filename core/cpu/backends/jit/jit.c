@@ -47,7 +47,7 @@
 #define JIT_CACHE_ENTRIES (1u << JIT_CACHE_BITS)
 #define JIT_HIT_COUNTERS (1u << 16)
 /* Interpreted executions before a block is compiled. Measured on
- * Silksong (docs/handoff/JIT_STATUS.md): 16 compiled ~2.5x the modules of
+ * a commercial game (docs/JIT.md "Measuring"): 16 compiled ~2.5x the modules of
  * 256 for the same guest speed, and module compilation is the JIT's
  * largest overhead while games load. */
 #define JIT_DEFAULT_HOT_THRESHOLD 256u

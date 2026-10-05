@@ -11,13 +11,34 @@ If you're using an AI coding agent against this repo, also read
 [`CLAUDE.md`](CLAUDE.md) — it states the same rules in the form an agent
 needs (hard rules, review tripwires), and applies to human contributors too.
 
+## Quick start
+
+```bash
+git clone https://github.com/helloimthesigma-blip/Voland && cd Voland
+./voland          # builds what is missing and opens the app
+./voland test     # native tests, web unit tests, browser tests
+```
+
+Then pick something:
+
+- **Try a game and report what happens.** Open a *Game compatibility*
+  issue with the page log (the app's log panel) and how far it got. This
+  is the most useful contribution that needs no code.
+- **Fix a bug** labelled `good first issue`, or one you hit yourself.
+- **Implement a missing service command.** When a game calls something
+  Voland does not implement, the log shows an `[ipc]` warning with the
+  service and command id. Add the command in `core/hle/services/`, with an
+  SVC-path test in `tests/services_test.c`.
+
+Make a branch, commit with a conventional message (`fix(hle): ...`), run
+`./voland test`, and open a pull request. The template asks for what
+changed and how you verified it.
+
 ## Current phase
 
-**Phase 0 — Skeleton.** The task list is `docs/DESIGN.md` §25. Don't start
-work that belongs to a later phase just because it seems adjacent — e.g. the
-softmmu (`core/common/vmm.c`, §5) and the guest thread scheduler (§7) are
-Phase 1/2 deliverables, not something to bolt on early because a Phase 0
-header happens to reference them.
+**Phase 4 — First Boot.** The task list is `docs/DESIGN.md` §25: getting
+commercial games to boot and play. Don't start work that belongs to a
+later phase just because it seems adjacent; ask in an issue first.
 
 ## Before you write any code
 
@@ -80,7 +101,7 @@ before a real CPU backend exists.
 
 ```bash
 cd platform/web
-npm install
+npx pnpm@12.8.1 install --frozen-lockfile
 npm run typecheck   # tsc --noEmit
 npm run test        # unit tests (node --test), no browser needed
 npm run build        # production build
