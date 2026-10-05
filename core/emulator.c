@@ -1169,3 +1169,229 @@ const char* emulator_backend_name(const Emulator* emulator) {
   if (!emulator || !emulator->cpu_backend) return "<none>";
   return emulator->cpu_backend->name;
 }
+
+/* ------------------------------------------------------------------ */
+/* Save states (emulator.h).                                           */
+/* ------------------------------------------------------------------ */
+
+/* One guest thread's architectural registers, captured through the
+ * backend interface (§8) so any backend's state restores into any other. */
+typedef struct Savestate_Cpu {
+  uint64_t live;
+  uint64_t x[CPU_REG_X30 + 1u];
+  uint64_t sp, pc;
+  uint64_t pstate;
+  uint64_t fpcr, fpsr, tpidr, tpidrro;
+  CPU_Vector_Register v[CPU_VECTOR_REGISTER_COUNT];
+} Savestate_Cpu;
+
+/* Saved with the state (a SAVESTATE_RANGE_REGISTERS range). */
+static Savestate_Cpu g_savestate_cpu[SCHEDULER_MAX_THREADS];
+/* Restore bookkeeping: the Emulator as it was (for what a restore keeps),
+ * the host-core setting to resume, and the states that existed. */
+static Emulator g_savestate_before;
+static uint32_t g_savestate_cores;
+static CPU_State *g_savestate_states[SCHEDULER_MAX_THREADS];
+
+static bool savestate_slot_has_state(const Sched_Thread *th) {
+  return th->state != THREAD_STATE_FREE && th->thread.cpu_state != NULL;
+}
+
+static void savestate_capture_cpu(const CPU_Backend *b, CPU_State *s, Savestate_Cpu *out) {
+  memset(out, 0, sizeof(*out));
+  out->live = 1;
+  for (uint8_t r = CPU_REG_X0; r <= CPU_REG_X30; r++) out->x[r] = b->get_reg(s, r);
+  out->sp = b->get_sp(s);
+  out->pc = b->get_pc(s);
+  out->pstate = b->get_pstate(s);
+  out->fpcr = b->get_sys_reg(s, CPU_SYSREG_FPCR);
+  out->fpsr = b->get_sys_reg(s, CPU_SYSREG_FPSR);
+  out->tpidr = b->get_sys_reg(s, CPU_SYSREG_TPIDR_EL0);
+  out->tpidrro = b->get_sys_reg(s, CPU_SYSREG_TPIDRRO_EL0);
+  for (uint8_t v = 0; v < CPU_VECTOR_REGISTER_COUNT; v++) out->v[v] = b->get_vector_reg(s, v);
+}
+
+static void savestate_apply_cpu(const CPU_Backend *b, CPU_State *s, const Savestate_Cpu *in) {
+  for (uint8_t r = CPU_REG_X0; r <= CPU_REG_X30; r++) b->set_reg(s, r, in->x[r]);
+  b->set_sp(s, in->sp);
+  b->set_pc(s, in->pc);
+  b->set_pstate(s, (uint32_t)in->pstate);
+  b->set_sys_reg(s, CPU_SYSREG_FPCR, in->fpcr);
+  b->set_sys_reg(s, CPU_SYSREG_FPSR, in->fpsr);
+  b->set_sys_reg(s, CPU_SYSREG_TPIDR_EL0, in->tpidr);
+  b->set_sys_reg(s, CPU_SYSREG_TPIDRRO_EL0, in->tpidrro);
+  for (uint8_t v = 0; v < CPU_VECTOR_REGISTER_COUNT; v++) b->set_vector_reg(s, v, in->v[v]);
+}
+
+static void savestate_add(Savestate_Plan *plan, Savestate_Kind kind, uint64_t address, uint64_t bytes, uint64_t capacity) {
+  if (plan->range_count >= SAVESTATE_MAX_RANGES || !address || !capacity) return;
+  plan->ranges[plan->range_count++] = (Savestate_Range){address, bytes, capacity, (uint32_t)kind, 0};
+}
+
+static void savestate_arena(Savestate_Plan *plan, Savestate_Kind kind, const Arena *arena) {
+  savestate_add(plan, kind, (uint64_t)(uintptr_t)arena->base, arena->used_bytes, arena->capacity_bytes);
+}
+
+static void savestate_plan(Emulator *emu, Savestate_Plan *plan) {
+  memset(plan, 0, sizeof(*plan));
+  plan->version = SAVESTATE_VERSION;
+  plan->program_id = emu->process.npdm.program_id;
+  plan->emulator_bytes = sizeof(Emulator);
+  plan->virtual_ticks = emu->scheduler.ticks;
+  const Memory_Layout *layout = layout_get();
+  savestate_add(plan, SAVESTATE_RANGE_EMULATOR, (uint64_t)(uintptr_t)emu, sizeof(Emulator), sizeof(Emulator));
+  uint64_t vmm_at = 0, vmm_bytes = 0, l2_at = 0, l2_bytes = 0, l2_capacity = 0;
+  vmm_state_ranges(emu->vmm, &vmm_at, &vmm_bytes, &l2_at, &l2_bytes, &l2_capacity);
+  savestate_add(plan, SAVESTATE_RANGE_VMM, vmm_at, vmm_bytes, vmm_bytes);
+  savestate_add(plan, SAVESTATE_RANGE_VMM_L2, l2_at, l2_bytes, l2_capacity);
+  savestate_add(plan, SAVESTATE_RANGE_PAGE_TABLE_L1, layout->page_table_l1_base, LAYOUT_PAGE_TABLE_L1_SIZE,
+                LAYOUT_PAGE_TABLE_L1_SIZE);
+  savestate_add(plan, SAVESTATE_RANGE_GUEST_RAM, layout->guest_ram_base, emu->pages.base_pa + emu->pages.used_bytes,
+                layout->guest_ram_size);
+  savestate_arena(plan, SAVESTATE_RANGE_SERVICE_ARENA, &emu->service_arena);
+  savestate_arena(plan, SAVESTATE_RANGE_RAMFS_ARENA, &emu->ramfs.arena);
+  if (emu->content_arena_live) savestate_arena(plan, SAVESTATE_RANGE_CONTENT_ARENA, &emu->content_arena);
+  savestate_add(plan, SAVESTATE_RANGE_REGISTERS, (uint64_t)(uintptr_t)g_savestate_cpu, sizeof(g_savestate_cpu),
+                sizeof(g_savestate_cpu));
+}
+
+/* Back to the serial scheduler: no guest code runs on another host
+ * thread while ranges are copied (docs/PARALLEL.md). */
+static void savestate_quiesce(Emulator *emu) {
+  g_savestate_cores = emu->parallel ? parallel_core_count(emu->parallel) : 0;
+  (void)emulator_set_host_cores(emu, 0);
+}
+
+static void savestate_resume(Emulator *emu) {
+  if (g_savestate_cores) (void)emulator_set_host_cores(emu, g_savestate_cores);
+  g_savestate_cores = 0;
+}
+
+Error emulator_savestate_begin_save(Emulator* emulator, Savestate_Plan* plan) {
+  if (!emulator || !plan || !emulator->program_loaded)
+    return ERR(RESULT_INVALID_ARGUMENT, "save state: no program is running");
+  savestate_quiesce(emulator);
+  memset(g_savestate_cpu, 0, sizeof(g_savestate_cpu));
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    Sched_Thread *th = &emulator->scheduler.threads[i];
+    if (savestate_slot_has_state(th)) savestate_capture_cpu(emulator->cpu_backend, th->thread.cpu_state, &g_savestate_cpu[i]);
+  }
+  savestate_plan(emulator, plan);
+  return OK;
+}
+
+void emulator_savestate_end_save(Emulator* emulator) {
+  if (emulator) savestate_resume(emulator);
+}
+
+Error emulator_savestate_begin_restore(Emulator* emulator, Savestate_Plan* plan) {
+  if (!emulator || !plan || !emulator->program_loaded)
+    return ERR(RESULT_INVALID_ARGUMENT, "save state: load the game first");
+  savestate_quiesce(emulator);
+  memcpy(&g_savestate_before, emulator, sizeof(Emulator));
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    const Sched_Thread *th = &emulator->scheduler.threads[i];
+    g_savestate_states[i] = savestate_slot_has_state(th) ? th->thread.cpu_state : NULL;
+  }
+  savestate_plan(emulator, plan);
+  return OK;
+}
+
+/* The renderer is the session's, not the state's: its decoded textures
+ * re-check their guest bytes (restored) before next use, render targets
+ * reload from guest memory, GPU ones are re-uploaded. */
+static void savestate_revalidate_renderer(Raster3d *r) {
+  for (uint32_t i = 0; i < RASTER_TEXTURES; i++) {
+    Raster3d_Texture *t = &r->textures[i];
+    t->validated = r->texture_epoch - 1u;
+    t->full_epoch = r->texture_epoch - RASTER_TEXTURE_FULL_EVERY;
+  }
+  r->surface_view_count = 0;
+  for (uint32_t i = 0; i < RASTER_SURFACES; i++) {
+    r->surfaces[i].loaded = false;
+    r->surfaces[i].dirty = false;
+  }
+  for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
+    if (r->gpu_surfaces[i].in_use) r->gpu_surfaces[i].stale = true;
+  }
+}
+
+static bool savestate_was_live(const CPU_State *state) {
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++)
+    if (g_savestate_states[i] == state) return true;
+  return false;
+}
+
+Error emulator_savestate_finish_restore(Emulator* emulator, bool applied) {
+  if (!emulator) return ERR(RESULT_INVALID_ARGUMENT, "save state: no emulator");
+  if (!applied) {
+    savestate_resume(emulator);
+    return OK;
+  }
+  const Emulator *before = &g_savestate_before;
+  /* What belongs to this session, not to the state. */
+  emulator->cpu_backend = before->cpu_backend;
+  emulator->cpu_state = before->cpu_state;
+  emulator->parallel = NULL;
+  emulator->scheduler.parallel = NULL;
+  emulator->free_running = before->free_running;
+  emulator->no_poll_coalescing = before->no_poll_coalescing;
+  emulator->scheduler.poll_coalescing = !before->no_poll_coalescing;
+  emulator->frame_skip = before->frame_skip;
+  emulator->pacing = before->pacing;
+  emulator->pacing_origin_ns = 0; /* re-anchored at the next slice */
+  emulator->shared_font = before->shared_font;
+  emulator->shared_font_size = before->shared_font_size;
+  memcpy(&emulator->renderer, &before->renderer, sizeof(Raster3d));
+  memcpy(&emulator->renderer_arena, &before->renderer_arena, sizeof(Arena));
+  memcpy(&emulator->gpu_stream, &before->gpu_stream, sizeof(Gpu_Stream));
+  emulator->gpu_stream_ready = before->gpu_stream_ready;
+  memcpy(&emulator->video, &before->video, sizeof(Video_Stream));
+  emulator->video_ready = before->video_ready;
+  if (emulator->gpu_stream_ready) raster3d_set_gpu(&emulator->renderer, &emulator->gpu_stream);
+  savestate_revalidate_renderer(&emulator->renderer);
+
+  /* Every thread gets a live CPU state holding its saved registers: the
+   * main thread's is the Emulator's; others reuse a state that still
+   * exists or get a new one. States no thread uses any more go. */
+  const CPU_Backend *b = emulator->cpu_backend;
+  bool reused[SCHEDULER_MAX_THREADS] = {false};
+  Error result = OK;
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    Sched_Thread *th = &emulator->scheduler.threads[i];
+    if (!savestate_slot_has_state(th)) continue;
+    CPU_State *state = th->thread.cpu_state;
+    if (!th->owns_cpu_state) {
+      state = emulator->cpu_state;
+    } else if (savestate_was_live(state)) {
+      for (uint32_t j = 0; j < SCHEDULER_MAX_THREADS; j++)
+        if (g_savestate_states[j] == state) reused[j] = true;
+    } else {
+      state = b->create(emulator->vmm, &emulator->hle);
+      if (!state) {
+        result = ERR(RESULT_OUT_OF_MEMORY, "save state: no CPU state for a thread");
+        th->state = THREAD_STATE_DEAD;
+        th->thread.cpu_state = NULL;
+        continue;
+      }
+      b->set_svc_handler(state, hle_on_svc);
+      b->set_undefined_handler(state, hle_on_undefined);
+    }
+    th->thread.cpu_state = state;
+    if (g_savestate_cpu[i].live) savestate_apply_cpu(b, state, &g_savestate_cpu[i]);
+  }
+  for (uint32_t j = 0; j < SCHEDULER_MAX_THREADS; j++) {
+    CPU_State *old = g_savestate_states[j];
+    if (old && !reused[j] && old != emulator->cpu_state) b->destroy(old);
+    g_savestate_states[j] = NULL;
+  }
+  /* Guest code changed under every cache: re-check compiled and
+   * predecoded blocks against memory. */
+  if (emulator->cpu_state) b->clear_cache(emulator->cpu_state);
+  vmm_bump_generation();
+  emulator->scheduler.current = -1;
+  savestate_resume(emulator);
+  log_info("[emulator] save state restored (virtual time %.1f s)",
+           (double)emulator->scheduler.ticks / (double)SCHEDULER_TIMER_HZ);
+  return result;
+}

@@ -23,6 +23,7 @@
  * in the encoder) before the next draw samples a texture written since.
  */
 
+import { type CacheContents, type PipelineSpec, type ShaderCacheStore, specKey, wgslHash } from "./shader-cache";
 import {
   BIND_DATA,
   BIND_FILTERED,
@@ -118,6 +119,8 @@ export interface ExecutorStats {
   passes: number;
   submits: number;
   pipelines: number;
+  /** Pipelines built ahead of use from the persistent cache. */
+  prewarmed: number;
   presents: number;
   errors: number;
   shadows: number;
@@ -232,9 +235,13 @@ function f32Bits(v: number): number {
 }
 
 export class GpuExecutor {
-  readonly stats: ExecutorStats = { draws: 0, passes: 0, submits: 0, pipelines: 0, presents: 0, errors: 0, shadows: 0, copies: 0 };
+  readonly stats: ExecutorStats = { draws: 0, passes: 0, submits: 0, pipelines: 0, prewarmed: 0, presents: 0, errors: 0, shadows: 0, copies: 0 };
   private readonly textures = new Map<number, Tex>();
   private readonly shaders = new Map<number, GPUShaderModule>();
+  /* Per-session shader ids -> WGSL content hash; modules shared by hash. */
+  private readonly shaderHashes = new Map<number, string>();
+  private readonly modulesByHash = new Map<string, GPUShaderModule>();
+  private cacheStore: ShaderCacheStore | null = null;
   private readonly pipelines = new Map<string, CachedPipeline>();
   private readonly shadows = new Map<string, Tex>();
   private readonly samplers = new Map<number, GPUSampler>();
@@ -451,7 +458,43 @@ export class GpuExecutor {
       code = code.replace(/@fragment fn fs\(([^)]*)\)( -> FOut)? \{[\s\S]*$/, (_m, args: string, ret: string | undefined) =>
         ret ? `@fragment fn fs(${args}) -> FOut { var fo: FOut; return fo; }` : `@fragment fn fs(${args}) { }`);
     }
-    this.shaders.set(id, this.device.createShaderModule({ code }));
+    const hash = wgslHash(code);
+    let module = this.modulesByHash.get(hash);
+    if (!module) {
+      module = this.device.createShaderModule({ code });
+      this.modulesByHash.set(hash, module);
+    }
+    this.shaders.set(id, module);
+    this.shaderHashes.set(id, hash);
+    this.cacheStore?.recordShader(hash, code);
+  }
+
+  /* ---- persistent pipeline cache (shader-cache.ts) ---- */
+
+  /** From now on, new shaders and pipelines are recorded in `store`; the
+   * ones it already holds are built in the background, oldest first, so
+   * they are ready before the title draws with them. */
+  usePersistentCache(store: ShaderCacheStore, contents: CacheContents): Promise<void> {
+    this.cacheStore = store;
+    for (const [hash, code] of contents.shaders) {
+      if (!this.modulesByHash.has(hash)) this.modulesByHash.set(hash, this.device.createShaderModule({ code }));
+    }
+    const builds = contents.pipelines.map(async (spec) => {
+      const key = specKey(spec);
+      const module = this.modulesByHash.get(spec.wgsl);
+      if (!module || this.pipelines.has(key)) return;
+      const { desc, layout } = this.pipelineDescriptor(spec, module);
+      try {
+        const pipeline = await this.device.createRenderPipelineAsync(desc);
+        if (!this.pipelines.has(key)) {
+          this.pipelines.set(key, { pipeline, layout });
+          this.stats.prewarmed++;
+        }
+      } catch {
+        /* not valid here (another adapter's formats): built on demand */
+      }
+    });
+    return Promise.all(builds).then(() => undefined);
   }
 
   /* ---- passes ---- */
@@ -571,75 +614,106 @@ export class GpuExecutor {
     return s;
   }
 
+  /** The spec (cache identity) of draw `d`'s pipeline. */
+  private drawSpec(d: Draw, textures: readonly Tex[], filtered: readonly boolean[],
+                   colorFormats: readonly (GPUTextureFormat | null)[], depth: Tex | undefined): PipelineSpec {
+    return {
+      wgsl: this.shaderHashes.get(d.shaderId) ?? `id${d.shaderId}`,
+      varyings: d.varyingCount,
+      textures: textures.map((t, i) => (filtered[i] ? "F" : t.sampleType)),
+      targets: d.targets.map((t, i) => ({
+        format: colorFormats[i] ?? null,
+        writeMask: t.writeMask,
+        blend: t.blend ? [t.colorOp, t.colorSrc, t.colorDst, t.alphaOp, t.alphaSrc, t.alphaDst] : null,
+      })),
+      depth: depth ? {
+        format: depth.format, test: d.depthTest, write: d.depthWrite, compare: d.depthCompare,
+        stencil: d.stencil ? {
+          front: [d.stencilFront.compare, d.stencilFront.fail, d.stencilFront.depthFail, d.stencilFront.pass],
+          back: [d.stencilBack.compare, d.stencilBack.fail, d.stencilBack.depthFail, d.stencilBack.pass],
+          readMask: d.stencilReadMask, writeMask: d.stencilWriteMask,
+        } : null,
+      } : null,
+    };
+  }
+
   private drawPipeline(d: Draw, module: GPUShaderModule, textures: readonly Tex[], filtered: readonly boolean[],
                        colorFormats: readonly (GPUTextureFormat | null)[], depth: Tex | undefined): CachedPipeline {
-    const key = [
-      "draw", d.shaderId, d.varyingCount,
-      textures.map((t, i) => (filtered[i] ? "F" : t.sampleType)).join(","),
-      d.targets.map((t, i) => `${colorFormats[i] ?? "-"}:${t.writeMask}:${t.blend ? `${t.colorOp}.${t.colorSrc}.${t.colorDst}.${t.alphaOp}.${t.alphaSrc}.${t.alphaDst}` : ""}`).join(","),
-      depth ? `${depth.format}:${d.depthTest}:${d.depthWrite}:${d.depthCompare}:${d.stencil ? JSON.stringify([d.stencilFront, d.stencilBack, d.stencilReadMask, d.stencilWriteMask]) : ""}` : "",
-    ].join("|");
-    return this.cached(key, () => {
-      const entries: GPUBindGroupLayoutEntry[] = [
-        { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage", hasDynamicOffset: true } },
-      ];
-      textures.forEach((t, i) => {
-        entries.push({
-          binding: 1 + i, visibility: GPUShaderStage.FRAGMENT,
-          texture: { sampleType: filtered[i] ? "float" : t.sampleType, viewDimension: "2d-array" },
-        });
-        if (filtered[i]) entries.push({ binding: 1 + MAX_TEXTURES + i, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } });
-      });
-      const layout = this.device.createBindGroupLayout({ entries });
-      const attributes: GPUVertexAttribute[] = [{ shaderLocation: 0, offset: 0, format: "float32x4" }];
-      for (let i = 0; i < d.varyingCount; i++) attributes.push({ shaderLocation: i + 1, offset: VERTEX_HEADER_BYTES + 16 * i, format: "uint32x4" });
-      const targets: (GPUColorTargetState | null)[] = d.targets.map((t, i) => {
-        const format = colorFormats[i];
-        if (!format) return null;
-        const state: GPUColorTargetState = { format, writeMask: t.writeMask };
-        if (t.blend && !format.endsWith("int")) {
-          const minmax = (op: number): boolean => op === 3 || op === 4;
-          state.blend = {
-            color: {
-              operation: BLEND_OPS[t.colorOp] ?? "add",
-              srcFactor: minmax(t.colorOp) ? "one" : BLEND_FACTORS[t.colorSrc] ?? "one",
-              dstFactor: minmax(t.colorOp) ? "one" : BLEND_FACTORS[t.colorDst] ?? "zero",
-            },
-            alpha: {
-              operation: BLEND_OPS[t.alphaOp] ?? "add",
-              srcFactor: minmax(t.alphaOp) ? "one" : BLEND_FACTORS[t.alphaSrc] ?? "one",
-              dstFactor: minmax(t.alphaOp) ? "one" : BLEND_FACTORS[t.alphaDst] ?? "zero",
-            },
-          };
-        }
-        return state;
-      });
-      const desc: GPURenderPipelineDescriptor = {
-        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-        vertex: { module, entryPoint: "vs", buffers: [{ arrayStride: VERTEX_HEADER_BYTES + 16 * d.varyingCount, attributes }] },
-        fragment: { module, entryPoint: "fs", targets },
-        primitive: { topology: "triangle-list", frontFace: "ccw", cullMode: "none" },
-      };
-      if (depth) {
-        const ds: GPUDepthStencilState = { format: depth.format };
-        if (hasDepth(depth.format)) {
-          ds.depthWriteEnabled = d.depthWrite;
-          ds.depthCompare = d.depthTest ? COMPARES[d.depthCompare] ?? "always" : "always";
-        }
-        if (d.stencil && hasStencil(depth.format)) {
-          const face = (f: Draw["stencilFront"]): GPUStencilFaceState => ({
-            compare: COMPARES[f.compare] ?? "always", failOp: STENCIL_OPS[f.fail] ?? "keep",
-            depthFailOp: STENCIL_OPS[f.depthFail] ?? "keep", passOp: STENCIL_OPS[f.pass] ?? "keep",
-          });
-          ds.stencilFront = face(d.stencilFront);
-          ds.stencilBack = face(d.stencilBack);
-          ds.stencilReadMask = d.stencilReadMask;
-          ds.stencilWriteMask = d.stencilWriteMask;
-        }
-        desc.depthStencil = ds;
-      }
-      return { pipeline: this.device.createRenderPipeline(desc), layout };
+    const spec = this.drawSpec(d, textures, filtered, colorFormats, depth);
+    return this.cached(specKey(spec), () => {
+      const { desc, layout } = this.pipelineDescriptor(spec, module);
+      const made = { pipeline: this.device.createRenderPipeline(desc), layout };
+      if (this.shaderHashes.has(d.shaderId)) this.cacheStore?.recordPipeline(spec);
+      return made;
     });
+  }
+
+  /** The descriptor (and its bind-group layout) `spec` stands for. */
+  private pipelineDescriptor(spec: PipelineSpec, module: GPUShaderModule):
+    { readonly desc: GPURenderPipelineDescriptor; readonly layout: GPUBindGroupLayout } {
+    const entries: GPUBindGroupLayoutEntry[] = [
+      { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage", hasDynamicOffset: true } },
+    ];
+    spec.textures.forEach((kind, i) => {
+      const filtered = kind === "F";
+      entries.push({
+        binding: 1 + i, visibility: GPUShaderStage.FRAGMENT,
+        texture: { sampleType: filtered ? "float" : kind as GPUTextureSampleType, viewDimension: "2d-array" },
+      });
+      if (filtered) entries.push({ binding: 1 + MAX_TEXTURES + i, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } });
+    });
+    const layout = this.device.createBindGroupLayout({ entries });
+    const attributes: GPUVertexAttribute[] = [{ shaderLocation: 0, offset: 0, format: "float32x4" }];
+    for (let i = 0; i < spec.varyings; i++) attributes.push({ shaderLocation: i + 1, offset: VERTEX_HEADER_BYTES + 16 * i, format: "uint32x4" });
+    const targets: (GPUColorTargetState | null)[] = spec.targets.map((t) => {
+      const format = t.format as GPUTextureFormat | null;
+      if (!format) return null;
+      const state: GPUColorTargetState = { format, writeMask: t.writeMask };
+      const [colorOp = 0, colorSrc = 0, colorDst = 0, alphaOp = 0, alphaSrc = 0, alphaDst = 0] = t.blend ?? [];
+      if (t.blend && !format.endsWith("int")) {
+        const minmax = (op: number): boolean => op === 3 || op === 4;
+        state.blend = {
+          color: {
+            operation: BLEND_OPS[colorOp] ?? "add",
+            srcFactor: minmax(colorOp) ? "one" : BLEND_FACTORS[colorSrc] ?? "one",
+            dstFactor: minmax(colorOp) ? "one" : BLEND_FACTORS[colorDst] ?? "zero",
+          },
+          alpha: {
+            operation: BLEND_OPS[alphaOp] ?? "add",
+            srcFactor: minmax(alphaOp) ? "one" : BLEND_FACTORS[alphaSrc] ?? "one",
+            dstFactor: minmax(alphaOp) ? "one" : BLEND_FACTORS[alphaDst] ?? "zero",
+          },
+        };
+      }
+      return state;
+    });
+    const desc: GPURenderPipelineDescriptor = {
+      layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+      vertex: { module, entryPoint: "vs", buffers: [{ arrayStride: VERTEX_HEADER_BYTES + 16 * spec.varyings, attributes }] },
+      fragment: { module, entryPoint: "fs", targets },
+      primitive: { topology: "triangle-list", frontFace: "ccw", cullMode: "none" },
+    };
+    const depth = spec.depth;
+    if (depth) {
+      const format = depth.format as GPUTextureFormat;
+      const ds: GPUDepthStencilState = { format };
+      if (hasDepth(format)) {
+        ds.depthWriteEnabled = depth.write;
+        ds.depthCompare = depth.test ? COMPARES[depth.compare] ?? "always" : "always";
+      }
+      if (depth.stencil && hasStencil(format)) {
+        const face = (f: readonly number[]): GPUStencilFaceState => ({
+          compare: COMPARES[f[0] ?? 0] ?? "always", failOp: STENCIL_OPS[f[1] ?? 0] ?? "keep",
+          depthFailOp: STENCIL_OPS[f[2] ?? 0] ?? "keep", passOp: STENCIL_OPS[f[3] ?? 0] ?? "keep",
+        });
+        ds.stencilFront = face(depth.stencil.front);
+        ds.stencilBack = face(depth.stencil.back);
+        ds.stencilReadMask = depth.stencil.readMask;
+        ds.stencilWriteMask = depth.stencil.writeMask;
+      }
+      desc.depthStencil = ds;
+    }
+    return { desc, layout };
   }
 
   private simplePipeline(kind: string, code: string, format: GPUTextureFormat | null, writeMask: number,

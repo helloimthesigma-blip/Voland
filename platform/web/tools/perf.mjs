@@ -8,7 +8,7 @@
  *                       [--url-params "a=1&b=2"] [--browser-arg ARG]...
  *                       [--press SLICE:KEY:SLICES]... [--shot FILE.png]
  *                       [--phases NAME:SLICE,NAME:SLICE,...,end:SLICE] [--json FILE]
- *                       [--restore-saves BACKUP.tar]
+ *                       [--restore-saves BACKUP.tar] [--user-data-dir DIR]
  *
  * - Builds the app (vite build; the core must already be staged by
  *   `cmake --build --preset web`) and serves it with `vite preview` on a
@@ -112,6 +112,7 @@ function parseArgs(argv) {
     else if (a === "--no-build") opts.build = false;
     else if (a === "--expect-jit-async") opts.expectJitAsync = true;
     else if (a === "--software") opts.software = true;
+    else if (a === "--user-data-dir") opts.userDataDir = next();
     else if (a === "--url-params") opts.urlParams = next();
     else if (a === "--out-dir") opts.outDir = next();
     else if (a === "--shot") opts.shot = next();
@@ -308,12 +309,17 @@ async function main() {
   if (opts.build) await run("npx", ["vite", "build", "--logLevel", "warn"]);
   const preview = spawn("npx", ["vite", "preview", "--port", String(opts.port), "--strictPort"], { cwd: WEB_DIR, stdio: "ignore" });
   const baseUrl = `http://localhost:${opts.port}/`;
-  const browser = await chromium.launch({
+  const launch = {
     channel: "chromium",
     headless: true,
     args: [...(opts.software ? SOFTWARE_GPU_ARGS : HARDWARE_GPU_ARGS), `--remote-debugging-port=${opts.debugPort}`,
            ...opts.browserArgs],
-  });
+  };
+  /* --user-data-dir DIR: a persistent profile, so OPFS (saves, shader
+   * cache) and IndexedDB carry over between runs. */
+  const browser = opts.userDataDir
+    ? await chromium.launchPersistentContext(opts.userDataDir, { ...launch, viewport: { width: 1280, height: 800 } })
+    : await chromium.launch(launch);
   const browserPid = chromiumChildPid();
   const results = { loadAvgStart: loadAverage(), phases: [], window: null };
   try {
@@ -325,7 +331,7 @@ async function main() {
       if (backend) results.backend = backend[1];
       const cores = /guest threads on (?:the serial scheduler|(\d+) host core)/.exec(m.text());
       if (cores) results.hostCores = cores[1] ? Number(cores[1]) : 0;
-      if ((m.type() === "error" && /\[(ERROR|WARN )\]|failed|crash/i.test(m.text())) || /core: |svcBreak/.test(m.text()))
+      if ((m.type() === "error" && /\[(ERROR|WARN )\]|failed|crash/i.test(m.text())) || /core: |svcBreak|shader cache/.test(m.text()))
         console.log(`  console: ${m.text()}`);
       /* Parallel guest threads' periodic timing report (docs/PARALLEL.md "Measuring"). */
       if (/\[parallel\] /.test(m.text())) console.log(`  ${m.text().replace(/^\[INFO \] /, "")}`);

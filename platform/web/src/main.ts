@@ -16,6 +16,7 @@ import { AUDIO_RING_CAPACITY_FRAMES, type MemoryLayout, toByteOffset } from "@bi
 import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
 import type { MainToVideoMessage, VideoToMainMessage } from "@bindings/video";
 import { handleSavesMessage, registerSavesWorker, rememberTitleName } from "./saves";
+import { handleSavestateMessage, registerSavestateWorker } from "./savestates";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
 import { PUBLISH_INDEX } from "@bindings/framebuffer";
@@ -206,6 +207,7 @@ async function boot(): Promise<BootResult | null> {
 
   const cpuWorker = new Worker(new URL("../workers/cpu.worker.ts", import.meta.url), { type: "module" });
   registerSavesWorker(cpuWorker);
+  registerSavestateWorker(cpuWorker);
   const gpuWorker = new Worker(new URL("../workers/gpu.worker.ts", import.meta.url), { type: "module" });
 
   type Slot = "pending" | "ready" | "failed";
@@ -254,6 +256,7 @@ async function boot(): Promise<BootResult | null> {
       } else if (msg.type === "game-loaded") {
         appendLogLine("info", `loaded title ${msg.titleId}, entry 0x${msg.entryPoint.toString(16)}`);
         if (loadingFileName) rememberTitleName(msg.titleId, loadingFileName);
+        gpuWorker.postMessage({ type: "title", titleId: msg.titleId } satisfies MainToGPUMessage);
         pendingLoad?.({ success: true, titleId: msg.titleId, entryPoint: msg.entryPoint });
         pendingLoad = null;
       } else if (msg.type === "guest-output") {
@@ -265,6 +268,8 @@ async function boot(): Promise<BootResult | null> {
         setGuestRunState(msg.state, msg.detail);
       } else if (handleSavesMessage(msg)) {
         /* game-save backup replies (src/saves.ts) */
+      } else if (handleSavestateMessage(msg)) {
+        /* save-state replies (src/savestates.ts) */
       } else if (msg.type === "sd-files-added") {
         appendLogLine(msg.failed.length ? "warn" : "info",
           `SD card: added ${msg.added.length} file(s)${msg.failed.length ? `, failed: ${msg.failed.join(", ")}` : ""}`);

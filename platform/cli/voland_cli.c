@@ -38,6 +38,8 @@
  *                                    DIR/job.done.<pid>. DIR/quit ends the server.
  *                                    Iterating on a late scene without replaying.
  *       --font FILE                  the TTF/OTF pl:u serves as the system font
+ *       --savestate-check N:M        save state at slice N, run to M, restore it and run
+ *                                    to M again: the frame hash and virtual time must match
  *       --svc-stats                  print per-SVC call counts at the end
  *       --dump-audio FILE            write what the guest played as a 48kHz stereo WAV
  *       --input SLICE:BUTTONS:SLICES player 1 holds BUTTONS (hex, HidNpadButton
@@ -486,6 +488,58 @@ static void snapshot_serve(const char *dir, Snapshot_Job *job) {
 
 static void setup_call_trace(Emulator *emu);
 
+/* --savestate-check N:M: a save state taken at slice N, in memory (the
+ * web build stores the same ranges in OPFS, workers/savestate-store.ts). */
+typedef struct Cli_Savestate {
+  Savestate_Plan plan;
+  uint8_t *bytes[SAVESTATE_MAX_RANGES];
+} Cli_Savestate;
+
+static bool cli_savestate_save(Emulator *emu, Cli_Savestate *out) {
+  if (!error_is_ok(emulator_savestate_begin_save(emu, &out->plan))) return false;
+  uint64_t total = 0;
+  for (uint32_t r = 0; r < out->plan.range_count; r++) {
+    const Savestate_Range *range = &out->plan.ranges[r];
+    out->bytes[r] = malloc(range->bytes ? range->bytes : 1u);
+    if (!out->bytes[r]) return false;
+    memcpy(out->bytes[r], (const void *)(uintptr_t)range->address, range->bytes);
+    total += range->bytes;
+  }
+  emulator_savestate_end_save(emu);
+  fprintf(stderr, "voland-cli: save state: %u ranges, %.1f MiB\n", out->plan.range_count, (double)total / (1024.0 * 1024.0));
+  return true;
+}
+
+/* Same build and session layout: every range where it was, room enough. */
+static bool cli_savestate_fits(const Savestate_Plan *saved, const Savestate_Plan *now) {
+  if (saved->version != now->version || saved->range_count != now->range_count ||
+      saved->emulator_bytes != now->emulator_bytes || saved->program_id != now->program_id)
+    return false;
+  for (uint32_t r = 0; r < saved->range_count; r++) {
+    const Savestate_Range *a = &saved->ranges[r], *b = &now->ranges[r];
+    if (a->kind != b->kind || a->address != b->address || a->capacity != b->capacity || a->bytes > b->capacity) return false;
+  }
+  return true;
+}
+
+static bool cli_savestate_restore(Emulator *emu, const Cli_Savestate *in) {
+  Savestate_Plan now;
+  if (!error_is_ok(emulator_savestate_begin_restore(emu, &now))) return false;
+  if (!cli_savestate_fits(&in->plan, &now)) {
+    (void)emulator_savestate_finish_restore(emu, false);
+    return false;
+  }
+  for (uint32_t r = 0; r < in->plan.range_count; r++) {
+    const Savestate_Range *saved = &in->plan.ranges[r];
+    uint8_t *at = (uint8_t *)(uintptr_t)saved->address;
+    memcpy(at, in->bytes[r], saved->bytes);
+    /* What the later timeline used beyond the state's extent goes back to zero. */
+    const uint64_t later = now.ranges[r].bytes;
+    if (later > saved->bytes) memset(at + saved->bytes, 0, later - saved->bytes);
+  }
+  return error_is_ok(emulator_savestate_finish_restore(emu, true));
+}
+
 /* VOLAND_EXCEPTION_SCAN=1 (diagnostics): after a run, look on each thread's
  * stack for IL2CPP managed objects whose class name ends in "Exception" and
  * print their string fields (message, stack trace) - what a Unity title
@@ -861,6 +915,10 @@ static int run(int argc, char **argv) {
   const CPU_Backend *backend = &CPU_BACKEND_INTERPRETER;
   uint64_t budget = DEFAULT_BUDGET, max_slices = DEFAULT_MAX_SLICES, dump_every = 0, snapshot_at = 0;
   const char *snapshot_dir = NULL, *gpu_stream_path = NULL;
+  unsigned long long savestate_from = 0, savestate_to = 0; /* --savestate-check N:M */
+  Cli_Savestate savestate = {0};
+  uint64_t savestate_hash = 0, savestate_ticks = 0, savestate_svcs = 0;
+  bool savestate_replaying = false;
   uint32_t frame_skip = 0, host_cores = 0;
   const char *restore_saves[MAX_RESTORE_SAVES];
   uint32_t restore_save_count = 0;
@@ -941,6 +999,9 @@ static int run(int argc, char **argv) {
       poll_coalescing = false;
     } else if (!strcmp(argv[i], "--host-cores") && has_value) {
       host_cores = (uint32_t)strtoul(argv[++i], NULL, 0);
+    } else if (!strcmp(argv[i], "--savestate-check") && has_value) {
+      if (sscanf(argv[++i], "%llu:%llu", &savestate_from, &savestate_to) != 2 || savestate_to <= savestate_from)
+        return EXIT_USAGE;
     } else if (!strcmp(argv[i], "--snapshot-at") && has_value) {
       snapshot_at = strtoull(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--snapshot-dir") && has_value) {
@@ -1113,6 +1174,36 @@ static int run(int argc, char **argv) {
       }
     }
 #endif
+    if (savestate_to && slices == savestate_from && !savestate_replaying) {
+      if (!cli_savestate_save(&emu, &savestate)) {
+        fprintf(stderr, "voland-cli: save state at slice %llu failed\n", savestate_from);
+        return EXIT_FRAME_MISMATCH;
+      }
+    }
+    if (savestate_to && slices == savestate_to) {
+      uint32_t w = 0, h = 0;
+      const uint64_t hash = newest_frame_hash(&w, &h);
+      if (!savestate_replaying) {
+        savestate_hash = hash;
+        savestate_ticks = emu.scheduler.ticks;
+        savestate_svcs = emu.hle.svc_call_count;
+        if (!cli_savestate_restore(&emu, &savestate)) {
+          fprintf(stderr, "voland-cli: save state restore failed\n");
+          return EXIT_FRAME_MISMATCH;
+        }
+        fprintf(stderr, "voland-cli: restored the slice-%llu state at slice %llu; replaying\n", savestate_from, savestate_to);
+        slices = savestate_from;
+        savestate_replaying = true;
+        continue;
+      }
+      const bool same = hash == savestate_hash && emu.scheduler.ticks == savestate_ticks;
+      fprintf(stderr, "voland-cli: save state check %s: frame %016llx vs %016llx, ticks %llu vs %llu, svcs %llu vs %llu\n",
+              same ? "OK" : "MISMATCH", (unsigned long long)hash, (unsigned long long)savestate_hash,
+              (unsigned long long)emu.scheduler.ticks, (unsigned long long)savestate_ticks,
+              (unsigned long long)emu.hle.svc_call_count, (unsigned long long)savestate_svcs);
+      if (!same) return EXIT_FRAME_MISMATCH;
+      savestate_to = 0;
+    }
     if (progress_every && slices % progress_every == 0) fprintf(stderr, "voland-cli: slice %llu\n", (unsigned long long)slices);
     if (input_count) apply_input(inputs, input_count, slices);
     emu.renderer.trace_draws = slices >= trace_start && slices - trace_start < trace_length;
@@ -1439,6 +1530,7 @@ static void usage(void) {
           "             --snapshot-at SLICE --snapshot-dir DIR  --frame-skip N\n"
           "  checking:  --test-card  --expect-output TEXT  --expect-frame-hash HEX\n"
           "             --svc-stats  --measure-from SLICE [--measure-seconds S]\n"
+          "             --savestate-check N:M (save at N, run to M, restore, re-run: same frame?)\n"
           "       voland-cli verify-dump <file>\n"
           "       voland-cli romfs <file.nca> [SUBSTRING [OUTDIR]]\n");
 }

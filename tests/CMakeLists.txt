@@ -219,6 +219,11 @@ set(VOLAND_DEMO_NRO ${PROJECT_SOURCE_DIR}/platform/web/public/demo/hello.nro)
 add_test(NAME cli_run_demo
          COMMAND voland-cli run ${VOLAND_DEMO_NRO}
                  --expect-output "fib(90) = 2880067194370816120")
+# Save states (emulator_savestate_*): saved at slice 2, run to 6, restored,
+# re-run to 6 - the same frame, virtual time and SVC count (--savestate-check).
+add_test(NAME cli_savestate_check
+         COMMAND voland-cli run ${VOLAND_DEMO_NRO} --backend interpreter --savestate-check 2:6)
+set_tests_properties(cli_savestate_check PROPERTIES PASS_REGULAR_EXPRESSION "save state check OK")
 # Golden image: the core's test card must hash identically on every host.
 add_test(NAME cli_golden_test_card
          COMMAND voland-cli run ${VOLAND_DEMO_NRO} --test-card --expect-frame-hash 777dcb7dfea1bd25)

@@ -10,6 +10,7 @@ import type { GameLoadOutcome, LoadFailure, SdImportOutcome } from "@bindings/lo
 import { type GuestConsoleState, getGuestConsole, subscribeGuestConsole } from "../guest-console";
 import { describeLoadFailure } from "./load-failure-copy";
 import GameLibrary from "./GameLibrary";
+import SaveStates from "./SaveStates";
 import {
   type LibraryGame, canKeepFiles, forgetGame, listGames, markPlayed, openGameFile, pickGameFile, rememberGame,
 } from "../library";
@@ -245,6 +246,9 @@ function LoadPanel(props: LoadPanelProps) {
                   Fullscreen
                 </button>
               </div>
+              <Show when={guest().runState !== "idle"}>
+                <SaveStates titleId={loaded().titleId} />
+              </Show>
               <p>
                 Title <code>{loaded().titleId}</code>, entry point{" "}
                 <code>0x{loaded().entryPoint.toString(16)}</code>.

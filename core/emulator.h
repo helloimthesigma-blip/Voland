@@ -332,6 +332,69 @@ void emulator_set_shared_font(Emulator *emulator, const uint8_t *ttf, uint32_t s
 /* Routes svcOutputDebugString text to the platform. */
 void emulator_set_debug_output(Emulator *emulator, HLE_Debug_Output_Fn fn, void *userdata);
 
+/* ------------------------------------------------------------------ */
+/* Save states: the whole machine, frozen and resumed (DESIGN.md §15).  */
+/*                                                                      */
+/* The core names the linear-memory ranges that hold the machine (the   */
+/* Emulator, page tables, the used guest RAM, service/ramfs/content     */
+/* arenas, every thread's registers) and the host copies them out or    */
+/* in. They hold absolute linear-memory addresses (PTEs, arena          */
+/* pointers), so a state restores only into the same layout: the same  */
+/* build and session layout, which the plan's ranges identify - a host  */
+/* compares a stored plan's addresses and capacities with the current   */
+/* one and refuses a mismatch. Caches (JIT, predecode, decoded          */
+/* textures, GPU render targets) are not saved; they are revalidated.   */
+/* ------------------------------------------------------------------ */
+
+#define SAVESTATE_VERSION 1u
+#define SAVESTATE_MAX_RANGES 12u
+
+typedef enum Savestate_Kind {
+  SAVESTATE_RANGE_EMULATOR = 1,
+  SAVESTATE_RANGE_VMM = 2,
+  SAVESTATE_RANGE_VMM_L2 = 3,
+  SAVESTATE_RANGE_PAGE_TABLE_L1 = 4,
+  SAVESTATE_RANGE_GUEST_RAM = 5,
+  SAVESTATE_RANGE_SERVICE_ARENA = 6,
+  SAVESTATE_RANGE_RAMFS_ARENA = 7,
+  SAVESTATE_RANGE_CONTENT_ARENA = 8,
+  SAVESTATE_RANGE_REGISTERS = 9,
+} Savestate_Kind;
+
+typedef struct Savestate_Range {
+  uint64_t address;  /* linear-memory offset */
+  uint64_t bytes;    /* what holds state now (<= capacity) */
+  uint64_t capacity; /* what may be written there on restore */
+  uint32_t kind;     /* Savestate_Kind */
+  uint32_t reserved;
+} Savestate_Range;
+
+typedef struct Savestate_Plan {
+  uint32_t version;     /* SAVESTATE_VERSION */
+  uint32_t range_count;
+  uint64_t program_id;
+  uint64_t emulator_bytes; /* sizeof(Emulator): a build check */
+  uint64_t virtual_ticks;  /* the moment captured (display) */
+  Savestate_Range ranges[SAVESTATE_MAX_RANGES];
+} Savestate_Plan;
+
+/* Quiesces the machine (guest threads back on the serial scheduler),
+ * captures every thread's registers and fills `plan`; the host then
+ * copies the ranges out and calls emulator_savestate_end_save, which
+ * resumes the previous host-core setting. RESULT_INVALID_ARGUMENT
+ * without a loaded program. */
+Error emulator_savestate_begin_save(Emulator *emulator, Savestate_Plan *plan);
+void emulator_savestate_end_save(Emulator *emulator);
+
+/* Quiesces the machine and keeps what a restore must not replace (the
+ * host side: renderer caches, GPU/video streams, host cores, pacing); fills
+ * `plan` with the current ranges to compare with the stored one. The host
+ * then writes the stored ranges (zero-filling what the state does not
+ * hold) and calls emulator_savestate_finish_restore(emulator, true); or,
+ * having written nothing, (emulator, false) to just resume. */
+Error emulator_savestate_begin_restore(Emulator *emulator, Savestate_Plan *plan);
+Error emulator_savestate_finish_restore(Emulator *emulator, bool applied);
+
 /* Single-step. */
 CPU_ExitReason emulator_step(Emulator *emulator);
 

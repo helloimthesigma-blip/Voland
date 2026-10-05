@@ -164,6 +164,13 @@ VMM_Context *vmm_create(void);
  * is re-zeroed by the next vmm_create). Safe to call with NULL. */
 void vmm_destroy(VMM_Context *ctx);
 
+/* Save states (emulator_savestate_*): where the context's own bytes are
+ * and the used part of its L2 arena. With the layout's L1 region they are
+ * the whole page-table state; PTEs hold linear-memory offsets, so a save
+ * state only restores into the session layout it was taken in. */
+void vmm_state_ranges(const VMM_Context *ctx, uint64_t *context_address, uint64_t *context_bytes,
+                      uint64_t *l2_address, uint64_t *l2_bytes, uint64_t *l2_capacity);
+
 /* The L1 table this context walks. Stable for the context's lifetime; the
  * interpreter caches it at run() entry, the JIT receives it as a config
  * constant at compiler init (§10). */

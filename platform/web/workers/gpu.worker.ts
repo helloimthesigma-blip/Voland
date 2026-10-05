@@ -29,6 +29,7 @@ import {
 import { type MemoryLayout, toByteOffset } from "@bindings/layout";
 import type { GPUToMainMessage, MainToGPUMessage } from "@bindings/protocol";
 import { GpuExecutor } from "./gpu-executor";
+import { ShaderCacheStore } from "./shader-cache";
 
 const self: DedicatedWorkerGlobalScope =
   globalThis as unknown as DedicatedWorkerGlobalScope;
@@ -84,6 +85,29 @@ async function waitForChange(word: Int32Array, index: number, seen: number): Pro
  * from the ring; the read position advances after each one (waking a
  * producer waiting for room).
  */
+/* The persistent shader/pipeline cache attaches once both the executor
+ * exists and the main thread has said which title is running. */
+let activeExecutor: GpuExecutor | null = null;
+let runningTitle: string | null = null;
+let cacheAttached = false;
+
+function attachShaderCache(): void {
+  const executor = activeExecutor;
+  const titleId = runningTitle;
+  if (!executor || !titleId || cacheAttached) return;
+  cacheAttached = true;
+  void ShaderCacheStore.open(titleId).then(async (opened) => {
+    if (!opened) return;
+    const { shaders, pipelines } = opened.contents;
+    if (shaders.size > 0) log("info", `shader cache: ${shaders.size} shader(s), ${pipelines.length} pipeline(s) for ${titleId}; building them in the background`);
+    const started = performance.now();
+    await executor.usePersistentCache(opened.store, opened.contents);
+    if (pipelines.length > 0) {
+      log("info", `shader cache: ${executor.stats.prewarmed} pipeline(s) ready in ${((performance.now() - started) / 1000).toFixed(1)} s`);
+    }
+  }).catch((e: unknown) => log("warn", `shader cache unavailable: ${e instanceof Error ? e.message : String(e)}`));
+}
+
 async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, headerBase: number): Promise<void> {
   const buffer = memory.buffer;
   const words = new Int32Array(buffer, headerBase, 12);
@@ -108,6 +132,8 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
     },
     log,
   });
+  activeExecutor = executor;
+  attachShaderCache();
   for (;;) {
     const seen = Atomics.load(words, OFF_WRITE_SIGNAL / 4);
     const write = Number(Atomics.load(wide, OFF_WRITE / 8));
@@ -263,6 +289,11 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
 }
 
 self.addEventListener("message", (event: MessageEvent<MainToGPUMessage>) => {
+  if (event.data.type === "title") {
+    runningTitle = event.data.titleId;
+    attachShaderCache();
+    return;
+  }
   if (event.data.type === "init") {
     init(event.data.canvas, event.data.memory, event.data.layout).catch((e: unknown) => {
       const err: GPUToMainMessage = {

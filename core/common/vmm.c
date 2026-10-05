@@ -265,6 +265,15 @@ void vmm_destroy(VMM_Context *ctx) {
   g_vmm_live = 0;
 }
 
+void vmm_state_ranges(const VMM_Context *ctx, uint64_t *context_address, uint64_t *context_bytes,
+                      uint64_t *l2_address, uint64_t *l2_bytes, uint64_t *l2_capacity) {
+  *context_address = (uint64_t)(uintptr_t)ctx;
+  *context_bytes = ctx ? sizeof(*ctx) : 0;
+  *l2_address = ctx ? (uint64_t)(uintptr_t)ctx->l2_arena.base : 0;
+  *l2_bytes = ctx ? ctx->l2_arena.used_bytes : 0;
+  *l2_capacity = ctx ? ctx->l2_arena.capacity_bytes : 0;
+}
+
 const uint64_t *vmm_page_table_l1(const VMM_Context *ctx) {
   SWITCH_ASSERT_ALWAYS(ctx != NULL, "vmm_page_table_l1: ctx is NULL");
   return ctx->l1;

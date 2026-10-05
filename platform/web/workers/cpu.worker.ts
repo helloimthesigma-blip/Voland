@@ -21,6 +21,10 @@ import type { CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
 import { clearSdFiles, diffManifests, parseManifest, persistSdFile, removeSdFile, restoreSdFiles } from "./sd-persistence";
 import { isSaveName, loadSaveArchives, readTar, removeSaveArchive, saveNameOfTar, storeSaveArchive, tarNameOfSave, writeTar } from "./save-store";
 import { writeSaveArchive } from "@bindings/save-archive";
+import {
+  PLAN_BYTES, createStateFile, deleteState, listStates, newStateId, openStateFile, parsePlan, planMismatch,
+  readState, readStoredPlan, stateInfo, writeState, writeStateInfo,
+} from "./savestate";
 import { parseTextInputRequest } from "./text-input";
 
 const self: DedicatedWorkerGlobalScope =
@@ -223,6 +227,7 @@ function refreshCorePerf(): void {
 }
 const BURST_MS = 12;
 let running = false;
+let loadedTitleId: string | null = null;
 let paused = false;
 /** The user's frame skip (set-frame-skip); applied to every core load. */
 let frameSkip = 0;
@@ -647,6 +652,102 @@ async function deleteSave(name: string): Promise<CPUToMainMessage> {
   return { type: "save-deleted", name, ok };
 }
 
+/* ------------------------------------------------------------------ */
+/* Save states (workers/savestate.ts): the machine frozen between       */
+/* slices, its ranges copied synchronously.                             */
+/* ------------------------------------------------------------------ */
+
+let stateBusy = false;
+
+function corePlan(address: number): ReturnType<typeof parsePlan> | null {
+  if (!coreMemory || address === 0) return null;
+  return parsePlan(new Uint8Array(coreMemory.buffer, address, PLAN_BYTES).slice());
+}
+
+function coreErrorMessage(): string {
+  if (!core || !coreMemory) return "the core is not running";
+  return readCString(coreMemory.buffer, Number(core._emulator_last_error_message_ffi()), CORE_ERROR_MESSAGE_MAX_BYTES);
+}
+
+async function saveState(): Promise<CPUToMainMessage> {
+  const titleId = loadedTitleId;
+  if (!core || !coreMemory || !titleId) return { type: "state-saved", info: null, error: "no game is running" };
+  if (stateBusy) return { type: "state-saved", info: null, error: "another save state is in progress" };
+  stateBusy = true;
+  const createdAt = Date.now();
+  const id = newStateId(titleId, createdAt);
+  let file: FileSystemSyncAccessHandle | null = null;
+  try {
+    file = await createStateFile(id); /* before freezing: opening is asynchronous */
+    const started = performance.now();
+    const plan = corePlan(core._emulator_savestate_begin_save_ffi());
+    if (!plan) throw new Error(coreErrorMessage());
+    let bytes = 0;
+    try {
+      bytes = writeState(file, coreMemory.buffer, plan);
+    } finally {
+      core._emulator_savestate_end_save_ffi();
+      core._emulator_pacing_resync_ffi(); /* the frozen moment does not count */
+    }
+    file.close();
+    file = null;
+    const info = stateInfo(id, titleId, plan, bytes, createdAt);
+    await writeStateInfo(info);
+    log("info", `save state: ${(bytes / 2 ** 20).toFixed(0)} MiB in ${((performance.now() - started) / 1000).toFixed(1)} s`);
+    return { type: "state-saved", info, error: "" };
+  } catch (e) {
+    file?.close();
+    await deleteState(id);
+    const error = e instanceof Error ? e.message : String(e);
+    log("warn", `save state failed: ${error}`);
+    return { type: "state-saved", info: null, error };
+  } finally {
+    stateBusy = false;
+  }
+}
+
+async function loadState(id: string): Promise<CPUToMainMessage> {
+  if (!core || !coreMemory || !loadedTitleId) return { type: "state-loaded", ok: false, error: "start the game first, then load its state" };
+  if (stateBusy) return { type: "state-loaded", ok: false, error: "another save state is in progress" };
+  stateBusy = true;
+  let file: FileSystemSyncAccessHandle | null = null;
+  try {
+    file = await openStateFile(id);
+    const stored = readStoredPlan(file);
+    if (!stored) return { type: "state-loaded", ok: false, error: "the state file is damaged" };
+    const started = performance.now();
+    const now = corePlan(core._emulator_savestate_begin_restore_ffi());
+    if (!now) return { type: "state-loaded", ok: false, error: coreErrorMessage() };
+    const mismatch = planMismatch(stored, now);
+    if (mismatch) {
+      core._emulator_savestate_finish_restore_ffi(0);
+      return { type: "state-loaded", ok: false, error: `This state cannot be loaded: ${mismatch}.` };
+    }
+    if (!readState(file, coreMemory.buffer, stored, now)) {
+      /* Memory is half written: the running game cannot continue as it was. */
+      core._emulator_savestate_finish_restore_ffi(0);
+      running = false;
+      postRunState("crashed", "a save state could not be read completely; reload the page");
+      return { type: "state-loaded", ok: false, error: "the state file is truncated" };
+    }
+    const code = core._emulator_savestate_finish_restore_ffi(1);
+    core._emulator_pacing_resync_ffi();
+    /* Rolled-back SD card and saves: the mirrors start from here. */
+    baselineCommittedSaves();
+    baselineSdMirror();
+    log("info", `save state loaded in ${((performance.now() - started) / 1000).toFixed(1)} s`);
+    if (code !== CoreResult.Ok) log("warn", `save state: ${coreErrorMessage()}`);
+    if (!running) startRunning(); /* e.g. back from a crash */
+    else if (!paused) scheduleBurst();
+    return { type: "state-loaded", ok: true, error: "" };
+  } catch (e) {
+    return { type: "state-loaded", ok: false, error: e instanceof Error ? e.message : String(e) };
+  } finally {
+    file?.close();
+    stateBusy = false;
+  }
+}
+
 async function clearSdCard(): Promise<CPUToMainMessage> {
   if (core && core._emulator_sd_clear_ffi() !== CoreResult.Ok) log("warn", "SD card: a file is in use; reload to clear it");
   await clearSdFiles();
@@ -686,9 +787,10 @@ function loadGame(file: File): CPUToMainMessage {
     return { type: "load-failed", failure: loadFailureFromResult(code, message) };
   }
 
+  loadedTitleId = formatTitleId(core._emulator_program_id_ffi());
   return {
     type: "game-loaded",
-    titleId: formatTitleId(core._emulator_program_id_ffi()),
+    titleId: loadedTitleId,
     entryPoint: core._cpu_get_pc_ffi(),
   };
 }
@@ -785,6 +887,23 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   }
   if (msg.type === "import-saves") {
     void importSaves(msg.tar).then((reply) => self.postMessage(reply));
+    return;
+  }
+  if (msg.type === "save-state") {
+    void saveState().then((reply) => self.postMessage(reply));
+    return;
+  }
+  if (msg.type === "load-state") {
+    void loadState(msg.id).then((reply) => self.postMessage(reply));
+    return;
+  }
+  if (msg.type === "list-states") {
+    void listStates().then((states) => self.postMessage({ type: "states-listed", states } satisfies CPUToMainMessage))
+      .catch(() => self.postMessage({ type: "states-listed", states: [] } satisfies CPUToMainMessage));
+    return;
+  }
+  if (msg.type === "delete-state") {
+    void deleteState(msg.id).then(() => self.postMessage({ type: "state-deleted", id: msg.id } satisfies CPUToMainMessage));
     return;
   }
   if (msg.type === "list-saves") {

@@ -41,6 +41,13 @@ export type MainToCPUMessage =
   | { readonly type: "list-saves" }
   | { readonly type: "put-save"; readonly name: string; readonly archive: ArrayBuffer }
   | { readonly type: "delete-save"; readonly name: string }
+  /* Save states (workers/savestate.ts): freeze the running game into a new
+   * state (state-saved), resume one (state-loaded), list (states-listed)
+   * or delete (state-deleted) them. */
+  | { readonly type: "save-state" }
+  | { readonly type: "load-state"; readonly id: string }
+  | { readonly type: "list-states" }
+  | { readonly type: "delete-state"; readonly id: string }
   /* §18: slot connect/disconnect is a lifecycle event; the state itself
    * travels through the input region, never postMessage. */
   | { readonly type: "controller-connected"; readonly index: number; readonly profileId: number }
@@ -76,6 +83,16 @@ export interface TextInputRequest {
   readonly password: boolean;
 }
 
+/** One stored save state, as the UI lists it. */
+export interface SavestateInfo {
+  readonly id: string;
+  readonly titleId: string;
+  readonly createdAt: number;
+  /** The game's virtual time when it was taken. */
+  readonly virtualSeconds: number;
+  readonly bytes: number;
+}
+
 /** One stored save: its name ("SS-<attribute hex>") and archive bytes. */
 export interface StoredSave {
   readonly name: string;
@@ -96,6 +113,10 @@ export type CPUToMainMessage =
   | { readonly type: "saves-listed"; readonly saves: readonly StoredSave[] }
   | { readonly type: "save-put"; readonly name: string; readonly ok: boolean }
   | { readonly type: "save-deleted"; readonly name: string; readonly ok: boolean }
+  | { readonly type: "state-saved"; readonly info: SavestateInfo | null; readonly error: string }
+  | { readonly type: "state-loaded"; readonly ok: boolean; readonly error: string }
+  | { readonly type: "states-listed"; readonly states: readonly SavestateInfo[] }
+  | { readonly type: "state-deleted"; readonly id: string }
   /* Guest debug text (svcOutputDebugString) and run-state changes: both
    * happen at guest pace, never per frame (§6). */
   | { readonly type: "guest-output"; readonly text: string }
@@ -109,7 +130,10 @@ export type MainToGPUMessage =
       readonly memory: WebAssembly.Memory;
       readonly layout: MemoryLayout;
     }
-  | { readonly type: "resize"; readonly width: number; readonly height: number };
+  | { readonly type: "resize"; readonly width: number; readonly height: number }
+  /* The title that just loaded (lifecycle): its persistent shader cache
+   * is opened and pre-built (workers/shader-cache.ts). */
+  | { readonly type: "title"; readonly titleId: string };
 
 export type GPUToMainMessage =
   | { readonly type: "ready"; readonly adapterName: string | null; readonly streamRenderer: boolean }

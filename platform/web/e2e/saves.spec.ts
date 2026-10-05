@@ -28,7 +28,8 @@ test("save browser lists, edits and keeps a game's save files", async ({ page })
   const saves = page.getByTestId("saves");
   await saves.locator("summary").click();
   await page.getByTestId("saves-import-input").setInputFiles({ name: "backup.tar", mimeType: "application/x-tar", buffer: Buffer.from(tar) });
-  await expect(page.getByTestId("saves-note")).toContainText("Imported 1 save");
+  /* The CPU worker may still be starting (a cold dev server compiles it). */
+  await expect(page.getByTestId("saves-note")).toContainText("Imported 1 save", { timeout: 30_000 });
 
   const entry = page.locator(`[data-save="${NAME}"]`);
   await expect(entry).toContainText("010013C00E930000");

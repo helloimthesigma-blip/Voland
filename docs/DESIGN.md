@@ -1538,6 +1538,12 @@ Games the player loads are remembered in IndexedDB (`voland-library`, `src/libra
 
 Each title's save is its own user save directory, as on Horizon: `fsp-srv` fills a title-save attribute's program id 0 with the running program's id (Voland before v3.74 kept them at 0, so every title shared one save; the first title to open such a save takes it over, committed archive renamed). The shell's **Save data** panel (`src/ui/SavesPanel.tsx`) lists every stored save by game (program id, named after the file it was loaded from), shows its file tree, downloads, replaces and deletes files, takes dropped files and folders, downloads one save as a tar of its files, and backs up or restores all of them. Edits rewrite the save's archive (`bindings/save-archive.ts`, the core's VSAV format) and go through the CPU worker (`put-save` / `delete-save`, lifecycle messages): the core validates and loads it first - refusing while the running game has one of its files open - then OPFS stores it.
 
+### Save states (v3.74)
+
+A save state freezes the whole machine, separate from the game's own saves. The core (`emulator_savestate_*`, core/emulator.h) quiesces guest threads onto the serial scheduler, captures every thread's registers through the backend interface (§8), and names the linear-memory ranges that hold the machine: the `Emulator`, the softmmu context and its used L2 arena, the L1 region, guest RAM up to the page allocator's high-water mark, and the service, ramfs and content arenas. The host copies those ranges out and back in. The web worker writes them with synchronous OPFS handles while the machine is frozen between slices, skipping all-zero 64 KiB chunks (`workers/savestate.ts`, `savestates/<id>.vstate`); the CLI keeps them in memory (`--savestate-check N:M`).
+
+Restoring keeps what belongs to the session: renderer caches (textures re-check their guest bytes, render targets reload, GPU ones re-upload), the GPU and video streams, host cores and pacing (re-anchored). CPU states are recreated or reused per thread, and the JIT and predecode caches revalidate by generation. The ranges hold absolute linear-memory addresses (PTEs, arena pointers), so a state only loads where every range sits at the same address with the same capacity. That means the same build and game, in the same session or in a fresh page that reached the same layout. The plan's addresses are compared and a mismatch is refused, never patched. The ramfs rolls back with the state, including the SD card and the game's saves in the core; the OPFS mirrors re-baseline afterwards. Verified bit-exact natively: Silksong saved at slice 100k, run to 160k, restored and re-run reaches the same frame hash, virtual time and SVC count (`cli_savestate_check` runs the same check on the demo).
+
 ### Save backup & sync (cloud providers + companion server)
 
 The olsc IPC service stays stubbed forever (§12); the *feature* — cross-device save continuity — is emulator infrastructure the game never sees, behind one abstraction:
@@ -2349,7 +2355,7 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 - [ ] Ballistic-x86 integration on desktop: region compilation, dispatcher, exit-code ABI (§10–11). This validates all dispatcher/block-cache/PTC infrastructure backend-agnostically; the WASM emitter slots in whenever upstream resumes it
 - [ ] **Predecoded interpreter** for web: decode blocks once into a dense internal form (op index + extracted operands), execute the predecoded form. *v3.42: block cache + specialized integer/branch/load-store handlers landed (~1.9×), proven equivalent to the reference decoder by `predecode_test`; SIMD/FP handlers and block chaining by successor pointer remain.* 2–4x over fetch-decode-execute, backend-independent, and its block discovery/invalidation is the same machinery the JIT dispatcher uses. This is the web execution path until Ballistic-WASM exists — treat it as a deliverable, not a stopgap
 - [ ] PTC first cut (desktop, against ballistic-x86): content-hash keys, OPFS bytes, session compile
-- [ ] Pipeline cache (OPFS, microcode-hash keys)
+- [x] Pipeline cache (OPFS). *v3.74: keyed by WGSL content hash per title, not microcode hash (the stream's shader ids are per session); pre-built with createRenderPipelineAsync at load (`workers/shader-cache.ts`).*
 - [ ] Software TLB if profiling justifies it (§5)
 - [ ] **Compatibility database — first cut.** As soon as any game runs, users need a public works/doesn't/hangs-at-X list.
 
@@ -2472,6 +2478,8 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 - **§15, per-title saves:** fsp-srv fills program id 0 in a title save's attribute with the running program's id; a save keyed with 0 by older builds is taken over by the first title that opens it (its committed archive is renamed, and the web mirror removes the old stored name).
 - **§15, save browser:** the shell's Save data panel browses, edits, adds (files and dropped folders), downloads and deletes each game's save files; `put-save` / `delete-save` / `list-saves` lifecycle messages.
+- **§15, save states:** the whole machine saved and restored (`emulator_savestate_*`, `workers/savestate.ts`, the player bar's Save state). States load in the same build and memory layout only.
+- **§13, pipeline cache:** WGSL modules and draw-pipeline specs persist per title in OPFS (`workers/shader-cache.ts`) and are built with `createRenderPipelineAsync` when the title loads. Pipelines are keyed by a WGSL content hash, not by the stream's per-session shader ids.
 - **§15, game library:** loaded games are remembered as file handles and launch from tiles in one click.
 - **§18, remapping:** every Switch control can be rebound to a keyboard key or standard-gamepad button from the controls panel; kept per browser.
 - **Web fullscreen:** the game canvas itself goes fullscreen (the screen box it is pinned over has nothing to show, so fullscreen was black).

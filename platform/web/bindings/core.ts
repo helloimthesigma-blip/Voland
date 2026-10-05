@@ -67,6 +67,11 @@ export interface SwitchCoreExports {
   readonly _emulator_save_commits_ffi: () => number;
   readonly _emulator_save_committed_manifest_ffi: (out: bigint, max: number) => number;
   readonly _emulator_save_restore_archive_ffi: (name: bigint, bytes: bigint, size: number) => number;
+  /* Save states (core/emulator.h; workers/savestate.ts): the plan's address or 0. */
+  readonly _emulator_savestate_begin_save_ffi: () => number;
+  readonly _emulator_savestate_end_save_ffi: () => void;
+  readonly _emulator_savestate_begin_restore_ffi: () => number;
+  readonly _emulator_savestate_finish_restore_ffi: (applied: number) => number;
   /* Software keyboard (v3.54): writes the pending request's fields joined
    * by U+001F and returns 1 (0 = none); respond with UTF-8 text. */
   readonly _emulator_text_request_ffi: (out: bigint, max: number) => number;

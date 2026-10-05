@@ -72,6 +72,10 @@ EXPORT double emulator_sd_read_file_ffi(uint64_t path, uint64_t out, double max)
 EXPORT double emulator_save_commits_ffi(void);
 EXPORT double emulator_save_committed_manifest_ffi(uint64_t out, double max);
 EXPORT int emulator_save_restore_archive_ffi(uint64_t name, uint64_t bytes, double size);
+EXPORT double emulator_savestate_begin_save_ffi(void);
+EXPORT void emulator_savestate_end_save_ffi(void);
+EXPORT double emulator_savestate_begin_restore_ffi(void);
+EXPORT int emulator_savestate_finish_restore_ffi(int applied);
 
 /* The Switch's handheld resolution. */
 #define BOOT_FRAME_WIDTH 1280u
@@ -464,6 +468,40 @@ EXPORT int emulator_save_restore_archive_ffi(uint64_t name, uint64_t bytes, doub
   if (!g_initialised || !name) return (int)RESULT_INVALID_ARGUMENT;
   const Error err = emulator_save_restore_archive(&g_emulator, (const char *)(uintptr_t)name,
                                                   (const void *)(uintptr_t)bytes, (uint64_t)size);
+  g_last_error_message = err.message;
+  return (int)err.code;
+}
+
+/* Save states (emulator.h): the begin calls return the address of the
+ * plan (a static Savestate_Plan; the worker reads its ranges and copies
+ * them out of / into linear memory), 0 on failure. */
+static Savestate_Plan g_savestate_plan;
+
+EXPORT double emulator_savestate_begin_save_ffi(void)
+{
+  if (!g_initialised) return 0;
+  const Error err = emulator_savestate_begin_save(&g_emulator, &g_savestate_plan);
+  g_last_error_message = err.message;
+  return error_is_ok(err) ? (double)(uintptr_t)&g_savestate_plan : 0;
+}
+
+EXPORT void emulator_savestate_end_save_ffi(void)
+{
+  if (g_initialised) emulator_savestate_end_save(&g_emulator);
+}
+
+EXPORT double emulator_savestate_begin_restore_ffi(void)
+{
+  if (!g_initialised) return 0;
+  const Error err = emulator_savestate_begin_restore(&g_emulator, &g_savestate_plan);
+  g_last_error_message = err.message;
+  return error_is_ok(err) ? (double)(uintptr_t)&g_savestate_plan : 0;
+}
+
+EXPORT int emulator_savestate_finish_restore_ffi(int applied)
+{
+  if (!g_initialised) return (int)RESULT_INVALID_ARGUMENT;
+  const Error err = emulator_savestate_finish_restore(&g_emulator, applied != 0);
   g_last_error_message = err.message;
   return (int)err.code;
 }

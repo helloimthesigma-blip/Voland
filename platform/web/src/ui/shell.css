@@ -371,3 +371,13 @@
 }
 .voland-game:hover .voland-game-forget, .voland-game-forget:focus-visible { opacity: 1; }
 @media (hover: none) { .voland-game-forget { opacity: 1; } }
+
+/* Save states (SaveStates.tsx). */
+.voland-states { margin: 0 0 10px; max-width: 640px; }
+.voland-state-list { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 4px; }
+.voland-state {
+  display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 10px; align-items: center;
+  padding: 5px 10px; border: 1px solid #262a3d; border-radius: 7px; background: #13151f; font-size: 12px;
+}
+.voland-state-when { color: #e6e6ea; font-weight: 600; }
+.voland-state-meta { color: #7d8199; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
