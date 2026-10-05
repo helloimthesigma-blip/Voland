@@ -576,7 +576,51 @@ static bool il2cpp_class_name(Emulator *emu, uint64_t object, char *name, size_t
   return guest_cstring(emu, name_ptr, name, cap);
 }
 
+static void il2cpp_print_exception(Emulator *emu, uint64_t object, const char *how);
+
+/* A C++ exception in flight (libc++abi): its _Unwind_Exception starts
+ * with the exception class "CLNGC++\0"; the __cxa_exception header before
+ * it holds the std::type_info*, whose name is the mangled type. IL2CPP
+ * throws managed exceptions wrapped in a C++ object whose first field is
+ * the Il2CppException*. */
+#define CXX_EXCEPTION_CLASS 0x434C4E47432B2B00ull
+#define CXA_UNWIND_HEADER_OFFSETS 2u
+static const uint64_t k_cxa_unwind_offsets[CXA_UNWIND_HEADER_OFFSETS] = {0x60u, 0x58u};
+#define CXA_TYPE_OFFSET 0x08u
+#define CXA_HEADER_BYTES 0x80u
+
+static void cxx_exception_scan(Emulator *emu, const Sched_Thread *th) {
+  const CPU_Register_File *rf = emu->cpu_backend->get_register_file(th->thread.cpu_state);
+  uint64_t seen[8];
+  uint32_t seen_count = 0;
+  for (uint64_t at = rf->sp & ~7ull; at < rf->sp + IL2CPP_SCAN_STACK_BYTES; at += 8u) {
+    uint64_t candidate = 0, tag = 0;
+    if (!error_is_ok(vmm_read64(emu->vmm, at, &candidate))) break;
+    if (!candidate || (candidate & 7u) || !error_is_ok(vmm_read64(emu->vmm, candidate, &tag)) || tag != CXX_EXCEPTION_CLASS)
+      continue;
+    bool dup = false;
+    for (uint32_t i = 0; i < seen_count; i++) dup = dup || seen[i] == candidate;
+    if (dup || seen_count == 8u) continue;
+    seen[seen_count++] = candidate;
+    for (uint32_t k = 0; k < CXA_UNWIND_HEADER_OFFSETS; k++) {
+      const uint64_t header = candidate - k_cxa_unwind_offsets[k];
+      uint64_t type = 0, name_ptr = 0;
+      char name[160];
+      if (!error_is_ok(vmm_read64(emu->vmm, header + CXA_TYPE_OFFSET, &type)) || !type ||
+          !error_is_ok(vmm_read64(emu->vmm, type + 8u, &name_ptr)) || !guest_cstring(emu, name_ptr, name, sizeof(name)))
+        continue;
+      const uint64_t thrown = header + CXA_HEADER_BYTES;
+      fprintf(stderr, "    C++ exception in flight: type %s, object 0x%llx (stack +0x%llx)\n", name,
+              (unsigned long long)thrown, (unsigned long long)(at - rf->sp));
+      uint64_t first = 0;
+      if (error_is_ok(vmm_read64(emu->vmm, thrown, &first))) il2cpp_print_exception(emu, first, "      wraps");
+      break;
+    }
+  }
+}
+
 static void il2cpp_exception_scan(Emulator *emu, const Sched_Thread *th) {
+  cxx_exception_scan(emu, th);
   const CPU_Register_File *rf = emu->cpu_backend->get_register_file(th->thread.cpu_state);
   uint64_t seen[32];
   uint32_t seen_count = 0;
@@ -591,14 +635,25 @@ static void il2cpp_exception_scan(Emulator *emu, const Sched_Thread *th) {
     for (uint32_t i = 0; i < seen_count; i++) dup = dup || seen[i] == object;
     if (dup || seen_count == 32u) continue;
     seen[seen_count++] = object;
-    fprintf(stderr, "    exception %s.%s at 0x%llx (stack +0x%llx)\n", ns, name, (unsigned long long)object,
-            (unsigned long long)(at - rf->sp));
+    fprintf(stderr, "    exception at stack +0x%llx:\n", (unsigned long long)(at - rf->sp));
+    il2cpp_print_exception(emu, object, "     ");
+  }
+}
+
+static void il2cpp_print_exception(Emulator *emu, uint64_t object, const char *how) {
+  char name[128], ns[128];
+  if (!il2cpp_class_name(emu, object, name, sizeof(name), ns, sizeof(ns))) return;
+  fprintf(stderr, "%s managed %s.%s at 0x%llx\n", how, ns, name, (unsigned long long)object);
+  {
     for (uint32_t f = 0; f < IL2CPP_SCAN_FIELDS; f++) {
       const uint64_t field_at = object + 0x10u + 8u * f;
       uint64_t value = 0;
       char fname[64], fns[64];
       if (!error_is_ok(vmm_read64(emu->vmm, field_at, &value)) || !value) continue;
-      if (!il2cpp_class_name(emu, value, fname, sizeof(fname), fns, sizeof(fns))) continue;
+      if (!il2cpp_class_name(emu, value, fname, sizeof(fname), fns, sizeof(fns))) {
+        fprintf(stderr, "      +0x%x: 0x%llx\n", 0x10u + 8u * f, (unsigned long long)value);
+        continue;
+      }
       if (strcmp(fname, "String") != 0) {
         fprintf(stderr, "      +0x%x: %s.%s\n", 0x10u + 8u * f, fns, fname);
         continue;
