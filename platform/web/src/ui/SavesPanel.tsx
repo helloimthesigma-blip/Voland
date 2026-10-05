@@ -100,18 +100,27 @@ function SaveBrowser(props: { readonly save: SaveView; readonly onChanged: () =>
   const [target, setTarget] = createSignal("/");
   const [dragging, setDragging] = createSignal(false);
   const [busy, setBusy] = createSignal(false);
+  /* What the last edit did, shown right above the files, and which rows it touched. */
+  const [status, setStatus] = createSignal<{ readonly ok: boolean; readonly text: string } | null>(null);
+  const [changed, setChanged] = createSignal<ReadonlySet<string>>(new Set());
   let addInput: HTMLInputElement | undefined;
   let replaceInput: HTMLInputElement | undefined;
   let replacing = "";
 
-  async function commit(next: SaveTree, done: string): Promise<void> {
+  async function commit(next: SaveTree, done: string, touched: readonly string[] = []): Promise<void> {
     setBusy(true);
+    setStatus({ ok: true, text: "Saving…" });
     const ok = await putSave(props.save.name, writeSaveArchive(next));
     setBusy(false);
     if (ok) {
       setTree(next);
+      setChanged(new Set(touched));
+      const text = `✓ ${done} Saved - the game reads it the next time it loads this save.`;
+      setStatus({ ok: true, text });
       props.note(done);
     } else {
+      setChanged(new Set<string>());
+      setStatus({ ok: false, text: `✗ Not changed. ${IN_USE_NOTE}` });
       props.note(IN_USE_NOTE);
     }
   }
@@ -126,7 +135,7 @@ function SaveBrowser(props: { readonly save: SaveView; readonly onChanged: () =>
       added.push(path);
     }
     if (added.length === 0) return;
-    await commit(next, `Added ${added.length} file${added.length === 1 ? "" : "s"} to ${directory}.`);
+    await commit(next, `Added ${added.length} file${added.length === 1 ? "" : "s"} to ${directory}.`, added);
   }
 
   async function onDrop(event: DragEvent, directory: string): Promise<void> {
@@ -142,7 +151,7 @@ function SaveBrowser(props: { readonly save: SaveView; readonly onChanged: () =>
     if (!name) return;
     const path = joinPath(target(), name);
     if (!path) return;
-    void commit(addSaveDirectory(tree(), path), `Created ${path}.`);
+    void commit(addSaveDirectory(tree(), path), `Created ${path}.`, [path]);
   }
 
   function downloadAll(): void {
@@ -167,6 +176,9 @@ function SaveBrowser(props: { readonly save: SaveView; readonly onChanged: () =>
       <Show when={props.save.tree === null}>
         <p class="voland-load-note">This stored save is damaged and cannot be shown. Deleting it lets the game make a new one.</p>
       </Show>
+      <Show when={status()}>
+        {(s) => <p class="voland-save-status" classList={{ failed: !s().ok }} data-testid="save-status" role="status">{s().text}</p>}
+      </Show>
       <div class="voland-save-files" role="tree">
         <div
           class="voland-save-row voland-save-dir"
@@ -183,14 +195,17 @@ function SaveBrowser(props: { readonly save: SaveView; readonly onChanged: () =>
           {([path, data]) => (
             <div
               class="voland-save-row"
-              classList={{ "voland-save-dir": data === null, target: target() === path }}
+              classList={{ "voland-save-dir": data === null, target: target() === path, changed: changed().has(path) }}
               role="treeitem"
               data-path={path}
               style={{ "padding-left": `${12 + 16 * (depth(path) + 1)}px` }}
               onClick={() => setTarget(data === null ? path : parentOf(path))}
               onDrop={(e) => void onDrop(e, data === null ? path : parentOf(path))}
             >
-              <span class="voland-save-name">{data === null ? `${baseName(path)}/` : baseName(path)}</span>
+              <span class="voland-save-name">
+                {data === null ? `${baseName(path)}/` : baseName(path)}
+                <Show when={changed().has(path)}><span class="voland-save-badge">updated</span></Show>
+              </span>
               <span class="voland-save-size">{data ? formatBytes(data.byteLength) : ""}</span>
               <span class="voland-save-actions">
                 <Show when={data}>
@@ -243,7 +258,7 @@ function SaveBrowser(props: { readonly save: SaveView; readonly onChanged: () =>
           if (!file || !replacing) return;
           const path = replacing;
           void file.arrayBuffer().then((buffer) =>
-            commit(putSaveFile(tree(), path, new Uint8Array(buffer)), `Replaced ${path} with ${file.name}.`));
+            commit(putSaveFile(tree(), path, new Uint8Array(buffer)), `Replaced ${path} with ${file.name} (${formatBytes(buffer.byteLength)}).`, [path]));
         }} />
     </div>
   );

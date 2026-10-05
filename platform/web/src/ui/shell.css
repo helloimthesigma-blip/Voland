@@ -339,3 +339,7 @@
   .voland-save-row { grid-template-columns: minmax(0, 1fr) auto; }
   .voland-save-actions { grid-column: 1 / -1; }
 }
+.voland-save-status { margin: 0 0 8px; padding: 6px 10px; border-radius: 6px; background: #13281d; border: 1px solid #245c3a; color: #9fe0b5; font-size: 12px; }
+.voland-save-status.failed { background: #2c1518; border-color: #6b2a31; color: #f0a8b0; }
+.voland-save-row.changed { background: #142a1e; }
+.voland-save-badge { margin-left: 8px; padding: 0 6px; border-radius: 4px; background: #245c3a; color: #c8f2d5; font: 10px system-ui, sans-serif; vertical-align: 1px; }

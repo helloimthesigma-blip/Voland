@@ -40,7 +40,8 @@ test("save browser lists, edits and keeps a game's save files", async ({ page })
 
   await page.getByTestId("save-add-input").setInputFiles({ name: "user2.dat", mimeType: "application/octet-stream", buffer: Buffer.from("{}") });
   await expect(page.getByTestId("saves-note")).toContainText("Added 1 file");
-  await expect(browser.locator('[data-path="/user2.dat"]')).toBeVisible();
+  await expect(browser.locator('[data-path="/user2.dat"]')).toContainText("updated");
+  await expect(page.getByTestId("save-status")).toContainText("✓ Added 1 file");
 
   await page.reload();
   await expect(page.getByTestId("load-panel")).toBeVisible({ timeout: 20_000 });
