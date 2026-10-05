@@ -15,7 +15,7 @@ import type { CPUToMainMessage, GPUToMainMessage, MainToCPUMessage, MainToGPUMes
 import { AUDIO_RING_CAPACITY_FRAMES, type MemoryLayout, toByteOffset } from "@bindings/layout";
 import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
 import type { MainToVideoMessage, VideoToMainMessage } from "@bindings/video";
-import { handleSavesMessage, registerSavesWorker } from "./saves";
+import { handleSavesMessage, registerSavesWorker, rememberTitleName } from "./saves";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
 import { PUBLISH_INDEX } from "@bindings/framebuffer";
@@ -24,6 +24,7 @@ import { appendGuestOutput, resetGuestConsole, setGuestFps, setGuestRunState } f
 import { clearTextInput, showTextInput } from "./text-input-store";
 import { startAudioOutput } from "./audio/audio-output";
 import { startInputLoop } from "./input/input-loop";
+import { getBindings } from "./input/bindings-store";
 import { appendLogLine, setStatus } from "./log";
 
 /**
@@ -214,6 +215,7 @@ async function boot(): Promise<BootResult | null> {
   /* At most one load in flight: the worker answers each load-game with
    * exactly one game-loaded or load-failed, in order. */
   let pendingLoad: ((outcome: GameLoadOutcome) => void) | null = null;
+  let loadingFileName = "";
   /* SD imports queue in order; the worker answers each with one sd-files-added. */
   const pendingSd: ((outcome: SdImportOutcome) => void)[] = [];
 
@@ -251,6 +253,7 @@ async function boot(): Promise<BootResult | null> {
         appendLogLine("warn", "cpu halted");
       } else if (msg.type === "game-loaded") {
         appendLogLine("info", `loaded title ${msg.titleId}, entry 0x${msg.entryPoint.toString(16)}`);
+        if (loadingFileName) rememberTitleName(msg.titleId, loadingFileName);
         pendingLoad?.({ success: true, titleId: msg.titleId, entryPoint: msg.entryPoint });
         pendingLoad = null;
       } else if (msg.type === "guest-output") {
@@ -336,6 +339,7 @@ async function boot(): Promise<BootResult | null> {
       getGamepads: () => navigator.getGamepads(),
       touchTarget: canvas,
       guestFps: () => window.__VOLAND_STATS__?.fps ?? 0,
+      bindings: getBindings,
       onConnectionChange: (change) => {
         const msg: MainToCPUMessage = change.connected
           ? { type: "controller-connected", index: change.slot, profileId: change.profileId }
@@ -393,6 +397,7 @@ async function boot(): Promise<BootResult | null> {
     }
     return new Promise<GameLoadOutcome>((resolve) => {
       pendingLoad = resolve;
+      loadingFileName = file.name;
       resetGuestConsole();
       cpuWorker.postMessage({ type: "load-game", file } satisfies MainToCPUMessage);
     });

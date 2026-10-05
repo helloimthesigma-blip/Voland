@@ -57,9 +57,11 @@ function LoadPanel(props: LoadPanelProps) {
     onCleanup(off);
   });
 
+  /* The game canvas itself goes fullscreen: it lives in <body>, pinned over
+   * the screen box (mount.tsx), so the box element has nothing to show. */
   function enterFullscreen(): void {
-    const screen = document.querySelector<HTMLElement>("[data-voland-screen]");
-    void screen?.requestFullscreen?.().catch(() => undefined);
+    const canvas = document.getElementById("game");
+    void canvas?.requestFullscreen?.().catch(() => undefined);
   }
 
   async function load(file: File): Promise<void> {

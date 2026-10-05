@@ -35,6 +35,12 @@ export type MainToCPUMessage =
    * core), answered by saves-imported. */
   | { readonly type: "export-saves" }
   | { readonly type: "import-saves"; readonly tar: ArrayBuffer }
+  /* The save browser (src/ui/SavesPanel.tsx): every stored save archive
+   * (saves-listed); one archive to replace a save with, loaded into the
+   * core and stored (save-put); a save to delete (save-deleted). */
+  | { readonly type: "list-saves" }
+  | { readonly type: "put-save"; readonly name: string; readonly archive: ArrayBuffer }
+  | { readonly type: "delete-save"; readonly name: string }
   /* §18: slot connect/disconnect is a lifecycle event; the state itself
    * travels through the input region, never postMessage. */
   | { readonly type: "controller-connected"; readonly index: number; readonly profileId: number }
@@ -70,6 +76,12 @@ export interface TextInputRequest {
   readonly password: boolean;
 }
 
+/** One stored save: its name ("SS-<attribute hex>") and archive bytes. */
+export interface StoredSave {
+  readonly name: string;
+  readonly archive: ArrayBuffer;
+}
+
 export type CPUToMainMessage =
   | { readonly type: "layout"; readonly layout: MemoryLayout }
   | { readonly type: "ready"; readonly backendName: string; readonly backendVersion: string }
@@ -81,6 +93,9 @@ export type CPUToMainMessage =
   | { readonly type: "sd-files-added"; readonly added: readonly string[]; readonly failed: readonly string[] }
   | { readonly type: "saves-exported"; readonly tar: ArrayBuffer; readonly count: number }
   | { readonly type: "saves-imported"; readonly imported: number; readonly rejected: number }
+  | { readonly type: "saves-listed"; readonly saves: readonly StoredSave[] }
+  | { readonly type: "save-put"; readonly name: string; readonly ok: boolean }
+  | { readonly type: "save-deleted"; readonly name: string; readonly ok: boolean }
   /* Guest debug text (svcOutputDebugString) and run-state changes: both
    * happen at guest pace, never per frame (§6). */
   | { readonly type: "guest-output"; readonly text: string }

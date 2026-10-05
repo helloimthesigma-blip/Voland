@@ -239,12 +239,29 @@
 .voland-controls { margin: 8px 0 12px; font-size: 13px; color: #c9cbd6; }
 .voland-controls summary { cursor: pointer; }
 .voland-controls-hint { margin: 8px 0 0; color: #9da0ad; max-width: 60ch; }
+.voland-bindings { display: grid; gap: 2px; margin: 10px 0; max-width: 640px; }
+.voland-bindings-head, .voland-bindings-row {
+  display: grid; grid-template-columns: minmax(110px, 1fr) minmax(90px, 1fr) minmax(110px, 1.2fr); gap: 8px; align-items: center;
+}
+.voland-bindings-head { color: #7d8199; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; padding-bottom: 4px; }
+.voland-bindings-row > span:first-child { color: #9da3c0; }
+.voland-bindings-row button {
+  background: #1b1e2e; color: #e6e6ea; border: 1px solid #30344d; border-radius: 6px; padding: 3px 8px;
+  font: 12px ui-monospace, SFMono-Regular, Menlo, monospace; cursor: pointer; text-align: left; min-height: 24px;
+}
+.voland-bindings-row button:hover { border-color: #4a5078; }
+.voland-bindings-row button.listening { border-color: #6c8cff; background: #222a52; color: #c9d4ff; }
+.voland-bindings-fixed { color: #5f6378; font-size: 12px; }
 .voland-controls dl { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 4px 16px; margin: 8px 0 0; }
 .voland-controls dl div { display: flex; justify-content: space-between; gap: 8px; }
 .voland-controls dt { color: #9da3c0; }
 .voland-controls dd { margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
-[data-voland-screen]:fullscreen { background: #000; display: flex; align-items: center; justify-content: center; }
-[data-voland-screen]:fullscreen canvas { width: 100vw; height: 100vh; object-fit: contain; }
+/* Fullscreen: the canvas fills the display, letterboxed; these beat the
+ * inline box/clip styles mount.tsx pins it to the page with. */
+#game:fullscreen {
+  background: #000; object-fit: contain;
+  border-radius: 0 !important; clip-path: none !important; visibility: visible !important;
+}
 
 .voland-dialog-backdrop {
   position: fixed; inset: 0; background: rgba(5, 6, 12, 0.6); display: flex;
@@ -284,4 +301,41 @@
 .voland-setting small {
   flex-basis: 100%;
   opacity: 0.7;
+}
+
+/* Save data browser (SavesPanel.tsx). */
+.voland-saves { margin: 8px 0 12px; font-size: 13px; color: #c9cbd6; max-width: 760px; }
+.voland-saves > summary { cursor: pointer; }
+.voland-save { border: 1px solid #262a3d; border-radius: 8px; margin: 8px 0; background: #13151f; overflow: hidden; }
+.voland-save-head {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px; width: 100%;
+  background: none; border: 0; color: inherit; font: inherit; text-align: left; padding: 10px 12px; cursor: pointer;
+}
+.voland-save-head:hover { background: #181b29; }
+.voland-save-title { color: #e6e6ea; font-weight: 600; }
+.voland-save-meta { color: #7d8199; font-size: 12px; overflow-wrap: anywhere; }
+.voland-save-browser { border-top: 1px solid #262a3d; padding: 8px 12px 4px; }
+.voland-save-browser.dragging { outline: 2px dashed #6c8cff; outline-offset: -4px; background: #161a2e; }
+.voland-save-files { display: grid; gap: 1px; }
+.voland-save-row {
+  display: grid; grid-template-columns: minmax(0, 1fr) auto auto; gap: 10px; align-items: center;
+  padding: 3px 12px; border-radius: 5px; cursor: default; min-height: 26px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px;
+}
+.voland-save-row:hover { background: #1a1d2b; }
+.voland-save-row.target { background: #1c2340; }
+.voland-save-dir { cursor: pointer; color: #9db0ff; }
+.voland-save-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.voland-save-size { color: #7d8199; }
+.voland-save-actions { display: flex; gap: 4px; }
+.voland-save-actions button {
+  background: #1b1e2e; color: #c9cbd6; border: 1px solid #30344d; border-radius: 5px; padding: 1px 8px;
+  font: 11px system-ui, sans-serif; cursor: pointer;
+}
+.voland-save-actions button:hover { border-color: #4a5078; color: #e6e6ea; }
+.voland-save-actions button:disabled { opacity: 0.5; cursor: default; }
+.voland-save-drop { color: #7d8199; font-size: 12px; margin: 8px 0 4px; }
+@media (max-width: 560px) {
+  .voland-save-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .voland-save-actions { grid-column: 1 / -1; }
 }

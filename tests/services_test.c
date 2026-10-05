@@ -431,6 +431,40 @@ static void test_fs(void) {
   save_in[0] = 1;
   const uint32_t save_a = object(fsp, 51, save_in, sizeof(save_in));
   (void)save_a;
+
+  /* Title saves: program id 0 means the running program, so two titles
+   * never share a save. A save made before that (keyed with program id 0)
+   * is taken over by the first title that opens it, committed archive
+   * included. */
+  {
+    const uint64_t saved_program = g_emu.fs.program_id;
+    g_emu.fs.program_id = 0x0100abcd00010000ull;
+    uint8_t legacy[FS_SAVE_ATTRIBUTE_BYTES];
+    memset(legacy, 0, sizeof(legacy));
+    legacy[0x10] = 0x77;   /* user id */
+    legacy[0x20] = 1;      /* SaveDataType Account */
+    uint32_t legacy_root = 0, root = 0;
+    CHECK(fs_save_root(&g_emu.fs, 1, legacy, true, &legacy_root) == 0);
+    CHECK(fs_commit_save(&g_emu.fs, legacy_root) == 0);
+    const uint64_t commits = g_emu.fs.save_commits;
+    uint8_t open_in[0x48];
+    memset(open_in, 0, sizeof(open_in));
+    open_in[0] = 1;
+    memcpy(open_in + 8, legacy, sizeof(legacy));
+    (void)object(fsp, 51, open_in, sizeof(open_in));
+    uint8_t keyed[FS_SAVE_ATTRIBUTE_BYTES];
+    memcpy(keyed, legacy, sizeof(keyed));
+    for (uint32_t i = 0; i < 8; i++) keyed[i] = (uint8_t)(g_emu.fs.program_id >> (8u * i));
+    CHECK(fs_save_root(&g_emu.fs, 1, keyed, false, &root) == 0 && root == legacy_root);
+    CHECK(fs_save_root(&g_emu.fs, 1, legacy, false, &root) == FS_RESULT_TARGET_NOT_FOUND);
+    CHECK(g_emu.fs.save_commits == commits + 1u); /* the archive was renamed */
+    /* Another title gets a save of its own. */
+    g_emu.fs.program_id = 0x0100abcd00020000ull;
+    (void)object(fsp, 51, open_in, sizeof(open_in));
+    for (uint32_t i = 0; i < 8; i++) keyed[i] = (uint8_t)(g_emu.fs.program_id >> (8u * i));
+    CHECK(fs_save_root(&g_emu.fs, 1, keyed, false, &root) == 0 && root != legacy_root);
+    g_emu.fs.program_id = saved_program;
+  }
   (void)call_ex(fsp, 200, NULL, 0, NULL, FS_RESULT_TARGET_NOT_FOUND);
   /* IDeviceOperator: SD card in, no game card. */
   const uint32_t device = object(fsp, 400, NULL, 0);

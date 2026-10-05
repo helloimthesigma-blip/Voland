@@ -25,6 +25,7 @@ import {
 } from "./input-region.ts";
 import { type GamepadLike, mapStandardGamepad } from "./gamepad-mapping.ts";
 import { isMappedKey, mapKeyboard } from "./keyboard-mapping.ts";
+import { type Bindings, DEFAULT_BINDINGS } from "./bindings.ts";
 
 export interface ConnectionChange {
   readonly slot: number;
@@ -76,6 +77,8 @@ export interface InputLoopOptions {
   readonly touchTarget?: HTMLElement;
   /** The guest's frames per second (for the tap minimum hold); 0 = unknown. */
   readonly guestFps?: () => number;
+  /** The player's current control bindings (read every frame). */
+  readonly bindings?: () => Bindings;
 }
 
 export interface ScreenBox {
@@ -106,11 +109,12 @@ export function collectSlotStates(
   gamepads: readonly (GamepadLike | null)[],
   keyboardActive: boolean,
   pressedKeys: ReadonlySet<string>,
+  bindings: Bindings = DEFAULT_BINDINGS,
 ): readonly ControllerState[] {
   return Array.from({ length: INPUT_REGION_SLOT_COUNT }, (_, slot) => {
     const pad = gamepads[slot];
-    if (pad && pad.connected) return mapStandardGamepad(pad);
-    if (slot === 0 && keyboardActive) return mapKeyboard(pressedKeys);
+    if (pad && pad.connected) return mapStandardGamepad(pad, bindings.gamepad);
+    if (slot === 0 && keyboardActive) return mapKeyboard(pressedKeys, bindings.keyboard);
     return DISCONNECTED;
   });
 }
@@ -127,10 +131,11 @@ export function startInputLoop(options: InputLoopOptions): () => void {
   const keyboardActive = true;
   let previous: readonly ControllerState[] = Array.from({ length: INPUT_REGION_SLOT_COUNT }, () => DISCONNECTED);
   let frame = 0;
+  const currentBindings = options.bindings ?? ((): Bindings => DEFAULT_BINDINGS);
   const holds: HoldState[] = Array.from({ length: INPUT_REGION_SLOT_COUNT }, () => new Map<number, number>());
 
   const onKeyDown = (event: KeyboardEvent): void => {
-    if (isTextEntry(event.target) || !isMappedKey(event.code)) return;
+    if (isTextEntry(event.target) || !isMappedKey(event.code, currentBindings().keyboard)) return;
     pressedKeys.add(event.code);
     event.preventDefault();
   };
@@ -174,7 +179,7 @@ export function startInputLoop(options: InputLoopOptions): () => void {
   const tick = (): void => {
     const now = performance.now();
     const holdMs = minimumHoldMs(options.guestFps?.() ?? 0);
-    const states = collectSlotStates(options.getGamepads(), keyboardActive, pressedKeys).map((state, slot) => {
+    const states = collectSlotStates(options.getGamepads(), keyboardActive, pressedKeys, currentBindings()).map((state, slot) => {
       const held = applyMinimumHold(holds[slot] ?? new Map(), state.buttons, now, holdMs);
       holds[slot] = held.state;
       return held.buttons === state.buttons ? state : { ...state, buttons: held.buttons };

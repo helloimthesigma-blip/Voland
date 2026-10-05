@@ -39,6 +39,13 @@ export async function storeSaveArchive(name: string, bytes: Uint8Array): Promise
   return true;
 }
 
+/** Removes one stored save archive (a missing one is fine). */
+export async function removeSaveArchive(name: string): Promise<void> {
+  if (!isSaveName(name)) return;
+  const dir = await savesDirectory();
+  await dir?.removeEntry(name + SAVE_ARCHIVE_SUFFIX).catch(() => undefined);
+}
+
 /** Every stored save archive, by name. */
 export async function loadSaveArchives(): Promise<ReadonlyMap<string, Uint8Array>> {
   const archives = new Map<string, Uint8Array>();

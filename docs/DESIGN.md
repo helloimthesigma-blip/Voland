@@ -1530,6 +1530,10 @@ Per §11: PTC entries are keyed by **content hash of the region's code bytes** +
 
 Voland never uploads cache data to any server. There is no cloud cache.
 
+### Save browser (v3.74)
+
+Each title's save is its own user save directory, as on Horizon: `fsp-srv` fills a title-save attribute's program id 0 with the running program's id (Voland before v3.74 kept them at 0, so every title shared one save; the first title to open such a save takes it over, committed archive renamed). The shell's **Save data** panel (`src/ui/SavesPanel.tsx`) lists every stored save by game (program id, named after the file it was loaded from), shows its file tree, downloads, replaces and deletes files, takes dropped files and folders, downloads one save as a tar of its files, and backs up or restores all of them. Edits rewrite the save's archive (`bindings/save-archive.ts`, the core's VSAV format) and go through the CPU worker (`put-save` / `delete-save`, lifecycle messages): the core validates and loads it first - refusing while the running game has one of its files open - then OPFS stores it.
+
 ### Save backup & sync (cloud providers + companion server)
 
 The olsc IPC service stays stubbed forever (§12); the *feature* — cross-device save continuity — is emulator infrastructure the game never sees, behind one abstraction:
@@ -1914,6 +1918,8 @@ const PRO_CONTROLLER_HID: ControllerProfile = {
   buttonMap: Array.from({ length: 32 }, (_, i) => i),
 };
 ```
+
+**Player remapping (v3.74, `src/input/bindings.ts`):** the tables above are the defaults. The controls panel rebinds any Switch control to another keyboard key (sticks as four digital directions) or standard-gamepad button; a key or button moves off whatever control it held before. Bindings are a per-browser convenience in `localStorage` (`input/bindings-store.ts`, sanitized on load, defaults when storage is blocked) and the input loop reads them every frame, so changes apply mid-game. Gamepad sticks stay analog and are not remapped.
 
 WebHID Joy-Con access (filters for 0x057E/0x2006–0x2009) and HD Rumble report forwarding as in v2 — progressive enhancement, Chrome-only, skipped silently elsewhere.
 
@@ -2454,9 +2460,17 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.73.0*
+*Document version: 3.74.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.73 → v3.74 (summary)
+
+- **§15, per-title saves:** fsp-srv fills program id 0 in a title save's attribute with the running program's id; a save keyed with 0 by older builds is taken over by the first title that opens it (its committed archive is renamed, and the web mirror removes the old stored name).
+- **§15, save browser:** the shell's Save data panel browses, edits, adds (files and dropped folders), downloads and deletes each game's save files; `put-save` / `delete-save` / `list-saves` lifecycle messages.
+- **§18, remapping:** every Switch control can be rebound to a keyboard key or standard-gamepad button from the controls panel; kept per browser.
+- **Web fullscreen:** the game canvas itself goes fullscreen (the screen box it is pinned over has nothing to show, so fullscreen was black).
+- **Diagnostics:** every IPC command that fails is logged as a warning (it shows in the web crash report).
 
 ### Changelog v3.72 → v3.73 (summary)
 

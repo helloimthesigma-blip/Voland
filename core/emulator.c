@@ -324,7 +324,7 @@ static void reset_process_services(Emulator* emulator) {
   apm_init(&emulator->apm);
   set_init(&emulator->set);
   time_init(&emulator->time, &emulator->shared_memory, emulator->rtc);
-  fs_reset_process(&emulator->fs, NULL);
+  fs_reset_process(&emulator->fs, NULL, 0);
   vi_init(&emulator->vi, &emulator->nvdrv, emulator->vi_scratch);
   emulator->vi.frame_skip = emulator->frame_skip;
   network_init(&emulator->network);
@@ -507,7 +507,7 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
     }
   }
   locate_romfs(emulator, is_nro);
-  fs_reset_process(&emulator->fs, emulator->romfs);
+  fs_reset_process(&emulator->fs, emulator->romfs, emulator->process.npdm.program_id);
   emulator->program_loaded = true;
   log_info("[emulator] program '%s' loaded; main thread armed at pc=0x%010llx",
            emulator->process.npdm.name, (unsigned long long)emulator->process.entry_point);

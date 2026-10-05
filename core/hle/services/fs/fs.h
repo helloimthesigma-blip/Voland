@@ -97,6 +97,7 @@ typedef struct Fs_State {
   uint64_t save_commits;         /* bumped on every successful commit snapshot */
   Fs_Bis bis[FS_MAX_BIS_PARTITIONS]; /* empty NAND partitions (§1.6: no NAND image) */
   const Byte_Source *romfs;      /* the program's RomFS bytes, or NULL */
+  uint64_t program_id;           /* the running program's; fills attribute program id 0 */
   Fs_Open_File files[FS_MAX_OPEN_FILES];
   Fs_Open_Directory directories[FS_MAX_OPEN_DIRECTORIES];
   uint8_t bounce[FS_BOUNCE_BYTES];
@@ -113,8 +114,9 @@ uint32_t fs_commit_save(Fs_State *s, uint32_t root);
 
 /* Once per Emulator: interfaces, the SD card root, no saves. */
 void fs_init(Fs_State *state, Ramfs_Pool *pool);
-/* Per process: closes every open file/directory and sets the RomFS. */
-void fs_reset_process(Fs_State *state, const Byte_Source *romfs);
+/* Per process: closes every open file/directory and sets the RomFS and
+ * the program id that save attributes with program id 0 stand for. */
+void fs_reset_process(Fs_State *state, const Byte_Source *romfs, uint64_t program_id);
 Error fs_register(Fs_State *state, SM_Registry *registry);
 /* The ramfs root of the save (space, SaveDataAttribute); created when
  * `create` and absent. 0 or an fs result (TargetNotFound, table full). */

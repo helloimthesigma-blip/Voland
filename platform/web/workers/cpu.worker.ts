@@ -19,7 +19,8 @@ import { readMemoryLayout } from "@bindings/layout";
 import { CoreResult, formatTitleId, loadFailureFromResult, readCString, runStateAfterSlice } from "@bindings/load";
 import type { CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
 import { clearSdFiles, diffManifests, parseManifest, persistSdFile, removeSdFile, restoreSdFiles } from "./sd-persistence";
-import { loadSaveArchives, readTar, saveNameOfTar, storeSaveArchive, tarNameOfSave, writeTar } from "./save-store";
+import { isSaveName, loadSaveArchives, readTar, removeSaveArchive, saveNameOfTar, storeSaveArchive, tarNameOfSave, writeTar } from "./save-store";
+import { writeSaveArchive } from "@bindings/save-archive";
 import { parseTextInputRequest } from "./text-input";
 
 const self: DedicatedWorkerGlobalScope =
@@ -556,6 +557,10 @@ async function mirrorCommittedSaves(): Promise<void> {
       const name = path.slice(COMMIT_PATH_PREFIX.length);
       if (bytes && !(await storeSaveArchive(name, bytes))) log("warn", "saves: no browser storage - progress will not survive a reload");
     }
+    /* A save the core renamed (a title taking over an unkeyed save). */
+    for (const path of savedArchives.keys()) {
+      if (path.startsWith(COMMIT_PATH_PREFIX) && !after.has(path)) await removeSaveArchive(path.slice(COMMIT_PATH_PREFIX.length));
+    }
     savedArchives = after;
     savedCommits = commits;
   } catch (e) {
@@ -610,6 +615,36 @@ async function importSaves(tarBytes: ArrayBuffer): Promise<CPUToMainMessage> {
   baselineCommittedSaves();
   log("info", `saves: imported ${imported}${rejected ? `, ${rejected} rejected (damaged, or in use by the running game)` : ""}`);
   return { type: "saves-imported", imported, rejected };
+}
+
+/* The save browser: list, replace, delete (src/ui/SavesPanel.tsx). */
+async function listSaves(): Promise<CPUToMainMessage> {
+  await mirrorCommittedSaves(); /* the latest commit first */
+  const archives = await loadSaveArchives();
+  const saves = [...archives].map(([name, bytes]) => ({ name, archive: bytes.slice().buffer as ArrayBuffer }));
+  return { type: "saves-listed", saves };
+}
+
+/** Replaces save `name` with `archive`: into the core first (which
+ * validates it, and refuses while the running game has a file of the
+ * save open), then into storage. */
+async function putSave(name: string, archive: ArrayBuffer): Promise<CPUToMainMessage> {
+  const bytes = new Uint8Array(archive);
+  const ok = isSaveName(name) && restoreSaveArchive(name, bytes) && (await storeSaveArchive(name, bytes));
+  if (ok) baselineCommittedSaves();
+  log(ok ? "info" : "warn", ok ? `saves: ${name.slice(0, 24)}… updated` : "saves: could not update a save (in use by the running game?)");
+  return { type: "save-put", name, ok };
+}
+
+/** Deletes save `name`: the running session sees it empty, and it is no
+ * longer stored, so it is gone after a reload. */
+async function deleteSave(name: string): Promise<CPUToMainMessage> {
+  const ok = isSaveName(name) && restoreSaveArchive(name, writeSaveArchive(new Map()));
+  if (ok) {
+    await removeSaveArchive(name);
+    baselineCommittedSaves();
+  }
+  return { type: "save-deleted", name, ok };
 }
 
 async function clearSdCard(): Promise<CPUToMainMessage> {
@@ -750,6 +785,18 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   }
   if (msg.type === "import-saves") {
     void importSaves(msg.tar).then((reply) => self.postMessage(reply));
+    return;
+  }
+  if (msg.type === "list-saves") {
+    void listSaves().then((reply) => self.postMessage(reply, reply.type === "saves-listed" ? reply.saves.map((s) => s.archive) : []));
+    return;
+  }
+  if (msg.type === "put-save") {
+    void putSave(msg.name, msg.archive).then((reply) => self.postMessage(reply));
+    return;
+  }
+  if (msg.type === "delete-save") {
+    void deleteSave(msg.name).then((reply) => self.postMessage(reply));
     return;
   }
 

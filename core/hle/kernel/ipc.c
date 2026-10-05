@@ -717,6 +717,7 @@ uint32_t ipc_dispatch(HLE_Context *context, IPC_Session *session, const IPC_Requ
     return HLE_RESULT_SUCCESS;
   }
   if (response->result != HLE_RESULT_SUCCESS) {
+    log_warn("[ipc] %s:%s failed: 0x%x", interface->name, command->name, (unsigned)response->result);
     close_handles(context, response->move_handles, response->move_handle_count);
     drop_unplaced_objects(response, 0);
     clear_outputs(response);

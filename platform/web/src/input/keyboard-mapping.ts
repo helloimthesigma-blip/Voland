@@ -1,55 +1,26 @@
 /**
- * Default keyboard profile (§18 "Sources": keyboard/pointer). Keyed on
- * KeyboardEvent.code (physical position), so it is layout-independent.
+ * Keyboard -> controller state (§18 "Sources": keyboard/pointer). Keyed on
+ * KeyboardEvent.code (physical position), so it is layout-independent; the
+ * keys come from the player's bindings (bindings.ts; the defaults are Z X
+ * C V for A B X Y, arrows for the D-pad, W A S D for the left stick).
  * Sticks are digital on a keyboard: full deflection per direction.
  */
-import { type ControllerState, INPUT_AXIS_COUNT, INPUT_AXIS_MAX, InputButton, InputDeviceKind } from "./input-region.ts";
+import { CONTROLS, DEFAULT_KEY_BINDINGS, type KeyBindings } from "./bindings.ts";
+import { type ControllerState, INPUT_AXIS_COUNT, INPUT_AXIS_MAX, InputDeviceKind } from "./input-region.ts";
 
 export const KEYBOARD_PROFILE_ID = 1;
 
-export const KEYBOARD_BUTTON_MAP: Readonly<Record<string, number>> = {
-  KeyZ: InputButton.A,
-  KeyX: InputButton.B,
-  KeyC: InputButton.X,
-  KeyV: InputButton.Y,
-  KeyE: InputButton.L,
-  KeyU: InputButton.R,
-  KeyQ: InputButton.ZL,
-  KeyO: InputButton.ZR,
-  Minus: InputButton.Minus,
-  Equal: InputButton.Plus,
-  KeyF: InputButton.StickL,
-  KeyN: InputButton.StickR,
-  ArrowUp: InputButton.DpadUp,
-  ArrowDown: InputButton.DpadDown,
-  ArrowLeft: InputButton.DpadLeft,
-  ArrowRight: InputButton.DpadRight,
-};
-
-/** [code, axis index, direction]. */
-const KEYBOARD_STICK_MAP: readonly (readonly [string, number, 1 | -1])[] = [
-  ["KeyW", 1, 1], ["KeyS", 1, -1], ["KeyA", 0, -1], ["KeyD", 0, 1],
-  ["KeyI", 3, 1], ["KeyK", 3, -1], ["KeyJ", 2, -1], ["KeyL", 2, 1],
-];
-
-/** The stick keys in up, down, left, right order (for the controls legend). */
-export const KEYBOARD_STICK_KEYS = {
-  left: ["KeyW", "KeyS", "KeyA", "KeyD"],
-  right: ["KeyI", "KeyK", "KeyJ", "KeyL"],
-} as const;
-
-export function isMappedKey(code: string): boolean {
-  return code in KEYBOARD_BUTTON_MAP || KEYBOARD_STICK_MAP.some(([key]) => key === code);
+export function isMappedKey(code: string, keyboard: KeyBindings = DEFAULT_KEY_BINDINGS): boolean {
+  return Object.values(keyboard).some((codes) => codes.includes(code));
 }
 
-export function mapKeyboard(pressed: ReadonlySet<string>): ControllerState {
+export function mapKeyboard(pressed: ReadonlySet<string>, keyboard: KeyBindings = DEFAULT_KEY_BINDINGS): ControllerState {
   let buttons = 0;
-  for (const [code, bit] of Object.entries(KEYBOARD_BUTTON_MAP)) {
-    if (pressed.has(code)) buttons |= bit;
-  }
   const axes = Array.from({ length: INPUT_AXIS_COUNT }, () => 0);
-  for (const [code, axis, direction] of KEYBOARD_STICK_MAP) {
-    if (pressed.has(code)) axes[axis] = (axes[axis] ?? 0) + direction * INPUT_AXIS_MAX;
+  for (const control of CONTROLS) {
+    if (!(keyboard[control.id] ?? []).some((code) => pressed.has(code))) continue;
+    if (control.kind === "button") buttons |= control.bit;
+    else axes[control.axis] = (axes[control.axis] ?? 0) + control.direction * INPUT_AXIS_MAX;
   }
   return {
     buttons: buttons >>> 0,

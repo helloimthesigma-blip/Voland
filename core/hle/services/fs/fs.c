@@ -159,7 +159,57 @@ static HLE_ServiceResult cmd_commit(HLE_Context *c, Service_Object *self, const 
   return HLE_RESULT_SUCCESS;
 }
 
-/* {u8 space, pad[7], SaveDataAttribute attr (0x40)}: find or create. */
+/* A SaveDataAttribute's program id: its first field, little-endian. */
+#define FS_ATTRIBUTE_PROGRAM_ID_BYTES 8u
+/* ...and its SaveDataType byte, after program id, user id and system id. */
+#define FS_ATTRIBUTE_TYPE_OFFSET 0x20u
+#define FS_SAVE_TYPE_SYSTEM 0u
+#define FS_SAVE_TYPE_SYSTEM_BCAT 6u
+
+/* Saves that belong to a title (account, device, BCAT, cache, temporary). */
+static bool is_title_save(const uint8_t key[FS_SAVE_ATTRIBUTE_BYTES]) {
+  const uint8_t type = key[FS_ATTRIBUTE_TYPE_OFFSET];
+  return type != FS_SAVE_TYPE_SYSTEM && type != FS_SAVE_TYPE_SYSTEM_BCAT;
+}
+
+static uint64_t attribute_program_id(const uint8_t key[FS_SAVE_ATTRIBUTE_BYTES]) {
+  uint64_t id = 0;
+  for (uint32_t i = 0; i < FS_ATTRIBUTE_PROGRAM_ID_BYTES; i++) id |= (uint64_t)key[i] << (8u * i);
+  return id;
+}
+
+static void set_attribute_program_id(uint8_t key[FS_SAVE_ATTRIBUTE_BYTES], uint64_t id) {
+  for (uint32_t i = 0; i < FS_ATTRIBUTE_PROGRAM_ID_BYTES; i++) key[i] = (uint8_t)(id >> (8u * i));
+}
+
+/* Saves Voland made before program ids were filled in are keyed with
+ * program id 0. The first title to open such a save after the change
+ * takes it over (renaming its committed archive too, so the host sees
+ * the old name go and the new one appear). */
+static void adopt_unkeyed_save(Fs_State *s, uint8_t space, const uint8_t key[FS_SAVE_ATTRIBUTE_BYTES]) {
+  uint8_t legacy[FS_SAVE_ATTRIBUTE_BYTES];
+  memcpy(legacy, key, sizeof(legacy));
+  set_attribute_program_id(legacy, 0);
+  for (uint32_t i = 0; i < FS_MAX_SAVES; i++) {
+    Fs_Save *save = &s->saves[i];
+    if (!save->used || save->space != space || memcmp(save->key, legacy, sizeof(legacy)) != 0) continue;
+    char from[FS_SAVE_NAME_BYTES + 1u], to[FS_SAVE_NAME_BYTES + 1u];
+    from[0] = to[0] = '/';
+    fs_save_name(save, from + 1);
+    memcpy(save->key, key, FS_SAVE_ATTRIBUTE_BYTES);
+    fs_save_name(save, to + 1);
+    if (s->committed_root != RAMFS_NO_NODE &&
+        ramfs_rename(s->pool, s->committed_root, from, to, false) == 0)
+      s->save_commits++;
+    log_info("[fs] save %s now belongs to program %016llx", from + 1,
+             (unsigned long long)attribute_program_id(key));
+    return;
+  }
+}
+
+/* {u8 space, pad[7], SaveDataAttribute attr (0x40)}: find or create.
+ * Program id 0 means "the calling program", as on Horizon: each title
+ * gets its own save. */
 static HLE_ServiceResult cmd_open_save_data(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                             IPC_Response *res) {
   (void)c;
@@ -167,8 +217,13 @@ static HLE_ServiceResult cmd_open_save_data(HLE_Context *c, Service_Object *self
   if (!s->pool) return FS_RESULT_TARGET_NOT_FOUND;
   uint8_t in[8 + FS_SAVE_ATTRIBUTE_BYTES];
   if (!error_is_ok(ipc_request_read_bytes(req, 0, in, sizeof(in)))) return IPC_RESULT_SF_INVALID_IN_HEADER;
+  uint8_t *key = in + 8;
   uint32_t root = 0;
-  const uint32_t rc = fs_save_root(s, in[0], in + 8, true, &root);
+  if (attribute_program_id(key) == 0 && s->program_id != 0 && is_title_save(key)) {
+    set_attribute_program_id(key, s->program_id);
+    if (fs_save_root(s, in[0], key, false, &root) == FS_RESULT_TARGET_NOT_FOUND) adopt_unkeyed_save(s, in[0], key);
+  }
+  const uint32_t rc = fs_save_root(s, in[0], key, true, &root);
   if (rc) return rc;
   (void)ipc_response_push_object(res, &s->filesystem, root);
   return HLE_RESULT_SUCCESS;
@@ -717,13 +772,14 @@ void fs_init(Fs_State *s, Ramfs_Pool *pool) {
   s->save_commits = 0;
 }
 
-void fs_reset_process(Fs_State *s, const Byte_Source *romfs) {
+void fs_reset_process(Fs_State *s, const Byte_Source *romfs, uint64_t program_id) {
   for (uint32_t i = 0; i < FS_MAX_OPEN_FILES && s->pool; i++) {
     if (s->files[i].used) file_on_close(s, i);
   }
   memset(s->files, 0, sizeof(s->files));
   memset(s->directories, 0, sizeof(s->directories));
   s->romfs = romfs;
+  s->program_id = program_id;
 }
 
 
