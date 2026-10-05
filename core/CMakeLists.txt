@@ -45,6 +45,7 @@ set(SWITCH_CORE_SOURCES
   hle/services/network/network.c
   hle/services/pl/pl.c
   hle/services/misc/misc.c
+  hle/services/social/social.c
   hle/services/audio/audout.c
   hle/services/audio/audren.c
   hle/services/acc/acc.c

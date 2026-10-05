@@ -329,6 +329,7 @@ static void reset_process_services(Emulator* emulator) {
   emulator->vi.frame_skip = emulator->frame_skip;
   network_init(&emulator->network);
   misc_init(&emulator->misc);
+  social_init(&emulator->social);
   audout_init(&emulator->audout);
   if (emulator->audren) audren_init(emulator->audren);
   acc_init(&emulator->acc);
@@ -348,6 +349,7 @@ static Error register_services(Emulator* emulator) {
   if (error_is_ok(err)) err = network_register(&emulator->network, &emulator->sm);
   if (error_is_ok(err)) err = pl_register(&emulator->pl, &emulator->sm);
   if (error_is_ok(err)) err = misc_register(&emulator->misc, &emulator->sm);
+  if (error_is_ok(err)) err = social_register(&emulator->social, &emulator->sm);
   if (error_is_ok(err)) err = audout_register(&emulator->audout, &emulator->sm);
   if (error_is_ok(err) && emulator->audren) err = audren_register(emulator->audren, &emulator->sm);
   if (error_is_ok(err)) err = acc_register(&emulator->acc, &emulator->sm);

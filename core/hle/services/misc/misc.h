@@ -30,9 +30,12 @@
  *        (permission checks pass, restriction off, safety level 0, the
  *        play timer off and its suspension event never fires).
  *   ldr:ro runtime module loading (nn::ro): 4 RegisterProcessHandle, 2/3
- *        (Un)RegisterModuleInfo (NRR) and 10 RegisterProcessModuleInfo are
- *        accepted; 0 MapManualLoadModuleMemory (loading an NRO) is not
- *        implemented yet and fails, so a title that needs it stops there.
+ *        (Un)RegisterModuleInfo (NRR; not verified) and 10 Register-
+ *        ProcessModuleInfo are accepted; 0 MapManualLoadModuleMemory maps
+ *        the NRO and its .bss buffer at a free 2MB-aligned address past the
+ *        TLS/IO region (.text RX, .rodata R, .data/.bss RW, the buffers
+ *        inaccessible meanwhile; hle_ro_map_module) - the guest's nn::ro
+ *        relocates and links it; 1 UnmapManualLoadModuleMemory undoes it.
  *   lm     the system log: 0 OpenLogger -> ILogger {0 Log (packets
  *        accepted and dropped - titles' own logging, not Voland's), 1 Set-
  *        Destination}.
@@ -61,8 +64,6 @@
 #define MM_REQUESTS 16u
 #define PM_MODULE 15u
 #define USB_MODULE 140u
-#define RO_MODULE 22u
-#define RO_RESULT_NOT_SUPPORTED ((1u << 9) | RO_MODULE) /* reported as a generic ro failure */
 #define USB_RESULT_NOT_FOUND ((2u << 9) | USB_MODULE) /* no such interface */
 #define PM_RESULT_PROCESS_NOT_FOUND ((1u << 9) | PM_MODULE) /* the largest fixed pdm:qry reply (PlayStatistics, 0x28 bytes) */
 

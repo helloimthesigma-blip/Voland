@@ -163,6 +163,17 @@ void hle_svc_unmap_shared_memory(HLE_Context *context, CPU_State *cpu_state);
  * loaded module's image - libnx's crt0 reprotects .data.rel.ro to R. */
 void hle_svc_set_memory_permission(HLE_Context *context, CPU_State *cpu_state);
 
+/* ldr:ro (nn::ro runtime modules): maps the NRO at `nro` (its own size,
+ * page multiple) plus a .bss buffer at `bss` into free address space past
+ * the TLS/IO region - .text RX, .rodata R, .data and .bss RW - and makes
+ * both buffers inaccessible while the module is mapped. The guest's
+ * nn::ro links it itself. Returns 0 and the module's base in *out, or a
+ * Horizon result (bad NRO, buffers not mapped, out of space or slots). */
+uint32_t hle_ro_map_module(HLE_Context *context, uint64_t nro, uint64_t nro_size, uint64_t bss, uint64_t bss_size,
+                           uint64_t *out);
+/* Undoes hle_ro_map_module for the module at `base`. */
+uint32_t hle_ro_unmap_module(HLE_Context *context, uint64_t base);
+
 /* 0x15 CreateTransferMemory X1 addr, X2 size, W3 perm (None/R/RW) -> W1
  * handle. The range must be page-aligned committed heap; it is
  * reprotected to `perm` until the handle is closed

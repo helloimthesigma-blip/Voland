@@ -90,6 +90,9 @@
 /* Live svcMapMemory aliases: thread stacks (the Nintendo SDK maps one
  * per thread, and titles create dozens of threads). */
 #define PROCESS_MAX_HEAP_BORROWS 256u
+/* Modules nn::ro maps at run time (ldr:ro LoadModule; a fighting game
+ * loads one per character). */
+#define PROCESS_MAX_RO_MODULES 256u
 #define PROCESS_MAX_SHARED_MAPPINGS 32u
 
 /* An svcMapSharedMemory mapping (shared_memory.h). */
@@ -114,6 +117,18 @@ typedef struct Process_Module {
   Address_Region data;                  /* .data + .bss, page-rounded */
   uint8_t module_id[NSO_MODULE_ID_SIZE]; /* build id; §19 mod matching */
 } Process_Module;
+
+/* A module mapped by ldr:ro: its NRO and .bss buffers (made inaccessible
+ * while mapped, as Horizon's process code mapping does) aliased at `base`
+ * with per-segment permissions. */
+typedef struct Ro_Module {
+  uint64_t base;      /* 0: free slot */
+  uint64_t nro_src;
+  uint64_t nro_size;
+  uint64_t bss_src;
+  uint64_t bss_size;
+  uint64_t writable;  /* offset of .data: [base + writable, base + nro_size + bss_size) is RW */
+} Ro_Module;
 
 typedef struct Process {
   NPDM npdm; /* copy; the bootstrap's source of thread/AS parameters */
@@ -146,6 +161,7 @@ typedef struct Process {
                                * 0 until the guest's first successful call,
                                * always a PROCESS_HEAP_SIZE_GRANULE multiple */
   Memory_Borrow heap_borrows[PROCESS_MAX_HEAP_BORROWS]; /* active svcMapMemory aliases */
+  Ro_Module ro_modules[PROCESS_MAX_RO_MODULES];
   uint32_t heap_borrow_count;
   Shared_Mapping shared_mappings[PROCESS_MAX_SHARED_MAPPINGS]; /* active svcMapSharedMemory views */
   Address_Region loader_env; /* the homebrew-ABI block the emulator maps for NROs; size 0 if none */

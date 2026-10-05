@@ -11,6 +11,7 @@
 #include "hle/kernel/handle_table.h"
 #include "hle/kernel/shared_memory.h"
 #include "hle/kernel/transfer_memory.h"
+#include "hle/loader/nro.h"
 
 #include <stddef.h>
 #include <string.h>
@@ -53,8 +54,19 @@ static bool borrow_overlaps_src(const Process *process, uint64_t base, uint64_t 
  * "mapped" if perms were VMM_PERM_NONE for some other reason (they are
  * not, today, but the borrow table is the honest source of truth rather
  * than perms as a proxy for it). */
+static const Ro_Module *ro_module_at(const Process *process, uint64_t gva) {
+  for (uint32_t i = 0; i < PROCESS_MAX_RO_MODULES; i++) {
+    const Ro_Module *m = &process->ro_modules[i];
+    if (m->base && gva >= m->base && gva - m->base < m->nro_size + m->bss_size) return m;
+  }
+  return NULL;
+}
+
 static uint32_t classify_type(const Process *process, uint64_t gva, bool is_mapped, uint32_t perms) {
   if (!is_mapped) return HLE_MEMTYPE_UNMAPPED;
+  /* nn::ro modules: code static below .data, mutable from it. */
+  const Ro_Module *ro = ro_module_at(process, gva);
+  if (ro) return gva - ro->base >= ro->writable ? HLE_MEMTYPE_CODE_MUTABLE : HLE_MEMTYPE_CODE_STATIC;
   for (uint32_t i = 0; i < process->shared_mapping_count; i++) {
     const Address_Region view = {process->shared_mappings[i].base, process->shared_mappings[i].size};
     if (address_region_contains(&view, gva, 1)) return HLE_MEMTYPE_SHARED;
@@ -566,7 +578,121 @@ static bool range_in_module(const Process *process, uint64_t base, uint64_t size
     const Address_Region image = {process->modules[m].base_gva, process->modules[m].image_size};
     if (address_region_contains(&image, base, size)) return true;
   }
+  const Ro_Module *ro = ro_module_at(process, base);
+  if (ro) {
+    const Address_Region image = {ro->base, ro->nro_size + ro->bss_size};
+    if (address_region_contains(&image, base, size)) return true;
+  }
   return false;
+}
+
+/* ------------------------------------------------------------------ */
+/* nn::ro modules (ldr:ro).                                             */
+/* ------------------------------------------------------------------ */
+
+typedef struct Guest_Source {
+  VMM_Context *vmm;
+  uint64_t base;
+} Guest_Source;
+
+static Error guest_source_read(void *user, uint64_t offset, void *out, uint64_t size) {
+  const Guest_Source *g = (const Guest_Source *)user;
+  return vmm_read_block(g->vmm, g->base + offset, out, size);
+}
+
+/* Every page of [gva, gva + size) mapped readable and writable. */
+static bool range_mapped_rw(VMM_Context *vmm, uint64_t gva, uint64_t size) {
+  for (uint64_t at = gva; at < gva + size;) {
+    VMM_Region_Info info;
+    if (!error_is_ok(vmm_query(vmm, at, &info)) || !info.is_mapped || (info.perms & VMM_PERM_RW) != VMM_PERM_RW) return false;
+    at = info.base_gva + info.size;
+  }
+  return true;
+}
+
+/* The first unmapped run of `size` bytes at or above `from` (2MB-aligned
+ * starts, as Horizon places modules), below the address-space end. */
+static uint64_t find_free_run(VMM_Context *vmm, uint64_t from, uint64_t end, uint64_t size) {
+  uint64_t at = (from + ADDRESS_SPACE_ASLR_GRANULE - 1u) & ~(ADDRESS_SPACE_ASLR_GRANULE - 1u);
+  while (at + size <= end) {
+    VMM_Region_Info info;
+    if (!error_is_ok(vmm_query(vmm, at, &info))) return 0;
+    if (!info.is_mapped && info.base_gva + info.size >= at + size) return at;
+    at = (info.base_gva + info.size + ADDRESS_SPACE_ASLR_GRANULE - 1u) & ~(ADDRESS_SPACE_ASLR_GRANULE - 1u);
+  }
+  return 0;
+}
+
+/* Aliases each page of [src, src + size) at dst with `perms`. */
+static bool alias_pages(VMM_Context *vmm, uint64_t dst, uint64_t src, uint64_t size, uint32_t perms) {
+  for (uint64_t off = 0; off < size; off += VMM_PAGE_SIZE) {
+    if (!error_is_ok(vmm_map(vmm, dst + off, page_pa_of(vmm, src + off), VMM_PAGE_SIZE, perms))) return false;
+  }
+  return true;
+}
+
+uint32_t hle_ro_map_module(HLE_Context *context, uint64_t nro, uint64_t nro_size, uint64_t bss, uint64_t bss_size,
+                           uint64_t *out) {
+  Process *process = context->process;
+  VMM_Context *vmm = context->vmm;
+  if (!nro_size || ((nro | nro_size | bss | bss_size) & VMM_PAGE_OFFSET_MASK) || (bss_size && !bss))
+    return HLE_RESULT_INVALID_SIZE;
+  if (!range_mapped_rw(vmm, nro, nro_size) || (bss_size && !range_mapped_rw(vmm, bss, bss_size)))
+    return HLE_RESULT_INVALID_MEMORY_STATE;
+  Guest_Source guest = {vmm, nro};
+  const Byte_Source source = {&guest, nro_size, guest_source_read};
+  NSO image;
+  const Error parsed = nro_open(&source, &image);
+  if (!error_is_ok(parsed)) {
+    log_warn("[ro] LoadModule: %s", parsed.message);
+    return HLE_RESULT_INVALID_MEMORY_STATE;
+  }
+  const NSO_Segment *text = &image.segments[NSO_SEGMENT_TEXT];
+  const NSO_Segment *rodata = &image.segments[NSO_SEGMENT_RODATA];
+  const NSO_Segment *data = &image.segments[NSO_SEGMENT_DATA];
+  if ((uint64_t)data->memory_offset + data->memory_size > nro_size || image.bss_size > bss_size + (nro_size - data->memory_offset - data->memory_size))
+    return HLE_RESULT_INVALID_SIZE;
+  Ro_Module *slot = NULL;
+  for (uint32_t i = 0; i < PROCESS_MAX_RO_MODULES && !slot; i++)
+    if (!process->ro_modules[i].base) slot = &process->ro_modules[i];
+  if (!slot) return HLE_RESULT_OUT_OF_MEMORY;
+  const Address_Space *as = &process->address_space;
+  const uint64_t base = find_free_run(vmm, as->tls_io.base + as->tls_io.size, as->aslr.base + as->aslr.size,
+                                      nro_size + bss_size);
+  if (!base) return HLE_RESULT_OUT_OF_MEMORY;
+  const uint64_t text_end = (uint64_t)text->memory_offset + text->memory_size;
+  const uint64_t ro_end = (uint64_t)rodata->memory_offset + rodata->memory_size;
+  bool ok = alias_pages(vmm, base, nro, text_end, VMM_PERM_RX) &&
+            alias_pages(vmm, base + text_end, nro + text_end, ro_end - text_end, VMM_PERM_R) &&
+            alias_pages(vmm, base + ro_end, nro + ro_end, nro_size - ro_end, VMM_PERM_RW) &&
+            (!bss_size || alias_pages(vmm, base + nro_size, bss, bss_size, VMM_PERM_RW));
+  if (!ok) {
+    (void)vmm_unmap(vmm, base, nro_size + bss_size);
+    return HLE_RESULT_OUT_OF_MEMORY;
+  }
+  /* The buffers belong to the module now. */
+  (void)vmm_reprotect(vmm, nro, nro_size, VMM_PERM_NONE);
+  if (bss_size) (void)vmm_reprotect(vmm, bss, bss_size, VMM_PERM_NONE);
+  *slot = (Ro_Module){base, nro, nro_size, bss, bss_size, ro_end};
+  log_info("[ro] module mapped at 0x%llx (.text 0x%llx, .rodata 0x%llx, .data+.bss 0x%llx)", (unsigned long long)base,
+           (unsigned long long)text_end, (unsigned long long)(ro_end - text_end),
+           (unsigned long long)(nro_size - ro_end + bss_size));
+  *out = base;
+  return HLE_RESULT_SUCCESS;
+}
+
+uint32_t hle_ro_unmap_module(HLE_Context *context, uint64_t base) {
+  Process *process = context->process;
+  for (uint32_t i = 0; i < PROCESS_MAX_RO_MODULES; i++) {
+    Ro_Module *m = &process->ro_modules[i];
+    if (!base || m->base != base) continue;
+    (void)vmm_unmap(context->vmm, m->base, m->nro_size + m->bss_size);
+    (void)vmm_reprotect(context->vmm, m->nro_src, m->nro_size, VMM_PERM_RW);
+    if (m->bss_size) (void)vmm_reprotect(context->vmm, m->bss_src, m->bss_size, VMM_PERM_RW);
+    memset(m, 0, sizeof(*m));
+    return HLE_RESULT_SUCCESS;
+  }
+  return HLE_RESULT_INVALID_MEMORY_STATE;
 }
 
 void hle_svc_set_memory_permission(HLE_Context *context, CPU_State *cpu_state) {

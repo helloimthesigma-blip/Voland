@@ -2,6 +2,7 @@
 
 #include "common/log.h"
 
+#include "hle/kernel/svc_memory.h"
 #include "hle/services/service_util.h"
 
 #define MILLI 1000u
@@ -320,19 +321,46 @@ static HLE_ServiceResult cmd_create_registrar(HLE_Context *c, Service_Object *se
   return HLE_RESULT_SUCCESS;
 }
 
+/* ldr:ro 0 MapManualLoadModuleMemory {u64 pid placeholder, u64 nro
+ * address, u64 nro size, u64 bss address, u64 bss size} -> u64 address
+ * (the module mapped by svc_memory.c; nn::ro links it in the guest). */
+#define RO_ARG_NRO 8u
+#define RO_ARG_NRO_SIZE 16u
+#define RO_ARG_BSS 24u
+#define RO_ARG_BSS_SIZE 32u
 static HLE_ServiceResult cmd_ro_load_module(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                             IPC_Response *res) {
-  (void)c;
   (void)self;
-  (void)req;
+  uint64_t nro = 0, nro_size = 0, bss = 0, bss_size = 0, base = 0;
+  if (!error_is_ok(ipc_request_read_u64(req, RO_ARG_NRO, &nro)) ||
+      !error_is_ok(ipc_request_read_u64(req, RO_ARG_NRO_SIZE, &nro_size)) ||
+      !error_is_ok(ipc_request_read_u64(req, RO_ARG_BSS, &bss)) ||
+      !error_is_ok(ipc_request_read_u64(req, RO_ARG_BSS_SIZE, &bss_size)))
+    return IPC_RESULT_SF_INVALID_IN_HEADER;
+  const uint32_t rc = hle_ro_map_module(c, nro, nro_size, bss, bss_size, &base);
+  if (rc) {
+    log_warn("[ro] LoadModule(nro 0x%llx+0x%llx, bss 0x%llx+0x%llx) failed: 0x%x", (unsigned long long)nro,
+             (unsigned long long)nro_size, (unsigned long long)bss, (unsigned long long)bss_size, rc);
+    return rc;
+  }
+  (void)ipc_response_push_u64(res, base);
+  return HLE_RESULT_SUCCESS;
+}
+
+/* 1 UnmapManualLoadModuleMemory {u64 pid placeholder, u64 module address}. */
+#define RO_ARG_MODULE 8u
+static HLE_ServiceResult cmd_ro_unload_module(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                              IPC_Response *res) {
+  (void)self;
   (void)res;
-  log_warn("[ro] LoadModule: runtime NRO loading is not implemented");
-  return RO_RESULT_NOT_SUPPORTED;
+  uint64_t base = 0;
+  if (!error_is_ok(ipc_request_read_u64(req, RO_ARG_MODULE, &base))) return IPC_RESULT_SF_INVALID_IN_HEADER;
+  return hle_ro_unmap_module(c, base);
 }
 
 static const Service_Command k_ldr_ro_commands[] = {
     {0, cmd_ro_load_module, "MapManualLoadModuleMemory"},
-    {1, service_cmd_ok, "UnmapManualLoadModuleMemory"},
+    {1, cmd_ro_unload_module, "UnmapManualLoadModuleMemory"},
     {2, service_cmd_ok, "RegisterModuleInfo"},
     {3, service_cmd_ok, "UnregisterModuleInfo"},
     {4, service_cmd_ok, "RegisterProcessHandle"},

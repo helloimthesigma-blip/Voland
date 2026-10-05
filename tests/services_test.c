@@ -794,7 +794,70 @@ static void test_sdk_startup_services(void) {
   CHECK(call(registrar, 0, NULL, 0, NULL).result == 0);
   const uint32_t ro = service("ldr:ro");
   CHECK(call(ro, 4, NULL, 0, NULL).result == 0);
-  (void)call_ex(ro, 0, NULL, 0, NULL, RO_RESULT_NOT_SUPPORTED);
+  /* LoadModule: a 3-page NRO (.text, .rodata, .data) plus a 1-page .bss
+   * buffer is aliased at a fresh address with per-segment permissions; its
+   * buffers become inaccessible until UnloadModule hands them back. */
+  {
+    const uint64_t nro = SCRATCH(0x20000), bss = SCRATCH(0x24000);
+    uint8_t header[0x80];
+    memset(header, 0, sizeof(header));
+    const uint32_t fields[][2] = {{0x10, 0x304F524Eu}, {0x18, 0x3000}, {0x20, 0}, {0x24, 0x1000}, {0x28, 0x1000},
+                                  {0x2C, 0x1000}, {0x30, 0x2000}, {0x34, 0x1000}, {0x38, 0x1000}};
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) memcpy(header + fields[i][0], &fields[i][1], 4);
+    CHECK_OK(vmm_write_block(g_emu.vmm, nro, header, sizeof(header)));
+    CHECK_OK(vmm_write32(g_emu.vmm, nro + 0x2000, 0xDA7A));
+    const uint64_t args[5] = {0, nro, 0x3000, bss, 0x1000};
+    Test_Ipc_Reply loaded = call(ro, 0, args, sizeof(args), NULL);
+    const uint64_t base = test_le64(loaded.data);
+    CHECK(base != 0 && (base & 0x1FFFFFu) == 0);
+    VMM_Region_Info info;
+    CHECK_OK(vmm_query(g_emu.vmm, base, &info));
+    CHECK(info.is_mapped && info.perms == VMM_PERM_RX);
+    CHECK_OK(vmm_query(g_emu.vmm, base + 0x1000, &info));
+    CHECK(info.perms == VMM_PERM_R);
+    CHECK_OK(vmm_query(g_emu.vmm, base + 0x2000, &info));
+    CHECK(info.perms == VMM_PERM_RW && info.base_gva + info.size >= base + 0x4000); /* .data then .bss */
+    uint32_t word = 0;
+    CHECK_OK(vmm_read32(g_emu.vmm, base + 0x2000, &word));
+    CHECK(word == 0xDA7A); /* the same pages, not a copy */
+    CHECK_OK(vmm_query(g_emu.vmm, nro, &info));
+    CHECK(info.perms == VMM_PERM_NONE);
+    /* A second module goes elsewhere; a non-NRO is refused. */
+    const uint64_t junk_args[5] = {0, SCRATCH(0x28000), 0x1000, 0, 0};
+    (void)call_ex(ro, 0, junk_args, sizeof(junk_args), NULL, HLE_RESULT_INVALID_MEMORY_STATE);
+    const uint64_t unload_args[2] = {0, base};
+    CHECK(call(ro, 1, unload_args, sizeof(unload_args), NULL).result == 0);
+    CHECK_OK(vmm_query(g_emu.vmm, base, &info));
+    CHECK(!info.is_mapped);
+    CHECK_OK(vmm_query(g_emu.vmm, nro, &info));
+    CHECK(info.perms == VMM_PERM_RW);
+    (void)call_ex(ro, 1, unload_args, sizeof(unload_args), NULL, HLE_RESULT_INVALID_MEMORY_STATE);
+  }
+  /* Offline answers for what big titles open at start-up (social.h). */
+  {
+    const uint32_t prepo = service("prepo:u");
+    CHECK(call(prepo, 10104, NULL, 0, NULL).result == 0);
+    CHECK(test_le32(call(prepo, 10300, NULL, 0, NULL).data) == 0);
+    const uint32_t friends = object(service("friend:u"), 0, NULL, 0);
+    CHECK(test_le32(call(friends, 10100, NULL, 0, NULL).data) == 0);
+    CHECK(call(friends, 0, NULL, 0, NULL).copy_count == 1);
+    const uint32_t notifications = object(service("friend:u"), 1, NULL, 0);
+    (void)call_ex(notifications, 2, NULL, 0, NULL, FRIENDS_RESULT_NO_NOTIFICATION);
+    const uint32_t storage = object(service("bcat:u"), 1, NULL, 0);
+    CHECK(test_le32(call(storage, 10, NULL, 0, NULL).data) == 0);
+    (void)call_ex(storage, 0, NULL, 0, NULL, BCAT_RESULT_NOT_FOUND);
+    CHECK(object(service("bcat:u"), 0, NULL, 0) != 0);
+    CHECK(call(service("caps:su"), 32, NULL, 0, NULL).result == 0);
+    const uint32_t nfp = object(service("nfp:user"), 0, NULL, 0);
+    CHECK(call(nfp, 0, NULL, 0, NULL).result == 0);
+    CHECK(test_le32(call(nfp, 2, NULL, 0, NULL).data) == 0);
+    CHECK(test_le32(call(nfp, 19, NULL, 0, NULL).data) == NFP_STATE_INITIALIZED);
+    /* fatal:u stops the process as crashed. */
+    const uint32_t fatal_result = 0x1234u;
+    (void)call(service("fatal:u"), 1, &fatal_result, sizeof(fatal_result), NULL);
+    CHECK(g_emu.scheduler.process_crashed);
+    g_emu.scheduler.process_crashed = false;
+  }
   const uint32_t aoc = service("aoc:u");
   Test_Ipc_Reply r = call(aoc, 2, NULL, 0, NULL);
   CHECK(test_le32(r.data) == 0);
