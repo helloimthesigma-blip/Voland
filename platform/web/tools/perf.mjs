@@ -243,6 +243,26 @@ class Cdp {
   }
 }
 
+/* CDP sessions on the workers whose URLs match `patterns` (in order). */
+async function attachToWorkers(cdp, pageUrl, patterns) {
+  const { targetInfos } = await cdp.send("Target.getTargets");
+  const pageTarget = targetInfos.find((t) => t.type === "page" && t.url.startsWith(pageUrl));
+  if (!pageTarget) throw new Error("page target not found");
+  const { sessionId: pageSession } = await cdp.send("Target.attachToTarget", { targetId: pageTarget.targetId, flatten: true });
+  const sessions = patterns.map(() => null);
+  const all = new Promise((resolveAll) => {
+    cdp.listeners.push((msg) => {
+      if (msg.method !== "Target.attachedToTarget") return;
+      patterns.forEach((pattern, i) => {
+        if (!sessions[i] && pattern.test(msg.params.targetInfo.url)) sessions[i] = msg.params.sessionId;
+      });
+      if (sessions.every(Boolean)) resolveAll(sessions);
+    });
+  });
+  await cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, pageSession);
+  return Promise.race([all, sleep(10_000).then(() => { throw new Error("worker targets not found"); })]);
+}
+
 async function attachToCpuWorker(cdp, pageUrl) {
   const { targetInfos } = await cdp.send("Target.getTargets");
   const pageTarget = targetInfos.find((t) => t.type === "page" && t.url.startsWith(pageUrl));
@@ -340,6 +360,7 @@ async function main() {
     await page.goto(pageUrl);
     await page.getByTestId("load-panel").waitFor({ timeout: 30_000 });
     if (opts.restoreSaves) {
+      await page.getByTestId("saves").locator("summary").click(); /* the panel starts collapsed */
       await page.getByTestId("saves-import-input").setInputFiles(opts.restoreSaves);
       const note = page.getByTestId("saves-note");
       await note.waitFor({ timeout: 30_000 });
@@ -543,12 +564,21 @@ async function main() {
     if (opts.profile > 0) {
       const cdp = await Cdp.connect(opts.debugPort);
       try {
-        const session = await attachToCpuWorker(cdp, baseUrl);
-        await cdp.send("Profiler.enable", {}, session);
-        await cdp.send("Profiler.setSamplingInterval", { interval: 500 }, session);
-        await cdp.send("Profiler.start", {}, session);
+        /* The GPU worker runs beside the CPU worker: sampled at the same time. */
+        const [session, gpuSession] = await attachToWorkers(cdp, baseUrl, [/cpu\.worker/, /gpu\.worker/]);
+        for (const s of [session, gpuSession]) {
+          await cdp.send("Profiler.enable", {}, s);
+          await cdp.send("Profiler.setSamplingInterval", { interval: 500 }, s);
+          await cdp.send("Profiler.start", {}, s);
+        }
         await sleep(opts.profile * 1000);
         const { profile } = await cdp.send("Profiler.stop", {}, session);
+        const { profile: gpuProfile } = await cdp.send("Profiler.stop", {}, gpuSession);
+        const gpuFile = join(opts.outDir, `gpu-worker-${Date.now()}.cpuprofile`);
+        mkdirSync(opts.outDir, { recursive: true });
+        writeFileSync(gpuFile, JSON.stringify(gpuProfile));
+        console.log(`\nGPU worker profile (${opts.profile} s, self time), saved to ${gpuFile}:`);
+        for (const line of summariseProfile(gpuProfile, 15)) console.log(`  ${line}`);
         mkdirSync(opts.outDir, { recursive: true });
         const file = join(opts.outDir, `cpu-worker-${Date.now()}.cpuprofile`);
         writeFileSync(file, JSON.stringify(profile));
