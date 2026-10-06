@@ -353,7 +353,10 @@ static HLE_ServiceResult cmd_get_entry_type(HLE_Context *c, Service_Object *self
   uint32_t node = 0;
   uint32_t rc = read_path(c, req, 0, path);
   if (!rc) rc = ramfs_lookup(s->pool, FS_ROOT(self), path, &node);
-  if (rc) return rc;
+  if (rc) {
+    log_debug("[fs] GetEntryType(\"%s\"): not there", path);
+    return rc;
+  }
   (void)ipc_response_push_u32(res, s->pool->nodes[node].is_dir ? RAMFS_DIRECTORY : RAMFS_FILE);
   return HLE_RESULT_SUCCESS;
 }
@@ -376,7 +379,10 @@ static HLE_ServiceResult cmd_open_file(HLE_Context *c, Service_Object *self, con
   uint32_t node = 0;
   uint32_t rc = read_path(c, req, 0, path);
   if (!rc) rc = ramfs_lookup(s->pool, FS_ROOT(self), path, &node);
-  if (rc) return rc;
+  if (rc) {
+    log_debug("[fs] OpenFile(\"%s\"): not there", path);
+    return rc;
+  }
   if (s->pool->nodes[node].is_dir) return FS_RESULT_PATH_NOT_FOUND;
   for (uint32_t i = 0; i < FS_MAX_OPEN_FILES; i++) {
     if (s->files[i].used) continue;
