@@ -238,6 +238,89 @@ static const Service_Command k_fatal_commands[] = {
 };
 
 /* ------------------------------------------------------------------ */
+/* mii                                                                 */
+/* ------------------------------------------------------------------ */
+
+static HLE_ServiceResult cmd_mii_database(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                          IPC_Response *res) {
+  (void)c;
+  (void)req;
+  (void)ipc_response_push_object(res, &state_of(self)->mii_database, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
+static const Service_Command k_mii_commands[] = {
+    {0, cmd_mii_database, "GetDatabaseService"},
+};
+
+/* nn::mii::CharInfo (0x58 bytes): create id, UTF-16 name, then one byte
+ * per facial parameter. Voland's own neutral Mii (not Nintendo's default
+ * table): every parameter mid-range, so validity checks pass. */
+#define MII_CHAR_INFO_BYTES 0x58u
+#define MII_CREATE_ID_BYTES 16u
+#define MII_NAME_OFFSET 0x10u
+#define MII_PARAMS_OFFSET 0x26u
+static const uint8_t k_mii_params[MII_CHAR_INFO_BYTES - MII_PARAMS_OFFSET] = {
+    /* font region, favorite color, gender, height, build, type, region move */
+    0, 0, 0, 64, 64, 0, 0,
+    /* faceline type, color, wrinkle, make */
+    0, 0, 0, 0,
+    /* hair type, color, flip */
+    33, 1, 0,
+    /* eye type, color, scale, aspect, rotate, x, y */
+    2, 0, 4, 3, 4, 2, 12,
+    /* eyebrow type, color, scale, aspect, rotate, x, y */
+    6, 1, 4, 3, 6, 2, 10,
+    /* nose type, scale, y */
+    1, 4, 9,
+    /* mouth type, color, scale, aspect, y */
+    23, 0, 4, 3, 13,
+    /* beard color, beard type, mustache type, mustache scale, mustache y */
+    0, 0, 0, 4, 10,
+    /* glasses type, color, scale, y */
+    0, 0, 4, 10,
+    /* mole type, scale, x, y */
+    0, 4, 2, 20,
+    /* reserved */
+    0,
+};
+
+static HLE_ServiceResult cmd_mii_build(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                       IPC_Response *res) {
+  (void)c;
+  (void)self;
+  uint32_t index = 0;
+  (void)ipc_request_read_u32(req, 0, &index);
+  uint8_t info[MII_CHAR_INFO_BYTES];
+  memset(info, 0, sizeof(info));
+  /* A version-4-style id, distinct per index. */
+  for (uint32_t i = 0; i < MII_CREATE_ID_BYTES; i++) info[i] = (uint8_t)(0x56u + 0x1Du * i + index);
+  info[6] = (uint8_t)((info[6] & 0x0Fu) | 0x40u);
+  info[8] = (uint8_t)((info[8] & 0x3Fu) | 0x80u);
+  static const char k_name[] = "Mii";
+  for (uint32_t i = 0; k_name[i]; i++) info[MII_NAME_OFFSET + 2u * i] = (uint8_t)k_name[i];
+  memcpy(info + MII_PARAMS_OFFSET, k_mii_params, sizeof(k_mii_params));
+  (void)ipc_response_push_bytes(res, info, sizeof(info));
+  return HLE_RESULT_SUCCESS;
+}
+
+/* An empty database: no user Miis to list, nothing changed. */
+static const Service_Command k_mii_database_commands[] = {
+    {0, service_cmd_out_u8_false, "IsUpdated"},
+    {1, service_cmd_out_u8_false, "IsFullDatabase"},
+    {2, cmd_zero_u32, "GetCount"},
+    {3, cmd_zero_u32, "Get"},
+    {4, cmd_zero_u32, "Get1"},
+    {5, service_cmd_ok, "UpdateLatest"},
+    {6, cmd_mii_build, "BuildRandom"},
+    {7, cmd_mii_build, "BuildDefault"},
+    {8, cmd_zero_u32, "Get2"},
+    {9, cmd_zero_u32, "Get3"},
+    {20, service_cmd_out_u8_false, "IsBrokenDatabaseWithClearFlag"},
+    {22, service_cmd_ok, "SetInterfaceVersion"},
+};
+
+/* ------------------------------------------------------------------ */
 /* nfp (amiibo)                                                        */
 /* ------------------------------------------------------------------ */
 
@@ -296,6 +379,9 @@ void social_init(Social_State *s) {
   s->caps_su = SERVICE_INTERFACE("caps:su", k_caps_su_commands, 0, s);
   s->caps_u = SERVICE_INTERFACE("caps:u", k_caps_u_commands, 0, s);
   s->fatal = SERVICE_INTERFACE("fatal:u", k_fatal_commands, 0, s);
+  static const char *const k_mii[SOCIAL_MII_PORTS] = {"mii:e", "mii:u"};
+  for (uint32_t i = 0; i < SOCIAL_MII_PORTS; i++) s->mii[i] = SERVICE_INTERFACE(k_mii[i], k_mii_commands, 0, s);
+  s->mii_database = SERVICE_INTERFACE("IDatabaseService", k_mii_database_commands, 0, s);
   static const char *const k_nfp[SOCIAL_NFP_PORTS] = {"nfp:user", "nfp:sys"};
   for (uint32_t i = 0; i < SOCIAL_NFP_PORTS; i++) s->nfp[i] = SERVICE_INTERFACE(k_nfp[i], k_nfp_commands, 0, s);
   s->nfp_user = SERVICE_INTERFACE("IUser", k_nfp_user_commands, 0, s);
@@ -309,6 +395,7 @@ Error social_register(Social_State *s, SM_Registry *registry) {
   if (error_is_ok(err)) err = sm_registry_add(registry, "caps:su", &s->caps_su);
   if (error_is_ok(err)) err = sm_registry_add(registry, "caps:u", &s->caps_u);
   if (error_is_ok(err)) err = sm_registry_add(registry, "fatal:u", &s->fatal);
+  for (uint32_t i = 0; i < SOCIAL_MII_PORTS && error_is_ok(err); i++) err = sm_registry_add(registry, s->mii[i].name, &s->mii[i]);
   for (uint32_t i = 0; i < SOCIAL_NFP_PORTS && error_is_ok(err); i++) err = sm_registry_add(registry, s->nfp[i].name, &s->nfp[i]);
   return err;
 }

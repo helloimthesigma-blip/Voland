@@ -332,7 +332,7 @@ static uint32_t as_gpu_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
     return NV_SUCCESS;
   }
   case 0x05: { /* UNMAP_BUFFER {u64 offset} */
-    for (uint32_t i = 0; i < NVDRV_MAX_GPU_MAPPINGS; i++) {
+    for (uint32_t i = 0; i < s->mapping_end; i++) {
       if (s->mappings[i].in_use && s->mappings[i].gpu_va == rd64(d)) {
         s->mappings[i].in_use = false;
         return NV_SUCCESS;
@@ -348,7 +348,7 @@ static uint32_t as_gpu_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
        * - e.g. deko3d marking image memory compressible. Kinds do not
        * change how memory reads here, so the range just has to exist. */
       const uint64_t va = rd64(d + 32), size = rd64(d + 24);
-      for (uint32_t i = 0; i < NVDRV_MAX_GPU_MAPPINGS; i++) {
+      for (uint32_t i = 0; i < s->mapping_end; i++) {
         const Gpu_Mapping *m = &s->mappings[i];
         if (m->in_use && va >= m->gpu_va && va - m->gpu_va + size <= m->size) return NV_SUCCESS;
       }
@@ -370,6 +370,7 @@ static uint32_t as_gpu_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
       Gpu_Mapping *m = &s->mappings[i];
       if (m->in_use) continue;
       *m = (Gpu_Mapping){true, gpu_va, size, handle, rd64(d + 16)};
+      if (i + 1u > s->mapping_end) s->mapping_end = i + 1u;
       log_debug("[as] MAP_BUFFER_EX flags 0x%x kind 0x%x handle %u page 0x%x buf_off 0x%llx size 0x%llx -> va 0x%llx",
                 flags, rd32(d + 4), handle, page_size, (unsigned long long)rd64(d + 16), (unsigned long long)size,
                 (unsigned long long)gpu_va);
@@ -416,17 +417,27 @@ static uint32_t complete_submission(Nvdrv_State *s, Nv_Fd *f, uint32_t increment
 
 /* ---- GPU memory for the command processor ------------------------- */
 
+static bool mapping_covers(const Gpu_Mapping *m, uint64_t gpu_va) {
+  return m->in_use && gpu_va >= m->gpu_va && gpu_va - m->gpu_va < m->size;
+}
+
+/* Linear over the used slots, but the previous hit is tried first:
+ * consecutive GPU accesses nearly always fall in the same buffer. The
+ * cached index is only a hint (a stale one just misses). */
 bool nvdrv_gpu_translate(const Nvdrv_State *s, uint64_t gpu_va, uint64_t *guest_va, uint64_t *contiguous) {
-  for (uint32_t i = 0; i < NVDRV_MAX_GPU_MAPPINGS; i++) {
-    const Gpu_Mapping *m = &s->mappings[i];
-    if (!m->in_use || gpu_va < m->gpu_va || gpu_va - m->gpu_va >= m->size) continue;
-    uint64_t base = 0, size = 0;
-    if (!nvdrv_nvmap_lookup(s, m->nvmap_handle, &base, &size)) return false;
-    *guest_va = base + m->buffer_offset + (gpu_va - m->gpu_va);
-    *contiguous = m->size - (gpu_va - m->gpu_va);
-    return true;
-  }
-  return false;
+  const uint32_t hint = __atomic_load_n(&s->last_mapping, __ATOMIC_RELAXED);
+  uint32_t found = UINT32_MAX;
+  if (hint < s->mapping_end && mapping_covers(&s->mappings[hint], gpu_va)) found = hint;
+  for (uint32_t i = 0; found == UINT32_MAX && i < s->mapping_end; i++)
+    if (mapping_covers(&s->mappings[i], gpu_va)) found = i;
+  if (found == UINT32_MAX) return false;
+  const Gpu_Mapping *m = &s->mappings[found];
+  uint64_t base = 0, size = 0;
+  if (!nvdrv_nvmap_lookup(s, m->nvmap_handle, &base, &size)) return false;
+  __atomic_store_n((uint32_t *)&s->last_mapping, found, __ATOMIC_RELAXED);
+  *guest_va = base + m->buffer_offset + (gpu_va - m->gpu_va);
+  *contiguous = m->size - (gpu_va - m->gpu_va);
+  return true;
 }
 
 static bool gpu_access(void *user, uint64_t gpu_va, void *buffer, uint64_t size, bool write) {
@@ -524,7 +535,7 @@ static void mm_written(void *user, uint32_t handle, uint64_t offset, uint64_t by
   Nvdrv_State *s = (Nvdrv_State *)user;
   if (!s->renderer) return;
   const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate};
-  for (uint32_t i = 0; i < NVDRV_MAX_GPU_MAPPINGS; i++) {
+  for (uint32_t i = 0; i < s->mapping_end; i++) {
     const Gpu_Mapping *m = &s->mappings[i];
     if (!m->in_use || m->nvmap_handle != handle) continue;
     const uint64_t start = offset > m->buffer_offset ? offset : m->buffer_offset;

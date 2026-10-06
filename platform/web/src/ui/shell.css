@@ -345,24 +345,28 @@
 .voland-save-badge { margin-left: 8px; padding: 0 6px; border-radius: 4px; background: #245c3a; color: #c8f2d5; font: 10px system-ui, sans-serif; vertical-align: 1px; }
 
 /* Game library (GameLibrary.tsx). */
-.voland-library { margin: 4px 0 14px; border-radius: 10px; }
+.voland-library { margin: 4px 0 14px; border-radius: 10px; min-width: 0; max-width: 100%; }
 .voland-library.dragging { outline: 2px dashed #6c8cff; outline-offset: 4px; }
 .voland-library-empty { color: #7d8199; font-size: 13px; margin: 0; }
-.voland-library-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 12px; }
-.voland-game { position: relative; }
+/* One horizontal row of compact tiles; scrolls sideways when it overflows. */
+.voland-library-grid {
+  display: flex; gap: 10px; overflow-x: auto; padding-bottom: 6px; max-width: 100%;
+  scroll-snap-type: x proximity; scrollbar-width: thin;
+}
+.voland-game { position: relative; flex: 0 0 120px; scroll-snap-align: start; }
 .voland-game-play {
-  display: flex; flex-direction: column; align-items: flex-start; gap: 4px; width: 100%; padding: 10px;
+  display: flex; flex-direction: column; align-items: flex-start; gap: 3px; width: 100%; padding: 7px;
   background: #13151f; border: 1px solid #262a3d; border-radius: 10px; color: inherit; font: inherit;
   text-align: left; cursor: pointer; transition: border-color 0.12s, transform 0.12s;
 }
 .voland-game-play:hover:not(:disabled) { border-color: #4a5078; transform: translateY(-1px); }
 .voland-game-play:disabled { opacity: 0.6; cursor: default; }
 .voland-game-art {
-  display: flex; align-items: center; justify-content: center; width: 100%; aspect-ratio: 1;
-  border-radius: 7px; font: 600 28px/1 system-ui, sans-serif; letter-spacing: 0.04em; color: #fff;
+  display: flex; align-items: center; justify-content: center; width: 100%; aspect-ratio: 4 / 3;
+  border-radius: 7px; font: 600 22px/1 system-ui, sans-serif; letter-spacing: 0.04em; color: #fff;
   background: linear-gradient(135deg, hsl(var(--hue) 55% 42%), hsl(calc(var(--hue) + 40) 60% 22%));
 }
-.voland-game-name { color: #e6e6ea; font-weight: 600; font-size: 14px; overflow-wrap: anywhere; }
+.voland-game-name { color: #e6e6ea; font-weight: 600; font-size: 13px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .voland-game-meta { color: #7d8199; font-size: 11px; }
 .voland-game-forget {
   position: absolute; top: 4px; right: 4px; width: 22px; height: 22px; border-radius: 50%;

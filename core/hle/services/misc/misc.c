@@ -2,6 +2,8 @@
 
 #include "common/log.h"
 
+#include <stdio.h>
+
 #include "hle/kernel/svc_memory.h"
 #include "hle/services/service_util.h"
 
@@ -307,8 +309,61 @@ static const Service_Command k_lm_commands[] = {
     {0, cmd_open_logger, "OpenLogger"},
 };
 
+/* lm ILogger::Log: a packet header (u64 process id, u64 thread id, u8
+ * flags, u8 reserved, u8 severity, u8 verbosity, u32 payload size) then
+ * chunks (u8 key, ULEB128 size, bytes). The title's own text, file, line
+ * and function go to Voland's log - when a game gives up, this is usually
+ * where it says why. */
+#define LM_HEADER_BYTES 0x18u
+#define LM_SEVERITY_OFFSET 0x12u
+#define LM_PACKET_MAX 0x1000u
+#define LM_KEY_TEXT 2u
+#define LM_KEY_LINE 3u
+#define LM_KEY_FILE 4u
+#define LM_KEY_FUNCTION 5u
+#define LM_SEVERITY_WARNING 2u
+#define LM_FIELD_MAX 160u
+
+static void lm_copy_text(char *out, const uint8_t *bytes, uint64_t size) {
+  const uint64_t n = size < LM_FIELD_MAX - 1u ? size : LM_FIELD_MAX - 1u;
+  for (uint64_t i = 0; i < n; i++) out[i] = (bytes[i] >= 0x20 && bytes[i] < 0x7f) ? (char)bytes[i] : ' ';
+  out[n] = '\0';
+}
+
+static HLE_ServiceResult cmd_logger_log(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                        IPC_Response *res) {
+  (void)self;
+  (void)res;
+  uint8_t packet[LM_PACKET_MAX];
+  const uint64_t got = service_read_in(c, req, 0, packet, sizeof(packet));
+  if (got <= LM_HEADER_BYTES) return HLE_RESULT_SUCCESS;
+  char text[LM_FIELD_MAX] = "", file[LM_FIELD_MAX] = "", function[LM_FIELD_MAX] = "";
+  uint32_t line = 0;
+  for (uint64_t at = LM_HEADER_BYTES; at < got;) {
+    const uint8_t key = packet[at++];
+    uint64_t size = 0;
+    for (uint32_t shift = 0; at < got && shift < 35u; shift += 7u) {
+      const uint8_t b = packet[at++];
+      size |= (uint64_t)(b & 0x7Fu) << shift;
+      if (!(b & 0x80u)) break;
+    }
+    if (size > got - at) break;
+    if (key == LM_KEY_TEXT) lm_copy_text(text, packet + at, size);
+    else if (key == LM_KEY_FILE) lm_copy_text(file, packet + at, size);
+    else if (key == LM_KEY_FUNCTION) lm_copy_text(function, packet + at, size);
+    else if (key == LM_KEY_LINE && size >= 4u) memcpy(&line, packet + at, 4);
+    at += size;
+  }
+  if (!text[0]) return HLE_RESULT_SUCCESS;
+  char where[LM_FIELD_MAX * 2u + 16u] = "";
+  if (file[0] || function[0]) snprintf(where, sizeof(where), " (%s:%u %s)", file, line, function);
+  if (packet[LM_SEVERITY_OFFSET] >= LM_SEVERITY_WARNING) log_warn("[guest log] %s%s", text, where);
+  else log_info("[guest log] %s%s", text, where);
+  return HLE_RESULT_SUCCESS;
+}
+
 static const Service_Command k_logger_commands[] = {
-    {0, service_cmd_ok, "Log"},
+    {0, cmd_logger_log, "Log"},
     {1, service_cmd_ok, "SetDestination"},
 };
 

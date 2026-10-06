@@ -2480,6 +2480,13 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 - **§15, save browser:** the shell's Save data panel browses, edits, adds (files and dropped folders), downloads and deletes each game's save files; `put-save` / `delete-save` / `list-saves` lifecycle messages.
 - **§15, save states:** the whole machine saved and restored (`emulator_savestate_*`, `workers/savestate.ts`, the player bar's Save state). States load in the same build and memory layout only.
 - **§13, pipeline cache:** WGSL modules and draw-pipeline specs persist per title in OPFS (`workers/shader-cache.ts`) and are built with `createRenderPipelineAsync` when the title loads. Pipelines are keyed by a WGSL content hash, not by the stream's per-session shader ids.
+- **Super Smash Bros. Ultimate bring-up (first steps):**
+  - `svcCreateTransferMemory` accepts module `.data`/`.bss`. SSBU hands a service a static buffer at start-up.
+  - nvdrv holds 8192 nvmap handles and 16384 GPU mappings. SSBU maps hundreds of buffers twice. Translation scans only the used slots and tries the last hit first.
+  - `audout` GetReleasedAudioOutBuffers writes nulls past the released entries, as Horizon does. The SDK returns slot 0 unchecked, so SSBU's mixer otherwise filled a stale pointer.
+  - New `mii:e`/`mii:u` service: an empty database, and BuildDefault/BuildRandom return Voland's own neutral CharInfo.
+  - `lm` decodes log packets: a title's own messages, with file, line and function, appear in Voland's log.
+  - Status: SSBU now loads a 9 MB runtime NRO through `ldr:ro` (nn::ro links it) and starts drawing, then stops on a null pointer in its own code. Under investigation.
 - **§12, `ldr:ro` LoadModule:** `MapManualLoadModuleMemory` maps an NRO and its .bss buffer at a free 2 MB-aligned address past the TLS/IO region (.text RX, .rodata R, .data/.bss RW; the buffers are inaccessible while mapped). The guest's nn::ro links the module. QueryMemory reports module code static or mutable. Unmap undoes it. SSBU loads fighters this way.
 - **§12, offline stubs:** `prepo`, `friend`, `bcat`, `caps:su/u`, `fatal:u` and `nfp:user/sys` answer as a signed-out console (`hle/services/social`). `fatal:u` stops the process as crashed. See docs/NEW_GAMES.md for bringing up a title.
 - **Compatibility report:** the core keeps every distinct warning/error line with a count (`log_distinct_problems`, up to 256 lines). The player area's Compatibility report combines it with renderer counters, run state, speed, browser and GPU into one text to copy or save. It is the first thing to ask for when a new title misbehaves.

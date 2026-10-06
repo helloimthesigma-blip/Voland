@@ -1,4 +1,5 @@
 #include "hle/services/audio/audout.h"
+#include "common/log.h"
 
 #include "audio/audio_ring.h"
 #include "hle/kernel/scheduler.h"
@@ -172,6 +173,16 @@ static HLE_ServiceResult cmd_get_released(HLE_Context *c, Service_Object *self, 
   const uint32_t n = capacity < s->released_count ? capacity : s->released_count;
   if (n && !error_is_ok(vmm_write_block(c->vmm, buf->gva, s->released, n * sizeof(uint64_t)))) {
     return HLE_RESULT_INVALID_POINTER;
+  }
+  /* The rest of the array reads as null, as on Horizon: the SDK's
+   * GetReleasedAudioOutBuffer returns slot 0 without checking the count,
+   * so "nothing released" must come back as a null buffer (Super Smash
+   * Bros. Ultimate's mixer otherwise fills a stale pointer). */
+  static const uint64_t k_none[AUDOUT_MAX_BUFFERS] = {0};
+  for (uint32_t i = n; i < capacity; i += AUDOUT_MAX_BUFFERS) {
+    const uint32_t count = capacity - i < AUDOUT_MAX_BUFFERS ? capacity - i : AUDOUT_MAX_BUFFERS;
+    if (!error_is_ok(vmm_write_block(c->vmm, buf->gva + (uint64_t)i * sizeof(uint64_t), k_none, count * sizeof(uint64_t))))
+      return HLE_RESULT_INVALID_POINTER;
   }
   memmove(s->released, s->released + n, (s->released_count - n) * sizeof(uint64_t));
   s->released_count -= n;

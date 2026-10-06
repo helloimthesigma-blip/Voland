@@ -18,6 +18,9 @@
  *        are not saved (SaveScreenShot* report success with a zeroed entry).
  *   fatal:u             0/1/2 ThrowFatal*: the result is logged as an error
  *        and the process stops as crashed (a console shows the fatal screen).
+ *   mii:e / mii:u       the Mii database: 0 GetDatabaseService ->
+ *        IDatabaseService with no user Miis: IsUpdated / IsFullDatabase
+ *        false, GetCount 0, Get* return none, SetInterfaceVersion accepted.
  *   nfp:user / nfp:sys  amiibo: 0 CreateUserInterface -> IUser: Initialize,
  *        ListDevices (none: no NFC reader), state Initialized, attach events
  *        that never fire. Titles report that no amiibo reader is present.
@@ -33,6 +36,7 @@
 #define SOCIAL_FRIEND_PORTS 5u
 #define SOCIAL_BCAT_PORTS 4u
 #define SOCIAL_NFP_PORTS 2u
+#define SOCIAL_MII_PORTS 2u
 
 #define BCAT_MODULE 122u
 #define BCAT_RESULT_NOT_FOUND ((2u << 9) | BCAT_MODULE)
@@ -52,6 +56,8 @@ typedef struct Social_State {
   Service_Interface caps_su;
   Service_Interface caps_u;
   Service_Interface fatal;
+  Service_Interface mii[SOCIAL_MII_PORTS];
+  Service_Interface mii_database;
   Service_Interface nfp[SOCIAL_NFP_PORTS];
   Service_Interface nfp_user;
   Kernel_Event *nfp_event;

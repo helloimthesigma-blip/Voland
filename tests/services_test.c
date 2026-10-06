@@ -852,6 +852,13 @@ static void test_sdk_startup_services(void) {
     CHECK(call(nfp, 0, NULL, 0, NULL).result == 0);
     CHECK(test_le32(call(nfp, 2, NULL, 0, NULL).data) == 0);
     CHECK(test_le32(call(nfp, 19, NULL, 0, NULL).data) == NFP_STATE_INITIALIZED);
+    /* mii: an empty database; BuildDefault gives a CharInfo with a create
+     * id and a name. */
+    const uint32_t mii = object(service("mii:e"), 0, NULL, 0);
+    CHECK(test_le32(call(mii, 2, NULL, 0, NULL).data) == 0);
+    const uint32_t mii_index = 0;
+    Test_Ipc_Reply built = call(mii, 7, &mii_index, sizeof(mii_index), NULL);
+    CHECK(built.data[0] != 0 && built.data[0x10] == 'M' && built.data[0x12] == 'i');
     /* fatal:u stops the process as crashed. */
     const uint32_t fatal_result = 0x1234u;
     (void)call(service("fatal:u"), 1, &fatal_result, sizeof(fatal_result), NULL);
@@ -1253,8 +1260,11 @@ static void test_audout(void) {
   b.receive_count = 1;
   r = call(out, 5, NULL, 0, &b);
   CHECK(test_le32(r.data) == 1 && rd64(SCRATCH(0xB300)) == tag);
+  /* Nothing released: the slot reads as null (the SDK returns slot 0
+   * without checking the count). */
+  CHECK_OK(vmm_write64(g_emu.vmm, SCRATCH(0xB300), 0xDEADBEEFull));
   r = call(out, 5, NULL, 0, &b);
-  CHECK(test_le32(r.data) == 0);
+  CHECK(test_le32(r.data) == 0 && rd64(SCRATCH(0xB300)) == 0);
   r = call(out, 10, NULL, 0, NULL);
   CHECK(test_le64(r.data) == 480);
 }

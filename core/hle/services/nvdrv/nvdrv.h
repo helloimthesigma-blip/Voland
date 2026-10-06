@@ -51,8 +51,10 @@
 #include "hle/services/sm/sm.h"
 
 #define NVDRV_MAX_FDS 64u
-#define NVMAP_MAX_HANDLES 1024u
-#define NVDRV_MAX_GPU_MAPPINGS 512u
+/* Big titles allocate thousands of buffers (Super Smash Bros. Ultimate maps
+ * each twice, a plain and a compressible-kind view). */
+#define NVMAP_MAX_HANDLES 8192u
+#define NVDRV_MAX_GPU_MAPPINGS 16384u
 #define NVDRV_MAX_EVENTS 64u
 #define NVDRV_MAX_CHANNELS 8u     /* GPU channels with command processing */
 #define NVDRV_NO_CHANNEL UINT32_MAX
@@ -123,6 +125,8 @@ typedef struct Nvdrv_State {
   Nv_Fd fds[NVDRV_MAX_FDS];
   Nvmap_Handle handles[NVMAP_MAX_HANDLES]; /* nvmap handle n is handles[n - 1] */
   Gpu_Mapping mappings[NVDRV_MAX_GPU_MAPPINGS];
+  uint32_t mapping_end;    /* one past the highest slot ever used: scans stop here */
+  uint32_t last_mapping;   /* the slot the last translation hit (checked first) */
   uint64_t next_gpu_va;
   Syncpoints syncpoints;
   Nv_Event_Slot events[NVDRV_MAX_EVENTS];

@@ -753,12 +753,16 @@ void hle_svc_create_transfer_memory(HLE_Context *context, CPU_State *cpu_state) 
     regs->x[0] = HLE_RESULT_INVALID_NEW_MEMORY_PERMISSION;
     return;
   }
-  /* Heap, or physical memory the process mapped (alias region). */
+  /* Heap, physical memory the process mapped (alias region), or a
+   * module's writable .data/.bss (code-data memory can be transferred:
+   * titles hand services static buffers, e.g. Super Smash Bros. Ultimate
+   * at start-up). */
   const Address_Region heap = {process->address_space.heap.base, process->heap_size};
   const bool in_heap = address_region_contains(&heap, addr, size);
   const bool in_alias = address_region_contains(&process->address_space.alias, addr, size) &&
                         range_is_rw(context->vmm, addr, size);
-  if ((!in_heap && !in_alias) || borrow_overlaps_src(process, addr, size)) {
+  const bool in_module_data = range_in_module(process, addr, size) && range_is_rw(context->vmm, addr, size);
+  if ((!in_heap && !in_alias && !in_module_data) || borrow_overlaps_src(process, addr, size)) {
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_STATE;
     return;
   }
