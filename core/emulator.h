@@ -33,6 +33,7 @@
 #include "hle/services/pl/pl.h"
 #include "hle/services/misc/misc.h"
 #include "hle/services/social/social.h"
+#include "hle/services/audio/hwopus.h"
 #include "hle/services/set/set.h"
 #include "hle/services/time/time.h"
 #include "hle/services/vi/vi.h"
@@ -92,7 +93,8 @@ typedef struct Emulator
   Network_State network; /* offline bsd/nifm */
   Pl_State pl;           /* shared font */
   Misc_State misc;       /* psm, ts */
-  Social_State social;   /* prepo, friend, bcat, caps, fatal, nfp: offline answers */
+  Social_State social;
+  Hwopus_State hwopus;   /* Opus decoding (silent until a decoder lands) */   /* prepo, friend, bcat, caps, fatal, nfp: offline answers */
   Audout_State audout;   /* PCM audio out (§14) */
   Audren_State *audren;  /* the audio renderer (§14); service arena */
   Ns_State ns;           /* application records (§12) */

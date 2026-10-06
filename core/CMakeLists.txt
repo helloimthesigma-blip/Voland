@@ -46,6 +46,7 @@ set(SWITCH_CORE_SOURCES
   hle/services/pl/pl.c
   hle/services/misc/misc.c
   hle/services/social/social.c
+  hle/services/audio/hwopus.c
   hle/services/audio/audout.c
   hle/services/audio/audren.c
   hle/services/acc/acc.c
@@ -56,6 +57,7 @@ set(SWITCH_CORE_SOURCES
   gpu/gpu_channel.c
   gpu/maxwell_shader.c
   gpu/texture.c
+  gpu/bc7.c
   gpu/astc.c
   gpu/raster3d.c
   gpu/gpu_stream.c

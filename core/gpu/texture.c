@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "gpu/astc.h"
+#include "gpu/bc7.h"
 #include "gpu/block_linear.h"
 
 /* MW(hi:lo) field of the 256-bit header. */
@@ -333,7 +334,10 @@ static void decode_bc_block(uint32_t format, const uint8_t *block, uint8_t out[]
       out[i][3] = 255;
     }
     break;
-  default: /* BC7 and others: unsupported - magenta marks it */
+  case FMT_BC7U:
+    bc7_decode_block(block, out);
+    break;
+  default: /* BC6H and others: unsupported - magenta marks it */
     for (uint32_t i = 0; i < 16u; i++) {
       out[i][0] = 255;
       out[i][1] = 0;

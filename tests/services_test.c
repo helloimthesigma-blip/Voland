@@ -859,6 +859,31 @@ static void test_sdk_startup_services(void) {
     const uint32_t mii_index = 0;
     Test_Ipc_Reply built = call(mii, 7, &mii_index, sizeof(mii_index), NULL);
     CHECK(built.data[0] != 0 && built.data[0x10] == 'M' && built.data[0x12] == 'i');
+    /* hwopus: packets decode to the right count of silent samples. */
+    {
+      const uint8_t celt_20ms = (uint8_t)(31u << 3); /* CELT FB 20 ms, one frame */
+      CHECK(hwopus_packet_samples(&celt_20ms, 1, 48000) == 960);
+      const uint8_t silk_two_10ms[2] = {(uint8_t)((0u << 3) | 1u), 0}; /* SILK 10 ms x2 */
+      CHECK(hwopus_packet_samples(silk_two_10ms, 2, 48000) == 960);
+      const uint8_t celt_code3[2] = {(uint8_t)((16u << 3) | 3u), 4}; /* 2.5 ms x4 */
+      CHECK(hwopus_packet_samples(celt_code3, 2, 24000) == 240);
+      const uint32_t open_params[2] = {48000, 2};
+      const uint32_t decoder = object(service("hwopus"), 0, open_params, sizeof(open_params));
+      const uint8_t packet[8 + 3] = {0, 0, 0, 3, 0, 0, 0, 0, celt_20ms, 0xAA, 0xBB};
+      CHECK_OK(vmm_write_block(g_emu.vmm, SCRATCH(0x2C000), packet, sizeof(packet)));
+      CHECK_OK(vmm_write32(g_emu.vmm, SCRATCH(0x2D000), 0x1234));
+      Test_Ipc_Message d;
+      memset(&d, 0, sizeof(d));
+      d.sends[0] = (Test_Ipc_Buffer){SCRATCH(0x2C000), sizeof(packet), 0};
+      d.send_count = 1;
+      d.receives[0] = (Test_Ipc_Buffer){SCRATCH(0x2D000), 960 * 2 * 2, 0};
+      d.receive_count = 1;
+      Test_Ipc_Reply decoded = call(decoder, 0, NULL, 0, &d);
+      CHECK(test_le32(decoded.data) == sizeof(packet) && test_le32(decoded.data + 4) == 960);
+      uint32_t pcm = 1;
+      CHECK_OK(vmm_read32(g_emu.vmm, SCRATCH(0x2D000), &pcm));
+      CHECK(pcm == 0);
+    }
     /* fatal:u stops the process as crashed. */
     const uint32_t fatal_result = 0x1234u;
     (void)call(service("fatal:u"), 1, &fatal_result, sizeof(fatal_result), NULL);
