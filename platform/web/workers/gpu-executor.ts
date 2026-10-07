@@ -38,7 +38,10 @@ import {
   COMPARES,
   type Clear,
   type Copy,
+  CULL_FRONT,
+  CULL_NONE,
   DRAW_BYTES,
+  FRONT_CCW,
   type Draw,
   FORMATS,
   PRESENT_FLIP_X,
@@ -482,8 +485,9 @@ export class GpuExecutor {
     const builds = contents.pipelines.map(async (spec) => {
       const key = specKey(spec);
       const module = this.modulesByHash.get(spec.wgsl);
-      if (!module || this.pipelines.has(key)) return;
-      const { desc, layout } = this.pipelineDescriptor(spec, module);
+      const vsModule = spec.vs ? this.modulesByHash.get(spec.vs.wgsl) : module;
+      if (!module || !vsModule || this.pipelines.has(key)) return;
+      const { desc, layout } = this.pipelineDescriptor(spec, module, vsModule);
       try {
         const pipeline = await this.device.createRenderPipelineAsync(desc);
         if (!this.pipelines.has(key)) {
@@ -619,6 +623,10 @@ export class GpuExecutor {
                    colorFormats: readonly (GPUTextureFormat | null)[], depth: Tex | undefined): PipelineSpec {
     return {
       wgsl: this.shaderHashes.get(d.shaderId) ?? `id${d.shaderId}`,
+      vs: d.vsShaderId ? {
+        wgsl: this.shaderHashes.get(d.vsShaderId) ?? `id${d.vsShaderId}`,
+        inputs: d.vertexInputCount, cull: d.cullMode, front: d.frontFace,
+      } : null,
       varyings: d.varyingCount,
       textures: textures.map((t, i) => (filtered[i] ? "F" : t.sampleType)),
       targets: d.targets.map((t, i) => ({
@@ -641,18 +649,24 @@ export class GpuExecutor {
                        colorFormats: readonly (GPUTextureFormat | null)[], depth: Tex | undefined): CachedPipeline {
     const spec = this.drawSpec(d, textures, filtered, colorFormats, depth);
     return this.cached(specKey(spec), () => {
-      const { desc, layout } = this.pipelineDescriptor(spec, module);
+      const vsModule = d.vsShaderId ? this.shaders.get(d.vsShaderId) : module;
+      if (!vsModule) throw new Error(`draw uses unknown vertex shader ${d.vsShaderId}`);
+      const { desc, layout } = this.pipelineDescriptor(spec, module, vsModule);
       const made = { pipeline: this.device.createRenderPipeline(desc), layout };
-      if (this.shaderHashes.has(d.shaderId)) this.cacheStore?.recordPipeline(spec);
+      if (this.shaderHashes.has(d.shaderId) && (!d.vsShaderId || this.shaderHashes.has(d.vsShaderId))) {
+        this.cacheStore?.recordPipeline(spec);
+      }
       return made;
     });
   }
 
   /** The descriptor (and its bind-group layout) `spec` stands for. */
-  private pipelineDescriptor(spec: PipelineSpec, module: GPUShaderModule):
+  private pipelineDescriptor(spec: PipelineSpec, module: GPUShaderModule, vsModule: GPUShaderModule = module):
     { readonly desc: GPURenderPipelineDescriptor; readonly layout: GPUBindGroupLayout } {
+    /* A GPU vertex stage reads the draw data too (its constant buffers, the viewport). */
+    const dataVisibility = spec.vs ? GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT : GPUShaderStage.FRAGMENT;
     const entries: GPUBindGroupLayoutEntry[] = [
-      { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage", hasDynamicOffset: true } },
+      { binding: 0, visibility: dataVisibility, buffer: { type: "read-only-storage", hasDynamicOffset: true } },
     ];
     spec.textures.forEach((kind, i) => {
       const filtered = kind === "F";
@@ -663,8 +677,18 @@ export class GpuExecutor {
       if (filtered) entries.push({ binding: 1 + MAX_TEXTURES + i, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } });
     });
     const layout = this.device.createBindGroupLayout({ entries });
-    const attributes: GPUVertexAttribute[] = [{ shaderLocation: 0, offset: 0, format: "float32x4" }];
-    for (let i = 0; i < spec.varyings; i++) attributes.push({ shaderLocation: i + 1, offset: VERTEX_HEADER_BYTES + 16 * i, format: "uint32x4" });
+    /* Transformed vertices (position, 1/w, varyings) or, for a GPU vertex
+     * stage, the ids and input vectors - every one a vec4<u32>. */
+    const attributes: GPUVertexAttribute[] = [];
+    let stride: number;
+    if (spec.vs) {
+      for (let i = 0; i <= spec.vs.inputs; i++) attributes.push({ shaderLocation: i, offset: 16 * i, format: "uint32x4" });
+      stride = 16 * (spec.vs.inputs + 1);
+    } else {
+      attributes.push({ shaderLocation: 0, offset: 0, format: "float32x4" });
+      for (let i = 0; i < spec.varyings; i++) attributes.push({ shaderLocation: i + 1, offset: VERTEX_HEADER_BYTES + 16 * i, format: "uint32x4" });
+      stride = VERTEX_HEADER_BYTES + 16 * spec.varyings;
+    }
     const targets: (GPUColorTargetState | null)[] = spec.targets.map((t) => {
       const format = t.format as GPUTextureFormat | null;
       if (!format) return null;
@@ -689,9 +713,13 @@ export class GpuExecutor {
     });
     const desc: GPURenderPipelineDescriptor = {
       layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-      vertex: { module, entryPoint: "vs", buffers: [{ arrayStride: VERTEX_HEADER_BYTES + 16 * spec.varyings, attributes }] },
+      vertex: { module: vsModule, entryPoint: "vs", buffers: [{ arrayStride: stride, attributes }] },
       fragment: { module, entryPoint: "fs", targets },
-      primitive: { topology: "triangle-list", frontFace: "ccw", cullMode: "none" },
+      primitive: {
+        topology: "triangle-list",
+        frontFace: spec.vs && spec.vs.front !== FRONT_CCW ? "cw" : "ccw",
+        cullMode: !spec.vs || spec.vs.cull === CULL_NONE ? "none" : spec.vs.cull === CULL_FRONT ? "front" : "back",
+      },
     };
     const depth = spec.depth;
     if (depth) {
@@ -786,7 +814,7 @@ export class GpuExecutor {
         samplerStates.set(binding, texture);
       }
     }
-    const stride = VERTEX_HEADER_BYTES + 16 * d.varyingCount;
+    const stride = d.vsShaderId ? 16 * (d.vertexInputCount + 1) : VERTEX_HEADER_BYTES + 16 * d.varyingCount;
     const vertices = payload.subarray(at, at + stride * d.vertexCount);
     const colorIds = d.targets.map((t) => (t.id && this.textures.get(t.id)?.renderView ? t.id : 0));
     const depthTex = d.depthId && !(globalThis as { NO_DEPTH?: boolean }).NO_DEPTH ? this.textures.get(d.depthId) : undefined;

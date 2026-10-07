@@ -150,7 +150,8 @@ static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); 
 #define GPU_VERTICES_OFFSET (GPU_WGSL_OFFSET + GPU_WGSL_STORAGE)
 #define GPU_VERTICES_STORAGE ((size_t)768 * 1024)
 #define GPU_DATA_OFFSET (GPU_VERTICES_OFFSET + GPU_VERTICES_STORAGE)
-#define GPU_DATA_STORAGE (((size_t)WGSL_DRAW_CONSTANT_WORDS + (size_t)SM_CBUF_SLOTS * (CBUF_SLOT_BYTES / 4u) + 2u) * 4u)
+/* Both stages' constant buffers (a GPU vertex stage reads its own). */
+#define GPU_DATA_STORAGE (((size_t)WGSL_DRAW_CONSTANT_WORDS + (size_t)2u * SM_CBUF_SLOTS * (CBUF_SLOT_BYTES / 4u) + 2u) * 4u)
 #define STORAGE_BYTES (GPU_DATA_OFFSET + GPU_DATA_STORAGE + 64u)
 
 size_t raster3d_storage_bytes(void) { return STORAGE_BYTES; }
@@ -1495,8 +1496,43 @@ typedef struct Vertex_Cache {
   Vertex vertex[VERTEX_CACHE];
 } Vertex_Cache;
 
+/* GPU vertex stage (gpu_choose_vertex_stage): vertices are not shaded
+ * here; the cache keeps their raw input vectors (varying[4 * v + c], the
+ * same 128 words) and ids (pos[0] vertex, pos[1] instance, as bits). */
+static bool gpu_raw_vertices(void);
+#define RAW_VERTEX_ID(v) f32_bits((v)->pos[0])
+
+static uint32_t f32_bits(float f) {
+  uint32_t u;
+  memcpy(&u, &f, sizeof(u));
+  return u;
+}
+
+static void raw_vertices(Draw_Context *ctx, const uint32_t *indices, uint32_t n, Vertex *const *out) {
+  const Sm_Header *h = &ctx->vs->header;
+  for (uint32_t l = 0; l < n; l++) {
+    const uint32_t ids[2] = {indices[l], ctx->instance};
+    memcpy(&out[l]->pos[0], &ids[0], 4);
+    memcpy(&out[l]->pos[1], &ids[1], 4);
+  }
+  for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++) {
+    if (!((h->input_generic[v / 8u] >> ((v % 8u) * 4u)) & 0xfu)) continue;
+    for (uint32_t l = 0; l < n; l++) fetch_attribute(ctx, v, indices[l], out[l]->varying + 4u * v);
+  }
+}
+
+static bool shade_vertices(Draw_Context *ctx, const uint32_t *indices, uint32_t n, Vertex *const *out);
+
 /* Shades `n` (<= SM_LANES) vertices at once, one per lane. */
 static bool run_vertices(Draw_Context *ctx, const uint32_t *indices, uint32_t n, Vertex *const *out) {
+  if (gpu_raw_vertices()) {
+    raw_vertices(ctx, indices, n, out);
+    return true;
+  }
+  return shade_vertices(ctx, indices, n, out);
+}
+
+static bool shade_vertices(Draw_Context *ctx, const uint32_t *indices, uint32_t n, Vertex *const *out) {
   Sm_Thread *t = ctx->r->thread;
   sm_thread_reset(t, n);
   const Sm_Header *h = &ctx->vs->header;
@@ -2542,7 +2578,13 @@ static bool needs_clip(const Raster_State *rs, const Vertex *v) {
   return false;
 }
 
+static void gpu_vs_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking);
+
 static void draw_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
+  if (gpu_raw_vertices()) { /* the GPU clips, culls and transforms */
+    gpu_vs_triangle(rs, a, b, c, provoking);
+    return;
+  }
   if (!needs_clip(rs, a) && !needs_clip(rs, b) && !needs_clip(rs, c)) {
     raster_triangle(rs, a, b, c, provoking);
     return;
@@ -2708,7 +2750,10 @@ static void assemble_end(Raster_State *rs, Vertex_Cache *cache, Assembler *as) {
 #define GPU_SHADER_FAILED UINT32_MAX
 #define GPU_WGSL_BYTES ((size_t)1 << 20)
 #define GPU_VERTEX_BYTES ((size_t)768 * 1024)
-#define GPU_DATA_WORDS (WGSL_DRAW_CONSTANT_WORDS + SM_CBUF_SLOTS * (CBUF_SLOT_BYTES / 4u))
+#define GPU_DATA_WORDS (WGSL_DRAW_CONSTANT_WORDS + 2u * SM_CBUF_SLOTS * (CBUF_SLOT_BYTES / 4u))
+/* What one draw's data may hold: the GPU worker binds it through a 2 MiB
+ * window (gpu-executor.ts DATA_WINDOW_BYTES). */
+#define GPU_DATA_WINDOW_WORDS ((2u << 20) / 4u)
 #define GPU_VERTEX_HEADER_BYTES (GPU_VERTEX_HEADER_WORDS * 4u)
 
 void raster3d_set_gpu(Raster3d *r, Gpu_Stream *stream) {
@@ -3036,10 +3081,20 @@ typedef struct Gpu_Draw {
   uint32_t texture_id[WGSL_MAX_TEXTURES];
   uint32_t sampler_state[WGSL_MAX_TEXTURES]; /* GPU_SAMPLER_*, for hardware-sampled bindings */
   uint32_t data_words;
+  /* A GPU vertex stage (gpu_draw_begin decides): the cache holds each
+   * vertex's raw inputs (vertex_raw), triangles go out untransformed. */
+  bool vs_mode;
+  uint32_t vs_shader_id;
+  uint32_t input_count;
+  uint8_t input_vector[WGSL_MAX_VARYINGS + 2u]; /* vertex input i + 1 -> generic vector */
+  uint32_t cull_mode, front_face;
   Wgsl_Program_Desc desc;
+  Wgsl_Program_Desc vs_desc;
 } Gpu_Draw;
 
 static Gpu_Draw g_gpu_draw;
+
+static bool gpu_raw_vertices(void) { return g_gpu_draw.active && g_gpu_draw.vs_mode; }
 
 static uint32_t gpu_blend_factor(uint32_t f) {
   switch ((Blend_Factor)f) {
@@ -3076,7 +3131,62 @@ static uint32_t gpu_stencil_op(uint32_t op) {
 }
 
 /* Attachments for the draw; false when it cannot be expressed. */
-static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs) {
+static uint32_t gpu_shader_for(Raster3d *r, const Sm_Program *program, const Wgsl_Program_Desc *desc);
+
+/* Topologies a GPU vertex stage draws (the assembler still makes the
+ * triangles); points and lines become quads on the CPU path. */
+static bool vs_topology(uint32_t topology) {
+  return topology == TOPOLOGY_TRIANGLES || topology == TOPOLOGY_TRIANGLE_STRIP || topology == TOPOLOGY_TRIANGLE_FAN ||
+         topology == TOPOLOGY_POLYGON || topology == TOPOLOGY_QUADS || topology == TOPOLOGY_QUAD_STRIP;
+}
+
+/* The vertex program on the GPU when it translates for this draw's pixel
+ * program: its outputs feed the pixel program's locations exactly as
+ * gpu_put_vertex would (perspective-divided where interpolated so). */
+static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_t topology) {
+  Gpu_Draw *g = &g_gpu_draw;
+  if (ctx->r->cpu_vertices || !vs_topology(topology)) return;
+  /* Both stages' constant buffers must fit the GPU's data window. */
+  uint64_t words = WGSL_DRAW_CONSTANT_WORDS + 2u;
+  for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++) {
+    if (ctx->env[0].cbuf[s]) words += ctx->env[0].cbuf_size[s] / 4u;
+    if (ctx->env[1].cbuf[s]) words += ctx->env[1].cbuf_size[s] / 4u;
+  }
+  if (words > GPU_DATA_WINDOW_WORDS) return;
+  Wgsl_Program_Desc *d = &g->vs_desc;
+  wgsl_default_desc(ctx->vs, d);
+  d->varying_count = g->locations;
+  d->flat_mask = g->flat_mask;
+  d->perspective_mask = 0;
+  memset(d->output_word, 0xff, sizeof(d->output_word));
+  for (uint32_t l = 0; l < g->locations; l++) {
+    for (uint32_t c = 0; c < 4u; c++) {
+      const uint32_t word = 4u * g->location_vector[l] + c;
+      const uint8_t i = g->varying_index[word];
+      if (i == 0xffu) continue;
+      d->output_word[l][c] = (uint16_t)(SM_ATTR_GENERIC / 4u + word);
+      if (rs->varyings.interp[i] == SM_INTERP_PERSPECTIVE) d->perspective_mask |= 1ull << (l * 4u + c);
+    }
+  }
+  const uint32_t id = gpu_shader_for(ctx->r, ctx->vs, d);
+  if (id == GPU_SHADER_FAILED) return;
+  g->vs_mode = true;
+  g->vs_shader_id = id;
+  g->input_count = d->input_count;
+  for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++)
+    if (d->input_location[v] < d->input_count) g->input_vector[d->input_location[v]] = (uint8_t)v;
+  g->stride = 16u * (1u + g->input_count);
+  /* Culling moves to the pipeline. WebGPU judges winding in framebuffer
+   * coordinates (y down) - the screen space gpu_triangle's area uses. */
+  g->front_face = rs->front_ccw ? GPU_FRONT_CCW : GPU_FRONT_CW;
+  g->cull_mode = GPU_CULL_NONE;
+  if (rs->cull) {
+    if (rs->cull_face == 0x408u) g->dead = true; /* both faces: nothing to draw */
+    else g->cull_mode = rs->cull_face == 0x404u ? GPU_CULL_FRONT : GPU_CULL_BACK;
+  }
+}
+
+static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs, uint32_t topology) {
   Raster3d *r = ctx->r;
   Gpu_Draw *g = &g_gpu_draw;
   memset(g, 0, offsetof(Gpu_Draw, desc));
@@ -3120,6 +3230,7 @@ static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs) {
   g->flat_mask = g->desc.flat_mask;
   g->stride = GPU_VERTEX_HEADER_BYTES + 16u * g->locations;
   g->active = true;
+  gpu_choose_vertex_stage(ctx, rs, topology);
   return true;
 }
 
@@ -3135,6 +3246,48 @@ static uint32_t gpu_texture_levels_of(const Raster3d *r, const Raster3d_Gpu_Surf
  * texture handle each texture instruction uses - bindless handles come
  * from registers - then builds the WGSL descriptor, the shader and the
  * draw's data. */
+/* The GPU shader for `program` under `desc`: translated (and sent as a
+ * SHADER record) the first time, cached by the descriptor hash after.
+ * GPU_SHADER_FAILED when it does not translate. */
+static uint32_t gpu_shader_for(Raster3d *r, const Sm_Program *program, const Wgsl_Program_Desc *desc) {
+  const uint64_t key = wgsl_desc_hash(desc, program);
+  uint32_t slot = (uint32_t)(key % RASTER_GPU_SHADERS);
+  Raster3d_Gpu_Shader *entry = NULL;
+  for (uint32_t probe_i = 0; probe_i < RASTER_GPU_SHADERS; probe_i++) {
+    Raster3d_Gpu_Shader *e = &r->gpu_shaders[(slot + probe_i) % RASTER_GPU_SHADERS];
+    if (e->id == 0 || e->key == key) {
+      entry = e;
+      break;
+    }
+  }
+  if (!entry) { /* full: start over (the GPU side keeps its pipelines by id) */
+    memset(r->gpu_shaders, 0, sizeof(Raster3d_Gpu_Shader) * RASTER_GPU_SHADERS);
+    entry = &r->gpu_shaders[slot];
+  }
+  if (entry->id == 0) {
+    entry->key = key;
+    const Wgsl_Result res = wgsl_translate(program, desc, r->gpu_wgsl, GPU_WGSL_BYTES);
+    if (!res.ok) {
+      if (desc->stage == SM_STAGE_VERTEX)
+        log_debug("[gpu] vertex program %llx stays on the CPU: %s", (unsigned long long)program->address, res.reason);
+      else
+        log_warn("[gpu] pixel program %llx not translated: %s", (unsigned long long)program->address, res.reason);
+      entry->id = GPU_SHADER_FAILED;
+    } else {
+      entry->id = gpu_new_id(r);
+      const uint32_t padded = ((uint32_t)res.length + 7u) & ~7u;
+      uint8_t *p = gpu_stream_begin(r->gpu, GPU_REC_SHADER, 8u + padded);
+      const uint32_t head[2] = {entry->id, (uint32_t)res.length};
+      memcpy(p, head, sizeof(head));
+      memcpy(p + 8u, res.text, res.length);
+      memset(p + 8u + res.length, ' ', padded - res.length);
+      gpu_stream_end(r->gpu);
+      r->gpu_stats.shaders++;
+    }
+  }
+  return entry->id;
+}
+
 static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex *provoking, bool front) {
   Draw_Context *ctx = rs->ctx;
   Raster3d *r = ctx->r;
@@ -3254,40 +3407,8 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
   }
   desc->mrt = rs->mrt;
   /* The shader. */
-  const uint64_t key = wgsl_desc_hash(desc, ctx->ps);
-  uint32_t slot = (uint32_t)(key % RASTER_GPU_SHADERS);
-  Raster3d_Gpu_Shader *entry = NULL;
-  for (uint32_t probe_i = 0; probe_i < RASTER_GPU_SHADERS; probe_i++) {
-    Raster3d_Gpu_Shader *e = &r->gpu_shaders[(slot + probe_i) % RASTER_GPU_SHADERS];
-    if (e->id == 0 || e->key == key) {
-      entry = e;
-      break;
-    }
-  }
-  if (!entry) { /* full: start over (the GPU side keeps its pipelines by id) */
-    memset(r->gpu_shaders, 0, sizeof(Raster3d_Gpu_Shader) * RASTER_GPU_SHADERS);
-    entry = &r->gpu_shaders[slot];
-  }
-  if (entry->id == 0) {
-    entry->key = key;
-    const Wgsl_Result res = wgsl_translate(ctx->ps, desc, r->gpu_wgsl, GPU_WGSL_BYTES);
-    if (!res.ok) {
-      log_warn("[gpu] pixel program %llx not translated: %s", (unsigned long long)ctx->ps->address, res.reason);
-      entry->id = GPU_SHADER_FAILED;
-    } else {
-      entry->id = gpu_new_id(r);
-      const uint32_t padded = ((uint32_t)res.length + 7u) & ~7u;
-      uint8_t *p = gpu_stream_begin(r->gpu, GPU_REC_SHADER, 8u + padded);
-      const uint32_t head[2] = {entry->id, (uint32_t)res.length};
-      memcpy(p, head, sizeof(head));
-      memcpy(p + 8u, res.text, res.length);
-      memset(p + 8u + res.length, ' ', padded - res.length);
-      gpu_stream_end(r->gpu);
-      r->gpu_stats.shaders++;
-    }
-  }
-  if (entry->id == GPU_SHADER_FAILED) return false;
-  g->shader_id = entry->id;
+  g->shader_id = gpu_shader_for(r, ctx->ps, desc);
+  if (g->shader_id == GPU_SHADER_FAILED) return false;
   /* Draw constants and the constant buffers the program reads. */
   data[WGSL_DRAW_SURFACE_HEIGHT] = u32f((float)rs->surface_height);
   data[WGSL_DRAW_FLAGS] = rs->lower_left ? WGSL_DRAW_LOWER_LEFT : 0u;
@@ -3302,6 +3423,26 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
     data[WGSL_DRAW_CBUF_TABLE + 2u * s] = words;
     data[WGSL_DRAW_CBUF_TABLE + 2u * s + 1u] = n;
     words += n;
+  }
+  if (g->vs_mode) {
+    /* The vertex stage's constant buffers and the viewport to_screen applies. */
+    const Sm_Env *venv = &ctx->env[0];
+    for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++) {
+      if (!venv->cbuf[s] || !venv->cbuf_size[s]) continue;
+      const uint32_t n = venv->cbuf_size[s] / 4u;
+      memcpy(data + words, venv->cbuf[s], (size_t)n * 4u);
+      data[WGSL_DRAW_VS_CBUF_TABLE + 2u * s] = words;
+      data[WGSL_DRAW_VS_CBUF_TABLE + 2u * s + 1u] = n;
+      words += n;
+    }
+    uint32_t *vp = data + WGSL_DRAW_VIEWPORT;
+    for (uint32_t c = 0; c < 3u; c++) {
+      vp[WGSL_VP_SCALE + c] = u32f(rs->vp_scale[c]);
+      vp[WGSL_VP_OFFSET + c] = u32f(rs->vp_offset[c]);
+    }
+    vp[WGSL_VP_TARGET] = u32f((float)g->width);
+    vp[WGSL_VP_TARGET + 1u] = u32f((float)g->height);
+    vp[WGSL_VP_FLAGS] = rs->viewport_transform ? WGSL_VP_TRANSFORM : 0u;
   }
   if (words & 1u) data[words++] = 0; /* records stay 8-aligned */
   g->data_words = words;
@@ -3366,6 +3507,12 @@ static void gpu_emit_draw(Raster_State *rs) {
   d.flat_mask = g->flat_mask;
   d.binding_count = bindings;
   d.vertex_count = g->vertices;
+  if (g->vs_mode) {
+    d.vs_shader_id = g->vs_shader_id;
+    d.vertex_input_count = g->input_count;
+    d.cull_mode = g->cull_mode;
+    d.front_face = g->front_face;
+  }
   memcpy(p, &d, sizeof(d));
   p += sizeof(d);
   Gpu_Rec_Binding b = {GPU_BIND_DATA, WGSL_DATA_BINDING, g->data_words * 4u, 0};
@@ -3413,6 +3560,56 @@ static void gpu_put_vertex(Raster_State *rs, const Screen_Vertex *v, const Verte
 
 /* GPU mode's raster_triangle: culls, then queues the triangle in NDC with
  * front faces counter-clockwise (y up). */
+/* One vertex for a GPU vertex stage: ids, then the input vectors. */
+static void gpu_put_raw(Raster_State *rs, const Vertex *v) {
+  Gpu_Draw *g = &g_gpu_draw;
+  uint32_t *p = (uint32_t *)(void *)(rs->ctx->r->gpu_vertices + g->vertex_bytes);
+  memcpy(&p[0], &v->pos[0], 4);
+  memcpy(&p[1], &v->pos[1], 4);
+  p[2] = p[3] = 0;
+  for (uint32_t i = 0; i < g->input_count; i++) memcpy(p + 4u + 4u * i, v->varying + 4u * g->input_vector[i], 16);
+  g->vertex_bytes += g->stride;
+  g->vertices++;
+}
+
+/* A triangle for the GPU vertex stage: untransformed, provoking vertex
+ * first (WebGPU's flat interpolation takes the first; the rotation keeps
+ * the winding). The draw is prepared from the first triangle shaded on
+ * the CPU once - the pixel program's texture probe reads its varyings. */
+static void gpu_vs_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
+  Gpu_Draw *g = &g_gpu_draw;
+  if (!g->active || g->dead) return;
+  if (!g->prepared) {
+    g->prepared = true;
+    static Vertex shaded[3];
+    Vertex *outs[3] = {&shaded[0], &shaded[1], &shaded[2]};
+    const uint32_t idx[3] = {RAW_VERTEX_ID(a), RAW_VERTEX_ID(b), RAW_VERTEX_ID(c)};
+    const uint32_t pi = provoking == b ? 1u : (provoking == c ? 2u : 0u);
+    bool ok = shade_vertices(rs->ctx, idx, 3u, outs);
+    Screen_Vertex sv[3];
+    bool front = true;
+    if (ok) {
+      for (uint32_t i = 0; i < 3u; i++) to_screen(rs, &shaded[i], &sv[i]);
+      const int64_t area = (sv[1].fx - sv[0].fx) * (sv[2].fy - sv[0].fy) - (sv[1].fy - sv[0].fy) * (sv[2].fx - sv[0].fx);
+      const bool clockwise = area > 0;
+      front = rs->front_ccw ? !clockwise : clockwise;
+    }
+    if (!ok || !gpu_prepare(rs, &sv[pi], &shaded[pi], front)) {
+      g->dead = true;
+      rs->ctx->r->gpu_stats.untranslated_draws++;
+      return;
+    }
+  }
+  if (g->vertex_bytes + 3u * g->stride > GPU_VERTEX_BYTES) gpu_emit_draw(rs);
+  const Vertex *first = provoking == b ? b : (provoking == c ? c : a);
+  const Vertex *second = first == a ? b : (first == b ? c : a);
+  const Vertex *third = first == a ? c : (first == b ? a : b);
+  gpu_put_raw(rs, first);
+  gpu_put_raw(rs, second);
+  gpu_put_raw(rs, third);
+  rs->ctx->r->gpu_stats.triangles++;
+}
+
 static void gpu_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
   Gpu_Draw *g = &g_gpu_draw;
   if (!g->active || g->dead) return;
@@ -3662,7 +3859,7 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     r->stats.skipped_draws++;
     return;
   }
-  if (r->gpu && !gpu_draw_begin(ctx, &rs)) {
+  if (r->gpu && !gpu_draw_begin(ctx, &rs, draw->topology)) {
     r->stats.skipped_draws++;
     return;
   }

@@ -216,6 +216,9 @@ typedef struct Raster3d {
    * the level from derivatives (a deliberate improvement over the
    * reference's level 0, §13). Off: level 0 only, as the reference. */
   bool gpu_mipmaps;
+  /* GPU mode: vertex programs run on the CPU for every draw (the path
+   * before GPU vertex stages; diagnostics and comparison). */
+  bool cpu_vertices;
 } Raster3d;
 
 /* Bytes of backing storage raster3d_init needs (one allocation). */

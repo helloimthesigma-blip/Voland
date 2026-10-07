@@ -138,7 +138,23 @@ typedef struct Gpu_Rec_Draw {
   uint32_t flat_mask;         /* bit per varying: not interpolated (u32) */
   uint32_t binding_count;     /* Gpu_Rec_Binding entries follow */
   uint32_t vertex_count;      /* vertices (a triangle list) follow the bindings */
+  /* Version 3: a GPU vertex stage. vs_shader_id 0: vertices are already
+   * transformed (GPU_VERTEX_HEADER_WORDS + varyings each; cullMode none).
+   * Otherwise each vertex is (1 + vertex_input_count) x vec4<u32> - the
+   * vertex and instance id, then the program's input vectors - run through
+   * shader vs_shader_id's `vs`, with cull_mode (GPU_CULL_*) and front_face
+   * (GPU_FRONT_*) for the pipeline. */
+  uint32_t vs_shader_id;
+  uint32_t vertex_input_count;
+  uint32_t cull_mode;
+  uint32_t front_face;
 } Gpu_Rec_Draw;
+
+#define GPU_CULL_NONE 0u
+#define GPU_CULL_FRONT 1u
+#define GPU_CULL_BACK 2u
+#define GPU_FRONT_CCW 0u
+#define GPU_FRONT_CW 1u
 
 #define GPU_BIND_DATA 1u    /* read-only storage buffer: Gpu_Rec_Binding, then `bytes` of data (a multiple of 8) */
 #define GPU_BIND_TEXTURE 2u /* texture_2d_array (gpu/wgsl.h); `bytes` = GPU_BIND_FILTERED when a sampler filters it */

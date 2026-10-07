@@ -56,9 +56,20 @@ export interface DepthSpec {
   readonly stencil: StencilSpec | null;
 }
 
+/** A GPU vertex stage: its module, how many input vectors each vertex
+ * has (after the ids), and the culling the CPU no longer does. */
+export interface VertexStageSpec {
+  readonly wgsl: string;
+  readonly inputs: number;
+  readonly cull: number;  /* CULL_* (gpu-records.ts) */
+  readonly front: number; /* FRONT_CCW or not */
+}
+
 /** Everything a draw pipeline is built from. */
 export interface PipelineSpec {
   readonly wgsl: string;
+  /** null: vertices arrive transformed (the pass-through vertex stage). */
+  readonly vs: VertexStageSpec | null;
   readonly varyings: number;
   /** Per texture binding: "F" (filtered, float) or its sample type. */
   readonly textures: readonly string[];
@@ -96,7 +107,11 @@ export function parseCache(text: string): CacheContents {
       for (const [hash, code] of Object.entries(s)) if (typeof code === "string") shaders.set(hash, code);
     }
     const p = r["pipelines"];
-    const pipelines = Array.isArray(p) ? p.filter(isSpec).filter((spec) => shaders.has(spec.wgsl)) : [];
+    const pipelines = Array.isArray(p)
+      ? p.filter(isSpec)
+        .map((spec): PipelineSpec => ({ ...spec, vs: spec.vs ?? null })) /* caches from before vertex stages */
+        .filter((spec) => shaders.has(spec.wgsl) && (!spec.vs || shaders.has(spec.vs.wgsl)))
+      : [];
     return { shaders, pipelines };
   } catch {
     return { shaders: new Map(), pipelines: [] };
@@ -108,7 +123,8 @@ export function parseCache(text: string): CacheContents {
 export function serializeCache(contents: CacheContents): string {
   const shaders = [...contents.shaders].slice(-MAX_SHADERS);
   const kept = new Set(shaders.map(([hash]) => hash));
-  const pipelines = contents.pipelines.filter((spec) => kept.has(spec.wgsl)).slice(-MAX_PIPELINES);
+  const pipelines = contents.pipelines.filter((spec) => kept.has(spec.wgsl) && (!spec.vs || kept.has(spec.vs.wgsl)))
+    .slice(-MAX_PIPELINES);
   return JSON.stringify({ version: SHADER_CACHE_VERSION, shaders: Object.fromEntries(shaders), pipelines });
 }
 

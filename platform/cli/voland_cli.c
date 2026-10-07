@@ -1191,6 +1191,8 @@ static int run(int argc, char **argv) {
     /* VOLAND_GPU_MIPMAPS=0: level 0 only, as the software reference (for
      * comparing replays with --dump-frame output pixel for pixel). */
     if (getenv("VOLAND_GPU_MIPMAPS") && !strcmp(getenv("VOLAND_GPU_MIPMAPS"), "0")) emu.renderer.gpu_mipmaps = false;
+    /* VOLAND_CPU_VERTICES=1: vertex programs on the CPU (the old path), to compare. */
+    if (getenv("VOLAND_CPU_VERTICES")) emu.renderer.cpu_vertices = true;
   }
   const bool pc_profile = getenv("VOLAND_PC_PROFILE") != NULL;
   const uint64_t stats_from = getenv("VOLAND_STATS_FROM") ? strtoull(getenv("VOLAND_STATS_FROM"), NULL, 0) : 0;

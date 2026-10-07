@@ -2470,9 +2470,22 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 
 ---
 
-*Document version: 3.74.0*
+*Document version: 3.75.0*
 *Last updated: October 2026*
 *Maintained by: proxy-alt and Null6598*
+
+### Changelog v3.74 → v3.75 (summary)
+
+- **§13, vertex programs on the GPU (stage 1 of GPU vertex shading).** In the WebGPU renderer, a draw whose vertex program translates to WGSL no longer shades vertices on the CPU.
+  - **Translation.** `wgsl.c` translates vertex programs (`stage` vertex in `Wgsl_Program_Desc`): ALD/AST on `ain`/`aout` arrays, and VERTEX_ID/INSTANCE_ID from the vertex input. Programs with KIL, IPA, quad ops or texture reads stay on the CPU.
+  - **Epilogue.** The epilogue applies to_screen's viewport transform and lower-left flip in clip space (window coordinates × w). It maps outputs to the pixel program's locations, divided by w where the pixel program interpolates perspective-correct.
+  - **What the CPU still does:** index fetch, attribute fetch (formats), and primitive assembly. Triangles go out as raw vertices: the ids, then the input vectors, provoking vertex first.
+  - **What moves to the pipeline:** clipping and culling, with `cullMode` and `frontFace` taken from the guest. WebGPU judges winding in framebuffer coordinates, y down, which is the CPU's screen space.
+  - **First triangle on the CPU.** It is still shaded there once, so that the pixel program's texture probe sees real varyings.
+  - **Fallbacks.** Points, lines, untranslatable programs, constant buffers over the 2 MiB data window, and `VOLAND_CPU_VERTICES=1` (voland-cli) keep the CPU path.
+  - **Stream version 3** (`docs/GPU_COMMAND_STREAM.md`).
+  - **Verification.** `raster3d_test` checks the raw vertices and the cull/front-face mapping against the CPU path's culling. A Silksong 250k-slice stream replays identically with GPU and CPU vertices (presents 300/600/last: no pixel differs by more than 1/255).
+- **Textures:** sampling saturates huge or NaN coordinates (`texel_coord`), so no read lands outside a texture.
 
 ### Changelog v3.73 → v3.74 (summary)
 

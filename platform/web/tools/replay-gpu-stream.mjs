@@ -45,7 +45,8 @@ function transpile(path) {
   const js = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.ESNext } }).outputText;
   return js.replace(/^import[\s\S]*?from\s+"[^"]+";\s*$/gm, "").replace(/^export\s+/gm, "");
 }
-const bundle = `${transpile("bindings/gpu-records.ts")}\n${transpile("workers/gpu-executor.ts")}\nwindow.GpuExecutor = GpuExecutor;`;
+const bundle = `${transpile("bindings/gpu-records.ts")}\n${transpile("workers/shader-cache.ts")}\n` +
+  `${transpile("workers/gpu-executor.ts")}\nwindow.GpuExecutor = GpuExecutor;`;
 
 const streamBytes = statSync(file).size;
 const launchArgs = ["--enable-unsafe-webgpu", "--enable-features=Vulkan"];
@@ -81,6 +82,7 @@ await page.addScriptTag({ content: bundle });
 if (process.env.TRACE_RECORDS) await page.evaluate(() => { globalThis.TRACE_RECORDS = true; });
 if (process.env.TRIVIAL_SHADERS) await page.evaluate(() => { globalThis.TRIVIAL_SHADERS = true; });
 if (process.env.MEASURE) await page.evaluate(() => { globalThis.MEASURE = true; });
+if (process.env.DRAW_TRACE) await page.evaluate((n) => { globalThis.DRAW_TRACE = n; }, Number(process.env.DRAW_TRACE));
 if (process.env.NO_DEPTH) await page.evaluate(() => { globalThis.NO_DEPTH = true; });
 if (process.env.SKIP_TYPES) await page.evaluate((t) => { globalThis.SKIP_TYPES = t; }, process.env.SKIP_TYPES.split(",").map(Number));
 const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
@@ -178,6 +180,27 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
         const m = (globalThis.MEASURED ??= {});
         const e = (m[shader] ??= { n: 0, ms: 0 }); e.n++; e.ms += performance.now() - m0;
       } else if (!(globalThis.SKIP_TYPES ?? []).includes(type)) ex.execute(type, payload);
+      if (globalThis.DRAW_TRACE && type === 6 && presents + 1 === globalThis.DRAW_TRACE) {
+        /* Diagnostics: each RGBA8 target's channel sums after every draw of one present. */
+        ex.flush();
+        const sums = [];
+        for (const [id, t] of ex.textures) {
+          if (!t.renderView || t.format !== "rgba8unorm") continue;
+          const bytesPerRow = Math.ceil((t.width * 4) / 256) * 256;
+          const buffer = device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+          const enc = device.createCommandEncoder();
+          enc.copyTextureToBuffer({ texture: t.texture }, { buffer, bytesPerRow }, [t.width, t.height]);
+          device.queue.submit([enc.finish()]);
+          await buffer.mapAsync(GPUMapMode.READ);
+          const src = new Uint8Array(buffer.getMappedRange());
+          let sum = 0;
+          for (let i = 0; i < src.length; i += 4) sum += src[i] + 3 * src[i + 1] + 7 * src[i + 2];
+          buffer.destroy();
+          sums.push(`${id}:${t.width}x${t.height}:${sum}`);
+        }
+        const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+        console.log(`draw ${records} shader ${dv.getUint32(0, true)} ${sums.join(" ")}`);
+      }
       const e = (byType[type] ??= { n: 0, ms: 0, bytes: 0 });
       e.n++; e.ms += performance.now() - r0; e.bytes += size;
       pos += 8 + size;

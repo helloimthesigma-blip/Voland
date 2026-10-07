@@ -8,6 +8,7 @@ import { type PipelineSpec, SHADER_CACHE_VERSION, parseCache, serializeCache, sp
 
 const SPEC: PipelineSpec = {
   wgsl: wgslHash("@fragment fn fs() {}"),
+  vs: null,
   varyings: 2,
   textures: ["F", "uint"],
   targets: [{ format: "rgba8unorm", writeMask: 15, blend: [0, 6, 7, 0, 1, 0] }, { format: null, writeMask: 0, blend: null }],

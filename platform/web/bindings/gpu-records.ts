@@ -5,7 +5,7 @@
  */
 
 export const GPU_STREAM_MAGIC = 0x55504756;
-export const GPU_STREAM_VERSION = 2;
+export const GPU_STREAM_VERSION = 3;
 export const GPU_STREAM_HEADER_BYTES = 56;
 export const GPU_STREAM_RECORD_HEADER_BYTES = 8;
 export const OFF_MAGIC = 0;
@@ -96,7 +96,12 @@ export const TEXTURE_WRITE_BYTES = 32;
 export const CLEAR_BYTES = 60;
 export const TARGET_BYTES = 36;
 export const STENCIL_FACE_BYTES = 16;
-export const DRAW_BYTES = 4 + 4 + TARGET_BYTES * MAX_TARGETS + 16 + 4 + STENCIL_FACE_BYTES * 2 + 12 + 16 + 16 + 16;
+/* Version 3 adds the GPU vertex stage's four words (vs shader, inputs, cull, front face). */
+export const DRAW_BYTES = 4 + 4 + TARGET_BYTES * MAX_TARGETS + 16 + 4 + STENCIL_FACE_BYTES * 2 + 12 + 16 + 16 + 16 + 16;
+export const CULL_NONE = 0;
+export const CULL_FRONT = 1;
+export const CULL_BACK = 2;
+export const FRONT_CCW = 0;
 export const BINDING_BYTES = 16;
 export const COPY_BYTES = 44;
 export const PRESENT_BYTES = 24;
@@ -172,6 +177,12 @@ export interface Draw {
   readonly flatMask: number;
   readonly bindingCount: number;
   readonly vertexCount: number;
+  /** 0: vertices arrive transformed. Else the vertex stage's shader; each
+   * vertex is (1 + vertexInputCount) x vec4<u32> (ids, then inputs). */
+  readonly vsShaderId: number;
+  readonly vertexInputCount: number;
+  readonly cullMode: number;
+  readonly frontFace: number;
 }
 
 export interface Copy {
@@ -245,6 +256,7 @@ export function parseDraw(v: DataView): Draw {
     blendConstant: Array.from({ length: 4 }, (_, i) => v.getFloat32(at + 12 + 4 * i, true)),
     scissor: i32s(v, at + 28, 4), varyingCount: u32(v, at + 44), flatMask: u32(v, at + 48),
     bindingCount: u32(v, at + 52), vertexCount: u32(v, at + 56),
+    vsShaderId: u32(v, at + 60), vertexInputCount: u32(v, at + 64), cullMode: u32(v, at + 68), frontFace: u32(v, at + 72),
   };
 }
 

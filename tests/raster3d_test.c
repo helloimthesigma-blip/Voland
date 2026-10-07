@@ -11,6 +11,8 @@
 
 #include "gpu/block_linear.h"
 #include "gpu/gpu_channel.h"
+#include "gpu/gpu_records.h"
+#include "gpu/gpu_stream.h"
 #include "gpu/raster3d.h"
 
 static int g_failures;
@@ -42,6 +44,9 @@ static int g_failures;
 #define RT (GPU_BASE + 0x10000u)
 #define RT_BL (GPU_BASE + 0x30000u)
 #define RT_SIZE 64u
+#define REG_CULL_ENABLE_TEST 0x646u
+#define REG_FRONT_FACE_TEST 0x647u
+#define REG_CULL_FACE_TEST 0x648u
 
 static uint8_t g_gpu[GPU_BYTES];
 
@@ -520,6 +525,107 @@ static void test_worker_count_invariance(Raster3d *r) {
   raster3d_set_workers(r, workers_default_count());
 }
 
+/* ---- GPU mode: the vertex stage on the GPU ------------------------- */
+
+#define GPU_RING_BYTES (1u << 20)
+#define CULL_BACK_REG 0x405u
+#define FRONT_CW_REG 0x900u
+#define FRONT_CCW_REG 0x901u
+
+static uint8_t g_stream_header[GPU_STREAM_HEADER_BYTES];
+static uint64_t g_stream_ring[GPU_RING_BYTES / 8u];
+
+typedef struct Seen_Draw {
+  uint32_t count;
+  Gpu_Rec_Draw last;
+  uint32_t raw[12]; /* the first vertex: ids, then two input vectors */
+  bool vertex_shader;
+} Seen_Draw;
+
+static void stream_drain(Seen_Draw *seen) {
+  Gpu_Stream_Record rec;
+  while (gpu_stream_read(g_stream_header, &rec)) {
+    if (rec.type == GPU_REC_SHADER && rec.payload_bytes > 8u) {
+      const char *text = (const char *)rec.payload + 8u;
+      const size_t length = rec.payload_bytes - 8u;
+      static const char k_entry[] = "@vertex fn vs(vin: VIn)";
+      const size_t n = sizeof(k_entry) - 1u;
+      for (size_t i = 0; i + n <= length && !seen->vertex_shader; i++)
+        seen->vertex_shader = memcmp(text + i, k_entry, n) == 0;
+    }
+    if (rec.type == GPU_REC_DRAW) {
+      memcpy(&seen->last, rec.payload, sizeof(Gpu_Rec_Draw));
+      seen->count++;
+      /* Bindings: the data binding's bytes follow it; vertices come last. */
+      const uint32_t vertex_bytes = seen->last.vs_shader_id ? 16u * (1u + seen->last.vertex_input_count) : 0u;
+      if (vertex_bytes && seen->last.vertex_count * vertex_bytes <= rec.payload_bytes)
+        memcpy(seen->raw, rec.payload + rec.payload_bytes - seen->last.vertex_count * vertex_bytes,
+               vertex_bytes < sizeof(seen->raw) ? vertex_bytes : sizeof(seen->raw));
+    }
+    gpu_stream_consume(g_stream_header, &rec);
+  }
+}
+
+static void stream_wait(void *user, volatile int32_t *word, int32_t expected) {
+  (void)word;
+  (void)expected;
+  stream_drain((Seen_Draw *)user);
+}
+
+/* One culled-state triangle in GPU mode; what the stream carries. */
+static Seen_Draw gpu_draw_once(Raster3d *r, uint32_t front_face_reg) {
+  static Gpu_Stream stream;
+  Seen_Draw seen;
+  memset(&seen, 0, sizeof(seen));
+  gpu_stream_init(&stream, g_stream_header, (uint8_t *)g_stream_ring, GPU_RING_BYTES, stream_wait, &seen);
+  raster3d_set_gpu(r, &stream);
+  base_state(RT, false, PS_OFFSET);
+  g_regs[REG_CULL_ENABLE_TEST] = 1;
+  g_regs[REG_CULL_FACE_TEST] = CULL_BACK_REG;
+  g_regs[REG_FRONT_FACE_TEST] = front_face_reg;
+  /* Clockwise on screen (y down): (0,0) -> (64,0) -> (0,64). */
+  vertex(0, -1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(1, 1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(2, -1.0f, 1.0f, 1, 0, 0, 1);
+  raster3d_begin_submission(r);
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  gpu_stream_publish(&stream);
+  stream_drain(&seen);
+  raster3d_set_gpu(r, NULL);
+  return seen;
+}
+
+static void test_gpu_vertex_stage(Raster3d *r) {
+  /* Software vertices: the reference culls on the CPU - a clockwise
+   * triangle is a back face under FRONT_FACE CCW, drawn under CW. */
+  r->cpu_vertices = true;
+  Seen_Draw cpu = gpu_draw_once(r, FRONT_CCW_REG);
+  CHECK(cpu.count == 0, "CPU vertices: the back face is culled (%u draws)", cpu.count);
+  cpu = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(cpu.count == 1 && cpu.last.vs_shader_id == 0 && cpu.last.vertex_count == 3u,
+        "CPU vertices: the front face is drawn pre-transformed");
+  /* GPU vertices: the triangle goes out raw; the pipeline culls with the
+   * same winding rule (WebGPU's front face is judged in framebuffer
+   * coordinates, y down - the CPU's screen space). */
+  r->cpu_vertices = false;
+  Seen_Draw gpu = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(gpu.count == 1 && gpu.last.vs_shader_id != 0, "GPU vertices: a vertex stage is used");
+  CHECK(gpu.vertex_shader, "the vertex stage's WGSL is streamed");
+  CHECK(gpu.last.cull_mode == GPU_CULL_BACK, "cull mode back (%u)", gpu.last.cull_mode);
+  CHECK(gpu.last.front_face == GPU_FRONT_CW, "front face CW on screen -> GPU_FRONT_CW (%u)", gpu.last.front_face);
+  CHECK(gpu.last.vertex_input_count == 2u && gpu.last.vertex_count == 3u, "raw vertices: %u inputs, %u vertices",
+        gpu.last.vertex_input_count, gpu.last.vertex_count);
+  float x, w, red;
+  memcpy(&x, &gpu.raw[4], 4);
+  memcpy(&w, &gpu.raw[7], 4);
+  memcpy(&red, &gpu.raw[8], 4);
+  CHECK(gpu.raw[0] == 0u && x == -1.0f && w == 1.0f && red == 1.0f, "the first vertex is raw: id 0, attributes as fetched");
+  gpu = gpu_draw_once(r, FRONT_CCW_REG);
+  CHECK(gpu.count == 1 && gpu.last.front_face == GPU_FRONT_CCW, "front face CCW -> GPU_FRONT_CCW (%u)",
+        gpu.last.front_face);
+}
+
 int main(void) {
   const size_t bytes = raster3d_storage_bytes();
   uint8_t *storage = (uint8_t *)malloc(bytes + 64u);
@@ -538,6 +644,7 @@ int main(void) {
   test_stencil(&r);
   test_derivatives(&r);
   test_worker_count_invariance(&r);
+  test_gpu_vertex_stage(&r);
   CHECK(r.stats.shader_faults == 0, "no shader faults");
   raster3d_shutdown(&r);
   free(storage);

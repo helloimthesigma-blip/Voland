@@ -1,4 +1,4 @@
-# GPU command stream (version 2)
+# GPU command stream (version 3)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -33,7 +33,7 @@ the header is at its base and the ring starts at +64. In `voland-cli
 | Offset | Field |
 |---|---|
 | +0 | u32 magic `VGPU` (0x55504756) |
-| +4 | u32 version (2) |
+| +4 | u32 version (3) |
 | +8 | u64 ring base (linear-memory offset) |
 | +16 | u64 ring capacity |
 | +24 | u64 write position (monotonic bytes; release-stored on publish) |
@@ -84,6 +84,9 @@ means none.
   mask and reference.
 - **Fixed-function extras:** the blend constant and the scissor rectangle.
 - **Counts:** varying count, flat mask, binding count and vertex count.
+- **Vertex stage (version 3):** the vertex shader id (0: none), the vertex
+  input count, the cull mode (0 none, 1 front, 2 back) and the front face
+  (0 counter-clockwise, 1 clockwise).
 
 Bindings follow the header:
 
@@ -123,6 +126,19 @@ interpolates screen-linearly; flat ones are the provoking vertex's.
 Front-facing triangles wind counter-clockwise in NDC. Culling is already
 done, so the pipeline uses `cullMode: none`, and the winding only feeds
 `@builtin(front_facing)`.
+
+### Vertex stage (version 3)
+
+When `vs_shader_id` is not 0, the vertices are not transformed. Each one is
+`1 + vertex_input_count` × vec4<u32>: (vertex id, instance id, 0, 0), then
+the vertex program's input vectors as fetched (locations 0..count). They
+go through the `vs` entry point of shader `vs_shader_id`. That entry
+point is a translated Maxwell vertex program whose epilogue applies the
+viewport (the DATA binding's viewport words and its own constant-buffer
+table, `wgsl.h`) and emits the pixel program's varyings. The provoking
+vertex comes first in each triangle. The pipeline culls with `cull_mode`
+and `front_face`. WebGPU judges winding in framebuffer coordinates (y
+down), so `front_face` is the guest's winding on screen.
 
 ## Verification
 
