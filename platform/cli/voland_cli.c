@@ -43,7 +43,8 @@
  *       --svc-stats                  print per-SVC call counts at the end
  *       --dump-audio FILE            write what the guest played as a 48kHz stereo WAV
  *       --input SLICE:BUTTONS:SLICES player 1 holds BUTTONS (hex, HidNpadButton
- *                                    bits) from SLICE for SLICES slices (repeatable)
+ *                                    bits) from SLICE for SLICES slices (repeatable);
+ *                                    bits 16-19 tilt the left stick (left, up, right, down)
  *       --swkbd TEXT                 answer software-keyboard prompts with TEXT
  *                                    (default: accept the prompt's initial text;
  *                                    --swkbd-cancel cancels them instead)
@@ -176,6 +177,12 @@ typedef struct Input_Event {
 
 /* Player 1 as a connected standard gamepad holding whatever the active
  * events say at `slice`. */
+#define CLI_STICK_L_LEFT (1u << 16)
+#define CLI_STICK_L_UP (1u << 17)
+#define CLI_STICK_L_RIGHT (1u << 18)
+#define CLI_STICK_L_DOWN (1u << 19)
+#define CLI_STICK_FULL INPUT_AXIS_MAX
+
 static void apply_input(const Input_Event *events, uint32_t count, uint64_t slice) {
   Input_Controller_State state;
   memset(&state, 0, sizeof(state));
@@ -183,6 +190,13 @@ static void apply_input(const Input_Event *events, uint32_t count, uint64_t slic
   for (uint32_t i = 0; i < count; i++) {
     if (slice >= events[i].start && slice < events[i].start + events[i].length) state.buttons |= events[i].buttons;
   }
+  /* HidNpadButton's left-stick pseudo-buttons (bits 16-19: left, up,
+   * right, down) are not transported: they become full stick deflection. */
+  if (state.buttons & CLI_STICK_L_LEFT) state.axes[0] = -CLI_STICK_FULL;
+  if (state.buttons & CLI_STICK_L_RIGHT) state.axes[0] = CLI_STICK_FULL;
+  if (state.buttons & CLI_STICK_L_UP) state.axes[1] = CLI_STICK_FULL;
+  if (state.buttons & CLI_STICK_L_DOWN) state.axes[1] = -CLI_STICK_FULL;
+  state.buttons &= ~(CLI_STICK_L_LEFT | CLI_STICK_L_UP | CLI_STICK_L_RIGHT | CLI_STICK_L_DOWN);
   void *region = (void *)(uintptr_t)layout_get()->input_region_base;
   input_region_write_begin(region, 0);
   input_region_write_payload(region, 0, &state);
