@@ -72,6 +72,7 @@ static const Op_Pattern k_patterns[] = {
     /* integer */
     {0xfff8, 0x5c10, SM_OP_IADD, R, 0}, {0xfff8, 0x4c10, SM_OP_IADD, C, 0}, {0xfef8, 0x3810, SM_OP_IADD, I, 0},
     {0xfe00, 0x1c00, SM_OP_IADD32I, L, 0},
+    {0xfff0, 0x5cc0, SM_OP_IADD3, R, 0}, {0xfff0, 0x4cc0, SM_OP_IADD3, C, 0}, {0xfef0, 0x38c0, SM_OP_IADD3, I, 0},
     {0xfff8, 0x5c18, SM_OP_ISCADD, R, 0}, {0xfff8, 0x4c18, SM_OP_ISCADD, C, 0}, {0xfef8, 0x3818, SM_OP_ISCADD, I, 0},
     {0xfff8, 0x5c20, SM_OP_IMNMX, R, 0}, {0xfff8, 0x4c20, SM_OP_IMNMX, C, 0}, {0xfef8, 0x3820, SM_OP_IMNMX, I, 0},
     {0xfff0, 0x5b50, SM_OP_ISET, R, 0}, {0xfff0, 0x4b50, SM_OP_ISET, C, 0}, {0xfef0, 0x3650, SM_OP_ISET, I, 0},
@@ -120,6 +121,7 @@ static const Op_Pattern k_patterns[] = {
     {0xfff8, 0xdf48, SM_OP_TXQ, R, 0}, {0xfff8, 0xdf58, SM_OP_TMML, R, 0},
     {0xffc0, 0xdf00, SM_OP_TLD4S, R, 0},
     {0xfe00, 0xd800, SM_OP_TEXS, R, 0}, {0xfe00, 0xda00, SM_OP_TLDS, R, 0},
+    {0xfe00, 0xd000, SM_OP_TEXS, R, 0}, {0xfe00, 0xd200, SM_OP_TLDS, R, 0}, /* bit 59 clear: half results */
     {0xff78, 0xdc38, SM_OP_TLD, R, 0}, {0xfff8, 0xde38, SM_OP_TXD, R, 0},
     {0xfc38, 0xc838, SM_OP_TLD4, R, 0}, {0xfe38, 0xc038, SM_OP_TEX, R, 0}, {0xfff8, 0xdeb8, SM_OP_TEX_B, R, 0},
     /* control */
@@ -936,6 +938,21 @@ static void write_scalar_results(Sm_Thread *t, uint64_t w, const uint32_t *value
   t->r[SM_RZ][l] = 0;
 }
 
+/* TEXS/TLDS with bit 59 (SM_TEXS_F32_BIT) clear: the components as
+ * half floats, two to a register - (c0, c1) in Rd, (c2, c3) in Rd2; a
+ * missing second half is 0. */
+static void write_scalar_results_half(Sm_Thread *t, uint64_t w, const uint32_t *values, uint32_t count, uint32_t l) {
+  const uint32_t d0 = REG_D(w), d1 = BITS(w, 28, 8);
+  for (uint32_t i = 0; i < count; i += 2u) {
+    const uint32_t base = i < 2u ? d0 : d1;
+    if (base == SM_RZ) continue;
+    const uint32_t lo = float_to_half(f32(values[i]));
+    const uint32_t hi = i + 1u < count ? float_to_half(f32(values[i + 1u])) : 0u;
+    t->r[base][l] = lo | (hi << HALF_HIGH_SHIFT);
+  }
+  t->r[SM_RZ][l] = 0;
+}
+
 /* Component lists for the 3-bit TEXS/TLDS mask, single / dual dest. */
 static uint32_t scalar_components(uint32_t code, bool dual, uint32_t out[4]) {
   static const uint8_t single[8][3] = {{1, 0}, {1, 1}, {1, 2}, {1, 3}, {2, 0}, {2, 0}, {2, 1}, {2, 2}};
@@ -1012,7 +1029,8 @@ static void exec_texs(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mas
   FOR_LANES(m) {
     uint32_t values[4];
     for (uint32_t i = 0; i < n; i++) values[i] = texels[l][comps[i]];
-    write_scalar_results(t, w, values, n, l);
+    if (BIT(w, SM_TEXS_F32_BIT)) write_scalar_results(t, w, values, n, l);
+    else write_scalar_results_half(t, w, values, n, l);
   }
 }
 
@@ -1050,7 +1068,8 @@ static void exec_tlds(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mas
   FOR_LANES(m) {
     uint32_t values[4];
     for (uint32_t i = 0; i < n; i++) values[i] = texels[l][comps[i]];
-    write_scalar_results(t, w, values, n, l);
+    if (BIT(w, SM_TEXS_F32_BIT)) write_scalar_results(t, w, values, n, l);
+    else write_scalar_results_half(t, w, values, n, l);
   }
 }
 
@@ -1652,6 +1671,43 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     if (cc) {
       set_mask(&t->cc_carry, m, carry);
       set_mask(&t->cc_overflow, m, over);
+      set_mask(&t->cc_zero, m, zero);
+      set_mask(&t->cc_sign, m, sign);
+    }
+    return;
+  }
+  case SM_OP_IADD3: {
+    /* Rd = A + B + C, each optionally negated; the register form can
+     * take a 16-bit half of each and shift A + B by 16 before adding C. */
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb), *c = t->r[REG_C(w)];
+    uint32_t *d = dst_row(t, REG_D(w));
+    const bool reg_form = in->form == SM_FORM_REG;
+    const uint32_t mode = reg_form ? BITS(w, IADD3_MODE_BIT, 2) : 0u;
+    const uint32_t heights[3] = {reg_form ? BITS(w, IADD3_HEIGHT_A_BIT, 2) : 0u, reg_form ? BITS(w, IADD3_HEIGHT_B_BIT, 2) : 0u,
+                                 reg_form ? BITS(w, IADD3_HEIGHT_C_BIT, 2) : 0u};
+    const uint32_t negs[3] = {BIT(w, IADD3_NEG_A_BIT), BIT(w, IADD3_NEG_B_BIT), BIT(w, IADD3_NEG_C_BIT)};
+    const bool x = BIT(w, IADD3_X_BIT) != 0, cc = BIT(w, IADD3_CC_BIT) != 0;
+    Sm_Mask carry = 0, zero = 0, sign = 0;
+    FOR_LANES(m) {
+      uint32_t v[3] = {a[l], b[l], c[l]};
+      for (uint32_t k = 0; k < 3u; k++) {
+        if (heights[k] == IADD3_HEIGHT_LOWER) v[k] &= HALF_LOW_MASK;
+        else if (heights[k] == IADD3_HEIGHT_UPPER) v[k] >>= HALF_HIGH_SHIFT;
+        if (negs[k]) v[k] = (uint32_t)(-(int64_t)v[k]);
+      }
+      uint64_t ab = (uint64_t)v[0] + v[1];
+      if (mode == IADD3_MODE_RIGHT_SHIFT) ab = (uint32_t)ab >> HALF_HIGH_SHIFT;
+      else if (mode == IADD3_MODE_LEFT_SHIFT) ab = (uint64_t)((uint32_t)ab << HALF_HIGH_SHIFT);
+      const uint64_t sum = ab + v[2] + (x && LANE(t->cc_carry, l) ? 1u : 0u);
+      const uint32_t r = (uint32_t)sum;
+      if (sum >> 32) carry |= (Sm_Mask)(1u << l);
+      if (r == 0) zero |= (Sm_Mask)(1u << l);
+      if (r >> 31) sign |= (Sm_Mask)(1u << l);
+      d[l] = r;
+    }
+    if (cc) {
+      set_mask(&t->cc_carry, m, carry);
+      set_mask(&t->cc_overflow, m, 0);
       set_mask(&t->cc_zero, m, zero);
       set_mask(&t->cc_sign, m, sign);
     }

@@ -2486,6 +2486,11 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - **Stream version 3** (`docs/GPU_COMMAND_STREAM.md`).
   - **Verification.** `raster3d_test` checks the raw vertices and the cull/front-face mapping against the CPU path's culling. A Silksong 250k-slice stream replays identically with GPU and CPU vertices (presents 300/600/last: no pixel differs by more than 1/255).
 - **Textures:** sampling saturates huge or NaN coordinates (`texel_coord`), so no read lands outside a texture.
+- **Maxwell shaders (SSBU fights):**
+  - TEXS/TLDS with bit 59 clear (top byte 0xd0–0xd3) write their results as packed half floats, two per register: (c0, c1) in Rd and (c2, c3) in Rd2.
+  - IADD3 (A + B + C with per-operand negation; the register form also has 16-bit halves and a 16-bit shift of A + B) is implemented in the interpreter and the WGSL translator.
+  - Before this, dozens of SSBU match shaders had undecoded instructions.
+  - New `wgsl_test` vectors (`iadd3`, `texture_half`) match the interpreter on WebGPU.
 
 ### Changelog v3.73 → v3.74 (summary)
 

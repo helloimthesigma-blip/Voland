@@ -34,6 +34,22 @@
 #define SM_PT 7u
 #define SM_ATTRIBUTE_WORDS 0x100u /* attribute space 0x000-0x3FC, by word */
 #define SM_CBUF_SLOTS 18u
+/* IADD3 fields: negations, extended (carry in), CC write; the register
+ * form's A+B shift mode and per-operand 16-bit halves. */
+#define IADD3_NEG_A_BIT 51u
+#define IADD3_NEG_B_BIT 50u
+#define IADD3_NEG_C_BIT 49u
+#define IADD3_X_BIT 48u
+#define IADD3_CC_BIT 47u
+#define IADD3_MODE_BIT 37u
+#define IADD3_HEIGHT_A_BIT 35u
+#define IADD3_HEIGHT_B_BIT 33u
+#define IADD3_HEIGHT_C_BIT 31u
+#define IADD3_MODE_RIGHT_SHIFT 1u
+#define IADD3_MODE_LEFT_SHIFT 2u
+#define IADD3_HEIGHT_LOWER 1u
+#define IADD3_HEIGHT_UPPER 2u
+#define SM_TEXS_F32_BIT 59u /* TEXS/TLDS: results as f32 (set) or packed halves (clear) */
 #define SM_STACK_DEPTH 16u
 #define SM_LOCAL_BYTES 0x400u   /* per-invocation local memory (LDL/STL) */
 #define SM_MAX_STEPS 1000000u   /* runaway guard per invocation */

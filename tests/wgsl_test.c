@@ -76,6 +76,18 @@ static uint64_t TEXS(uint32_t d0, uint32_t d1, uint32_t a, uint32_t b, uint32_t 
   return op_top(0xd800) | GUARD | ((uint64_t)target << 53) | ((uint64_t)mask << 50) | ((uint64_t)tex << 36) |
          ((uint64_t)d1 << 28) | rb(b) | ra(a) | rd(d0);
 }
+/* TEXS with bit 59 clear: the results as packed halves. */
+static uint64_t TEXS_HALF(uint32_t d0, uint32_t d1, uint32_t a, uint32_t b, uint32_t target, uint32_t mask, uint32_t tex) {
+  return TEXS(d0, d1, a, b, target, mask, tex) & ~(1ull << SM_TEXS_F32_BIT);
+}
+/* IADD3 (register): negations a/b/c (bits 2/1/0 of `neg`), A+B shift mode, halves of a/b/c. */
+static uint64_t IADD3_R(uint32_t d, uint32_t a, uint32_t b, uint32_t c, uint32_t neg, uint32_t mode, uint32_t ha,
+                        uint32_t hb, uint32_t hc) {
+  return op_top(0x5cc0) | GUARD | ((uint64_t)((neg >> 2) & 1u) << IADD3_NEG_A_BIT) |
+         ((uint64_t)((neg >> 1) & 1u) << IADD3_NEG_B_BIT) | ((uint64_t)(neg & 1u) << IADD3_NEG_C_BIT) | rc(c) |
+         ((uint64_t)mode << IADD3_MODE_BIT) | ((uint64_t)ha << IADD3_HEIGHT_A_BIT) | ((uint64_t)hb << IADD3_HEIGHT_B_BIT) |
+         ((uint64_t)hc << IADD3_HEIGHT_C_BIT) | rb(b) | ra(a) | rd(d);
+}
 static uint64_t LDC(uint32_t d, uint32_t a, uint32_t slot, uint32_t off) {
   return op_top(0xef90) | GUARD | (4ull << 48) | ((uint64_t)slot << 36) | ((uint64_t)off << 20) | ra(a) | rd(d);
 }
@@ -291,6 +303,21 @@ static void vector_integer(void) {
   finish(&b, "integer", false);
 }
 
+/* IADD3: RZ - b - c (SSBU's form), the shift modes and the 16-bit halves. */
+static void vector_iadd3(void) {
+  Builder b;
+  begin(&b);
+  emit(&b, MOV32I(4, 0x12345678u));
+  emit(&b, MOV32I(5, 0x0f0f0f0fu));
+  emit(&b, MOV32I(6, 0x00010003u));
+  emit(&b, IADD3_R(0, (uint32_t)RZ, 4, 5, 3, 0, 0, 0, 0));          /* -(r4 + r5) */
+  emit(&b, IADD3_R(1, 4, 5, 6, 0, IADD3_MODE_RIGHT_SHIFT, IADD3_HEIGHT_UPPER, IADD3_HEIGHT_LOWER, 0));
+  emit(&b, IADD3_R(2, 4, 6, 5, 4, IADD3_MODE_LEFT_SHIFT, 0, 0, IADD3_HEIGHT_LOWER));
+  emit(&b, IADD3_R(3, 4, 5, 6, 5, 0, IADD3_HEIGHT_LOWER, IADD3_HEIGHT_UPPER, 0));
+  emit(&b, EXIT());
+  finish(&b, "iadd3", false);
+}
+
 static void vector_branches(void) {
   /* r0 = sum of 1..4 through a BRA loop; r1 via SSY/SYNC around a skipped
    * block; r2 from a PBK/BRK loop. */
@@ -353,6 +380,20 @@ static void vector_select_texture(void) {
   emit(&b, SEL_R(3, 6, 7, 2));        /* r3 = p2 ? r6 : r7 */
   emit(&b, EXIT());
   finish(&b, "texture", true);
+}
+
+/* TEXS writing packed halves: (r, g) in r0 and (b, a) in r2. */
+static void vector_texture_half(void) {
+  Builder b;
+  begin(&b);
+  put_varying(0, 0.25f, 0.75f, 0.0f, 0.0f);
+  emit(&b, IPA(4, SM_ATTR_GENERIC, 0, (uint32_t)RZ));
+  emit(&b, IPA(5, SM_ATTR_GENERIC + 4u, 0, (uint32_t)RZ));
+  emit(&b, MOV32I(1, 0x11111111u));
+  emit(&b, MOV32I(3, 0x33333333u));
+  emit(&b, TEXS_HALF(0, 2, 4, 5, 1, 4, 0)); /* RGBA -> halves in r0, r2; r1, r3 kept */
+  emit(&b, EXIT());
+  finish(&b, "texture_half", false);
 }
 
 /* The same sample through a hardware sampler (bilinear weights differ in
@@ -518,8 +559,10 @@ int main(int argc, char **argv) {
   lod_selection();
   vector_float();
   vector_integer();
+  vector_iadd3();
   vector_branches();
   vector_select_texture();
+  vector_texture_half();
   vector_texture_hw();
   vector_texture_lod();
   vector_shfl();

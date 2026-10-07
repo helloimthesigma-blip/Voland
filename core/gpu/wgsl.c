@@ -711,9 +711,21 @@ static uint32_t scalar_components(uint32_t code, bool dual, uint32_t out[4]) {
   return dual_count[code];
 }
 
-/* write_scalar_results from the vec4<u32> `tx`. */
-static void write_scalar(Tr *t, uint64_t w, const uint32_t *comps, uint32_t count) {
+/* write_scalar_results from the vec4<u32> `tx` (`half`: packed halves,
+ * write_scalar_results_half). */
+static void write_scalar(Tr *t, uint64_t w, const uint32_t *comps, uint32_t count, bool half) {
   const uint32_t d0 = REG_D(w), d1 = BITS(w, 28, 8);
+  if (half) {
+    for (uint32_t i = 0; i < count; i += 2u) {
+      const uint32_t base = i < 2u ? d0 : d1;
+      if (base == SM_RZ) continue;
+      if (i + 1u < count)
+        EMIT("%s = f2h(F(tx[%u])) | (f2h(F(tx[%u])) << 16u); ", reg_dst(t, base).s, comps[i], comps[i + 1u]);
+      else
+        EMIT("%s = f2h(F(tx[%u])); ", reg_dst(t, base).s, comps[i]);
+    }
+    return;
+  }
   for (uint32_t i = 0; i < count; i++) {
     const uint32_t base = i < 2u ? d0 : d1;
     if (base == SM_RZ) continue;
@@ -772,7 +784,7 @@ static void emit_texs(Tr *t, const Sm_Insn *in, uint32_t pc) {
     const Ex l = lod_expr(t, b, mode, lod, ex("tc"), ex("tl"));
     EMIT("let tx = t%u_sample(tc, tl, %s, %s, vec2<i32>(0), %s); ", b, dref.s, shadow ? "true" : "false", l.s);
   }
-  write_scalar(t, w, comps, n);
+  write_scalar(t, w, comps, n, !BIT(w, SM_TEXS_F32_BIT));
 }
 
 static void emit_tlds(Tr *t, const Sm_Insn *in, uint32_t pc) {
@@ -798,7 +810,7 @@ static void emit_tlds(Tr *t, const Sm_Insn *in, uint32_t pc) {
   }
   if (b == WGSL_NO_BINDING) EMIT("let tx = %s; ", k_unbound);
   else EMIT("let tx = t%u_fetch(%s, %s, %s); ", b, x.s, y.s, layer.s);
-  write_scalar(t, w, comps, n);
+  write_scalar(t, w, comps, n, !BIT(w, SM_TEXS_F32_BIT));
 }
 
 static void emit_tld4s(Tr *t, const Sm_Insn *in, uint32_t pc) {
@@ -820,7 +832,7 @@ static void emit_tld4s(Tr *t, const Sm_Insn *in, uint32_t pc) {
     EMIT("let tx = t%u_gather(vec3<f32>(F(%s), F(%s), 0.0), 0.0, %uu, %s, %s, %s); ", b, a[0].s, a[1].s, BITS(w, 52, 2),
          dref.s, shadow ? "true" : "false", off.s);
   static const uint32_t all[4] = {0, 1, 2, 3};
-  write_scalar(t, w, all, 4);
+  write_scalar(t, w, all, 4, false);
 }
 
 static void emit_tex_vector(Tr *t, const Sm_Insn *in, uint32_t pc) {
@@ -1324,6 +1336,28 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
     EMIT("let r = %s; ", sat ? "iaddsat(av, bv)" : "s");
     if (cc)
       EMIT("ccc = s1 < av || s < s1; cco = ((~(av ^ bv) & (av ^ r)) >> 31u) != 0u; ccz = r == 0u; ccs = (r >> 31u) != 0u; ");
+    EMIT("%s = r; } ", reg_dst(t, REG_D(w)).s);
+    return;
+  }
+  case SM_OP_IADD3: { /* maxwell_shader.c's IADD3 */
+    const bool reg_form = in->form == SM_FORM_REG;
+    const Ex a = reg(t, REG_A(w)), b = op_b(t, in), c = reg(t, REG_C(w));
+    const Ex srcs[3] = {a, b, c};
+    const uint32_t height_bits[3] = {IADD3_HEIGHT_A_BIT, IADD3_HEIGHT_B_BIT, IADD3_HEIGHT_C_BIT};
+    const uint32_t neg_bits[3] = {IADD3_NEG_A_BIT, IADD3_NEG_B_BIT, IADD3_NEG_C_BIT};
+    EMIT("{ ");
+    for (uint32_t k = 0; k < 3u; k++) {
+      const uint32_t h = reg_form ? BITS(w, height_bits[k], 2) : 0u;
+      const char *sel = h == IADD3_HEIGHT_LOWER ? " & 0xffffu" : h == IADD3_HEIGHT_UPPER ? " >> 16u" : "";
+      EMIT("let v%u = %s(%s%s); ", k, BIT(w, neg_bits[k]) ? "0u - " : "", srcs[k].s, sel);
+    }
+    const uint32_t mode = reg_form ? BITS(w, IADD3_MODE_BIT, 2) : 0u;
+    EMIT("let ab = v0 + v1; let abc = ab < v0; let s = %s; let s1 = s + v2; let r = s1 + %s; ",
+         mode == IADD3_MODE_RIGHT_SHIFT ? "ab >> 16u" : mode == IADD3_MODE_LEFT_SHIFT ? "ab << 16u" : "ab",
+         BIT(w, IADD3_X_BIT) ? "select(0u, 1u, ccc)" : "0u");
+    if (BIT(w, IADD3_CC_BIT))
+      EMIT("ccc = %s s1 < s || r < s1; cco = false; ccz = r == 0u; ccs = (r >> 31u) != 0u; ",
+           mode == 0u ? "abc ||" : "");
     EMIT("%s = r; } ", reg_dst(t, REG_D(w)).s);
     return;
   }
