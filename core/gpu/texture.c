@@ -706,6 +706,18 @@ static void resolve_coords(const Tex_Image *img, const float coords[3], float la
   *lay = l;
 }
 
+/* A texel coordinate as an integer, saturated well inside int32 so the
+ * +1 of a bilinear tap and the wrap arithmetic cannot overflow; NaN is 0.
+ * (A shader's huge or NaN coordinates once overflowed x0 + 1 past the
+ * bounds check below and read far outside the texture.) */
+#define TEXEL_COORD_LIMIT 1073741824.0f /* 2^30 */
+static int32_t texel_coord(float f) {
+  if (!(f == f)) return 0;
+  if (f > TEXEL_COORD_LIMIT) return (int32_t)TEXEL_COORD_LIMIT;
+  if (f < -TEXEL_COORD_LIMIT) return -(int32_t)TEXEL_COORD_LIMIT;
+  return (int32_t)f;
+}
+
 void tex_sample(const Tex_Image *img, const Tex_Sampler *s, const float coords[3], float layer, float dref,
                 bool shadow, const int32_t offset[3], uint32_t out[4]) {
   if (!img || !img->valid) {
@@ -721,7 +733,7 @@ void tex_sample(const Tex_Image *img, const Tex_Sampler *s, const float coords[3
   const bool do_compare = shadow && s && s->depth_compare;
   uint32_t texel[4];
   if (!linear) {
-    texel_at(img, s, (int32_t)floorf(u) + ox, (int32_t)floorf(v) + oy, lay, texel);
+    texel_at(img, s, texel_coord(floorf(u)) + ox, texel_coord(floorf(v)) + oy, lay, texel);
     if (do_compare) {
       texel[0] = u32f(compare(s->compare_func, dref, f32(texel[0])) ? 1.0f : 0.0f);
       texel[1] = texel[2] = texel[0];
@@ -732,7 +744,7 @@ void tex_sample(const Tex_Image *img, const Tex_Sampler *s, const float coords[3
   const float x = u - 0.5f, y = v - 0.5f;
   const float fx = floorf(x), fy = floorf(y);
   const float ax = x - fx, ay = y - fy;
-  const int32_t x0 = (int32_t)fx + ox, y0 = (int32_t)fy + oy;
+  const int32_t x0 = texel_coord(fx) + ox, y0 = texel_coord(fy) + oy;
   if (img->rgba8 && !do_compare && x0 >= 0 && y0 >= 0 && x0 + 1 < (int32_t)img->width &&
       y0 + 1 < (int32_t)img->height && lay < img->layers) {
     /* All four taps inside an RGBA8 image: no wrapping, direct reads
@@ -825,8 +837,8 @@ void tex_gather(const Tex_Image *img, const Tex_Sampler *s, const float coords[3
   float u, v;
   uint32_t lay;
   resolve_coords(img, coords, layer, &u, &v, &lay);
-  const int32_t x0 = (int32_t)floorf(u - 0.5f) + (offset ? offset[0] : 0);
-  const int32_t y0 = (int32_t)floorf(v - 0.5f) + (offset ? offset[1] : 0);
+  const int32_t x0 = texel_coord(floorf(u - 0.5f)) + (offset ? offset[0] : 0);
+  const int32_t y0 = texel_coord(floorf(v - 0.5f)) + (offset ? offset[1] : 0);
   /* GL order: (x0,y1), (x1,y1), (x1,y0), (x0,y0). */
   const int32_t xs[4] = {x0, x0 + 1, x0 + 1, x0};
   const int32_t ys[4] = {y0 + 1, y0 + 1, y0, y0};
