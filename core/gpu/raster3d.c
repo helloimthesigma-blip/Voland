@@ -3976,3 +3976,193 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     }
   }
 }
+
+/* ---- compute ------------------------------------------------------ */
+
+#define COMPUTE_GROUPS (COMPUTE_MAX_BLOCK_THREADS / SM_LANES)
+#define COMPUTE_REGS 0x1000u /* a 3D-layout register file for the texture resolver */
+
+/* A compute program: code from `address`, no shader program header (the
+ * decoder is given a zeroed one in front). Cached apart from graphics
+ * programs by its stage. */
+static const Sm_Program *compute_program_get(Raster3d *r, uint64_t address, const Gpu_Memory *mem) {
+  Raster3d_Program *slot = NULL;
+  r->tick++;
+  for (uint32_t i = 0; i < RASTER_PROGRAMS; i++) {
+    Raster3d_Program *p = &r->programs[i];
+    if (p->valid && p->program.address == address && p->program.header.stage == SM_STAGE_COMPUTE) {
+      slot = p;
+      break;
+    }
+  }
+  if (slot && slot->validated == r->submission) {
+    slot->last_used = r->tick;
+    return &slot->program;
+  }
+  uint8_t *bytes = r->program_bytes;
+  memset(bytes, 0, SM_SPH_BYTES);
+  uint32_t got = SM_SPH_BYTES, extent = 0;
+  for (uint32_t want = 0x800u; want <= RASTER_PROGRAM_READ_BYTES; want *= 2u) {
+    if (want > got && !mem->read(mem->user, address + (got - SM_SPH_BYTES), bytes + got, want - got)) break;
+    got = want;
+    extent = sm_program_extent(bytes, got);
+    if (extent < got) break;
+  }
+  if (got <= SM_SPH_BYTES) return NULL;
+  if (!extent) extent = got;
+  const uint32_t hash = sm_hash(bytes, extent);
+  if (slot && slot->program.hash == hash && slot->program.byte_size == extent) {
+    slot->validated = r->submission;
+    slot->last_used = r->tick;
+    return &slot->program;
+  }
+  if (!slot) {
+    for (uint32_t i = 0; i < RASTER_PROGRAMS; i++) {
+      Raster3d_Program *p = &r->programs[i];
+      if (!p->valid) {
+        slot = p;
+        break;
+      }
+      if (!slot || p->last_used < slot->last_used) slot = p;
+    }
+  }
+  sm_program_decode(bytes, extent, address, &slot->program);
+  slot->program.header.stage = SM_STAGE_COMPUTE;
+  if (r->on_program_decoded) r->on_program_decoded(r->on_program_user, &slot->program);
+  slot->valid = true;
+  slot->validated = r->submission;
+  slot->last_used = r->tick;
+  r->stats.unknown_ops += slot->program.unknown_ops;
+  if (slot->program.unknown_ops) {
+    for (uint32_t i = 0; i < slot->program.word_count; i++) {
+      if (slot->program.insns[i].op == SM_OP_INVALID) {
+        log_warn("[gpu] compute program @%llx: %u undecoded instruction(s), first %016llx at word %u",
+                 (unsigned long long)address, slot->program.unknown_ops,
+                 (unsigned long long)slot->program.insns[i].raw, i);
+        break;
+      }
+    }
+  }
+  return &slot->program;
+}
+
+/* Global writes of the dispatch, as a few merged ranges, so what is
+ * cached over them is checked again afterwards (raster3d_sync_range) -
+ * without one span reaching over unrelated render targets. */
+#define COMPUTE_WRITE_RANGES 32u
+#define COMPUTE_WRITE_MERGE_GAP 4096u /* ranges closer than this merge */
+typedef struct Compute_Writes {
+  uint64_t lo[COMPUTE_WRITE_RANGES], hi[COMPUTE_WRITE_RANGES];
+  uint32_t count;
+} Compute_Writes;
+static Compute_Writes g_compute_writes;
+
+static void compute_note_write(uint64_t va, uint64_t end) {
+  Compute_Writes *w = &g_compute_writes;
+  for (uint32_t i = 0; i < w->count; i++) {
+    if (va <= w->hi[i] + COMPUTE_WRITE_MERGE_GAP && end + COMPUTE_WRITE_MERGE_GAP >= w->lo[i]) {
+      if (va < w->lo[i]) w->lo[i] = va;
+      if (end > w->hi[i]) w->hi[i] = end;
+      return;
+    }
+  }
+  if (w->count < COMPUTE_WRITE_RANGES) {
+    w->lo[w->count] = va;
+    w->hi[w->count] = end;
+    w->count++;
+    return;
+  }
+  /* Full: widen the last range (a rare dispatch scattering widely). */
+  if (va < w->lo[w->count - 1u]) w->lo[w->count - 1u] = va;
+  if (end > w->hi[w->count - 1u]) w->hi[w->count - 1u] = end;
+}
+
+static bool compute_global_write(void *user, uint64_t va, const void *src, uint32_t size) {
+  const bool ok = env_global_write(user, va, src, size);
+  compute_note_write(va, va + size);
+  return ok;
+}
+
+void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t *cregs, const Gpu_Memory *mem) {
+  if (!r->ready) return;
+  static uint32_t regs[COMPUTE_REGS];
+  static Draw_Context ctx;
+  static Sm_Thread groups[COMPUTE_GROUPS];
+  static Sm_Group_State states[COMPUTE_GROUPS];
+  static uint8_t shared[COMPUTE_MAX_SHARED_BYTES];
+  memset(regs, 0, sizeof(regs));
+  regs[REG_TEX_HEADER_POOL] = cregs[COMPUTE_METHOD_TEX_HEADER_POOL];
+  regs[REG_TEX_HEADER_POOL + 1u] = cregs[COMPUTE_METHOD_TEX_HEADER_POOL + 1u];
+  regs[REG_SAMPLER_POOL] = cregs[COMPUTE_METHOD_TEX_SAMPLER_POOL];
+  regs[REG_SAMPLER_POOL + 1u] = cregs[COMPUTE_METHOD_TEX_SAMPLER_POOL + 1u];
+  regs[REG_BINDLESS_TEXTURE] = cregs[COMPUTE_METHOD_BINDLESS_TEXTURE];
+  const uint64_t address = addr40(cregs[COMPUTE_METHOD_PROGRAM_REGION], cregs[COMPUTE_METHOD_PROGRAM_REGION + 1u]) +
+                           launch->program_offset;
+  const Sm_Program *program = compute_program_get(r, address, mem);
+  if (!program) {
+    r->stats.compute_faults++;
+    return;
+  }
+  ctx.r = r;
+  ctx.regs = regs;
+  ctx.mem = mem;
+  ctx.resolver.ctx = &ctx;
+  ctx.resolver.count = 0;
+  static Raster3d_Bindings bindings;
+  memset(&bindings, 0, sizeof(bindings));
+  for (uint32_t i = 0; i < COMPUTE_CBUFS && i < SM_CBUF_SLOTS; i++) {
+    if (!((launch->cbuf_valid >> i) & 1u)) continue;
+    bindings.address[0][i] = launch->cbuf_address[i];
+    bindings.size[0][i] = launch->cbuf_size[i];
+  }
+  env_setup(&ctx, 0, program, &bindings, 0);
+  Sm_Env *env = &ctx.env[0];
+  env->global_write = compute_global_write;
+  env->shared = shared;
+  env->shared_bytes = launch->shared_bytes < sizeof(shared) ? launch->shared_bytes : (uint32_t)sizeof(shared);
+  g_compute_writes.count = 0;
+  /* Software surfaces the program may read: in guest memory first. */
+  if (!r->gpu)
+    for (uint32_t i = 0; i < RASTER_SURFACES; i++) surface_write_back(r, &r->surfaces[i], mem);
+  const uint32_t threads = launch->block[0] * launch->block[1] * launch->block[2];
+  const uint32_t group_count = (threads + SM_LANES - 1u) / SM_LANES;
+  bool faulted = false;
+  for (uint32_t bz = 0; bz < launch->grid[2] && !faulted; bz++)
+    for (uint32_t by = 0; by < launch->grid[1] && !faulted; by++)
+      for (uint32_t bx = 0; bx < launch->grid[0] && !faulted; bx++) {
+        memset(shared, 0, env->shared_bytes);
+        bool running[COMPUTE_GROUPS];
+        for (uint32_t g = 0; g < group_count; g++) {
+          Sm_Thread *t = &groups[g];
+          const uint32_t first = g * SM_LANES, lanes = threads - first < SM_LANES ? threads - first : SM_LANES;
+          sm_thread_reset(t, lanes);
+          for (uint32_t l = 0; l < lanes; l++) {
+            const uint32_t id = first + l;
+            t->tid[0][l] = id % launch->block[0];
+            t->tid[1][l] = (id / launch->block[0]) % launch->block[1];
+            t->tid[2][l] = id / (launch->block[0] * launch->block[1]);
+          }
+          t->ctaid[0] = bx;
+          t->ctaid[1] = by;
+          t->ctaid[2] = bz;
+          sm_group_begin(&states[g], t);
+          running[g] = true;
+        }
+        /* Every group to the next barrier (or its end), then again. */
+        for (bool any = true; any && !faulted;) {
+          any = false;
+          for (uint32_t g = 0; g < group_count; g++) {
+            if (!running[g]) continue;
+            const Sm_Group_Status status = sm_group_run(program, env, &groups[g], &states[g]);
+            if (status == SM_GROUP_FAULT) faulted = true;
+            running[g] = status == SM_GROUP_BARRIER;
+            any = any || running[g];
+          }
+        }
+        r->stats.compute_threads += threads;
+      }
+  r->stats.compute_dispatches++;
+  if (faulted) r->stats.compute_faults++;
+  for (uint32_t i = 0; i < g_compute_writes.count; i++)
+    raster3d_sync_range(r, mem, g_compute_writes.lo[i], g_compute_writes.hi[i] - g_compute_writes.lo[i], true);
+}

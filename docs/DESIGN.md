@@ -2486,6 +2486,14 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - **Stream version 3** (`docs/GPU_COMMAND_STREAM.md`).
   - **Verification.** `raster3d_test` checks the raw vertices and the cull/front-face mapping against the CPU path's culling. A Silksong 250k-slice stream replays identically with GPU and CPU vertices (presents 300/600/last: no pixel differs by more than 1/255).
 - **Textures:** sampling saturates huge or NaN coordinates (`texel_coord`), so no read lands outside a texture.
+- **§13, compute (class B1C0), on the reference interpreter.** SEND_SIGNALING_PCAS_B (schedule) runs the QMD that SEND_PCAS_A names.
+  - **QMD decode** (`gpu/compute.{h,c}`): from NVIDIA's published QMD v01_07 field layout (open-gpu-doc): program offset, grid, block, shared memory, eight constant buffers.
+  - **Program:** header-less code from the program region. It is cached as `SM_STAGE_COMPUTE`.
+  - **Execution** (`raster3d_compute`): block by block, as 32-lane groups that `sm_group_run` stops at BAR.SYNC until every group reached it.
+  - **Shader features added:** shared memory for LDS/STS (`Sm_Env.shared`; graphics stages keep the per-invocation behaviour), and SR_TID / SR_CTAID.
+  - **Interactions:** written ranges re-validate cached textures and GPU surfaces (`raster3d_sync_range`), and software surfaces are written back first.
+  - **Why:** SSBU issues ~80 compute launches per frame. Ignoring them left the buffers its final composite reads as zeros, so fights rendered black natively.
+  - **Limitations:** in GPU mode the programs still run on the CPU and cannot see GPU-only render targets. WGSL compute is future work.
 - **Maxwell shaders (SSBU fights):**
   - TEXS/TLDS with bit 59 clear (top byte 0xd0–0xd3) write their results as packed half floats, two per register: (c0, c1) in Rd and (c2, c3) in Rd2.
   - IADD3 (A + B + C with per-operand negation; the register form also has 16-bit halves and a 16-bit shift of A + B) is implemented in the interpreter and the WGSL translator.

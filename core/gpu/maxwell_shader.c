@@ -13,6 +13,10 @@
 
 #define BITS(w, at, n) ((uint32_t)(((w) >> (at)) & ((1ull << (n)) - 1ull)))
 #define BIT(w, at) ((uint32_t)(((w) >> (at)) & 1ull))
+#define SM_LDST_SPACE_MASK 0xfff8u
+#define SM_LDS_OPCODE 0xef48u
+#define SM_STS_OPCODE 0xef58u
+#define SM_BAR_OPCODE 0xf0a8u
 
 #define REG_D(w) BITS(w, 0, 8)
 #define REG_A(w) BITS(w, 8, 8)
@@ -355,12 +359,13 @@ void sm_program_decode(const uint8_t *bytes, uint32_t size, uint64_t address, Sm
     }
   }
   /* Fall-through successors skip what does nothing here: scheduling
-   * words, NOP, and the barriers (DEPBAR / BAR / MEMBAR). */
+   * words, NOP, DEPBAR and MEMBAR - not BAR, where compute blocks meet. */
   uint32_t following = out->word_count;
   for (uint32_t i = out->word_count; i-- > 0;) {
     out->insns[i].next = (uint16_t)following;
     const uint16_t op = out->insns[i].op;
-    if (op != SM_OP_SCHED && op != SM_OP_NOP && op != SM_OP_BARRIER) following = i;
+    const bool bar_sync = op == SM_OP_BARRIER && ((uint32_t)(out->insns[i].raw >> 48) & SM_LDST_SPACE_MASK) == SM_BAR_OPCODE;
+    if (op != SM_OP_SCHED && op != SM_OP_NOP && (op != SM_OP_BARRIER || bar_sync)) following = i;
   }
 }
 
@@ -1286,9 +1291,22 @@ void sm_thread_reset_light(Sm_Thread *t, uint32_t lanes) {
   memset(t->r[SM_RZ], 0, sizeof(t->r[SM_RZ]));
 }
 
-static uint32_t sysreg(uint32_t id, uint32_t lane) {
+#define SR_TID 0x20u /* x | y << 16 | z << 26 */
+#define SR_TID_X 0x21u
+#define SR_TID_Y 0x22u
+#define SR_TID_Z 0x23u
+#define SR_CTAID_X 0x25u
+#define SR_CTAID_Y 0x26u
+#define SR_CTAID_Z 0x27u
+#define SR_TID_Y_SHIFT 16u
+#define SR_TID_Z_SHIFT 26u
+
+static uint32_t sysreg(const Sm_Thread *t, uint32_t id, uint32_t lane) {
   static _Thread_local uint32_t clock;
   switch (id) {
+  case SR_TID: return t->tid[0][lane] | (t->tid[1][lane] << SR_TID_Y_SHIFT) | (t->tid[2][lane] << SR_TID_Z_SHIFT);
+  case SR_TID_X: case SR_TID_Y: case SR_TID_Z: return t->tid[id - SR_TID_X][lane];
+  case SR_CTAID_X: case SR_CTAID_Y: case SR_CTAID_Z: return t->ctaid[id - SR_CTAID_X];
   case 0x00: return lane;        /* lane id */
   case 0x12: return u32f(1.0f);  /* Y direction */
   case 0x38: return 1u << lane;  /* lanemask eq */
@@ -2069,7 +2087,7 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
   case SM_OP_CS2R: {
     uint32_t *d = dst_row(t, REG_D(w));
     const uint32_t id = BITS(w, 20, 8);
-    FOR_LANES(m) d[l] = sysreg(id, l);
+    FOR_LANES(m) d[l] = sysreg(t, id, l);
     return;
   }
   case SM_OP_VOTE: {
@@ -2222,6 +2240,22 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     const uint32_t size = BITS(w, 48, 3), n = access_bytes(size);
     const int32_t off = (int32_t)(BITS(w, 20, 24) << 8) >> 8;
     const uint32_t *idx = t->r[REG_A(w)];
+    const uint32_t top = (uint32_t)(w >> 48) & SM_LDST_SPACE_MASK;
+    if (env->shared && (top == SM_LDS_OPCODE || top == SM_STS_OPCODE)) { /* the block's shared memory */
+      FOR_LANES(m) {
+        const uint32_t addr = idx[l] + (uint32_t)off;
+        uint8_t buf[16];
+        memset(buf, 0, sizeof(buf));
+        if (in->op == SM_OP_LDL) {
+          if ((uint64_t)addr + n <= env->shared_bytes) memcpy(buf, env->shared + addr, n);
+          load_to_regs(t, REG_D(w), size, buf, l);
+        } else {
+          regs_to_bytes(t, REG_D(w), size, buf, l);
+          if ((uint64_t)addr + n <= env->shared_bytes) memcpy(env->shared + addr, buf, n);
+        }
+      }
+      return;
+    }
     FOR_LANES(m) {
       const uint32_t addr = idx[l] + (uint32_t)off;
       uint8_t buf[16];
@@ -2275,21 +2309,29 @@ static bool split(Warp *warps, uint32_t *count, Warp *w, Sm_Mask stay) {
   return true;
 }
 
-bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
-  static _Thread_local Warp warps[MAX_WARPS]; /* per shading thread (raster3d workers); too big for small stacks */
-  uint32_t count = 1;
-  warps[0].mask = (Sm_Mask)(t->lanes >= SM_LANES ? SM_ALL_LANES : ((1u << t->lanes) - 1u));
-  warps[0].pc = 1;
-  warps[0].depth = 0;
-  warps[0].call_depth = 0;
-  uint32_t steps = 0;
+/* The interpreter's state for one group of lanes: the divergent warps
+ * still running and those parked at a barrier. */
+typedef struct Run_State {
+  Warp warps[MAX_WARPS];
+  uint32_t count;
+  Warp park[MAX_WARPS];
+  uint32_t parked;
+  uint32_t steps;
+} Run_State;
+
+static Sm_Group_Status run_warps(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t, Run_State *r,
+                                 bool barriers) {
+  Warp *warps = r->warps;
+  uint32_t count = r->count;
+  uint32_t steps = r->steps;
   while (count > 0) {
     Warp *w = &warps[count - 1u];
     bool done = false;
     while (!done) {
       if (++steps > SM_MAX_STEPS || w->pc >= program->word_count) {
         t->faulted = true;
-        return false;
+        r->count = count;
+        return SM_GROUP_FAULT;
       }
       if (w->pc % 4u == 0) {
         w->pc++;
@@ -2306,16 +2348,17 @@ bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
         }
         if (in->target < 0) {
           t->faulted = true;
-          return false;
+          r->count = count;
+          return SM_GROUP_FAULT;
         }
-        if (!split(warps, &count, w, (Sm_Mask)(w->mask & ~guard))) { t->faulted = true; return false; }
+        if (!split(warps, &count, w, (Sm_Mask)(w->mask & ~guard))) { t->faulted = true; r->count = count; return SM_GROUP_FAULT; }
         w->pc = (uint32_t)in->target;
         break;
       case SM_OP_SSY:
       case SM_OP_PBK:
       case SM_OP_PCNT: {
         const uint32_t kind = in->op == SM_OP_SSY ? STACK_SSY : (in->op == SM_OP_PBK ? STACK_PBK : STACK_PCNT);
-        if (!flow_push(w, kind, in->target)) { t->faulted = true; return false; }
+        if (!flow_push(w, kind, in->target)) { t->faulted = true; r->count = count; return SM_GROUP_FAULT; }
         w->pc = in->next;
         break;
       }
@@ -2326,15 +2369,15 @@ bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
           w->pc = in->next;
           break;
         }
-        if (!split(warps, &count, w, (Sm_Mask)(w->mask & ~guard))) { t->faulted = true; return false; }
+        if (!split(warps, &count, w, (Sm_Mask)(w->mask & ~guard))) { t->faulted = true; r->count = count; return SM_GROUP_FAULT; }
         const uint32_t kind = in->op == SM_OP_SYNC ? STACK_SSY : (in->op == SM_OP_BRK ? STACK_PBK : STACK_PCNT);
         const int32_t target = flow_pop_to(w, kind, in->op == SM_OP_CONT);
-        if (target < 0) { t->faulted = true; return false; }
+        if (target < 0) { t->faulted = true; r->count = count; return SM_GROUP_FAULT; }
         w->pc = (uint32_t)target;
         break;
       }
       case SM_OP_CAL:
-        if (in->target < 0 || w->call_depth >= SM_STACK_DEPTH) { t->faulted = true; return false; }
+        if (in->target < 0 || w->call_depth >= SM_STACK_DEPTH) { t->faulted = true; r->count = count; return SM_GROUP_FAULT; }
         w->calls[w->call_depth++] = in->next;
         w->pc = (uint32_t)in->target;
         break;
@@ -2343,12 +2386,25 @@ bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
           w->pc = in->next;
           break;
         }
-        if (!split(warps, &count, w, (Sm_Mask)(w->mask & ~guard))) { t->faulted = true; return false; }
+        if (!split(warps, &count, w, (Sm_Mask)(w->mask & ~guard))) { t->faulted = true; r->count = count; return SM_GROUP_FAULT; }
         if (w->call_depth == 0) {
           w->mask = 0; /* return from the entry point: exit */
         } else {
           w->pc = w->calls[--w->call_depth];
         }
+        break;
+      case SM_OP_BARRIER:
+        /* BAR.SYNC in a compute block: park the group's lanes until every
+         * group reached it (sm_group_run); elsewhere a no-op. */
+        if (barriers && guard && ((uint32_t)(in->raw >> 48) & SM_LDST_SPACE_MASK) == SM_BAR_OPCODE &&
+            r->parked < MAX_WARPS) {
+          r->park[r->parked] = *w;
+          r->park[r->parked].pc = in->next;
+          r->parked++;
+          w->mask = 0;
+          break;
+        }
+        w->pc = in->next;
         break;
       case SM_OP_EXIT:
         w->mask &= (Sm_Mask)~guard;
@@ -2376,5 +2432,35 @@ bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
       count--;
     }
   }
-  return true;
+  r->count = 0;
+  r->steps = steps;
+  return r->parked ? SM_GROUP_BARRIER : SM_GROUP_DONE;
+}
+
+static void run_begin(Run_State *r, const Sm_Thread *t) {
+  r->count = 1;
+  r->parked = 0;
+  r->steps = 0;
+  r->warps[0].mask = (Sm_Mask)(t->lanes >= SM_LANES ? SM_ALL_LANES : ((1u << t->lanes) - 1u));
+  r->warps[0].pc = 1;
+  r->warps[0].depth = 0;
+  r->warps[0].call_depth = 0;
+}
+
+bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t) {
+  static _Thread_local Run_State state; /* per shading thread (raster3d workers); too big for small stacks */
+  run_begin(&state, t);
+  return run_warps(program, env, t, &state, false) == SM_GROUP_DONE;
+}
+
+_Static_assert(sizeof(Run_State) <= SM_GROUP_STATE_BYTES, "Sm_Group_State too small");
+
+void sm_group_begin(Sm_Group_State *state, const Sm_Thread *t) { run_begin((Run_State *)(void *)state->bytes, t); }
+
+Sm_Group_Status sm_group_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *t, Sm_Group_State *state) {
+  Run_State *r = (Run_State *)(void *)state->bytes;
+  /* Resume past the barrier: the parked warps run again. */
+  for (uint32_t i = 0; i < r->parked && r->count < MAX_WARPS; i++) r->warps[r->count++] = r->park[i];
+  r->parked = 0;
+  return run_warps(program, env, t, r, true);
 }

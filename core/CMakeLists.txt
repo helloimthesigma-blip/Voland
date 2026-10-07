@@ -59,6 +59,7 @@ set(SWITCH_CORE_SOURCES
   gpu/texture.c
   gpu/bc7.c
   gpu/astc.c
+  gpu/compute.c
   gpu/raster3d.c
   gpu/gpu_stream.c
   gpu/wgsl.c

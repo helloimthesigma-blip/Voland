@@ -48,6 +48,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "gpu/compute.h"
 #include "gpu/raster3d.h"
 
 #define GPU_SUBCHANNELS 8u
@@ -92,6 +93,8 @@ typedef struct Gpu_Channel {
   uint32_t dma[GPU_DMA_REGISTER_WORDS];      /* B0B5 registers, by word address */
   uint32_t engine3d[GPU_3D_REGISTER_WORDS];  /* B197 registers, by word address */
   uint32_t engine2d[GPU_2D_REGISTER_WORDS];  /* 902D registers, by word address */
+  uint32_t compute[COMPUTE_REGISTER_WORDS];  /* B1C0 registers, by word address */
+  uint64_t compute_launches;
   /* Macro Method Expander. */
   uint32_t mme_code[GPU_MME_CODE_WORDS];
   uint32_t mme_start[GPU_MME_MACROS];

@@ -29,6 +29,7 @@
 #include <stdint.h>
 
 #include "common/workers.h"
+#include "gpu/compute.h"
 #include "gpu/maxwell_shader.h"
 #include "gpu/texture.h"
 
@@ -169,6 +170,9 @@ typedef struct Raster3d_Stats {
   uint64_t pixels;
   uint64_t skipped_draws;   /* no programs / no targets / unsupported */
   uint64_t shader_faults;
+  uint64_t compute_dispatches; /* compute launches run (raster3d_compute) */
+  uint64_t compute_threads;
+  uint64_t compute_faults;
   uint64_t unknown_ops;     /* undecodable words seen in loaded programs */
   uint64_t texture_misses;  /* pool full / unreadable */
 } Raster3d_Stats;
@@ -262,6 +266,11 @@ typedef struct Raster3d_Draw {
 
 void raster3d_begin_submission(Raster3d *r);
 void raster3d_clear(Raster3d *r, const uint32_t *regs, const struct Gpu_Memory *mem, uint32_t clear);
+/* A compute dispatch (gpu/compute.h) on the interpreter: every block of
+ * the grid, its groups interleaved at barriers, global memory through
+ * `mem`. `regs` is the compute class's register file (program region,
+ * texture pools, bindless slot). */
+void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t *regs, const struct Gpu_Memory *mem);
 void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *bindings,
                    const struct Gpu_Memory *mem, const Raster3d_Draw *draw);
 /* A copy engine is about to read (write = false) or overwrite (write =

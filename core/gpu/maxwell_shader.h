@@ -68,6 +68,7 @@ typedef enum Sm_Stage {
   SM_STAGE_TESS_EVAL = 3,
   SM_STAGE_GEOMETRY = 4,
   SM_STAGE_PIXEL = 5,
+  SM_STAGE_COMPUTE = 6, /* no shader program header (gpu/compute.h) */
 } Sm_Stage;
 
 /* Pixel-shader input interpolation (SPH PS ImapGenericVector, 2 bits per
@@ -216,6 +217,10 @@ typedef struct Sm_Env {
   void (*texture_batch)(void *user, const Sm_Tex_Request *requests, Sm_Mask lanes, uint32_t (*out)[4]);
   bool (*global_read)(void *user, uint64_t gpu_va, void *out, uint32_t size);
   bool (*global_write)(void *user, uint64_t gpu_va, const void *src, uint32_t size);
+  /* Compute: the block's shared memory (LDS/STS); NULL elsewhere, where
+   * LDS/STS act per invocation as LDL/STL. */
+  uint8_t *shared;
+  uint32_t shared_bytes;
 } Sm_Env;
 
 /* Invocations run SIMT-style in up to SM_LANES lanes: each instruction
@@ -240,6 +245,10 @@ typedef struct Sm_Thread {
   uint32_t instance_id[SM_LANES];
   Sm_Mask front_facing;
   Sm_Mask killed;
+  /* Compute (sm_group_run): each lane's thread id in the block and the
+   * block's id in the grid (S2R SR_TID*, SR_CTAID*). */
+  uint32_t tid[3][SM_LANES];
+  uint32_t ctaid[3];
   bool faulted;                          /* runaway / bad branch (any lane) */
   uint32_t discard[SM_LANES];            /* writes to RZ land here */
   uint8_t local[SM_LANES][SM_LOCAL_BYTES];
@@ -271,6 +280,18 @@ void sm_thread_reset_light(Sm_Thread *thread, uint32_t lanes);
  * lane has reached EXIT (or KIL). Returns false when the program faulted
  * (runaway, bad stack). */
 bool sm_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *thread);
+
+/* Compute: one group of up to SM_LANES threads of a block, run until all
+ * of its lanes exit (SM_GROUP_DONE) or reach BAR.SYNC (SM_GROUP_BARRIER;
+ * the next sm_group_run continues past it). The caller runs every group
+ * of the block to the barrier before continuing any. */
+typedef enum Sm_Group_Status { SM_GROUP_DONE, SM_GROUP_BARRIER, SM_GROUP_FAULT } Sm_Group_Status;
+#define SM_GROUP_STATE_BYTES (64u * 1024u)
+typedef struct Sm_Group_State {
+  _Alignas(8) uint8_t bytes[SM_GROUP_STATE_BYTES];
+} Sm_Group_State;
+void sm_group_begin(Sm_Group_State *state, const Sm_Thread *thread);
+Sm_Group_Status sm_group_run(const Sm_Program *program, const Sm_Env *env, Sm_Thread *thread, Sm_Group_State *state);
 
 /* Short mnemonic for diagnostics. */
 const char *sm_op_name(Sm_Op op);

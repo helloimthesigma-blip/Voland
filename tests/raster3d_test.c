@@ -626,6 +626,84 @@ static void test_gpu_vertex_stage(Raster3d *r) {
         gpu.last.front_face);
 }
 
+/* ---- compute: a block of two lane groups meeting at BAR.SYNC --------- */
+
+#define COMPUTE_CODE 0x2000u     /* program region offset of the (header-less) code */
+#define COMPUTE_OUT (GPU_BASE + 0x8000u)
+#define COMPUTE_THREADS 64u
+#define SR_TID_X 0x21u
+#define LDST_32 4u /* 32-bit access */
+
+static uint64_t S2R(uint32_t d, uint32_t sr) { return (0xf0c8ull << 48) | GUARD | ((uint64_t)sr << 20) | (RZ << 8) | d; }
+static uint64_t SHL_I(uint32_t d, uint32_t a, uint32_t s) { return (0x3848ull << 48) | GUARD | ((uint64_t)s << 20) | ((uint64_t)a << 8) | d; }
+static uint64_t IADD_R(uint32_t d, uint32_t a, uint32_t b, bool neg_a) {
+  return (0x5c10ull << 48) | GUARD | ((uint64_t)neg_a << 49) | ((uint64_t)b << 20) | ((uint64_t)a << 8) | d;
+}
+static uint64_t SHARED(uint64_t top, uint32_t d, uint32_t a) { return (top << 48) | GUARD | ((uint64_t)LDST_32 << 48) | ((uint64_t)a << 8) | d; }
+static uint64_t STG(uint32_t d, uint32_t a) { return (0xeed8ull << 48) | GUARD | ((uint64_t)LDST_32 << 48) | ((uint64_t)a << 8) | d; }
+static uint64_t BAR_SYNC(void) { return (0xf0a8ull << 48) | GUARD; }
+
+static void qmd_set(uint32_t *qmd, uint32_t lo, uint32_t width, uint32_t value) {
+  for (uint32_t b = 0; b < width; b++) {
+    const uint32_t bit = lo + b;
+    if ((value >> b) & 1u) qmd[bit / 32u] |= 1u << (bit % 32u);
+  }
+}
+
+static void test_compute(Raster3d *r) {
+  uint8_t no_sph[SM_SPH_BYTES];
+  memset(no_sph, 0, sizeof(no_sph));
+  const uint64_t code[] = {
+      S2R(0, SR_TID_X), SHL_I(1, 0, 2),            /* r1 = tid * 4 */
+      SHARED(0xef58, 0, 1),                        /* shared[tid] = tid */
+      BAR_SYNC(),
+      MOV32I(4, (COMPUTE_THREADS - 1u) * 4u), IADD_R(3, 1, 4, true), /* r3 = (63 - tid) * 4 */
+      SHARED(0xef48, 5, 3),                        /* r5 = shared[63 - tid] */
+      MOV32I(6, (uint32_t)COMPUTE_OUT), IADD_R(7, 1, 6, false),
+      STG(5, 7),                                   /* out[tid] = r5 */
+      EXIT()};
+  /* write_program puts a header first: the code starts SM_SPH_BYTES in. */
+  write_program(COMPUTE_CODE, no_sph, code, sizeof(code) / sizeof(code[0]));
+  uint32_t qmd[COMPUTE_QMD_WORDS];
+  memset(qmd, 0, sizeof(qmd));
+  qmd_set(qmd, 256, 32, COMPUTE_CODE + SM_SPH_BYTES); /* PROGRAM_OFFSET */
+  qmd_set(qmd, 384, 32, 2);                           /* CTA_RASTER_WIDTH: two blocks */
+  qmd_set(qmd, 416, 16, 1);
+  qmd_set(qmd, 432, 16, 1);
+  qmd_set(qmd, 544, 18, COMPUTE_THREADS * 4u);        /* SHARED_MEMORY_SIZE */
+  qmd_set(qmd, 592, 16, COMPUTE_THREADS);             /* CTA_THREAD_DIMENSION0..2 */
+  qmd_set(qmd, 608, 16, 1);
+  qmd_set(qmd, 624, 16, 1);
+  qmd_set(qmd, 640 + 3, 1, 1);                        /* constant buffer 3 */
+  qmd_set(qmd, 928 + 3 * 64, 32, (uint32_t)CBUF);
+  qmd_set(qmd, 975 + 3 * 64, 17, 0x100u);
+  Compute_Launch launch;
+  CHECK(compute_qmd_parse(qmd, &launch), "QMD parses");
+  CHECK(launch.program_offset == COMPUTE_CODE + SM_SPH_BYTES && launch.grid[0] == 2u && launch.grid[1] == 1u &&
+            launch.block[0] == COMPUTE_THREADS && launch.shared_bytes == COMPUTE_THREADS * 4u,
+        "QMD fields");
+  CHECK(launch.cbuf_valid == 1u << 3 && launch.cbuf_address[3] == CBUF && launch.cbuf_size[3] == 0x100u,
+        "QMD constant buffer");
+  static uint32_t cregs[COMPUTE_REGISTER_WORDS];
+  cregs[COMPUTE_METHOD_PROGRAM_REGION] = (uint32_t)(PROGRAM_REGION >> 32);
+  cregs[COMPUTE_METHOD_PROGRAM_REGION + 1u] = (uint32_t)PROGRAM_REGION;
+  memset(g_gpu + (COMPUTE_OUT - GPU_BASE), 0xee, COMPUTE_THREADS * 4u);
+  const uint64_t before = r->stats.compute_threads;
+  raster3d_compute(r, &launch, cregs, &k_mem);
+  CHECK(r->stats.compute_threads - before == 2u * COMPUTE_THREADS, "every thread of both blocks ran");
+  uint32_t wrong = 0;
+  for (uint32_t i = 0; i < COMPUTE_THREADS; i++) {
+    uint32_t v;
+    memcpy(&v, g_gpu + (COMPUTE_OUT - GPU_BASE) + 4u * i, 4);
+    if (v != COMPUTE_THREADS - 1u - i) {
+      if (wrong < 4u) fprintf(stderr, "  out[%u] = %08x\n", i, v);
+      wrong++;
+    }
+  }
+  CHECK(wrong == 0, "out[tid] = shared[63 - tid] written by the other lane group before the barrier (%u wrong)", wrong);
+  CHECK(r->stats.compute_faults == 0, "no compute faults");
+}
+
 int main(void) {
   const size_t bytes = raster3d_storage_bytes();
   uint8_t *storage = (uint8_t *)malloc(bytes + 64u);
@@ -645,6 +723,7 @@ int main(void) {
   test_derivatives(&r);
   test_worker_count_invariance(&r);
   test_gpu_vertex_stage(&r);
+  test_compute(&r);
   CHECK(r.stats.shader_faults == 0, "no shader faults");
   raster3d_shutdown(&r);
   free(storage);

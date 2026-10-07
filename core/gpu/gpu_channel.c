@@ -968,6 +968,24 @@ static void engine3d_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t met
   }
 }
 
+/* SEND_SIGNALING_PCAS_B (schedule): the QMD SEND_PCAS_A names, run by
+ * the renderer (gpu/compute.h). */
+static void compute_launch(Gpu_Channel *ch, const Gpu_Memory *mem) {
+  const uint64_t qmd_address = (uint64_t)ch->compute[COMPUTE_METHOD_SEND_PCAS_A] << COMPUTE_QMD_ADDRESS_SHIFT;
+  uint32_t qmd[COMPUTE_QMD_WORDS];
+  if (!mem->read(mem->user, qmd_address, qmd, sizeof(qmd))) {
+    ch->faults++;
+    return;
+  }
+  Compute_Launch launch;
+  if (!compute_qmd_parse(qmd, &launch)) {
+    log_debug("[gpu] compute QMD @%llx: nothing to run", (unsigned long long)qmd_address);
+    return;
+  }
+  ch->compute_launches++;
+  if (mem->renderer) raster3d_compute(mem->renderer, &launch, ch->compute, mem);
+}
+
 void gpu_channel_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t subchannel, uint32_t method, uint32_t data) {
   ch->methods++;
   subchannel &= GPU_SUBCHANNELS - 1u;
@@ -994,6 +1012,11 @@ void gpu_channel_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t subchan
   }
   if ((cls == GPU_CLASS_COMPUTE || cls == GPU_CLASS_I2M) && is_i2m_method(method)) {
     i2m_method(ch, mem, method - GPU_I2M_FIRST, data);
+    return;
+  }
+  if (cls == GPU_CLASS_COMPUTE && method < COMPUTE_REGISTER_WORDS) {
+    ch->compute[method] = data;
+    if (method == COMPUTE_METHOD_SEND_SIGNALING_PCAS_B && (data & COMPUTE_PCAS_B_SCHEDULE)) compute_launch(ch, mem);
     return;
   }
   log_debug("[gpu] ignored: class %04x method 0x%x = 0x%x", cls, method * 4u, data);
