@@ -34,7 +34,8 @@
  *                                    continues from slice N with the job's lines
  *                                    (max_slices N, input S:HEX:L, frame PATH,
  *                                    every N, trace S:L, log PATH, snapshot N DIR -
- *                                    a nested snapshot server); the result is
+ *                                    a nested snapshot server, gpu_stream FILE -
+ *                                    GPU mode recorded from here); the result is
  *                                    DIR/job.done.<pid>. DIR/quit ends the server.
  *                                    Iterating on a late scene without replaying.
  *       --font FILE                  the TTF/OTF pl:u serves as the system font
@@ -439,6 +440,7 @@ typedef struct Snapshot_Job {
   uint64_t max_slices, dump_every, trace_start, trace_length, snapshot_at;
   char frame_path[512];
   char snapshot_dir[512];
+  char gpu_stream_path[512]; /* "gpu_stream FILE": record GPU mode from the job's start */
   Input_Event inputs[MAX_INPUT_EVENTS];
   uint32_t input_count;
   int32_t host_cores; /* "cores N": --host-cores for this job; -1 = unchanged */
@@ -463,6 +465,7 @@ static bool read_job(const char *path, Snapshot_Job *job) {
       job->inputs[job->input_count++] = (Input_Event){a, buttons, b};
     } else if (sscanf(line, "snapshot %llu %511s", &a, job->snapshot_dir) == 2) {
       job->snapshot_at = a;
+    } else if (sscanf(line, "gpu_stream %511s", job->gpu_stream_path) == 1) {
     } else if (sscanf(line, "frame %511s", job->frame_path) == 1) {
     } else if (sscanf(line, "log %511s", log_path) == 1) {
     }
@@ -1232,6 +1235,14 @@ static int run(int argc, char **argv) {
       max_slices = job.max_slices;
       if (job.dump_every) dump_every = job.dump_every;
       if (job.frame_path[0]) frame_path = job.frame_path;
+      if (job.gpu_stream_path[0] && !g_gpu_file) {
+        /* GPU mode from here: targets drawn before exist only in guest
+         * memory, so the first frames may miss what was not redrawn. */
+        g_gpu_file = fopen(job.gpu_stream_path, "wb");
+        if (!g_gpu_file) _exit(EXIT_USAGE);
+        gpu_stream_init(&g_gpu_stream, g_gpu_header, g_gpu_ring, CLI_GPU_RING_BYTES, gpu_stream_wait, NULL);
+        raster3d_set_gpu(&emu.renderer, &g_gpu_stream);
+      }
       if (job.trace_length) {
         trace_start = job.trace_start;
         trace_length = job.trace_length;

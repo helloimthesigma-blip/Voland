@@ -83,6 +83,7 @@ if (process.env.TRACE_RECORDS) await page.evaluate(() => { globalThis.TRACE_RECO
 if (process.env.TRIVIAL_SHADERS) await page.evaluate(() => { globalThis.TRIVIAL_SHADERS = true; });
 if (process.env.MEASURE) await page.evaluate(() => { globalThis.MEASURE = true; });
 if (process.env.DRAW_TRACE) await page.evaluate((n) => { globalThis.DRAW_TRACE = n; }, Number(process.env.DRAW_TRACE));
+if (process.env.SYNC_DRAWS) await page.evaluate(() => { globalThis.SYNC_DRAWS = true; });
 if (process.env.NO_DEPTH) await page.evaluate(() => { globalThis.NO_DEPTH = true; });
 if (process.env.SKIP_TYPES) await page.evaluate((t) => { globalThis.SKIP_TYPES = t; }, process.env.SKIP_TYPES.split(",").map(Number));
 const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
@@ -180,6 +181,7 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
         const m = (globalThis.MEASURED ??= {});
         const e = (m[shader] ??= { n: 0, ms: 0 }); e.n++; e.ms += performance.now() - m0;
       } else if (!(globalThis.SKIP_TYPES ?? []).includes(type)) ex.execute(type, payload);
+      if (globalThis.SYNC_DRAWS && type === 6) { ex.flush(); await device.queue.onSubmittedWorkDone(); }
       if (globalThis.DRAW_TRACE && type === 6 && presents + 1 === globalThis.DRAW_TRACE) {
         /* Diagnostics: each RGBA8 target's channel sums after every draw of one present. */
         ex.flush();
@@ -206,7 +208,7 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
       pos += 8 + size;
       records++;
       /* Keep the GPU from queueing unbounded work (and frames from piling up). */
-      if (type === 8 && presents % 64 === 0) { await device.queue.onSubmittedWorkDone(); await Promise.all(pending.splice(0)); }
+      if (type === 8 && presents % 4 === 0) { await device.queue.onSubmittedWorkDone(); await Promise.all(pending.splice(0)); }
     }
     if (eof) break;
     /* The executor copies what it keeps (staging arrays, writeBuffer/
