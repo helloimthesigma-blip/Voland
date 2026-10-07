@@ -9,10 +9,9 @@
  * MapMemory, GetInfo - the next §25 checkboxes) reads region bases and
  * sizes from it and never recomputes them.
  *
- * The 39-bit layout (NPDM_ADDRESS_SPACE_64_BIT_39, every modern
- * title) is implemented. The 36-bit and 32-bit layouts return
- * RESULT_NOT_IMPLEMENTED; they carve the same region kinds with different
- * sizes and can be added behind this interface when a title needs them.
+ * Every NPDM address-space type is laid out: 39-bit (every modern title),
+ * 36-bit (titles built before system 2.0) and the two 32-bit types
+ * (AArch32 titles) carve the same region kinds with different sizes.
  *
  * 39-bit layout, as Horizon lays it out (observed behavior; the numbers
  * are the kernel's per-address-space-type region sizes):
@@ -63,6 +62,19 @@
 #define ADDRESS_SPACE_36_HEAP_SIZE ((uint64_t)0x180000000)   /* 6GB */
 #define ADDRESS_SPACE_36_STACK_SIZE ((uint64_t)0x80000000)   /* 2GB */
 #define ADDRESS_SPACE_36_TLS_IO_SIZE ((uint64_t)0x80000000)  /* 2GB */
+
+/* The 32-bit layouts (NPDM_ADDRESS_SPACE_32_BIT and _32_BIT_NO_RESERVED,
+ * AArch32 titles): the same order inside [2MB, 4GB). "No reserved" drops
+ * the 1GB alias region and gives the heap that room. (The layout is
+ * ready; running AArch32 code still needs an A32/T32 CPU backend.) */
+#define ADDRESS_SPACE_32_START ((uint64_t)0x200000)          /* 2MB */
+#define ADDRESS_SPACE_32_END ((uint64_t)1 << 32)            /* 4GB */
+#define ADDRESS_SPACE_32_ALIAS_SIZE ((uint64_t)0x40000000)   /* 1GB */
+#define ADDRESS_SPACE_32_HEAP_SIZE ((uint64_t)0x40000000)    /* 1GB */
+#define ADDRESS_SPACE_32_NO_RESERVED_ALIAS_SIZE ((uint64_t)0)
+#define ADDRESS_SPACE_32_NO_RESERVED_HEAP_SIZE ((uint64_t)0x80000000) /* 2GB */
+#define ADDRESS_SPACE_32_STACK_SIZE ((uint64_t)0x10000000)   /* 256MB */
+#define ADDRESS_SPACE_32_TLS_IO_SIZE ((uint64_t)0x10000000)  /* 256MB */
 
 /* ASLR shifts the code base in multiples of this (2MB: Horizon's region
  * randomization granule). */

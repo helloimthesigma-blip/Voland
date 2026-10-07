@@ -42,6 +42,8 @@ titles).
 - **Runtime modules (`nn::ro`) are mapped, not verified.** NRR registration
   is accepted without checks. SSBU loads its fighters this way. The mapping
   is tested; real titles are not yet.
+- **32-bit (AArch32) games do not run.** Their address space is laid out,
+  but Voland has no 32-bit ARM CPU, so loading one says so plainly.
 - **Offline services answer "signed out"** (`prepo`, `friend`, `bcat`,
   `caps`, `nfp`, `pctl`, `nifm`). Online features stay empty by design
   (§1.6, §20).

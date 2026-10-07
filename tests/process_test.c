@@ -358,10 +358,12 @@ int main(void) {
     exefs_image.bytes[sdk_entry->offset] = 'N';
   }
 
-  /* Unsupported address space (32-bit npdm). */
+  /* A 32-bit (AArch32) program: its address space lays out, but Voland
+   * has no A32/T32 CPU, so the bootstrap refuses it before mapping. */
   build_npdm(0);
   NPDM npdm32;
   CHECK_OK(npdm_parse(g_npdm_image.bytes, g_npdm_image.size, &npdm32));
+  npdm32.is_64bit_instruction = false;
   bad = params;
   bad.npdm = &npdm32;
   CHECK_CODE(process_bootstrap(&bad, &process), RESULT_NOT_IMPLEMENTED);

@@ -2480,6 +2480,7 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 - **§15, save browser:** the shell's Save data panel browses, edits, adds (files and dropped folders), downloads and deletes each game's save files; `put-save` / `delete-save` / `list-saves` lifecycle messages.
 - **§15, save states:** the whole machine saved and restored (`emulator_savestate_*`, `workers/savestate.ts`, the player bar's Save state). States load in the same build and memory layout only.
 - **§13, pipeline cache:** WGSL modules and draw-pipeline specs persist per title in OPFS (`workers/shader-cache.ts`) and are built with `createRenderPipelineAsync` when the title loads. Pipelines are keyed by a WGSL content hash, not by the stream's per-session shader ids.
+- **§12, address spaces:** all four NPDM types are laid out: 39-bit, 36-bit, and the two 32-bit types (in [2 MB, 4 GB); "no reserved" drops the 1 GB alias region for a 2 GB heap). AArch32 programs (NPDM 64-bit flag clear) are refused at bootstrap with a plain message, because Voland has no A32/T32 CPU backend yet.
 - **Super Smash Bros. Ultimate bring-up (first steps):**
   - `svcCreateTransferMemory` accepts module `.data`/`.bss`. SSBU hands a service a static buffer at start-up.
   - nvdrv holds 8192 nvmap handles and 16384 GPU mappings. SSBU maps hundreds of buffers twice. Translation scans only the used slots and tries the last hit first.

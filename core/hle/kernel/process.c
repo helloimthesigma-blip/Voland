@@ -203,6 +203,13 @@ Error process_bootstrap(const Process_Bootstrap_Params *params, Process *out) {
     return ERR(RESULT_NOT_FOUND, "process_bootstrap: ExeFS has no `main` NSO");
   }
 
+  /* AArch32 code needs an A32/T32 CPU backend, which Voland does not have
+   * yet: say so plainly rather than run 32-bit instructions as A64. */
+  if (!npdm->is_64bit_instruction) {
+    return ERR(RESULT_NOT_IMPLEMENTED,
+               "this is a 32-bit (AArch32) game: Voland can lay out its address space but does not run 32-bit ARM code yet");
+  }
+
   /* Step 2 + 3a: the address space from the npdm's type. */
   Error err = address_space_init(npdm->address_space, code_size, params->aslr_seed,
                                  &out->address_space);

@@ -46,9 +46,16 @@ Error address_space_init(NPDM_Address_Space type, uint64_t code_size,
     heap_size = ADDRESS_SPACE_36_HEAP_SIZE;
     stack_size = ADDRESS_SPACE_36_STACK_SIZE;
     tls_io_size = ADDRESS_SPACE_36_TLS_IO_SIZE;
+  } else if (type == NPDM_ADDRESS_SPACE_32_BIT || type == NPDM_ADDRESS_SPACE_32_BIT_NO_RESERVED) {
+    const bool reserved = type == NPDM_ADDRESS_SPACE_32_BIT;
+    start = ADDRESS_SPACE_32_START;
+    end = ADDRESS_SPACE_32_END;
+    alias_size = reserved ? ADDRESS_SPACE_32_ALIAS_SIZE : ADDRESS_SPACE_32_NO_RESERVED_ALIAS_SIZE;
+    heap_size = reserved ? ADDRESS_SPACE_32_HEAP_SIZE : ADDRESS_SPACE_32_NO_RESERVED_HEAP_SIZE;
+    stack_size = ADDRESS_SPACE_32_STACK_SIZE;
+    tls_io_size = ADDRESS_SPACE_32_TLS_IO_SIZE;
   } else {
-    return ERR(RESULT_NOT_IMPLEMENTED,
-               "address_space_init: 32-bit (AArch32) programs are not supported");
+    return ERR(RESULT_INVALID_ARGUMENT, "address_space_init: unknown address-space type");
   }
   memset(out, 0, sizeof(*out));
 

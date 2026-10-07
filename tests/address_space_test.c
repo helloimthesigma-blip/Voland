@@ -40,7 +40,7 @@ static void check_regions(const Address_Space *as, uint64_t start, uint64_t end)
   CHECK(as->aslr.base + as->aslr.size == end);
   for (size_t i = 0; i < n; i++) {
     CHECK(page_aligned(regions[i]));
-    CHECK(regions[i]->size > 0);
+    CHECK(regions[i]->size > 0 || (regions[i] == &as->alias && as->type == NPDM_ADDRESS_SPACE_32_BIT_NO_RESERVED));
     CHECK(inside(&as->aslr, regions[i]));
     for (size_t j = i + 1; j < n; j++) CHECK(disjoint(regions[i], regions[j]));
   }
@@ -120,10 +120,21 @@ int main(void) {
   CHECK_CODE(address_space_init(NPDM_ADDRESS_SPACE_64_BIT_39, 0, 0, &as), RESULT_INVALID_ARGUMENT);
   CHECK_CODE(address_space_init(NPDM_ADDRESS_SPACE_64_BIT_39, CODE_BYTES, 0, NULL),
              RESULT_INVALID_ARGUMENT);
-  CHECK_CODE(address_space_init(NPDM_ADDRESS_SPACE_32_BIT, CODE_BYTES, 0, &as),
-             RESULT_NOT_IMPLEMENTED);
-  CHECK_CODE(address_space_init(NPDM_ADDRESS_SPACE_32_BIT_NO_RESERVED, CODE_BYTES, 0, &as),
-             RESULT_NOT_IMPLEMENTED);
+  CHECK_CODE(address_space_init((NPDM_Address_Space)7, CODE_BYTES, 0, &as), RESULT_INVALID_ARGUMENT);
+
+  /* The 32-bit layouts: every region inside [2MB, 4GB); "no reserved" has
+   * no alias region and a 2GB heap. */
+  CHECK_OK(address_space_init(NPDM_ADDRESS_SPACE_32_BIT, CODE_BYTES, 0, &as));
+  check_regions(&as, ADDRESS_SPACE_32_START, ADDRESS_SPACE_32_END);
+  CHECK(as.code.base == ADDRESS_SPACE_32_START && as.alias.size == ADDRESS_SPACE_32_ALIAS_SIZE &&
+        as.heap.size == ADDRESS_SPACE_32_HEAP_SIZE);
+  CHECK(as.tls_io.base + as.tls_io.size <= ADDRESS_SPACE_32_END);
+  CHECK_OK(address_space_init(NPDM_ADDRESS_SPACE_32_BIT_NO_RESERVED, CODE_BYTES, 0x77, &as));
+  check_regions(&as, ADDRESS_SPACE_32_START, ADDRESS_SPACE_32_END);
+  CHECK(as.alias.size == 0 && as.heap.size == ADDRESS_SPACE_32_NO_RESERVED_HEAP_SIZE);
+  CHECK((as.code.base - ADDRESS_SPACE_32_START) % ADDRESS_SPACE_ASLR_GRANULE == 0);
+  /* A 64-bit-sized code image does not fit 4GB. */
+  CHECK_CODE(address_space_init(NPDM_ADDRESS_SPACE_32_BIT, (uint64_t)3 << 30, 0, &as), RESULT_INVALID_ARGUMENT);
 
   /* address_region_contains, including the overflow edges. */
   const Address_Region r = {0x1000, 0x2000};
