@@ -172,6 +172,24 @@ retires it.
   result changes nothing). Vector forms apply the same rules to every
   active lane. Anything else takes the exact path, which has not changed
   any state yet when the guard fails.
+- **More inline forms, chosen from a census of the direct calls during
+  Silksong gameplay** (`voland-cli --jit-fallbacks-from N`; the profile
+  marks entries that are a fast path's exact arm):
+  - **Pure moves:** element moves (DUP general, INS general and element,
+    SMOV, UMOV, scalar DUP) and vector FABS/FNEG.
+  - **SIMD128 integer ops:** pairwise ADDP/SMAXP/UMAXP/SMINP/UMINP, and
+    SSHLL/USHLL(2).
+  - **Conversions under the scalar rules:** SCVTF/UCVTF and
+    FCVTZS/FCVTZU, as vector, scalar-element and fixed-point forms. Only
+    the integer-to-FP rounding can be inexact; the fixed-point scale is
+    an exact power of two. FP-to-integer requires every active lane in
+    range, so neither saturation nor IOC can occur.
+  - **FP compares:** FCMEQ/FCMGE/FCMGT/FACGE/FACGT and the compares with
+    zero, when no active lane is a NaN and FPCR is 0.
+  - **Tests:** `jit_diff_test` generates these forms on registers holding
+    ordinary floats; seeded mutations of each were caught. One mutation
+    is not caught in 20000 streams: signed instead of unsigned truncation
+    for lanes in [2^31, 2^32).
 
 **Code validity.** Regions are compiled only from pages that are
 executable and not writable.

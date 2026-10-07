@@ -214,8 +214,52 @@ static uint32_t gen_exclusive(void) {
 /* SIMD&FP data processing and structure loads/stores (direct calls). */
 static uint32_t vreg(void) { return pick(32); }
 static uint32_t ftype(void) { return pick(8) == 0 ? 3u : pick(2); } /* single/double, sometimes half/undefined */
+/* The inline Advanced SIMD forms (jit_compile.c: c_simd_copy,
+ * c_simd_misc_fp, c_simd_pairwise, c_simd_shift_long, vector compares,
+ * fixed-point conversions), mostly on the registers holding ordinary
+ * floats (v16-v27) so the fast arms run. */
+static uint32_t fp_vreg(void) { return pick(4) ? 16u + pick(12) : vreg(); }
+static uint32_t gen_simd_inline(void) {
+  const uint32_t q = pick(4) ? 1u : 0u, u = pick(2);
+  switch (pick(8)) {
+  case 0: /* copy: DUP/INS/SMOV/UMOV general, INS element, scalar DUP */
+    if (pick(4) == 0) return 0x5E000400u | ((1u + pick(31)) << 16) | (fp_vreg() << 5) | vreg();
+    static const uint32_t moves[4] = {1, 3, 5, 7}; /* DUP, INS, SMOV, UMOV (general) */
+    return 0x0E000400u | (q << 30) | (pick(4) == 0 ? 1u << 29 : 0) | ((1u + pick(31)) << 16) |
+           ((pick(4) ? moves[pick(4)] : pick(16)) << 11) |
+           (pick(2) ? reg() << 5 : fp_vreg() << 5) | (pick(2) ? dst() : vreg());
+  case 1: { /* FABS/FNEG, SCVTF/UCVTF, FCVTZS/FCVTZU, FCM* zero: vector */
+    static const uint32_t forms[6][2] = {{0x0F, 1}, {0x1D, 0}, {0x1B, 1}, {0x0C, 1}, {0x0D, 1}, {0x0E, 1}};
+    const uint32_t *f = forms[pick(6)];
+    return 0x0E200800u | (q << 30) | (u << 29) | (f[1] << 23) | (pick(3) == 0 ? 1u << 22 : 0) | (f[0] << 12) |
+           (fp_vreg() << 5) | vreg();
+  }
+  case 2: /* SCVTF/UCVTF, FCVTZS/FCVTZU: scalar (vector form) */
+    return pick(2) ? 0x5E21D800u | (u << 29) | (pick(3) == 0 ? 1u << 22 : 0) | (fp_vreg() << 5) | vreg()
+                   : 0x5EA1B800u | (u << 29) | (pick(3) == 0 ? 1u << 22 : 0) | (fp_vreg() << 5) | vreg();
+  case 3: { /* FCMEQ/FCMGE/FCMGT/FACGE/FACGT (register) */
+    static const uint32_t keys[5] = {0x04, 0x14, 0x1C, 0x15, 0x1D};
+    const uint32_t key = keys[pick(5)];
+    return 0x0E20C400u | (q << 30) | ((key >> 4) << 29) | (((key >> 3) & 1u) << 23) | (pick(3) == 0 ? 1u << 22 : 0) |
+           (fp_vreg() << 16) | ((0x18u | (key & 7u)) << 11) | (fp_vreg() << 5) | vreg();
+  }
+  case 4: /* ADDP, SMAXP/UMAXP, SMINP/UMINP */
+    return 0x0E200400u | (q << 30) | (u << 29) | (pick(4) << 22) | (vreg() << 16) | ((0x14u + pick(4)) << 11) |
+           (vreg() << 5) | vreg();
+  case 5: /* SSHLL/USHLL(2) */
+    return 0x0F00A400u | (q << 30) | (u << 29) | ((1u + pick(15)) << 19) | (pick(8) << 16) | (vreg() << 5) | vreg();
+  case 6: /* SCVTF/UCVTF (fixed point) */
+    return (pick(2) << 31) | 0x1E020000u | (pick(2) << 22) | (pick(2) << 16) | ((64u - 1u - pick(64)) << 10) |
+           (reg() << 5) | vreg();
+  default: /* FCVTZS/FCVTZU (fixed point) */
+    return (pick(2) << 31) | 0x1E180000u | (pick(2) << 22) | (pick(2) << 16) | ((64u - 1u - pick(64)) << 10) |
+           (fp_vreg() << 5) | dst();
+  }
+}
+
 static uint32_t gen_simd_fp(void) {
-  switch (pick(17)) {
+  switch (pick(24)) {
+  case 17: case 18: case 19: case 20: case 21: case 22: case 23: return gen_simd_inline();
   case 0: return 0x1E200800u | (ftype() << 22) | (vreg() << 16) | (pick(9) << 12) | (vreg() << 5) | vreg(); /* 2-source */
   case 1: return 0x1E204000u | (ftype() << 22) | (pick(16) << 15) | (vreg() << 5) | vreg();               /* 1-source */
   case 2: return 0x1F000000u | (ftype() << 22) | (pick(2) << 21) | (vreg() << 16) | (pick(2) << 15) | (vreg() << 10) |
@@ -365,6 +409,7 @@ static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint64_t *x, u
         if (((x[(i + k) % 31] >> 40) & 3u) == 0) f = (k & 1u) ? -0.0f : 0.0f; /* exact zeros: x*0, 0/x */
         if (((x[(i + k) % 31] >> 42) & 7u) == 1) f *= 1e-22f;               /* tiny: products underflow */
         if (((x[(i + k) % 31] >> 42) & 7u) == 2) f *= 1e-40f;               /* subnormal */
+        if (((x[(i + k) % 31] >> 42) & 7u) == 3) f *= 4194304.0f;           /* large: 2^31..2^32 conversions */
         memcpy(&lanes[k], &f, sizeof(lanes[k]));
       }
       v.lo = lanes[0] | ((uint64_t)lanes[1] << 32);

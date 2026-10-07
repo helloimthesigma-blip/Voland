@@ -490,10 +490,33 @@ static bool g_fallback_profile;
 static uint32_t g_fallback_key[FALLBACK_SLOTS];
 static uint64_t g_fallback_count[FALLBACK_SLOTS];
 
+static uint32_t g_fast_key[FALLBACK_SLOTS];
+
 void jit_set_fallback_profile(bool enabled) { g_fallback_profile = enabled; }
 
+static uint32_t fallback_key(uint32_t insn) { return (insn & FALLBACK_OPCODE_MASK) | 1u; /* never 0: 0 = empty */ }
+
+void jit_note_fast_path(uint32_t insn) {
+  const uint32_t key = fallback_key(insn);
+  for (uint32_t i = 0, slot = (key * 2654435761u) >> 20; i < FALLBACK_SLOTS; i++, slot = (slot + 1u) % FALLBACK_SLOTS) {
+    if (g_fast_key[slot] == key) return;
+    if (g_fast_key[slot] == 0) {
+      g_fast_key[slot] = key;
+      return;
+    }
+  }
+}
+
+static bool has_fast_path(uint32_t key) {
+  for (uint32_t i = 0, slot = (key * 2654435761u) >> 20; i < FALLBACK_SLOTS; i++, slot = (slot + 1u) % FALLBACK_SLOTS) {
+    if (g_fast_key[slot] == key) return true;
+    if (g_fast_key[slot] == 0) return false;
+  }
+  return false;
+}
+
 static void profile_fallback(uint32_t insn) {
-  const uint32_t key = (insn & FALLBACK_OPCODE_MASK) | 1u; /* never 0: 0 = empty slot */
+  const uint32_t key = fallback_key(insn);
   for (uint32_t i = 0, slot = (key * 2654435761u) >> 20; i < FALLBACK_SLOTS; i++, slot = (slot + 1u) % FALLBACK_SLOTS) {
     if (g_fallback_key[slot] == key || g_fallback_key[slot] == 0) {
       g_fallback_key[slot] = key;
@@ -510,7 +533,8 @@ void jit_print_fallback_profile(uint32_t top) {
       if (g_fallback_count[i] && (best == FALLBACK_SLOTS || g_fallback_count[i] > g_fallback_count[best])) best = i;
     }
     if (best == FALLBACK_SLOTS) return;
-    fprintf(stderr, "  %12llu  %08x\n", (unsigned long long)g_fallback_count[best], g_fallback_key[best] & ~1u);
+    fprintf(stderr, "  %12llu  %08x%s\n", (unsigned long long)g_fallback_count[best], g_fallback_key[best] & ~1u,
+            has_fast_path(g_fallback_key[best]) ? "  (fast path's exact arm)" : "");
     g_fallback_count[best] = 0;
   }
 }

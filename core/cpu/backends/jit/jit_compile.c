@@ -2077,6 +2077,15 @@ static void simd_fp_sync(uint32_t insn, Sync *sync) {
 #define FPSR_IXC_BIT 4u /* softfloat.h FPSR_IXC */
 #define F32_EXTRA_BITS 29u /* f64 fraction bits below an f32's */
 #define F32_MIDPOINT (1ull << (F32_EXTRA_BITS - 1u))
+/* Truncation bounds (f32/f64 bits): -1, -2^31, 2^31, 2^32, -2^63, 2^63, 2^64. */
+#define F32_MINUS_ONE 0xBF800000u
+#define F32_MINUS_2_31 0xCF000000u
+#define F32_2_31 0x4F000000u
+#define F32_2_32 0x4F800000u
+#define F64_MINUS_ONE 0xBFF0000000000000ull
+#define F64_MINUS_2_63 0xC3E0000000000000ull
+#define F64_2_63 0x43E0000000000000ull
+#define F64_2_64 0x43F0000000000000ull
 
 static void f64c(Ctx *c, uint64_t bits_value) {
   op(c, WASM_OP_F64_CONST);
@@ -2189,6 +2198,7 @@ static void emit_tiny_single_in_double(Ctx *c, uint32_t local) {
  * fast arm; finish with fp_else_exact(). */
 static void fp_fast_arm(Ctx *c) { open_if(c, WASM_BLOCK_VOID); }
 static void fp_else_exact(Ctx *c, const Sync *sync) {
+  jit_note_fast_path(c->insn);
   else_(c);
   emit_direct_call(c, sync);
   end_(c);
@@ -2347,11 +2357,106 @@ static void emit_fp_compare(Ctx *c, bool dbl, uint32_t n, uint32_t m, bool with_
   c->flag_kind = FLAGS_LIVE;
 }
 
+/* 2^e as f32/f64 bits (|e| small enough to stay normal). */
+#define F32_EXPONENT_BIAS 127
+#define F64_EXPONENT_BIAS 1023
+#define F32_FRACTION_BITS 23u
+#define F64_FRACTION_BITS 52u
+#define FIXED_SCALE_LIMIT 64u /* fbits = 64 - scale */
+#define FIXED_SCALE_32 32u    /* a 32-bit integer has at most 32 fraction bits */
+static void fp_power_of_two(Ctx *c, bool dbl, int32_t e) {
+  if (dbl) f64c(c, (uint64_t)(int64_t)(F64_EXPONENT_BIAS + e) << F64_FRACTION_BITS);
+  else f32c(c, (uint32_t)(F32_EXPONENT_BIAS + e) << F32_FRACTION_BITS);
+}
+
+/* SCVTF/UCVTF (general or fixed point with `fbits` fraction bits): the
+ * integer converts with one rounding; scaling by 2^-fbits is then exact
+ * (2^-64 times a non-zero integer is still a normal f32). */
+static void emit_int_to_fp(Ctx *c, bool sf, bool is_unsigned, bool dbl, uint32_t rn, uint32_t rd, uint32_t fbits) {
+  static const uint8_t to64[2][2] = {{WASM_OP_F64_CONVERT_I32_S, WASM_OP_F64_CONVERT_I32_U},
+                                     {WASM_OP_F64_CONVERT_I64_S, WASM_OP_F64_CONVERT_I64_U}};
+  static const uint8_t to32[2][2] = {{WASM_OP_F32_CONVERT_I32_S, WASM_OP_F32_CONVERT_I32_U},
+                                     {WASM_OP_F32_CONVERT_I64_S, WASM_OP_F32_CONVERT_I64_U}};
+  const uint32_t r = fp_result_local(dbl);
+  get_x(c, rn);
+  if (!sf) op(c, WASM_OP_I32_WRAP_I64);
+  op(c, dbl ? to64[sf][is_unsigned] : to32[sf][is_unsigned]);
+  if (fbits) {
+    fp_power_of_two(c, dbl, -(int32_t)fbits);
+    op(c, dbl ? WASM_OP_F64_MUL : WASM_OP_F32_MUL);
+  }
+  lset(c, r);
+  if (dbl && !sf) { /* a 32-bit integer always fits a double exactly */
+    emit_fpcr_default(c);
+  } else {
+    emit_fp_env_ok(c);
+  }
+  fp_fast_arm(c);
+  store_fp_local(c, rd, dbl, r);
+  Sync sync = {0};
+  sync_x(&sync, rn);
+  sync_x(&sync, rd);
+  fp_else_exact(c, &sync);
+}
+
+/* i32: low < local < top for a truncation to a `to64`-bit integer, as
+ * doubles (exact for every f32); false for NaN. */
+static void emit_truncation_in_range(Ctx *c, uint32_t local, bool dbl, bool to64, bool is_unsigned) {
+  const double high = to64 ? 18446744073709551616.0 : 4294967296.0;
+  const double high_signed = to64 ? 9223372036854775808.0 : 2147483648.0;
+  const double low = is_unsigned ? -1.0 : -(high_signed) - 1.0;
+  const double top = is_unsigned ? high : high_signed;
+  uint64_t low_bits, top_bits;
+  memcpy(&low_bits, &low, sizeof(low_bits));
+  memcpy(&top_bits, &top, sizeof(top_bits));
+  lget(c, local);
+  if (!dbl) op(c, WASM_OP_F64_PROMOTE_F32);
+  f64c(c, low_bits);
+  op(c, WASM_OP_F64_GT);
+  lget(c, local);
+  if (!dbl) op(c, WASM_OP_F64_PROMOTE_F32);
+  f64c(c, top_bits);
+  op(c, WASM_OP_F64_LT);
+  op(c, WASM_OP_I32_AND);
+}
+
+/* FCVTZS/FCVTZU (general, or fixed point: the value times 2^fbits first,
+ * exact or infinite - and then out of range). */
+static void emit_fp_to_int(Ctx *c, bool sf, bool is_unsigned, bool dbl, uint32_t rn, uint32_t rd, uint32_t fbits) {
+  const uint32_t a = fp_result_local(dbl);
+  load_fp(c, rn, dbl);
+  if (fbits) {
+    fp_power_of_two(c, dbl, (int32_t)fbits);
+    op(c, dbl ? WASM_OP_F64_MUL : WASM_OP_F32_MUL);
+  }
+  lset(c, a);
+  emit_truncation_in_range(c, a, dbl, sf, is_unsigned);
+  emit_fp_env_ok(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  lget(c, a);
+  if (sf) {
+    static const uint8_t trunc64[2][2] = {{WASM_OP_I64_TRUNC_F32_S, WASM_OP_I64_TRUNC_F32_U},
+                                          {WASM_OP_I64_TRUNC_F64_S, WASM_OP_I64_TRUNC_F64_U}};
+    op(c, trunc64[dbl][is_unsigned]);
+  } else {
+    static const uint8_t trunc32[2][2] = {{WASM_OP_I32_TRUNC_F32_S, WASM_OP_I32_TRUNC_F32_U},
+                                          {WASM_OP_I32_TRUNC_F64_S, WASM_OP_I32_TRUNC_F64_U}};
+    op(c, trunc32[dbl][is_unsigned]);
+    op(c, WASM_OP_I64_EXTEND_I32_U);
+  }
+  set_x(c, rd);
+  Sync sync = {0};
+  sync_x(&sync, rn);
+  sync_x(&sync, rd);
+  fp_else_exact(c, &sync);
+}
+
 /* Scalar FP with a native fast path; false: not one of these forms. */
 static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
   if (bits(insn, 31, 29) != 0 || bits(insn, 28, 24) < 0x1E) {
-    /* FMOV/SCVTF/UCVTF/FCVTZS/FCVTZU (general) have sf in bit 31 */
-    if (!(bits(insn, 30, 24) == 0x1E && bit(insn, 21) && bits(insn, 15, 10) == 0)) return false;
+    /* FMOV/SCVTF/UCVTF/FCVTZS/FCVTZU (general and fixed point) have sf in bit 31 */
+    if (!(bits(insn, 30, 24) == 0x1E && (!bit(insn, 21) || bits(insn, 15, 10) == 0))) return false;
   }
   const uint32_t ftype = bits(insn, 23, 22);
   const uint32_t rn = bits(insn, 9, 5), rd = bits(insn, 4, 0), rm = bits(insn, 20, 16);
@@ -2360,8 +2465,22 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
     emit_fp_fused_single(c, bit(insn, 21), bit(insn, 15), rn, rm, bits(insn, 14, 10), rd);
     return true;
   }
-  if (!bit(insn, 21)) return false; /* fixed-point conversions */
   const bool dbl = ftype == 1u;
+  if (!bit(insn, 21)) { /* conversions between FP and fixed point */
+    const bool sf = bit(insn, 31);
+    const uint32_t rmode = bits(insn, 20, 19), opcode = bits(insn, 18, 16), scale = bits(insn, 15, 10);
+    if (ftype > 1u || (!sf && scale < FIXED_SCALE_32)) return false;
+    const uint32_t fbits = FIXED_SCALE_LIMIT - scale;
+    if ((opcode == 2 || opcode == 3) && rmode == 0) {
+      emit_int_to_fp(c, sf, opcode == 3, dbl, rn, rd, fbits);
+      return true;
+    }
+    if ((opcode == 0 || opcode == 1) && rmode == 3) {
+      emit_fp_to_int(c, sf, opcode == 1, dbl, rn, rd, fbits);
+      return true;
+    }
+    return false;
+  }
   if (bits(insn, 15, 10) == 0) { /* conversions between FP and general registers */
     const bool sf = bit(insn, 31);
     const uint32_t rmode = bits(insn, 20, 19), opcode = bits(insn, 18, 16);
@@ -2390,70 +2509,11 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
     }
     if (ftype > 1u) return false;
     if ((opcode == 2 || opcode == 3) && rmode == 0) { /* SCVTF / UCVTF */
-      static const uint8_t to64[2][2] = {{WASM_OP_F64_CONVERT_I32_S, WASM_OP_F64_CONVERT_I32_U},
-                                         {WASM_OP_F64_CONVERT_I64_S, WASM_OP_F64_CONVERT_I64_U}};
-      static const uint8_t to32[2][2] = {{WASM_OP_F32_CONVERT_I32_S, WASM_OP_F32_CONVERT_I32_U},
-                                         {WASM_OP_F32_CONVERT_I64_S, WASM_OP_F32_CONVERT_I64_U}};
-      const uint32_t is_unsigned = opcode == 3;
-      const uint32_t r = fp_result_local(dbl);
-      get_x(c, rn);
-      if (!sf) op(c, WASM_OP_I32_WRAP_I64);
-      op(c, dbl ? to64[sf][is_unsigned] : to32[sf][is_unsigned]);
-      lset(c, r);
-      if (dbl && !sf) { /* a 32-bit integer always fits a double exactly */
-        emit_fpcr_default(c);
-      } else {
-        emit_fp_env_ok(c);
-      }
-      fp_fast_arm(c);
-      store_fp_local(c, rd, dbl, r);
-      Sync sync = {0};
-      sync_x(&sync, rn);
-      sync_x(&sync, rd);
-      fp_else_exact(c, &sync);
+      emit_int_to_fp(c, sf, opcode == 3, dbl, rn, rd, 0);
       return true;
     }
     if ((opcode == 0 || opcode == 1) && rmode == 3) { /* FCVTZS / FCVTZU: truncation, in range only */
-      const bool is_unsigned = opcode == 1;
-      const uint32_t a = fp_result_local(dbl);
-      load_fp(c, rn, dbl);
-      lset(c, a);
-      /* low < a < high, as doubles (exact for every f32) */
-      const double high = sf ? 18446744073709551616.0 : 4294967296.0;
-      const double high_signed = sf ? 9223372036854775808.0 : 2147483648.0;
-      const double low = is_unsigned ? -1.0 : -(high_signed) - 1.0;
-      const double top = is_unsigned ? high : high_signed;
-      uint64_t low_bits, top_bits;
-      memcpy(&low_bits, &low, sizeof(low_bits));
-      memcpy(&top_bits, &top, sizeof(top_bits));
-      lget(c, a);
-      if (!dbl) op(c, WASM_OP_F64_PROMOTE_F32);
-      f64c(c, low_bits);
-      op(c, WASM_OP_F64_GT);
-      lget(c, a);
-      if (!dbl) op(c, WASM_OP_F64_PROMOTE_F32);
-      f64c(c, top_bits);
-      op(c, WASM_OP_F64_LT);
-      op(c, WASM_OP_I32_AND);
-      emit_fp_env_ok(c);
-      op(c, WASM_OP_I32_AND);
-      fp_fast_arm(c);
-      lget(c, a);
-      if (sf) {
-        static const uint8_t trunc64[2][2] = {{WASM_OP_I64_TRUNC_F32_S, WASM_OP_I64_TRUNC_F32_U},
-                                              {WASM_OP_I64_TRUNC_F64_S, WASM_OP_I64_TRUNC_F64_U}};
-        op(c, trunc64[dbl][is_unsigned]);
-      } else {
-        static const uint8_t trunc32[2][2] = {{WASM_OP_I32_TRUNC_F32_S, WASM_OP_I32_TRUNC_F32_U},
-                                              {WASM_OP_I32_TRUNC_F64_S, WASM_OP_I32_TRUNC_F64_U}};
-        op(c, trunc32[dbl][is_unsigned]);
-        op(c, WASM_OP_I64_EXTEND_I32_U);
-      }
-      set_x(c, rd);
-      Sync sync = {0};
-      sync_x(&sync, rn);
-      sync_x(&sync, rd);
-      fp_else_exact(c, &sync);
+      emit_fp_to_int(c, sf, opcode == 1, dbl, rn, rd, 0);
       return true;
     }
     return false;
@@ -2784,6 +2844,10 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
   fp_else_exact(c, &none);
 }
 
+typedef enum Fp_Compare { FCMP_EQ, FCMP_GE, FCMP_GT, FCMP_LE, FCMP_LT } Fp_Compare;
+static void emit_vector_fp_compare(Ctx *c, Fp_Compare cmp, bool dbl, bool q, bool with_zero, bool absolute,
+                                   uint32_t n, uint32_t m, uint32_t d);
+
 /* Advanced SIMD FP with a fast path; false: not one of these forms. */
 static bool c_vector_fp_fast(Ctx *c, uint32_t insn) {
   if (bit(insn, 31)) return false;
@@ -2793,8 +2857,17 @@ static bool c_vector_fp_fast(Ctx *c, uint32_t insn) {
     /* three same, floating point */
     const bool dbl = bit(insn, 22), a1 = bit(insn, 23);
     if (dbl && !q) return false;
+    const uint32_t key = ((uint32_t)u << 4) | ((uint32_t)a1 << 3) | bits(insn, 13, 11);
+    switch (key) {
+    case 0x04: case 0x14: case 0x1C: case 0x15: case 0x1D: /* FCMEQ, FCMGE, FCMGT, FACGE, FACGT */
+      emit_vector_fp_compare(c, key == 0x04 ? FCMP_EQ : (key & 8u) ? FCMP_GT : FCMP_GE, dbl, q, false,
+                             key == 0x15 || key == 0x1D, rn, bits(insn, 20, 16), rd);
+      return true;
+    default:
+      break;
+    }
     Vector_Fp_Op vop;
-    switch (((uint32_t)u << 4) | ((uint32_t)a1 << 3) | bits(insn, 13, 11)) {
+    switch (key) {
     case 0x02: vop = VFP_ADD; break;
     case 0x0A: vop = VFP_SUB; break;
     case 0x13: vop = VFP_MUL; break;
@@ -3002,8 +3075,370 @@ static bool c_vector_int_fast(Ctx *c, uint32_t insn) {
   return false;
 }
 
+/* ------------------------------------------------------------------ */
+/* More Advanced SIMD inline: element moves, FP misc, pairwise, widening */
+/* ------------------------------------------------------------------ */
+
+static const uint8_t k_element_load_u[4] = {WASM_OP_I64_LOAD8_U, WASM_OP_I64_LOAD16_U, WASM_OP_I64_LOAD32_U,
+                                            WASM_OP_I64_LOAD};
+static const uint8_t k_element_load_s[4] = {WASM_OP_I64_LOAD8_S, WASM_OP_I64_LOAD16_S, WASM_OP_I64_LOAD32_S,
+                                            WASM_OP_I64_LOAD};
+static const uint8_t k_element_store[4] = {WASM_OP_I64_STORE8, WASM_OP_I64_STORE16, WASM_OP_I64_STORE32,
+                                           WASM_OP_I64_STORE};
+#define ELEMENT_SIZES 4u /* log2 bytes: 0 B, 1 H, 2 S, 3 D */
+
+/* A copy-group imm5: the element size (its lowest set bit) and index. */
+static bool imm5_element(uint32_t imm5, uint32_t *lsize, uint32_t *index) {
+  uint32_t s = 0;
+  while (s < ELEMENT_SIZES && !((imm5 >> s) & 1u)) s++;
+  if (s >= ELEMENT_SIZES) return false;
+  *lsize = s;
+  *index = imm5 >> (s + 1u);
+  return true;
+}
+
+/* DUP (general), INS (general and element), SMOV, UMOV, and scalar DUP
+ * (element): moves only, done on the register file in memory. */
+static bool c_simd_copy(Ctx *c, uint32_t insn) {
+  if (bit(insn, 31) || bits(insn, 23, 21) != 0 || bit(insn, 15) || !bit(insn, 10)) return false;
+  const bool q = bit(insn, 30), op_bit = bit(insn, 29);
+  const uint32_t imm4 = bits(insn, 14, 11), rn = bits(insn, 9, 5), rd = bits(insn, 4, 0);
+  uint32_t lsize = 0, index = 0;
+  if (!imm5_element(bits(insn, 20, 16), &lsize, &index)) return false;
+  const uint32_t esize = 1u << lsize;
+  if (bits(insn, 28, 24) == 0x1E) { /* scalar DUP (element): Vd = Vn.T[i], the rest zeroed */
+    if (!q || op_bit || imm4 != 0) return false;
+    lget(c, L_STATE);
+    mem(c, k_element_load_u[lsize], lsize, OFF_V(rn) + index * esize);
+    store_fp_bits(c, rd);
+    return true;
+  }
+  if (bits(insn, 28, 24) != 0x0E) return false;
+  if (op_bit) { /* INS (element) */
+    if (!q) return false;
+    lget(c, L_STATE);
+    lget(c, L_STATE);
+    mem(c, k_element_load_u[lsize], lsize, OFF_V(rn) + (imm4 >> lsize) * esize);
+    mem(c, k_element_store[lsize], lsize, OFF_V(rd) + index * esize);
+    return true;
+  }
+  static const uint32_t splat[ELEMENT_SIZES] = {WASM_SIMD_I8X16_SPLAT, WASM_SIMD_I16X8_SPLAT, WASM_SIMD_I32X4_SPLAT,
+                                                WASM_SIMD_I64X2_SPLAT};
+  switch (imm4) {
+  case 1: /* DUP (general) */
+    if (lsize == 3u && !q) return false;
+    get_x(c, rn);
+    if (lsize < 3u) op(c, WASM_OP_I32_WRAP_I64);
+    simd(c, splat[lsize]);
+    lset(c, L_VR);
+    store_v(c, rd, L_VR, q);
+    return true;
+  case 3: /* INS (general) */
+    if (!q) return false;
+    lget(c, L_STATE);
+    get_x(c, rn);
+    mem(c, k_element_store[lsize], lsize, OFF_V(rd) + index * esize);
+    return true;
+  case 5: case 7: { /* SMOV, UMOV */
+    const bool is_signed = imm4 == 5u;
+    if (is_signed ? lsize >= (q ? 3u : 2u) : (q ? lsize != 3u : lsize == 3u)) return false;
+    lget(c, L_STATE);
+    mem(c, is_signed ? k_element_load_s[lsize] : k_element_load_u[lsize], lsize, OFF_V(rn) + index * esize);
+    if (is_signed && !q) mask32(c);
+    set_x(c, rd);
+    return true;
+  }
+  default:
+    return false;
+  }
+}
+
+/* f32x4/f64x2 splat of 0.0. */
+static void v128_fp_zero(Ctx *c, bool dbl) {
+  if (dbl) f64c(c, 0);
+  else f32c(c, 0);
+  simd(c, dbl ? WASM_SIMD_F64X2_SPLAT : WASM_SIMD_F32X4_SPLAT);
+}
+
+/* i32 guard: no active lane of `local` is a NaN, and FPCR is 0. */
+static void emit_lanes_ordered(Ctx *c, uint32_t local, bool dbl, bool q) {
+  lget(c, local);
+  lget(c, local);
+  simd(c, dbl ? WASM_SIMD_F64X2_EQ : WASM_SIMD_F32X4_EQ);
+  emit_all_lanes(c, q);
+  emit_fpcr_default(c);
+  op(c, WASM_OP_I32_AND);
+}
+
+/* Vector SCVTF/UCVTF: one rounding per lane (wasm rounds to nearest). */
+static void emit_vector_int_to_fp(Ctx *c, bool dbl, bool q, bool is_unsigned, uint32_t n, uint32_t d) {
+  load_v(c, n);
+  if (!dbl) {
+    simd(c, is_unsigned ? WASM_SIMD_F32X4_CONVERT_I32X4_U : WASM_SIMD_F32X4_CONVERT_I32X4_S);
+  } else { /* no i64x2 conversion: lane by lane */
+    lset(c, L_VA);
+    for (uint32_t lane = 0; lane < 2u; lane++) {
+      if (lane) lget(c, L_VR);
+      lget(c, L_VA);
+      simd(c, WASM_SIMD_I64X2_EXTRACT_LANE);
+      wasm_u8(c->b, (uint8_t)lane);
+      op(c, is_unsigned ? WASM_OP_F64_CONVERT_I64_U : WASM_OP_F64_CONVERT_I64_S);
+      if (lane) {
+        simd(c, WASM_SIMD_F64X2_REPLACE_LANE);
+        wasm_u8(c->b, (uint8_t)lane);
+      } else {
+        simd(c, WASM_SIMD_F64X2_SPLAT);
+      }
+      lset(c, L_VR);
+    }
+    lget(c, L_VR);
+  }
+  lset(c, L_VR);
+  emit_fp_env_ok(c);
+  fp_fast_arm(c);
+  store_v(c, d, L_VR, q);
+  Sync none = {0};
+  fp_else_exact(c, &none);
+}
+
+/* Vector FCVTZS/FCVTZU: every active lane in range (no saturation, no
+ * NaN: no IOC), then truncation, which only ever sets the sticky IXC. */
+static void emit_vector_fp_to_int(Ctx *c, bool dbl, bool q, bool is_unsigned, uint32_t n, uint32_t d) {
+  load_v(c, n);
+  lset(c, L_VA);
+  if (!dbl) {
+    lget(c, L_VA);
+    f32c(c, is_unsigned ? F32_MINUS_ONE : F32_MINUS_2_31);
+    simd(c, WASM_SIMD_F32X4_SPLAT);
+    simd(c, is_unsigned ? WASM_SIMD_F32X4_GT : WASM_SIMD_F32X4_GE);
+    lget(c, L_VA);
+    f32c(c, is_unsigned ? F32_2_32 : F32_2_31);
+    simd(c, WASM_SIMD_F32X4_SPLAT);
+    simd(c, WASM_SIMD_F32X4_LT);
+  } else {
+    lget(c, L_VA);
+    f64c(c, is_unsigned ? F64_MINUS_ONE : F64_MINUS_2_63);
+    simd(c, WASM_SIMD_F64X2_SPLAT);
+    simd(c, is_unsigned ? WASM_SIMD_F64X2_GT : WASM_SIMD_F64X2_GE);
+    lget(c, L_VA);
+    f64c(c, is_unsigned ? F64_2_64 : F64_2_63);
+    simd(c, WASM_SIMD_F64X2_SPLAT);
+    simd(c, WASM_SIMD_F64X2_LT);
+  }
+  simd(c, WASM_SIMD_V128_AND);
+  emit_all_lanes(c, q);
+  emit_fp_env_ok(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  if (!dbl) {
+    lget(c, L_VA);
+    simd(c, is_unsigned ? WASM_SIMD_I32X4_TRUNC_SAT_F32X4_U : WASM_SIMD_I32X4_TRUNC_SAT_F32X4_S);
+    lset(c, L_VR);
+  } else { /* in range: the scalar truncation cannot trap */
+    for (uint32_t lane = 0; lane < 2u; lane++) {
+      if (lane) lget(c, L_VR);
+      lget(c, L_VA);
+      simd(c, WASM_SIMD_F64X2_EXTRACT_LANE);
+      wasm_u8(c->b, (uint8_t)lane);
+      op(c, is_unsigned ? WASM_OP_I64_TRUNC_F64_U : WASM_OP_I64_TRUNC_F64_S);
+      if (lane) {
+        simd(c, WASM_SIMD_I64X2_REPLACE_LANE);
+        wasm_u8(c->b, (uint8_t)lane);
+      } else {
+        simd(c, WASM_SIMD_I64X2_SPLAT);
+      }
+      lset(c, L_VR);
+    }
+  }
+  store_v(c, d, L_VR, q);
+  Sync none = {0};
+  fp_else_exact(c, &none);
+}
+
+/* V[d] = lane masks of V[n] cmp (V[m] or 0.0): exact without NaNs and
+ * with FPCR 0 (FZ would compare denormals as zero). `absolute`: FACGE/FACGT. */
+static void emit_vector_fp_compare(Ctx *c, Fp_Compare cmp, bool dbl, bool q, bool with_zero, bool absolute,
+                                   uint32_t n, uint32_t m, uint32_t d) {
+  static const uint32_t ops32[5] = {WASM_SIMD_F32X4_EQ, WASM_SIMD_F32X4_GE, WASM_SIMD_F32X4_GT, WASM_SIMD_F32X4_LE,
+                                    WASM_SIMD_F32X4_LT};
+  static const uint32_t ops64[5] = {WASM_SIMD_F64X2_EQ, WASM_SIMD_F64X2_GE, WASM_SIMD_F64X2_GT, WASM_SIMD_F64X2_LE,
+                                    WASM_SIMD_F64X2_LT};
+  load_v(c, n);
+  if (absolute) simd(c, dbl ? WASM_SIMD_F64X2_ABS : WASM_SIMD_F32X4_ABS);
+  lset(c, L_VA);
+  if (with_zero) {
+    v128_fp_zero(c, dbl);
+  } else {
+    load_v(c, m);
+    if (absolute) simd(c, dbl ? WASM_SIMD_F64X2_ABS : WASM_SIMD_F32X4_ABS);
+  }
+  lset(c, L_VB);
+  emit_lanes_ordered(c, L_VA, dbl, q);
+  emit_lanes_ordered(c, L_VB, dbl, q);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  lget(c, L_VA);
+  lget(c, L_VB);
+  simd(c, dbl ? ops64[cmp] : ops32[cmp]);
+  lset(c, L_VR);
+  store_v(c, d, L_VR, q);
+  Sync none = {0};
+  fp_else_exact(c, &none);
+}
+
+/* Scalar SCVTF/UCVTF/FCVTZS/FCVTZU (vector forms on one element): V[d]
+ * as integer or FP bits, the rest zeroed. */
+static void emit_scalar_lane_convert(Ctx *c, bool to_fp, bool dbl, bool is_unsigned, uint32_t n, uint32_t d) {
+  const uint32_t r = fp_result_local(dbl);
+  if (to_fp) {
+    lget(c, L_STATE);
+    if (dbl) {
+      mem(c, WASM_OP_I64_LOAD, ALIGN_8, OFF_V(n));
+      op(c, is_unsigned ? WASM_OP_F64_CONVERT_I64_U : WASM_OP_F64_CONVERT_I64_S);
+    } else {
+      mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_V(n));
+      op(c, is_unsigned ? WASM_OP_F32_CONVERT_I32_U : WASM_OP_F32_CONVERT_I32_S);
+    }
+    lset(c, r);
+    emit_fp_env_ok(c);
+    fp_fast_arm(c);
+    store_fp_local(c, d, dbl, r);
+  } else {
+    load_fp(c, n, dbl);
+    lset(c, r);
+    emit_truncation_in_range(c, r, dbl, dbl, is_unsigned);
+    emit_fp_env_ok(c);
+    op(c, WASM_OP_I32_AND);
+    fp_fast_arm(c);
+    lget(c, r);
+    if (dbl) {
+      op(c, is_unsigned ? WASM_OP_I64_TRUNC_F64_U : WASM_OP_I64_TRUNC_F64_S);
+    } else {
+      op(c, is_unsigned ? WASM_OP_I32_TRUNC_F32_U : WASM_OP_I32_TRUNC_F32_S);
+      op(c, WASM_OP_I64_EXTEND_I32_U);
+    }
+    store_fp_bits(c, d);
+  }
+  Sync none = {0};
+  fp_else_exact(c, &none);
+}
+
+/* Two-register misc, FP forms (vector and scalar): FABS, FNEG,
+ * SCVTF/UCVTF, FCVTZS/FCVTZU, and the compares with zero (vector). */
+static bool c_simd_misc_fp(Ctx *c, uint32_t insn) {
+  if (bit(insn, 31) || !bit(insn, 21) || bits(insn, 20, 17) != 0 || bits(insn, 11, 10) != 2) return false;
+  const bool scalar = bits(insn, 28, 24) == 0x1E;
+  if (!scalar && bits(insn, 28, 24) != 0x0E) return false;
+  const bool q = bit(insn, 30), u = bit(insn, 29), dbl = bit(insn, 22), hi = bit(insn, 23);
+  if (scalar && !q) return false;
+  if (!scalar && dbl && !q) return false; /* .1D: reserved */
+  const uint32_t opcode = bits(insn, 16, 12), rn = bits(insn, 9, 5), rd = bits(insn, 4, 0);
+  if (opcode == 0x1D && !hi) { /* SCVTF / UCVTF */
+    if (scalar) emit_scalar_lane_convert(c, true, dbl, u, rn, rd);
+    else emit_vector_int_to_fp(c, dbl, q, u, rn, rd);
+    return true;
+  }
+  if (opcode == 0x1B && hi) { /* FCVTZS / FCVTZU */
+    if (scalar) emit_scalar_lane_convert(c, false, dbl, u, rn, rd);
+    else emit_vector_fp_to_int(c, dbl, q, u, rn, rd);
+    return true;
+  }
+  if (scalar || !hi) return false;
+  if (opcode == 0x0F) { /* FABS / FNEG: sign bit operations, no exceptions */
+    const uint64_t sign = dbl ? FP_SIGN_D : (uint64_t)FP_SIGN_S << 32 | FP_SIGN_S;
+    load_v(c, rn);
+    v128_const(c, u ? sign : ~sign, u ? sign : ~sign);
+    simd(c, u ? WASM_SIMD_V128_XOR : WASM_SIMD_V128_AND);
+    lset(c, L_VR);
+    store_v(c, rd, L_VR, q);
+    return true;
+  }
+  Fp_Compare cmp;
+  if (opcode == 0x0C) cmp = u ? FCMP_GE : FCMP_GT;
+  else if (opcode == 0x0D) cmp = u ? FCMP_LE : FCMP_EQ;
+  else if (opcode == 0x0E && !u) cmp = FCMP_LT;
+  else return false;
+  emit_vector_fp_compare(c, cmp, dbl, q, true, false, rn, 0, rd);
+  return true;
+}
+
+/* Byte lanes picking each pair's first (`odd` false) or second element:
+ * the pairs of n, then the pairs of m (a 64-bit vector: its low half). */
+static void pairwise_lanes(uint8_t lanes[SIMD_LANE_BYTES], uint32_t esize, uint32_t count, bool odd) {
+  uint8_t src[VECTOR_MAX_LANES];
+  bool from_m[VECTOR_MAX_LANES];
+  const uint32_t half = count / 2u;
+  for (uint32_t i = 0; i < count; i++) {
+    from_m[i] = i >= half;
+    src[i] = (uint8_t)(2u * (i % half) + (odd ? 1u : 0u));
+  }
+  element_lanes(lanes, esize, count, src, from_m);
+}
+
+/* ADDP, SMAXP/UMAXP, SMINP/UMINP (vector). */
+static bool c_simd_pairwise(Ctx *c, uint32_t insn) {
+  if (bit(insn, 31) || bits(insn, 28, 24) != 0x0E || !bit(insn, 21) || !bit(insn, 10)) return false;
+  const bool q = bit(insn, 30), u = bit(insn, 29);
+  const uint32_t size = bits(insn, 23, 22), opcode = bits(insn, 15, 11);
+  static const uint32_t add[ELEMENT_SIZES] = {WASM_SIMD_I8X16_ADD, WASM_SIMD_I16X8_ADD, WASM_SIMD_I32X4_ADD,
+                                              WASM_SIMD_I64X2_ADD};
+  static const uint32_t min_s[3] = {WASM_SIMD_I8X16_MIN_S, WASM_SIMD_I16X8_MIN_S, WASM_SIMD_I32X4_MIN_S};
+  uint32_t wop;
+  if (opcode == 0x17 && !u) { /* ADDP */
+    if (size == 3u && !q) return false;
+    wop = add[size];
+  } else if (opcode == 0x14 || opcode == 0x15) { /* MAXP, MINP: min_s, min_u, max_s, max_u follow each other */
+    if (size == 3u) return false;
+    wop = min_s[size] + (opcode == 0x14 ? 2u : 0u) + (u ? 1u : 0u);
+  } else {
+    return false;
+  }
+  const uint32_t esize = 1u << size, count = (q ? SIMD_LANE_BYTES : SIMD_LANE_BYTES / 2u) / esize;
+  uint8_t even[SIMD_LANE_BYTES], odd[SIMD_LANE_BYTES];
+  pairwise_lanes(even, esize, count, false);
+  pairwise_lanes(odd, esize, count, true);
+  load_v(c, bits(insn, 9, 5));
+  lset(c, L_VA);
+  load_v(c, bits(insn, 20, 16));
+  lset(c, L_VB);
+  lget(c, L_VA);
+  lget(c, L_VB);
+  v128_shuffle(c, even);
+  lget(c, L_VA);
+  lget(c, L_VB);
+  v128_shuffle(c, odd);
+  simd(c, wop);
+  lset(c, L_VR);
+  store_v(c, bits(insn, 4, 0), L_VR, q);
+  return true;
+}
+
+/* SSHLL/USHLL (and SXTL/UXTL), with the "2" forms reading the upper half. */
+static bool c_simd_shift_long(Ctx *c, uint32_t insn) {
+  if (bit(insn, 31) || bits(insn, 28, 23) != 0x1E || bits(insn, 15, 10) != 0x29) return false;
+  const uint32_t immh = bits(insn, 22, 19);
+  if (immh == 0 || (immh & 8u)) return false;
+  const uint32_t lsize = (immh & 4u) ? 2u : (immh & 2u) ? 1u : 0u;
+  const uint32_t shift = bits(insn, 22, 16) - (8u << lsize);
+  static const uint32_t extend[3] = {WASM_SIMD_I16X8_EXTEND_LOW_I8X16_S, WASM_SIMD_I32X4_EXTEND_LOW_I16X8_S,
+                                     WASM_SIMD_I64X2_EXTEND_LOW_I32X4_S};
+  static const uint32_t shl[3] = {WASM_SIMD_I16X8_SHL, WASM_SIMD_I32X4_SHL, WASM_SIMD_I64X2_SHL};
+  load_v(c, bits(insn, 9, 5));
+  /* low_s, high_s, low_u, high_u */
+  simd(c, extend[lsize] + (bit(insn, 29) ? 2u : 0u) + (bit(insn, 30) ? 1u : 0u));
+  if (shift) {
+    i32c(c, shift);
+    simd(c, shl[lsize]);
+  }
+  lset(c, L_VR);
+  store_v(c, bits(insn, 4, 0), L_VR, true);
+  return true;
+}
+
 static bool c_simd_fp(Ctx *c, uint32_t insn) {
-  if (c_scalar_fp_fast(c, insn) || c_vector_fp_fast(c, insn) || c_vector_int_fast(c, insn)) return true;
+  if (c_scalar_fp_fast(c, insn) || c_vector_fp_fast(c, insn) || c_vector_int_fast(c, insn) || c_simd_copy(c, insn) ||
+      c_simd_misc_fp(c, insn) || c_simd_pairwise(c, insn) || c_simd_shift_long(c, insn))
+    return true;
   Sync sync = {0};
   simd_fp_sync(insn, &sync);
   emit_direct_call(c, &sync);

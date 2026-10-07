@@ -124,6 +124,10 @@ uint32_t jit_helper_write(Jit_State *state, uint64_t address, uint32_t size);
  * general registers and NZCV it touches. 0 if it completed; otherwise
  * nothing changed and the compiled code hands it to the interpreter. */
 uint32_t jit_helper_simd(Jit_State *state, uint32_t insn);
+/* Fallback profile (diagnostics): the compiler notes each instruction it
+ * gave an inline fast path, so the profile can tell guard misses (the
+ * exact arm) from instructions with no fast path. */
+void jit_note_fast_path(uint32_t insn);
 
 /* ------------------------------------------------------------------ */
 /* Compiler (jit_compile.c).                                           */
