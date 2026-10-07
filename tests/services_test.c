@@ -540,6 +540,16 @@ static void test_set_apm_am(void) {
   r = call(getter, 9, NULL, 0, NULL);
   CHECK(r.data[0] == AM_FOCUS_IN_FOCUS);
 
+  /* GetSaveDataSize: a non-zero capacity and journal (titles check it). */
+  const uint32_t app = object(proxy, 20, NULL, 0);
+  uint8_t save_args[24];
+  memset(save_args, 0, sizeof(save_args));
+  save_args[0] = 1; /* account save */
+  r = call(app, 26, save_args, sizeof(save_args), NULL);
+  uint64_t sizes[2];
+  memcpy(sizes, r.data, sizeof(sizes));
+  CHECK(sizes[0] == AM_SAVE_DATA_SIZE && sizes[1] == AM_SAVE_JOURNAL_SIZE);
+
   /* Storage: create, write, read back; out of bounds refused. */
   const uint32_t creator = object(proxy, 11, NULL, 0);
   const uint64_t size = 16;

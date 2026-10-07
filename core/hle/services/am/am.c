@@ -259,6 +259,20 @@ static HLE_ServiceResult cmd_get_pseudo_device_id(HLE_Context *c, Service_Object
   return HLE_RESULT_SUCCESS;
 }
 
+/* GetSaveDataSize (type, uid) -> u64 size, u64 journal size: what the
+ * title's save data holds. Voland's saves grow as needed, so this reports
+ * a generous capacity; titles that check it before saving (SSBU asks at
+ * start-up) then save instead of seeing no room. */
+static HLE_ServiceResult cmd_get_save_data_size(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                                IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)ipc_response_push_u64(res, AM_SAVE_DATA_SIZE);
+  (void)ipc_response_push_u64(res, AM_SAVE_JOURNAL_SIZE);
+  return HLE_RESULT_SUCCESS;
+}
+
 /* EnsureSaveData -> u64 required size (0: nothing to do). */
 static HLE_ServiceResult cmd_ensure_save_data(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                               IPC_Response *res) {
@@ -918,7 +932,7 @@ static const Service_Command k_application_functions_commands[] = {
     {22, service_cmd_ok, "SetTerminateResult_stub"},
     {23, cmd_get_display_version, "GetDisplayVersion"},
     {25, service_cmd_out_zero128, "ExtendSaveData"},
-    {26, service_cmd_out_zero128, "GetSaveDataSize"},
+    {26, cmd_get_save_data_size, "GetSaveDataSize"},
     {30, service_cmd_ok, "BeginBlockingHomeButtonShortAndLongPressed_stub"},
     {31, service_cmd_ok, "EndBlockingHomeButtonShortAndLongPressed_stub"},
     {32, service_cmd_ok, "BeginBlockingHomeButton_stub"},

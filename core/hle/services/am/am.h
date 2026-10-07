@@ -54,6 +54,8 @@
 
 #define AM_STORAGE_CAPACITY 32u
 #define AM_STORAGE_MAX_BYTES 0x8000u /* software keyboard configs are the largest common storage */
+#define AM_SAVE_DATA_SIZE ((uint64_t)64 * 1024 * 1024)    /* GetSaveDataSize: capacity reported */
+#define AM_SAVE_JOURNAL_SIZE ((uint64_t)64 * 1024 * 1024)
 #define AM_APPLET_CAPACITY 8u
 
 #define AM_STORAGE_POOL_BYTES ((uint64_t)AM_STORAGE_CAPACITY * AM_STORAGE_MAX_BYTES)
