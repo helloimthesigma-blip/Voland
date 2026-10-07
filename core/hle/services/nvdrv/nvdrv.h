@@ -85,6 +85,9 @@ typedef enum Nv_Device {
   NV_DEVICE_NVJPG,
 } Nv_Device;
 
+#define NVDRV_GRANULE_HINTS 1024u /* power of two */
+#define NVDRV_GRANULE_SHIFT 16u
+
 typedef struct Nv_Fd {
   Nv_Device device;
   uint32_t syncpoint;   /* channels: their syncpoint, allocated on open/gpfifo */
@@ -127,6 +130,9 @@ typedef struct Nvdrv_State {
   Gpu_Mapping mappings[NVDRV_MAX_GPU_MAPPINGS];
   uint32_t mapping_end;    /* one past the highest slot ever used: scans stop here */
   uint32_t last_mapping;   /* the slot the last translation hit (checked first) */
+  /* Then a hint per 64 KiB GPU granule (direct mapped): compute and vertex
+   * fetch alternate between buffers, and a miss scans every mapping. */
+  uint32_t granule_hint[NVDRV_GRANULE_HINTS];
   uint64_t next_gpu_va;
   Syncpoints syncpoints;
   Nv_Event_Slot events[NVDRV_MAX_EVENTS];

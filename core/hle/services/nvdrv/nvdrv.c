@@ -428,9 +428,15 @@ bool nvdrv_gpu_translate(const Nvdrv_State *s, uint64_t gpu_va, uint64_t *guest_
   const uint32_t hint = __atomic_load_n(&s->last_mapping, __ATOMIC_RELAXED);
   uint32_t found = UINT32_MAX;
   if (hint < s->mapping_end && mapping_covers(&s->mappings[hint], gpu_va)) found = hint;
+  const uint32_t granule = (uint32_t)(gpu_va >> NVDRV_GRANULE_SHIFT) & (NVDRV_GRANULE_HINTS - 1u);
+  if (found == UINT32_MAX) {
+    const uint32_t g = __atomic_load_n(&s->granule_hint[granule], __ATOMIC_RELAXED);
+    if (g < s->mapping_end && mapping_covers(&s->mappings[g], gpu_va)) found = g;
+  }
   for (uint32_t i = 0; found == UINT32_MAX && i < s->mapping_end; i++)
     if (mapping_covers(&s->mappings[i], gpu_va)) found = i;
   if (found == UINT32_MAX) return false;
+  __atomic_store_n((uint32_t *)&s->granule_hint[granule], found, __ATOMIC_RELAXED);
   const Gpu_Mapping *m = &s->mappings[found];
   uint64_t base = 0, size = 0;
   if (!nvdrv_nvmap_lookup(s, m->nvmap_handle, &base, &size)) return false;
