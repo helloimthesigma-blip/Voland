@@ -1353,6 +1353,12 @@ static int run(int argc, char **argv) {
             (unsigned long long)(gs->upload_bytes >> 20), (unsigned long long)gs->surfaces,
             (unsigned long long)gs->presents, (unsigned long long)gs->copies,
             (unsigned long long)(gs->hashed_bytes >> 20));
+    fprintf(stderr,
+            "voland-cli: GPU texture re-hash: %llu whole hashes; MB new %llu, unsampled %llu, sample changed %llu, "
+            "periodic %llu, forced by writes %llu\n",
+            (unsigned long long)gs->full_hashes, (unsigned long long)(gs->hashed_new >> 20),
+            (unsigned long long)(gs->hashed_unsampled >> 20), (unsigned long long)(gs->hashed_changed >> 20),
+            (unsigned long long)(gs->hashed_periodic >> 20), (unsigned long long)(gs->hashed_forced >> 20));
   }
   if (pc_profile) pc_profile_print(&emu);
   if (stats_from) time_stats_print(&emu);

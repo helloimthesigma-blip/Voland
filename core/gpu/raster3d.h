@@ -105,6 +105,7 @@ typedef struct Raster3d_Texture {
   uint64_t raw_hash;     /* of the guest bytes it was decoded from */
   uint32_t validated;    /* epoch (frame) it was last checked against guest memory */
   uint32_t full_epoch;   /* epoch of its last whole-texture hash (between those, a sampled hash) */
+  bool forced;           /* textures_invalidate asked for a whole hash */
   uint64_t sample_hash;  /* hash of RASTER_TEXTURE_SAMPLES spans of its guest bytes */
   uint64_t address;      /* guest bytes it was decoded from */
   uint64_t raw_bytes;
@@ -154,6 +155,11 @@ typedef struct Raster3d_Gpu_Stats {
   uint64_t presents;
   uint64_t copies;
   uint64_t hashed_bytes; /* guest texture bytes re-hashed to detect changes */
+  /* ...by reason: first sight (or evicted), too small or unreadable to
+   * sample, the sampled hash changed, the periodic whole hash, forced by
+   * a write over it (textures_invalidate); and the whole hashes done. */
+  uint64_t hashed_new, hashed_unsampled, hashed_changed, hashed_periodic, hashed_forced;
+  uint64_t full_hashes;
 } Raster3d_Gpu_Stats;
 
 typedef struct Raster3d_Stats {

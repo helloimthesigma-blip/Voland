@@ -576,6 +576,7 @@ static void textures_invalidate(Raster3d *r, uint64_t address, uint64_t bytes) {
     if (t->valid && t->address < address + bytes && address < t->address + t->raw_bytes) {
       t->validated = r->texture_epoch - 1u;
       t->full_epoch = r->texture_epoch - RASTER_TEXTURE_FULL_EVERY; /* a whole hash next time */
+      t->forced = true;
     }
   }
 }
@@ -1019,6 +1020,8 @@ static Raster3d_Texture *surface_view(Raster3d *r, const uint32_t tic[8]) {
 
 /* ---- texture cache ------------------------------------------------ */
 
+#define RASTER_REHASH_LOG_BYTES ((uint64_t)4 * 1024 * 1024) /* whole hashes this large are logged (debug) */
+
 /* The least recently used texture the current draw has not touched (its
  * workers may be sampling every texture it has), or NULL. */
 static Raster3d_Texture *texture_victim(Raster3d *r) {
@@ -1114,7 +1117,20 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
   }
   /* Hashed in place: the whole texture is staged only to decode it. */
   uint64_t hash = 0;
-  r->gpu_stats.hashed_bytes += raw_bytes;
+  Raster3d_Gpu_Stats *gs = &r->gpu_stats;
+  gs->hashed_bytes += raw_bytes;
+  gs->full_hashes++;
+  if (!usable) gs->hashed_new += raw_bytes;
+  else if (t->forced) gs->hashed_forced += raw_bytes;
+  else if (!sampled || t->raw_bytes != raw_bytes) gs->hashed_unsampled += raw_bytes;
+  else if (t->sample_hash != sample) gs->hashed_changed += raw_bytes;
+  else gs->hashed_periodic += raw_bytes;
+  if (raw_bytes >= RASTER_REHASH_LOG_BYTES)
+    log_debug("[gpu] texture @%llx: whole hash of %llu KB (%s)", (unsigned long long)h.address,
+              (unsigned long long)(raw_bytes >> 10),
+              !usable ? "new" : t->forced ? "forced" : (!sampled || t->raw_bytes != raw_bytes) ? "unsampled"
+                      : t->sample_hash != sample ? "sample changed" : "periodic");
+  if (t) t->forced = false;
   if (!guest_hash(mem, h.address, raw_bytes, &hash)) {
     texture_miss(r, &h, "unreadable");
     return NULL;
@@ -2897,7 +2913,10 @@ static void gpu_surface_upload(Raster3d *r, Raster3d_Gpu_Surface *s, const Gpu_M
  * its current guest contents matter (not about to be fully overwritten). */
 static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d, const Gpu_Memory *mem, bool load) {
   r->tick++;
-  textures_invalidate(r, d->address, surface_guest_bytes(d));
+  /* No textures_invalidate: GPU drawing never changes guest memory, so a
+   * texture over a render target's bytes hashes the same before and after
+   * (one that is the target samples it through gpu_surface_at). Forcing
+   * a whole re-hash per bound target cost SSBU ~1.5 GB hashed per frame. */
   Raster3d_Gpu_Surface *victim = NULL;
   for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
     Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
@@ -3288,6 +3307,17 @@ static uint32_t gpu_shader_for(Raster3d *r, const Sm_Program *program, const Wgs
   return entry->id;
 }
 
+/* The words of constant buffer `slot` a program can read: none if it
+ * never touches the slot, up to its highest direct offset, or the whole
+ * bound buffer when it indexes it (cbuf_extent). An unread tail reads 0
+ * in WGSL - the same as the program never reading it. */
+static uint32_t cbuf_words_read(const Sm_Program *program, const Sm_Env *env, uint32_t slot) {
+  if (!((program->cbuf_used >> slot) & 1u)) return 0;
+  const uint32_t extent = program->cbuf_extent[slot];
+  const uint32_t bytes = extent < env->cbuf_size[slot] ? extent : env->cbuf_size[slot];
+  return (bytes + 3u) / 4u;
+}
+
 static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex *provoking, bool front) {
   Draw_Context *ctx = rs->ctx;
   Raster3d *r = ctx->r;
@@ -3418,7 +3448,8 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
   const Sm_Env *penv = &ctx->env[1];
   for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++) {
     if (!penv->cbuf[s] || !penv->cbuf_size[s]) continue;
-    const uint32_t n = penv->cbuf_size[s] / 4u;
+    const uint32_t n = cbuf_words_read(ctx->ps, penv, s);
+    if (!n) continue;
     memcpy(data + words, penv->cbuf[s], (size_t)n * 4u);
     data[WGSL_DRAW_CBUF_TABLE + 2u * s] = words;
     data[WGSL_DRAW_CBUF_TABLE + 2u * s + 1u] = n;
@@ -3429,7 +3460,8 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
     const Sm_Env *venv = &ctx->env[0];
     for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++) {
       if (!venv->cbuf[s] || !venv->cbuf_size[s]) continue;
-      const uint32_t n = venv->cbuf_size[s] / 4u;
+      const uint32_t n = cbuf_words_read(ctx->vs, venv, s);
+      if (!n) continue;
       memcpy(data + words, venv->cbuf[s], (size_t)n * 4u);
       data[WGSL_DRAW_VS_CBUF_TABLE + 2u * s] = words;
       data[WGSL_DRAW_VS_CBUF_TABLE + 2u * s + 1u] = n;
