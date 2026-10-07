@@ -2494,6 +2494,7 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - **Interactions:** written ranges re-validate cached textures and GPU surfaces (`raster3d_sync_range`), and software surfaces are written back first.
   - **Why:** SSBU issues ~80 compute launches per frame. Ignoring them left the buffers its final composite reads as zeros, so fights rendered black natively.
   - **Limitations:** in GPU mode the programs still run on the CPU and cannot see GPU-only render targets. WGSL compute is future work.
+- **Textures: BC6H (BPTC float, UF16/SF16)** decode from the Khronos Data Format Specification §20.2 (`bc6h_decode_block` in `gpu/bc7.c`). The 14 mode layouts are transcribed from its Table 122, and texels come out as RGBA16F. SSBU lights fighters with BC6H cube maps, which used to be texture misses. Unsigned output matches Pillow's decoder on 49152 random-block channels. Pillow's signed output disagrees on pixels containing negative or very large values, so the signed form follows the specification's text. Missing formats are now logged once per format.
 - **Maxwell shaders (SSBU fights):**
   - TEXS/TLDS with bit 59 clear (top byte 0xd0–0xd3) write their results as packed half floats, two per register: (c0, c1) in Rd and (c2, c3) in Rd2.
   - IADD3 (A + B + C with per-operand negation; the register form also has 16-bit halves and a 16-bit shift of A + B) is implemented in the interpreter and the WGSL translator.

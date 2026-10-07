@@ -10,6 +10,7 @@
 #ifndef SWITCH_GPU_BC7_H
 #define SWITCH_GPU_BC7_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #define BC7_BLOCK_BYTES 16u
@@ -18,5 +19,10 @@
 /* Decodes one 4x4 block into RGBA8 texels in row-major order. A block
  * with no valid mode decodes to transparent black, as the spec requires. */
 void bc7_decode_block(const uint8_t block[BC7_BLOCK_BYTES], uint8_t out[BC7_TEXELS][4]);
+
+/* BC6H (BPTC float, Khronos Data Format Specification §20.2): one 4x4
+ * block into half-float RGBA texels (alpha 1.0), row-major. Reserved
+ * modes decode to (0, 0, 0, 1). `is_signed`: BC6H_SF16, else UF16. */
+void bc6h_decode_block(const uint8_t block[BC7_BLOCK_BYTES], bool is_signed, uint16_t out[BC7_TEXELS][4]);
 
 #endif /* SWITCH_GPU_BC7_H */

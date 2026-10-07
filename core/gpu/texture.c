@@ -102,6 +102,8 @@ void tex_sampler_parse(const uint32_t words[8], Tex_Sampler *out) {
 #define FMT_G8R24 0x0du
 #define FMT_G24R8 0x0eu
 #define FMT_R32 0x0fu
+#define FMT_BC6H_SF16 0x10u
+#define FMT_BC6H_UF16 0x11u
 #define FMT_A4B4G4R4 0x12u
 #define FMT_A5B5G5R1 0x13u
 #define FMT_A1B5G5R5 0x14u
@@ -145,7 +147,7 @@ static const Format_Info k_formats[] = {
     {FMT_R16, 2, 1, 1, {16, 0, 0, 0}}, {FMT_Y8_VIDEO, 1, 1, 1, {8, 0, 0, 0}}, {FMT_R8, 1, 1, 1, {8, 0, 0, 0}},
     {FMT_G4R4, 1, 1, 1, {4, 4, 0, 0}}, {FMT_E5B9G9R9, 4, 1, 1, {0}}, {FMT_BF10GF11RF11, 4, 1, 1, {0}},
     {FMT_DXT1, 8, 4, 4, {0}}, {FMT_DXT23, 16, 4, 4, {0}}, {FMT_DXT45, 16, 4, 4, {0}}, {FMT_DXN1, 8, 4, 4, {0}},
-    {FMT_DXN2, 16, 4, 4, {0}}, {FMT_BC7U, 16, 4, 4, {0}},
+    {FMT_DXN2, 16, 4, 4, {0}}, {FMT_BC7U, 16, 4, 4, {0}}, {FMT_BC6H_SF16, 16, 4, 4, {0}}, {FMT_BC6H_UF16, 16, 4, 4, {0}},
     {FMT_Z24S8, 4, 1, 1, {0}}, {FMT_X8Z24, 4, 1, 1, {0}}, {FMT_S8Z24, 4, 1, 1, {0}}, {FMT_ZF32, 4, 1, 1, {0}},
     {FMT_ZF32_X24S8, 8, 1, 1, {0}}, {FMT_Z16, 2, 1, 1, {0}},
     /* ASTC: 16-byte blocks of various footprints. */
@@ -235,6 +237,11 @@ static bool expands_to_rgba8(const Tex_Header *h) {
   return true;
 }
 
+static bool is_bc6h(uint32_t format) { return format == FMT_BC6H_SF16 || format == FMT_BC6H_UF16; }
+
+#define RGBA16F_TEXEL_BYTES 8u
+static uint32_t expanded_texel_bytes(const Tex_Header *h) { return is_bc6h(h->format) ? RGBA16F_TEXEL_BYTES : 4u; }
+
 uint64_t tex_decoded_bytes(const Tex_Header *h) {
   const Format_Info *f = format_info(h->format);
   if (!f) return 0;
@@ -242,8 +249,8 @@ uint64_t tex_decoded_bytes(const Tex_Header *h) {
   const uint32_t cols = (h->width + f->bw - 1u) / f->bw, rows = (h->height + f->bh - 1u) / f->bh;
   const uint64_t linear = (uint64_t)cols * f->bytes * rows * layers;
   if (f->bw == 1u && !expands_to_rgba8(h)) return linear;
-  /* Expanded RGBA8 plus the linear compressed staging. */
-  return (uint64_t)h->width * h->height * 4u * layers + linear;
+  /* Expanded RGBA8 (BC6H: RGBA16F) plus the linear compressed staging. */
+  return (uint64_t)h->width * h->height * expanded_texel_bytes(h) * layers + linear;
 }
 
 /* ---- BCn ---------------------------------------------------------- */
@@ -358,7 +365,8 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
   const uint64_t linear_layer = (uint64_t)row_bytes * rows;
   const uint64_t stride = tex_layer_stride(h);
   const bool expand = expands_to_rgba8(h);
-  uint8_t *linear = (f->bw == 1u && !expand) ? dst : dst + (uint64_t)h->width * h->height * 4u * layers;
+  uint8_t *linear =
+      (f->bw == 1u && !expand) ? dst : dst + (uint64_t)h->width * h->height * expanded_texel_bytes(h) * layers;
   for (uint32_t layer = 0; layer < layers; layer++) {
     const uint8_t *src = raw + stride * layer;
     uint8_t *to = linear + linear_layer * layer;
@@ -406,6 +414,31 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
     out->bytes_per_texel = f->bytes;
     out->row_bytes = row_bytes;
     out->layer_bytes = linear_layer;
+    out->texels = dst;
+    out->valid = true;
+    return true;
+  }
+  if (is_bc6h(h->format)) { /* HDR blocks: half-float RGBA texels */
+    const uint32_t out_row = h->width * RGBA16F_TEXEL_BYTES;
+    for (uint32_t layer = 0; layer < layers; layer++) {
+      const uint8_t *blocks = linear + linear_layer * layer;
+      uint8_t *texels = dst + (uint64_t)out_row * h->height * layer;
+      for (uint32_t by = 0; by < rows; by++)
+        for (uint32_t bx = 0; bx < cols; bx++) {
+          uint16_t px[BC7_TEXELS][4];
+          bc6h_decode_block(blocks + (uint64_t)by * row_bytes + (uint64_t)bx * f->bytes, h->format == FMT_BC6H_SF16, px);
+          for (uint32_t i = 0; i < BC7_TEXELS; i++) {
+            const uint32_t x = bx * f->bw + i % f->bw, y = by * f->bh + i / f->bw;
+            if (x >= h->width || y >= h->height) continue;
+            memcpy(texels + (uint64_t)y * out_row + (uint64_t)x * RGBA16F_TEXEL_BYTES, px[i], RGBA16F_TEXEL_BYTES);
+          }
+        }
+    }
+    out->format = FMT_R16_G16_B16_A16;
+    for (uint32_t c = 0; c < 4u; c++) out->header.data_type[c] = TEX_DATA_FLOAT;
+    out->bytes_per_texel = RGBA16F_TEXEL_BYTES;
+    out->row_bytes = out_row;
+    out->layer_bytes = (uint64_t)out_row * h->height;
     out->texels = dst;
     out->valid = true;
     return true;

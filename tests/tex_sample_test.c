@@ -4,10 +4,14 @@
  * reading outside the texture - SSBU's first match once crashed the
  * reference renderer this way (x0 saturated to INT32_MAX, x0 + 1 wrapped
  * negative and passed the fast path's bounds check).
+ *
+ * Also: a BC6H (unsigned) texture decodes to half-float RGBA texels that
+ * read back as its block's values (SSBU lights with BC6H cube maps).
  */
 #define CHECK_NAME "tex_sample_test"
 #include "check.h"
 
+#include "gpu/bc7.h"
 #include "gpu/texture.h"
 
 #include <math.h>
@@ -15,6 +19,7 @@
 #include <string.h>
 
 #define SIDE 4u
+#define BC6H_UF16_FORMAT 0x11u
 
 static uint8_t g_texels[SIDE * SIDE * 4u];
 
@@ -55,6 +60,40 @@ int main(void) {
   float red;
   memcpy(&red, &out[0], sizeof(red));
   CHECK(fabsf(red - (float)g_texels[(2u * SIDE + 1u) * 4u] / 255.0f) < 1e-6f);
+  /* BC6H: one 4x4 block, pitch layout. */
+  {
+    static const uint8_t block[BC7_BLOCK_BYTES] = {0x03, 0x91, 0x4c, 0x2e, 0x7a, 0x15, 0xc8, 0x63,
+                                                   0x0f, 0xb2, 0x55, 0x19, 0xe4, 0x87, 0x3d, 0xa6};
+    Tex_Header h;
+    memset(&h, 0, sizeof(h));
+    h.format = BC6H_UF16_FORMAT;
+    h.width = h.height = SIDE;
+    h.type = TEX_TYPE_2D;
+    h.layout = TEX_LAYOUT_PITCH;
+    h.pitch = BC7_BLOCK_BYTES;
+    h.levels = 1;
+    for (uint32_t c = 0; c < 4u; c++) h.data_type[c] = TEX_DATA_FLOAT;
+    static uint8_t decoded[4096];
+    CHECK(tex_decoded_bytes(&h) <= sizeof(decoded));
+    Tex_Image bc6;
+    CHECK(tex_decode(&h, block, decoded, &bc6));
+    CHECK(bc6.bytes_per_texel == 8u && !bc6.rgba8);
+    uint16_t want[BC7_TEXELS][4];
+    bc6h_decode_block(block, false, want);
+    uint32_t differ = 0;
+    for (uint32_t t = 0; t < BC7_TEXELS; t++) {
+      uint32_t texel[4];
+      tex_texel(&bc6, t % SIDE, t / SIDE, 0, texel);
+      for (uint32_t c = 0; c < 4u; c++) {
+        const uint32_t h16 = want[t][c], exponent = (h16 >> 10) & 0x1fu, mantissa = h16 & 0x3ffu;
+        const float expect = exponent ? ldexpf((float)(mantissa | 0x400u), (int)exponent - 25) : ldexpf((float)mantissa, -24);
+        float got;
+        memcpy(&got, &texel[c], sizeof(got));
+        if (got != expect) differ++;
+      }
+    }
+    CHECK(differ == 0);
+  }
   printf("[tex_sample_test] passed\n");
   return 0;
 }

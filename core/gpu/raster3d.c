@@ -1074,8 +1074,15 @@ static size_t pool_allocate(Raster3d *r, size_t bytes) {
   }
 }
 
+#define MISS_FORMATS_LOGGED 32u
 static void texture_miss(Raster3d *r, const Tex_Header *h, const char *why) {
-  if (!r->stats.texture_misses)
+  /* Each format's first miss (one bad format must not hide another). */
+  static uint32_t seen[MISS_FORMATS_LOGGED];
+  static uint32_t seen_count;
+  bool first = true;
+  for (uint32_t i = 0; i < seen_count; i++) first = first && seen[i] != h->format;
+  if (first && seen_count < MISS_FORMATS_LOGGED) seen[seen_count++] = h->format;
+  if (first)
     log_warn("[gpu] texture %ux%u format 0x%02x layout %u type %u at %llx: %s", h->width, h->height, h->format, h->layout,
              h->type, (unsigned long long)h->address, why);
   r->stats.texture_misses++;
