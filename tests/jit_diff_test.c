@@ -544,7 +544,10 @@ static void run_case(uint32_t iteration) {
   if (only == -2) only = getenv("JIT_ONLY") ? atoi(getenv("JIT_ONLY")) : -1;
   if (only >= 0 && (int)iteration != only) return;
 
-  /* JIT: run() with the same budgets. */
+  /* JIT: run() with the same budgets - every fourth stream compiled as
+   * for parallel guest threads (fenced, CAS exclusives, generation-checked
+   * translation caches), which one thread must not be able to tell apart. */
+  cpu_set_multicore((iteration & 3u) == 3u);
   CHECK_OK(vmm_write_physical(g_vmm, DATA_PA, g_data_init, DATA_BYTES));
   set_state(g_jit_cpu, g_jit, x, sp, nzcv);
   CPU_ExitReason jit_exit = CPU_EXIT_CYCLES_ELAPSED;
@@ -573,6 +576,7 @@ static void run_case(uint32_t iteration) {
     if (jit_exit != CPU_EXIT_CYCLES_ELAPSED) break;
   }
   const Snapshot jit = snapshot(g_jit_cpu, g_jit, jit_exit, jit_cycles);
+  cpu_set_multicore(false);
   static uint8_t data_jit[DATA_BYTES];
   CHECK_OK(vmm_read_physical(g_vmm, DATA_PA, data_jit, DATA_BYTES));
 
