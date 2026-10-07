@@ -570,10 +570,19 @@ static void surface_load(Raster3d *r, Raster3d_Surface *s, const Gpu_Memory *mem
 /* Render-to-texture: a decoded texture over memory the GPU is about to
  * draw into is re-checked against guest memory at its next use, even
  * within the submission that already validated it. */
+#define INVALIDATE_LOG_LIMIT 300u /* debug lines describing forced re-hashes */
 static void textures_invalidate(Raster3d *r, uint64_t address, uint64_t bytes) {
+  static uint32_t logged;
   for (uint32_t i = 0; i < RASTER_TEXTURES; i++) {
     Raster3d_Texture *t = &r->textures[i];
     if (t->valid && t->address < address + bytes && address < t->address + t->raw_bytes) {
+      if (r->gpu && !t->forced && logged < INVALIDATE_LOG_LIMIT) {
+        logged++;
+        log_debug("[gpu] write %llx+%llx forces texture %llx+%llx (%ux%u fmt 0x%02x levels %u layers %u)",
+                  (unsigned long long)address, (unsigned long long)bytes, (unsigned long long)t->address,
+                  (unsigned long long)t->raw_bytes, t->image.width, t->image.height, t->image.header.format,
+                  t->image.header.levels, t->image.layers);
+      }
       t->validated = r->texture_epoch - 1u;
       t->full_epoch = r->texture_epoch - RASTER_TEXTURE_FULL_EVERY; /* a whole hash next time */
       t->forced = true;

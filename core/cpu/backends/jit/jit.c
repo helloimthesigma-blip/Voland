@@ -193,6 +193,14 @@ void jit_print_hot_regions(uint32_t top) {
   const Jit_Entry *g_cache = g_main_thread.cache; /* the first core's (the CLI runs one) */
   static bool printed[JIT_CACHE_ENTRIES];
   memset(printed, 0, sizeof(printed));
+  uint64_t entries = 0, weighted = 0;
+  for (uint32_t i = 0; i < JIT_CACHE_ENTRIES; i++) {
+    if (!g_cache[i].function) continue;
+    entries += g_cache[i].entries;
+    weighted += g_cache[i].entries * g_cache[i].length;
+  }
+  fprintf(stderr, "  region entries %llu (cached regions), entry-block instructions per entry %.1f\n",
+          (unsigned long long)entries, entries ? (double)weighted / (double)entries : 0.0);
   for (uint32_t n = 0; n < top; n++) {
     uint32_t best = JIT_CACHE_ENTRIES;
     uint64_t best_weight = 0;

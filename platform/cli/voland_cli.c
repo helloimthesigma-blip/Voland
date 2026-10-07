@@ -35,7 +35,8 @@
  *                                    (max_slices N, input S:HEX:L, frame PATH,
  *                                    every N, trace S:L, log PATH, snapshot N DIR -
  *                                    a nested snapshot server, gpu_stream FILE -
- *                                    GPU mode recorded from here); the result is
+ *                                    GPU mode recorded from here, dump_shaders DIR);
+ *                                    the result is
  *                                    DIR/job.done.<pid>. DIR/quit ends the server.
  *                                    Iterating on a late scene without replaying.
  *       --font FILE                  the TTF/OTF pl:u serves as the system font
@@ -441,6 +442,7 @@ typedef struct Snapshot_Job {
   char frame_path[512];
   char snapshot_dir[512];
   char gpu_stream_path[512]; /* "gpu_stream FILE": record GPU mode from the job's start */
+  char dump_shaders[512];    /* "dump_shaders DIR": VOLAND_DUMP_SHADERS from the job's start */
   Input_Event inputs[MAX_INPUT_EVENTS];
   uint32_t input_count;
   int32_t host_cores; /* "cores N": --host-cores for this job; -1 = unchanged */
@@ -466,6 +468,7 @@ static bool read_job(const char *path, Snapshot_Job *job) {
     } else if (sscanf(line, "snapshot %llu %511s", &a, job->snapshot_dir) == 2) {
       job->snapshot_at = a;
     } else if (sscanf(line, "gpu_stream %511s", job->gpu_stream_path) == 1) {
+    } else if (sscanf(line, "dump_shaders %511s", job->dump_shaders) == 1) {
     } else if (sscanf(line, "frame %511s", job->frame_path) == 1) {
     } else if (sscanf(line, "log %511s", log_path) == 1) {
     }
@@ -1235,6 +1238,12 @@ static int run(int argc, char **argv) {
       max_slices = job.max_slices;
       if (job.dump_every) dump_every = job.dump_every;
       if (job.frame_path[0]) frame_path = job.frame_path;
+      if (job.dump_shaders[0]) {
+        /* Every program the job uses, decoded again so each is dumped. */
+        setenv("VOLAND_DUMP_SHADERS", job.dump_shaders, 1);
+        emu.renderer.on_program_decoded = program_decoded;
+        for (uint32_t i = 0; i < RASTER_PROGRAMS; i++) emu.renderer.programs[i].valid = false;
+      }
       if (job.gpu_stream_path[0] && !g_gpu_file) {
         /* GPU mode from here: targets drawn before exist only in guest
          * memory, so the first frames may miss what was not redrawn. */
