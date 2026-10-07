@@ -441,8 +441,16 @@ static void structural(void) {
   sm_program_decode(b.bytes, SM_SPH_BYTES + 8u * b.words, 0, &g_prog);
   Wgsl_Program_Desc desc;
   wgsl_default_desc(&g_prog, &desc);
+  CHECK(desc.stage == SM_STAGE_VERTEX);
+  desc.stage = SM_STAGE_PIXEL; /* a vertex program translated as pixel: refused */
   Wgsl_Result r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   CHECK(!r.ok && strstr(r.reason, "pixel") != NULL);
+  /* As a vertex program it translates: a `vs` entry, attribute arrays, the
+   * viewport epilogue, and no fragment stage or quad helpers. */
+  wgsl_default_desc(&g_prog, &desc);
+  r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
+  CHECK(r.ok && strstr(g_text, "@vertex fn vs(vin: VIn) -> VOut") && strstr(g_text, "var aout: array<u32, 256>"));
+  CHECK(strstr(g_text, "@fragment") == NULL && strstr(g_text, "dpdxFine") == NULL && strstr(g_text, "discard") == NULL);
   /* Unsupported in a pixel program: reported, nothing emitted. */
   begin(&b);
   emit(&b, ALD(0, 0x80, 1));

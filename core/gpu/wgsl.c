@@ -77,9 +77,13 @@ typedef struct Tr {
    * instructions. Elsewhere implicit LODs are level 0 (the reference). */
   bool uniform_flow;
   bool guarded;       /* emitting a predicated instruction */
+  bool vertex;        /* a vertex program (desc->stage == SM_STAGE_VERTEX) */
+  uint32_t cbt;       /* the draw-constant word of this stage's constant-buffer table */
   bool leader[SM_MAX_WORDS];
   bool reached[SM_MAX_WORDS];
 } Tr;
+
+static bool is_texture_op(uint16_t op);
 
 static void out_add(Out *o, const char *fmt, ...) {
   if (o->overflow) return;
@@ -973,6 +977,36 @@ static void emit_ipa(Tr *t, const Sm_Insn *in) {
   else EMIT("%s = U(f); } ", d.s);
 }
 
+/* ---- vertex attributes (ALD / AST) --------------------------------- */
+
+/* As the interpreter: inputs and outputs are 256-word attribute arrays
+ * (ain / aout), addressed by (base + index register) / 4; ALD of the vertex
+ * or instance id address reads those ids. */
+static void emit_ald(Tr *t, const Sm_Insn *in) {
+  const uint64_t w = in->raw;
+  const uint32_t count = BITS(w, 47, 2) + 1u, d = REG_D(w);
+  const bool out = BIT(w, 32) != 0;
+  if (d == SM_RZ) return;
+  EMIT("{ let ab = %uu + %s; ", BITS(w, 20, 10), reg(t, REG_A(w)).s);
+  for (uint32_t i = 0; i < count; i++) {
+    const uint32_t r = (d + i) & 0xffu;
+    if (r == SM_RZ) continue;
+    EMIT("{ let a = ab + %uu; var v = %s[(a >> 2u) & %uu]; ", 4u * i, out ? "aout" : "ain", SM_ATTRIBUTE_WORDS - 1u);
+    if (!out) EMIT("if (a == %uu) { v = vid; } if (a == %uu) { v = iid; } ", SM_ATTR_VERTEX_ID, SM_ATTR_INSTANCE_ID);
+    EMIT("%s = v; } ", reg_dst(t, r).s);
+  }
+  EMIT("} ");
+}
+
+static void emit_ast(Tr *t, const Sm_Insn *in) {
+  const uint64_t w = in->raw;
+  const uint32_t count = BITS(w, 47, 2) + 1u, d = REG_D(w);
+  EMIT("{ let ab = (%uu + %s) >> 2u; ", BITS(w, 20, 10), reg(t, REG_A(w)).s);
+  for (uint32_t i = 0; i < count; i++)
+    EMIT("aout[(ab + %uu) & %uu] = %s; ", i, SM_ATTRIBUTE_WORDS - 1u, d == SM_RZ ? "0u" : reg(t, (d + i) & 0xffu).s);
+  EMIT("} ");
+}
+
 /* ---- memory ------------------------------------------------------- */
 
 static uint32_t access_bytes(uint32_t size) {
@@ -1012,7 +1046,7 @@ static void emit_ldc(Tr *t, const Sm_Insn *in) {
   }
   /* All-or-nothing: the whole access must fit (cbyte checks each word;
    * the interpreter checks the total). */
-  EMIT("let lok = la + %uu <= D[%uu] * 4u; ", n, WGSL_DRAW_CBUF_TABLE + 2u * slot + 1u);
+  EMIT("let lok = la + %uu <= D[%uu] * 4u; ", n, t->cbt + 2u * slot + 1u);
   for (uint32_t i = 0; i < n / 4u; i++) {
     if (dr == SM_RZ || ((dr + i) & 0xffu) == SM_RZ) continue;
     EMIT("%s = select(0u, cbyte(%uu, la + %uu, 4u), lok); ", reg_dst(t, dr + i).s, slot, 4u * i);
@@ -1519,7 +1553,13 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
   case SM_OP_TXQ:
   case SM_OP_TMML: EMIT("{ "); emit_tex_vector(t, in, pc); EMIT("} "); return;
   case SM_OP_ALD:
-  case SM_OP_AST: fail(t, "%s in a pixel program", sm_op_name((Sm_Op)in->op)); return;
+    if (t->vertex) emit_ald(t, in);
+    else fail(t, "ALD in a pixel program");
+    return;
+  case SM_OP_AST:
+    if (t->vertex) emit_ast(t, in);
+    else fail(t, "AST in a pixel program");
+    return;
   case SM_OP_LD:
   case SM_OP_ST:
   case SM_OP_LDG:
@@ -1673,7 +1713,7 @@ static bool is_flow(uint16_t op) {
 static bool emit_straight_end(Tr *t, const Sm_Insn *in) {
   const Ex g = control_guard(in);
   const bool always = !strcmp(g.s, "true");
-  const char *leave = in->op == SM_OP_KIL ? "discard; break;" : "break;";
+  const char *leave = in->op == SM_OP_KIL && !t->vertex ? "discard; break;" : "break;";
   if (!always) t->uniform_flow = false;
   if (always) EMIT("%s ", leave);
   else EMIT("if (%s) { %s } ", g.s, leave);
@@ -1717,7 +1757,7 @@ static void emit_block(Tr *t, uint32_t start) {
     if (next >= p->word_count || t->leader[next]) {
       if (t->straight) {
         if (next >= p->word_count) {
-          EMIT("discard; break; ");
+          EMIT(t->vertex ? "break; " : "discard; break; ");
           t->straight_live = false;
         }
       } else {
@@ -1738,15 +1778,26 @@ static const char *target_type(const Wgsl_Program_Desc *d, uint32_t i) {
   return "vec4<f32>";
 }
 
-static void emit_io(Out *o, const Wgsl_Program_Desc *d, bool depth) {
-  out_add(o, "struct VIn {\n  @location(0) p: vec4<f32>,\n");
-  for (uint32_t i = 0; i < d->varying_count; i++) out_add(o, "  @location(%u) v%u: vec4<u32>,\n", i + 1u, i);
-  out_add(o, "}\nstruct VOut {\n  @builtin(position) pos: vec4<f32>,\n  @location(0) inv_w: f32,\n");
+/* The vertex -> pixel interface, shared by both stages' modules. Every
+ * varying - and 1/w - interpolates linearly in screen space: the values
+ * are already divided by w where the program wants perspective (as
+ * to_screen does), which with the pass-through vertex stage's w of 1 and
+ * with a GPU vertex stage's real w gives the same results. */
+static void emit_vout(Out *o, const Wgsl_Program_Desc *d) {
+  out_add(o, "struct VOut {\n  @builtin(position) pos: vec4<f32>,\n  @location(0) @interpolate(linear) inv_w: f32,\n");
   for (uint32_t i = 0; i < d->varying_count; i++) {
     if ((d->flat_mask >> i) & 1u) out_add(o, "  @location(%u) @interpolate(flat) v%u: vec4<u32>,\n", i + 1u, i);
     else out_add(o, "  @location(%u) @interpolate(linear) v%u: vec4<f32>,\n", i + 1u, i);
   }
-  out_add(o, "}\n@vertex fn vs(vin: VIn) -> VOut {\n  var o: VOut;\n  o.pos = vec4<f32>(vin.p.xyz, 1.0);\n"
+  out_add(o, "}\n");
+}
+
+static void emit_io(Out *o, const Wgsl_Program_Desc *d, bool depth) {
+  out_add(o, "struct VIn {\n  @location(0) p: vec4<f32>,\n");
+  for (uint32_t i = 0; i < d->varying_count; i++) out_add(o, "  @location(%u) v%u: vec4<u32>,\n", i + 1u, i);
+  out_add(o, "}\n");
+  emit_vout(o, d);
+  out_add(o, "@vertex fn vs(vin: VIn) -> VOut {\n  var o: VOut;\n  o.pos = vec4<f32>(vin.p.xyz, 1.0);\n"
              "  o.inv_w = vin.p.w;\n");
   for (uint32_t i = 0; i < d->varying_count; i++) {
     if ((d->flat_mask >> i) & 1u) out_add(o, "  o.v%u = vin.v%u;\n", i, i);
@@ -1759,6 +1810,48 @@ static void emit_io(Out *o, const Wgsl_Program_Desc *d, bool depth) {
     if (depth) out_add(o, "  @builtin(frag_depth) depth: f32,\n");
     out_add(o, "}\n");
   }
+}
+
+/* A GPU vertex stage: the inputs, then (after the translated body) the
+ * epilogue that turns the position output into clip space - x, y, z
+ * become to_screen's window coordinates and gpu_put_vertex's NDC once
+ * divided by w - and the outputs into the pixel program's varyings. */
+static void emit_vertex_io(Out *o, const Wgsl_Program_Desc *d) {
+  out_add(o, "struct VIn {\n  @location(%u) ids: vec4<u32>,\n", WGSL_VERTEX_ID_LOCATION);
+  for (uint32_t i = 0; i < d->input_count; i++) out_add(o, "  @location(%u) a%u: vec4<u32>,\n", i + 1u, i);
+  out_add(o, "}\n");
+  emit_vout(o, d);
+}
+
+static void emit_vertex_epilogue(Out *o, const Wgsl_Program_Desc *d) {
+  const uint32_t vp = WGSL_DRAW_VIEWPORT, pw = SM_ATTR_POSITION / 4u;
+  out_add(o, "  var o: VOut;\n");
+  out_add(o, "  let x = F(aout[%uu]); let y = F(aout[%uu]); let z = F(aout[%uu]); let w = F(aout[%uu]);\n", pw,
+          pw + 1u, pw + 2u, pw + 3u);
+  /* Window coordinates times w (no division until the GPU's). */
+  out_add(o, "  var xw = x; var yw = y; var zw = z;\n");
+  out_add(o, "  if ((D[%uu] & %uu) != 0u) { xw = x * F(D[%uu]) + F(D[%uu]) * w; yw = y * F(D[%uu]) + F(D[%uu]) * w; "
+             "zw = z * F(D[%uu]) + F(D[%uu]) * w; }\n",
+          vp + WGSL_VP_FLAGS, WGSL_VP_TRANSFORM, vp + WGSL_VP_SCALE, vp + WGSL_VP_OFFSET, vp + WGSL_VP_SCALE + 1u,
+          vp + WGSL_VP_OFFSET + 1u, vp + WGSL_VP_SCALE + 2u, vp + WGSL_VP_OFFSET + 2u);
+  out_add(o, "  if ((D[%uu] & %uu) != 0u) { yw = F(D[%uu]) * w - yw; }\n", WGSL_DRAW_FLAGS, WGSL_DRAW_LOWER_LEFT,
+          WGSL_DRAW_SURFACE_HEIGHT);
+  out_add(o, "  o.pos = vec4<f32>(xw / F(D[%uu]) * 2.0 - w, w - yw / F(D[%uu]) * 2.0, zw, w);\n",
+          vp + WGSL_VP_TARGET, vp + WGSL_VP_TARGET + 1u);
+  out_add(o, "  let iw = 1.0 / w;\n  o.inv_w = iw;\n");
+  for (uint32_t l = 0; l < d->varying_count; l++) {
+    const bool flat = (d->flat_mask >> l) & 1u;
+    char comp[4][48];
+    for (uint32_t c = 0; c < 4u; c++) {
+      const uint16_t word = d->output_word[l][c];
+      const bool persp = (d->perspective_mask >> (l * 4u + c)) & 1u;
+      if (word >= SM_ATTRIBUTE_WORDS) snprintf(comp[c], sizeof(comp[c]), flat ? "0u" : "0.0");
+      else if (flat) snprintf(comp[c], sizeof(comp[c]), "aout[%uu]", word);
+      else snprintf(comp[c], sizeof(comp[c]), persp ? "F(aout[%uu]) * iw" : "F(aout[%uu])", word);
+    }
+    out_add(o, "  o.v%u = vec4<%s>(%s, %s, %s, %s);\n", l, flat ? "u32" : "f32", comp[0], comp[1], comp[2], comp[3]);
+  }
+  out_add(o, "  return o;\n");
 }
 
 /* "fn quad_read": quad lane k's value of `v` (SHFL in a quad). */
@@ -1819,7 +1912,18 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   t->p = program;
   t->d = desc;
   t->ok = true;
-  if (program->header.stage != SM_STAGE_PIXEL) fail(t, "not a pixel program");
+  t->vertex = desc->stage == SM_STAGE_VERTEX;
+  t->cbt = t->vertex ? WGSL_DRAW_VS_CBUF_TABLE : WGSL_DRAW_CBUF_TABLE;
+  if (program->header.stage != (t->vertex ? SM_STAGE_VERTEX : SM_STAGE_PIXEL))
+    fail(t, t->vertex ? "not a vertex program" : "not a pixel program");
+  if (t->vertex && desc->input_count + 1u > 16u) fail(t, "%u vertex inputs", desc->input_count);
+  /* A vertex stage has no quads (derivatives, discard) and, for now, no
+   * textures or pixel inputs: such programs stay on the CPU path. */
+  for (uint32_t pc = 0; t->vertex && pc < program->word_count && t->ok; pc++) {
+    const uint16_t op = program->insns[pc].op;
+    if (op == SM_OP_KIL || op == SM_OP_IPA || op == SM_OP_SHFL || op == SM_OP_FSWZADD || is_texture_op(op))
+      fail(t, "%s in a vertex program", sm_op_name((Sm_Op)op));
+  }
   if (desc->varying_count > WGSL_MAX_VARYINGS) fail(t, "%u varyings", desc->varying_count);
   if (desc->target_count > WGSL_MAX_TARGETS) fail(t, "%u targets", desc->target_count);
   if (capacity < 4096u) fail(t, "buffer too small");
@@ -1846,7 +1950,7 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   /* Outputs reference registers too: emit them into a scratch tail first
    * by running them against the header buffer later; they only add to
    * reg_used, so collect that before writing declarations. */
-  {
+  if (!t->vertex) {
     char scratch[2048];
     Out probe = {scratch, sizeof(scratch), 0, false};
     emit_outputs(t, &probe);
@@ -1858,26 +1962,38 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
     return res;
   }
   for (size_t i = 0; i < sizeof(k_prelude) / sizeof(k_prelude[0]); i++)
-    out_add(&head, k_prelude[i], WGSL_DRAW_CBUF_TABLE, WGSL_DRAW_CBUF_TABLE, WGSL_DRAW_CBUF_TABLE);
-  out_add(&head, "%s", k_quad);
+    out_add(&head, k_prelude[i], t->cbt, t->cbt, t->cbt);
+  if (!t->vertex) out_add(&head, "%s", k_quad);
   for (uint32_t i = 0; i < desc->texture_count && i < WGSL_MAX_TEXTURES; i++)
     if ((t->textures_used >> i) & 1u)
       emit_texture_helpers(&head, i, desc->sample_type[i],
                            ((desc->hw_sample_mask >> i) & 1u) && desc->sample_type[i] == WGSL_SAMPLE_FLOAT);
-  emit_io(&head, desc, program->header.omap_depth);
-  const bool has_out = desc->target_count || program->header.omap_depth;
-  out_add(&head, "@fragment fn fs(fin: VOut, @builtin(front_facing) ff: bool)%s {\n", has_out ? " -> FOut" : "");
-  out_add(&head, "  let ql = (u32(fin.pos.x) & 1u) | ((u32(fin.pos.y) & 1u) << 1u);\n");
-  out_add(&head, "  let fy = select(fin.pos.y, F(D[%uu]) - fin.pos.y, (D[%uu] & %uu) != 0u);\n", WGSL_DRAW_SURFACE_HEIGHT,
-          WGSL_DRAW_FLAGS, WGSL_DRAW_LOWER_LEFT);
+  if (t->vertex) {
+    emit_vertex_io(&head, desc);
+    out_add(&head, "@vertex fn vs(vin: VIn) -> VOut {\n  let vid = vin.ids.x; let iid = vin.ids.y;\n");
+    out_add(&head, "  var ain: array<u32, %u>; var aout: array<u32, %u>;\n  aout[%uu] = 0x3f800000u;\n",
+            SM_ATTRIBUTE_WORDS, SM_ATTRIBUTE_WORDS, SM_ATTR_POSITION / 4u + 3u);
+    for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++) {
+      const uint8_t loc = desc->input_location[v];
+      if (loc == 0xffu || loc >= desc->input_count) continue;
+      for (uint32_t c = 0; c < 4u; c++)
+        out_add(&head, "  ain[%uu] = vin.a%u[%u];\n", SM_ATTR_GENERIC / 4u + 4u * v + c, loc, c);
+    }
+  } else {
+    emit_io(&head, desc, program->header.omap_depth);
+    const bool has_out = desc->target_count || program->header.omap_depth;
+    out_add(&head, "@fragment fn fs(fin: VOut, @builtin(front_facing) ff: bool)%s {\n", has_out ? " -> FOut" : "");
+    out_add(&head, "  let ql = (u32(fin.pos.x) & 1u) | ((u32(fin.pos.y) & 1u) << 1u);\n");
+    out_add(&head, "  let fy = select(fin.pos.y, F(D[%uu]) - fin.pos.y, (D[%uu] & %uu) != 0u);\n",
+            WGSL_DRAW_SURFACE_HEIGHT, WGSL_DRAW_FLAGS, WGSL_DRAW_LOWER_LEFT);
+  }
   for (uint32_t r = 0; r < SM_RZ; r++)
     if ((t->reg_used[r / 8u] >> (r % 8u)) & 1u) out_add(&head, "  var r%u: u32;\n", r);
   out_add(&head, "  var _d: u32;\n  var p0: bool; var p1: bool; var p2: bool; var p3: bool; var p4: bool; var p5: bool; "
                  "var p6: bool;\n  var ccz: bool; var ccs: bool; var ccc: bool; var cco: bool;\n");
   for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++)
     if ((t->cbuf_slots >> s) & 1u)
-      out_add(&head, "  let cbB%u = D[%uu]; let cbN%u = D[%uu];\n", s, WGSL_DRAW_CBUF_TABLE + 2u * s, s,
-              WGSL_DRAW_CBUF_TABLE + 2u * s + 1u);
+      out_add(&head, "  let cbB%u = D[%uu]; let cbN%u = D[%uu];\n", s, t->cbt + 2u * s, s, t->cbt + 2u * s + 1u);
   if (t->uses_local) out_add(&head, "  var lm: array<u32, %u>;\n", LOCAL_WORDS);
   if (t->straight) {
     out_add(&head, "  loop {\n");
@@ -1885,7 +2001,8 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
     out_add(&head, "  var fsk: array<u32, %u>; var fst: array<u32, %u>; var fsd = 0u;\n", FLOW_DEPTH, FLOW_DEPTH);
     out_add(&head, "  var cst: array<u32, %u>; var csd = 0u;\n", SM_STACK_DEPTH);
     out_add(&head, "  var pc = %uu; var steps = 0u;\n", norm_pc(1u));
-    out_add(&head, "  loop {\n    if (pc >= %uu) { if (pc != %uu) { discard; } break; }\n", PC_FAULT, PC_DONE);
+    if (t->vertex) out_add(&head, "  loop {\n    if (pc >= %uu) { break; }\n", PC_FAULT);
+    else out_add(&head, "  loop {\n    if (pc >= %uu) { if (pc != %uu) { discard; } break; }\n", PC_FAULT, PC_DONE);
     out_add(&head, "    steps = steps + 1u; if (steps > %uu) { pc = %uu; continue; }\n", MAX_BLOCK_STEPS, PC_FAULT);
     out_add(&head, "    switch (pc) {\n");
   }
@@ -1900,7 +2017,8 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   head.cap = capacity;
   if (t->straight) out_add(&head, "%s  }\n", t->straight_live ? "    break;\n" : "");
   else out_add(&head, "    default: { pc = %uu; }\n    }\n  }\n", PC_FAULT);
-  emit_outputs(t, &head);
+  if (t->vertex) emit_vertex_epilogue(&head, desc);
+  else emit_outputs(t, &head);
   out_add(&head, "}\n");
   if (head.overflow) {
     res.ok = false;
@@ -1949,6 +2067,24 @@ void wgsl_default_desc(const Sm_Program *program, Wgsl_Program_Desc *desc) {
   for (uint32_t t = 0; t < WGSL_MAX_TARGETS; t++)
     if ((h->omap_target >> (4u * t)) & 0xfu) desc->target_count = t + 1u;
   desc->mrt = h->mrt_enable;
+  desc->stage = h->stage == SM_STAGE_VERTEX ? SM_STAGE_VERTEX : SM_STAGE_PIXEL;
+  memset(desc->input_location, 0xff, sizeof(desc->input_location));
+  memset(desc->output_word, 0xff, sizeof(desc->output_word));
+  if (desc->stage != SM_STAGE_VERTEX) return;
+  /* A vertex program alone: every input vector it reads is supplied, and
+   * each output vector becomes the next varying, interpolated with
+   * perspective (tests and diagnostics; draws use the pixel program's). */
+  desc->varying_count = 0;
+  desc->flat_mask = 0;
+  for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++) {
+    if ((h->input_generic[v / 8u] >> ((v % 8u) * 4u)) & 0xfu) desc->input_location[v] = (uint8_t)desc->input_count++;
+    if (!((h->output_generic[v / 8u] >> ((v % 8u) * 4u)) & 0xfu) || desc->varying_count >= WGSL_MAX_VARYINGS) continue;
+    const uint32_t l = desc->varying_count++;
+    for (uint32_t c = 0; c < 4u; c++) {
+      desc->output_word[l][c] = (uint16_t)(SM_ATTR_GENERIC / 4u + 4u * v + c);
+      desc->perspective_mask |= 1ull << (l * 4u + c);
+    }
+  }
 }
 
 uint64_t wgsl_desc_hash(const Wgsl_Program_Desc *desc, const Sm_Program *program) {
@@ -1974,6 +2110,13 @@ uint64_t wgsl_desc_hash(const Wgsl_Program_Desc *desc, const Sm_Program *program
   MIX(&desc->target_sint_mask, sizeof(desc->target_sint_mask));
   MIX(&desc->mrt, sizeof(desc->mrt));
   MIX(&desc->hw_sample_mask, sizeof(desc->hw_sample_mask));
+  MIX(&desc->stage, sizeof(desc->stage));
+  if (desc->stage == SM_STAGE_VERTEX) {
+    MIX(desc->input_location, sizeof(desc->input_location));
+    MIX(&desc->input_count, sizeof(desc->input_count));
+    MIX(desc->output_word, sizeof(desc->output_word));
+    MIX(&desc->perspective_mask, sizeof(desc->perspective_mask));
+  }
 #undef MIX
   return h;
 }

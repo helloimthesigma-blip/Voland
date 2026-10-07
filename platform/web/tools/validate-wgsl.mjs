@@ -41,7 +41,28 @@ const results = await page.evaluate(async (mods) => {
     for (const msg of info.messages) {
       if (msg.type === "error") errors.push(`${msg.lineNum}:${msg.linePos} ${msg.message}`);
     }
-    const varyings = (m.code.match(/struct VIn \{([\s\S]*?)\}/)?.[1].match(/@location/g) ?? []).length - 1;
+    /* A GPU vertex stage (no fragment entry): every VIn location is a
+     * vec4<u32> input; the pipeline is built without a fragment stage. */
+    const vertexOnly = !m.code.includes("@fragment");
+    const inputs = (m.code.match(/struct VIn \{([\s\S]*?)\}/)?.[1].match(/@location/g) ?? []).length;
+    if (vertexOnly && errors.length === 0) {
+      try {
+        const attrs = Array.from({ length: inputs }, (_, i) => ({ shaderLocation: i, offset: 16 * i, format: "uint32x4" }));
+        device.createRenderPipeline({
+          layout: "auto",
+          vertex: { module, entryPoint: "vs", buffers: [{ arrayStride: 16 * inputs, attributes: attrs }] },
+          primitive: { topology: "triangle-list" },
+          depthStencil: { format: "depth32float", depthWriteEnabled: true, depthCompare: "always" },
+        });
+      } catch (e) {
+        errors.push(String(e));
+      }
+      const scopedVs = await device.popErrorScope();
+      if (scopedVs) errors.push(scopedVs.message.split("\n").slice(0, 6).join(" | "));
+      out.push({ name: m.name, errors });
+      continue;
+    }
+    const varyings = inputs - 1;
     const fout = m.code.match(/struct FOut \{([\s\S]*?)\}/)?.[1] ?? "";
     const targets = [...fout.matchAll(/@location\((\d+)\) c\d+: vec4<(\w+)>/g)].map((t) => ({
       format: t[2] === "f32" ? "rgba8unorm" : t[2] === "u32" ? "rgba32uint" : "rgba32sint",

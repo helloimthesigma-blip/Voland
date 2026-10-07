@@ -270,11 +270,11 @@ static void dump_program(void *user, const Sm_Program *program) {
 
 #define WGSL_DUMP_BYTES (2u << 20)
 
-/* VOLAND_DUMP_WGSL=DIR: every pixel program translated to WGSL with the
- * default descriptor, as DIR/<address>-<hash>.wgsl (or .fail with the
- * reason) - the WebGPU translator's corpus (diagnostics). */
+/* VOLAND_DUMP_WGSL=DIR: every pixel and vertex program translated to WGSL
+ * with the default descriptor, as DIR/<address>-<hash>.wgsl (or .fail
+ * with the reason) - the WebGPU translator's corpus (diagnostics). */
 static void dump_wgsl(void *user, const Sm_Program *program) {
-  if (program->header.stage != SM_STAGE_PIXEL) return;
+  if (program->header.stage != SM_STAGE_PIXEL && program->header.stage != SM_STAGE_VERTEX) return;
   static Wgsl_Program_Desc desc;
   static char text[WGSL_DUMP_BYTES];
   wgsl_default_desc(program, &desc);

@@ -68,7 +68,18 @@
 #define WGSL_DRAW_TEXTURE_PARAMS 4u
 #define WGSL_TEX_PARAM_WORDS 12u
 #define WGSL_DRAW_CBUF_TABLE (WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEX_PARAM_WORDS * WGSL_MAX_TEXTURES)
-#define WGSL_DRAW_CONSTANT_WORDS (WGSL_DRAW_CBUF_TABLE + 2u * SM_CBUF_SLOTS)
+/* Vertex programs on the GPU (WGSL_STAGE vertex): their own constant
+ * buffer table, then the viewport the CPU path applies in to_screen. */
+#define WGSL_DRAW_VS_CBUF_TABLE (WGSL_DRAW_CBUF_TABLE + 2u * SM_CBUF_SLOTS)
+#define WGSL_DRAW_VIEWPORT (WGSL_DRAW_VS_CBUF_TABLE + 2u * SM_CBUF_SLOTS)
+#define WGSL_VP_SCALE 0u      /* f32 x, y, z */
+#define WGSL_VP_OFFSET 3u     /* f32 x, y, z */
+#define WGSL_VP_TARGET 6u     /* f32 target width, height (the NDC mapping) */
+#define WGSL_VP_FLAGS 8u      /* WGSL_VP_TRANSFORM */
+#define WGSL_VP_WORDS 10u
+#define WGSL_VP_TRANSFORM 1u  /* the viewport transform is enabled */
+#define WGSL_DRAW_CONSTANT_WORDS (WGSL_DRAW_VIEWPORT + WGSL_VP_WORDS)
+#define WGSL_VERTEX_ID_LOCATION 0u /* vertex input: vec4<u32>(vertex id, instance id, 0, 0) */
 #define WGSL_MAX_VARYINGS 14u /* + 1/w, within WebGPU's 16 inter-stage vectors */
 #define WGSL_DRAW_LOWER_LEFT 1u /* position y counts from the bottom */
 
@@ -118,6 +129,19 @@ typedef struct Wgsl_Program_Desc {
   uint32_t target_int_mask;
   uint32_t target_sint_mask;
   bool mrt;               /* each target gets its own colour (else target 0's) */
+  /* The stage: SM_STAGE_PIXEL, or SM_STAGE_VERTEX for a vertex program run
+   * on the GPU. A vertex program's outputs must match its pixel program's
+   * inputs: varying_count and flat_mask are the pixel program's, and
+   * output_word[l][c] is the attribute word (SM_ATTRIBUTE_WORDS index)
+   * feeding location l component c (0xffff: 0), divided by w where
+   * perspective_mask bit l * 4 + c is set (as to_screen does). Generic
+   * input vector v arrives at vertex input input_location[v] (0xff: not
+   * supplied; reads 0); input 0 is the vertex and instance id. */
+  uint8_t stage;
+  uint8_t input_location[SM_ATTR_GENERIC_COUNT];
+  uint32_t input_count;
+  uint16_t output_word[WGSL_MAX_VARYINGS][4];
+  uint64_t perspective_mask;
 } Wgsl_Program_Desc;
 
 typedef struct Wgsl_Result {
@@ -128,7 +152,11 @@ typedef struct Wgsl_Result {
   uint32_t cbuf_slots; /* bit per constant buffer the WGSL reads */
 } Wgsl_Result;
 
-/* Translates `program` (a pixel program) for `desc` into `buffer`. */
+/* Translates `program` (a pixel program, or a vertex program when
+ * desc->stage is SM_STAGE_VERTEX) for `desc` into `buffer`. A vertex
+ * module's entry point is `vs`: its VOut is the pixel module's input, its
+ * clip position reproduces to_screen's window coordinates once divided
+ * by w, and its varyings are what gpu_put_vertex would have sent. */
 Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *desc, char *buffer, size_t capacity);
 
 /* A descriptor from the program alone (tests, diagnostics, and the start
