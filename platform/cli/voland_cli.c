@@ -1251,6 +1251,8 @@ static int run(int argc, char **argv) {
         if (!g_gpu_file) _exit(EXIT_USAGE);
         gpu_stream_init(&g_gpu_stream, g_gpu_header, g_gpu_ring, CLI_GPU_RING_BYTES, gpu_stream_wait, NULL);
         raster3d_set_gpu(&emu.renderer, &g_gpu_stream);
+        /* The summary then describes GPU mode only, not the software run before. */
+        memset(&emu.renderer.gpu_stats, 0, sizeof(emu.renderer.gpu_stats));
       }
       if (job.trace_length) {
         trace_start = job.trace_start;

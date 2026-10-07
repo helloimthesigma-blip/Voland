@@ -3007,11 +3007,24 @@ static uint32_t gpu_texture_levels(const Raster3d *r, const Tex_Image *img, bool
 
 /* A decoded texture's GPU copy: RGBA8 as it is, anything else as the
  * 32-bit RGBA texels sampling sees (tex_texel). */
+#define TEX_FORMAT_R16G16B16A16 0x03u
+
+/* RGBA16F texels (BC6H decodes to them) upload as they are: half the
+ * bytes of the RGBA32F conversion, the same values once sampled. */
+static bool image_is_rgba16f(const Tex_Image *img) {
+  if (img->rgba8 || img->format != TEX_FORMAT_R16G16B16A16) return false;
+  for (uint32_t c = 0; c < 4u; c++)
+    if (img->header.data_type[c] != TEX_DATA_FLOAT) return false;
+  return true;
+}
+
 static uint32_t gpu_texture(Raster3d *r, Raster3d_Texture *t) {
   const Tex_Image *img = &t->image;
   const uint32_t layers = img->layers ? img->layers : 1u;
   const bool is_int = img->header.data_type[0] == TEX_DATA_UINT || img->header.data_type[0] == TEX_DATA_SINT;
+  const bool half = image_is_rgba16f(img);
   const uint32_t format = img->rgba8 ? GPU_FMT_RGBA8_UNORM
+                          : half    ? GPU_FMT_RGBA16_FLOAT
                           : !is_int ? GPU_FMT_RGBA32_FLOAT
                           : img->header.data_type[0] == TEX_DATA_UINT ? GPU_FMT_RGBA32_UINT
                                                                      : GPU_FMT_RGBA32_SINT;
@@ -3030,7 +3043,7 @@ static uint32_t gpu_texture(Raster3d *r, Raster3d_Texture *t) {
     t->gpu_levels = levels;
   }
   for (uint32_t l = 0; l < layers; l++) {
-    if (img->rgba8) {
+    if (img->rgba8 || half) {
       gpu_write_rows(r, t->gpu_id, img->width, img->height, l, img->row_bytes,
                      img->texels + img->layer_bytes * l);
       continue;
