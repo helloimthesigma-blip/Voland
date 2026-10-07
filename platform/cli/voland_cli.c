@@ -1494,6 +1494,10 @@ static int run(int argc, char **argv) {
               (unsigned long long)g->clears, (unsigned long long)g->draws, (unsigned long long)g->skipped_draws,
               (unsigned long long)g->triangles, (unsigned long long)g->pixels, (unsigned long long)g->shader_faults,
               (unsigned long long)g->unknown_ops, (unsigned long long)g->texture_misses);
+    if (g->compute_dispatches)
+      fprintf(stderr, "voland-cli: compute %llu dispatches, %llu threads, %llu faulted\n",
+              (unsigned long long)g->compute_dispatches, (unsigned long long)g->compute_threads,
+              (unsigned long long)g->compute_faults);
   }
   if (backend == &CPU_BACKEND_JIT) {
     const Jit_Stats *j = jit_stats();

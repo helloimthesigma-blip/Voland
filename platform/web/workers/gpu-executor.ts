@@ -274,7 +274,9 @@ export class GpuExecutor {
 
   constructor(private readonly device: GPUDevice, private readonly host: ExecutorHost) {
     for (let i = 0; i < BUFFER_SETS; i++) {
-      this.vertexBuffers.push(device.createBuffer({ size: VERTEX_BUFFER_BYTES, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.COPY_DST }));
+      this.vertexBuffers.push(device.createBuffer({
+        size: VERTEX_BUFFER_BYTES, usage: GPUBufferUsage.VERTEX | GPUBufferUsage.INDEX | GPUBufferUsage.COPY_DST,
+      }));
       this.dataBuffers.push(device.createBuffer({ size: DATA_BUFFER_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }));
     }
     this.linearSampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
@@ -816,6 +818,9 @@ export class GpuExecutor {
     }
     const stride = d.vsShaderId ? 16 * (d.vertexInputCount + 1) : VERTEX_HEADER_BYTES + 16 * d.varyingCount;
     const vertices = payload.subarray(at, at + stride * d.vertexCount);
+    const indexStart = at + stride * d.vertexCount;
+    const indices = d.indexCount ? payload.subarray(indexStart, indexStart + 4 * d.indexCount) : null;
+    const indexBytes = indices ? Math.ceil(indices.byteLength / 16) * 16 : 0;
     const colorIds = d.targets.map((t) => (t.id && this.textures.get(t.id)?.renderView ? t.id : 0));
     const depthTex = d.depthId && !(globalThis as { NO_DEPTH?: boolean }).NO_DEPTH ? this.textures.get(d.depthId) : undefined;
     const depthId = depthTex?.renderView ? d.depthId : 0;
@@ -835,7 +840,7 @@ export class GpuExecutor {
     const colorFormats = colorIds.map((id) => (id ? this.textures.get(id)?.format ?? null : null));
     const { pipeline, layout } = this.drawPipeline(d, module, textures, filtered, colorFormats, depthId ? depthTex : undefined);
     /* Vertices and data (a flush may happen in between: stage both first). */
-    if (this.vertexUsed + vertices.byteLength > VERTEX_BUFFER_BYTES ||
+    if (this.vertexUsed + Math.ceil(vertices.byteLength / 16) * 16 + indexBytes > VERTEX_BUFFER_BYTES ||
         Math.ceil(this.dataUsed / DATA_ALIGN) * DATA_ALIGN + Math.max(data?.byteLength ?? 0, DATA_WINDOW_BYTES) > DATA_BUFFER_BYTES) {
       this.flush();
     }
@@ -843,6 +848,10 @@ export class GpuExecutor {
     const vertexOffset = this.vertexUsed;
     this.vertexStaging.set(vertices, vertexOffset);
     this.vertexUsed += Math.ceil(vertices.byteLength / 16) * 16;
+    /* Indices ride in the same buffer, after this draw's vertices. */
+    const indexOffset = this.vertexUsed;
+    if (indices) this.vertexStaging.set(indices, indexOffset);
+    this.vertexUsed += indexBytes;
     const pass = this.passFor(colorIds, depthId);
     if (!pass) return;
     if (!this.scissor(pass, d.scissor)) return;
@@ -867,7 +876,12 @@ export class GpuExecutor {
     pass.setVertexBuffer(0, this.vertexBuffer, vertexOffset, vertices.byteLength);
     pass.setBlendConstant({ r: d.blendConstant[0] ?? 0, g: d.blendConstant[1] ?? 0, b: d.blendConstant[2] ?? 0, a: d.blendConstant[3] ?? 0 });
     pass.setStencilReference(d.stencilRef);
-    pass.draw(d.vertexCount);
+    if (indices) {
+      pass.setIndexBuffer(this.vertexBuffer, "uint32", indexOffset, indices.byteLength);
+      pass.drawIndexed(d.indexCount);
+    } else {
+      pass.draw(d.vertexCount);
+    }
     this.stats.draws++;
   }
 

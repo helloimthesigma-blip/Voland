@@ -148,6 +148,12 @@ typedef struct Gpu_Rec_Draw {
   uint32_t vertex_input_count;
   uint32_t cull_mode;
   uint32_t front_face;
+  /* Version 4: with a vertex stage, index_count > 0 means the vertex_count
+   * vertices are each draw's distinct ones and index_count u32 indices into
+   * them (a triangle list, each triangle's provoking vertex first) follow
+   * the vertices. */
+  uint32_t index_count;
+  uint32_t reserved;
 } Gpu_Rec_Draw;
 
 #define GPU_CULL_NONE 0u

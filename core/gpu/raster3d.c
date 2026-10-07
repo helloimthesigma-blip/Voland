@@ -3111,6 +3111,7 @@ typedef struct Gpu_Draw {
   uint32_t stride;
   uint32_t vertex_bytes;
   uint32_t vertices;
+  uint32_t index_count; /* vertex stage: indices into the distinct vertices (g_gpu_indices) */
   uint32_t shader_id;
   uint32_t texture_count;
   uint32_t texture_id[WGSL_MAX_TEXTURES];
@@ -3128,6 +3129,22 @@ typedef struct Gpu_Draw {
 } Gpu_Draw;
 
 static Gpu_Draw g_gpu_draw;
+
+/* A vertex-stage draw sends each distinct vertex once and a triangle list
+ * of indices: guest vertex id -> slot in the record, per record (a stamp
+ * per entry instead of clearing the table). */
+#define GPU_MAX_INDICES 65536u
+#define GPU_VERTEX_MAP 65536u /* power of two, over twice the most vertices a record holds */
+static uint32_t g_gpu_indices[GPU_MAX_INDICES];
+static uint32_t g_vertex_map_key[GPU_VERTEX_MAP], g_vertex_map_slot[GPU_VERTEX_MAP], g_vertex_map_stamp[GPU_VERTEX_MAP];
+static uint32_t g_vertex_map_now = 1;
+
+static void gpu_vertex_map_reset(void) {
+  if (++g_vertex_map_now == 0) { /* wrapped: clear once */
+    memset(g_vertex_map_stamp, 0, sizeof(g_vertex_map_stamp));
+    g_vertex_map_now = 1;
+  }
+}
 
 static bool gpu_raw_vertices(void) { return g_gpu_draw.active && g_gpu_draw.vs_mode; }
 
@@ -3265,6 +3282,7 @@ static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs, uint32_t topolog
   g->flat_mask = g->desc.flat_mask;
   g->stride = GPU_VERTEX_HEADER_BYTES + 16u * g->locations;
   g->active = true;
+  gpu_vertex_map_reset();
   gpu_choose_vertex_stage(ctx, rs, topology);
   return true;
 }
@@ -3505,10 +3523,11 @@ static void gpu_emit_draw(Raster_State *rs) {
   for (uint32_t i = 0; i < g->texture_count; i++) samplers += (g->desc.hw_sample_mask >> i) & 1u;
   const uint32_t bindings = 1u + g->texture_count + samplers;
   const uint64_t bytes = sizeof(Gpu_Rec_Draw) + sizeof(Gpu_Rec_Binding) * bindings + (uint64_t)g->data_words * 4u +
-                         g->vertex_bytes;
+                         g->vertex_bytes + (uint64_t)g->index_count * sizeof(uint32_t);
   if (bytes > gpu_stream_max_payload(r->gpu)) {
     log_warn("[gpu] draw of %u bytes exceeds the stream's record limit: dropped", (uint32_t)bytes);
-    g->vertices = g->vertex_bytes = 0;
+    g->vertices = g->vertex_bytes = g->index_count = 0;
+    gpu_vertex_map_reset();
     return;
   }
   uint8_t *p = gpu_stream_begin(r->gpu, GPU_REC_DRAW, (uint32_t)bytes);
@@ -3560,6 +3579,7 @@ static void gpu_emit_draw(Raster_State *rs) {
     d.vertex_input_count = g->input_count;
     d.cull_mode = g->cull_mode;
     d.front_face = g->front_face;
+    d.index_count = g->index_count;
   }
   memcpy(p, &d, sizeof(d));
   p += sizeof(d);
@@ -3580,10 +3600,14 @@ static void gpu_emit_draw(Raster_State *rs) {
     p += sizeof(sb);
   }
   memcpy(p, r->gpu_vertices, g->vertex_bytes);
+  p += g->vertex_bytes;
+  memcpy(p, g_gpu_indices, (size_t)g->index_count * sizeof(uint32_t));
   gpu_stream_end(r->gpu);
   r->gpu_stats.draws++;
   g->vertices = 0;
   g->vertex_bytes = 0;
+  g->index_count = 0;
+  gpu_vertex_map_reset();
 }
 
 static void gpu_put_vertex(Raster_State *rs, const Screen_Vertex *v, const Vertex *provoking) {
@@ -3620,6 +3644,23 @@ static void gpu_put_raw(Raster_State *rs, const Vertex *v) {
   g->vertices++;
 }
 
+/* The record's slot for vertex `v` (by its guest vertex id): appended the
+ * first time the draw uses it. */
+static uint32_t gpu_vertex_slot(Raster_State *rs, const Vertex *v) {
+  Gpu_Draw *g = &g_gpu_draw;
+  const uint32_t id = RAW_VERTEX_ID(v);
+  for (uint32_t i = (id * 2654435761u) & (GPU_VERTEX_MAP - 1u);; i = (i + 1u) & (GPU_VERTEX_MAP - 1u)) {
+    if (g_vertex_map_stamp[i] != g_vertex_map_now) {
+      g_vertex_map_stamp[i] = g_vertex_map_now;
+      g_vertex_map_key[i] = id;
+      g_vertex_map_slot[i] = g->vertices;
+      gpu_put_raw(rs, v);
+      return g_vertex_map_slot[i];
+    }
+    if (g_vertex_map_key[i] == id) return g_vertex_map_slot[i];
+  }
+}
+
 /* A triangle for the GPU vertex stage: untransformed, provoking vertex
  * first (WebGPU's flat interpolation takes the first; the rotation keeps
  * the winding). The draw is prepared from the first triangle shaded on
@@ -3648,13 +3689,13 @@ static void gpu_vs_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
       return;
     }
   }
-  if (g->vertex_bytes + 3u * g->stride > GPU_VERTEX_BYTES) gpu_emit_draw(rs);
+  if (g->vertex_bytes + 3u * g->stride > GPU_VERTEX_BYTES || g->index_count + 3u > GPU_MAX_INDICES) gpu_emit_draw(rs);
   const Vertex *first = provoking == b ? b : (provoking == c ? c : a);
   const Vertex *second = first == a ? b : (first == b ? c : a);
   const Vertex *third = first == a ? c : (first == b ? a : b);
-  gpu_put_raw(rs, first);
-  gpu_put_raw(rs, second);
-  gpu_put_raw(rs, third);
+  g_gpu_indices[g->index_count++] = gpu_vertex_slot(rs, first);
+  g_gpu_indices[g->index_count++] = gpu_vertex_slot(rs, second);
+  g_gpu_indices[g->index_count++] = gpu_vertex_slot(rs, third);
   rs->ctx->r->gpu_stats.triangles++;
 }
 

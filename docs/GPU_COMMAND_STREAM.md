@@ -1,4 +1,4 @@
-# GPU command stream (version 3)
+# GPU command stream (version 4)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -33,7 +33,7 @@ the header is at its base and the ring starts at +64. In `voland-cli
 | Offset | Field |
 |---|---|
 | +0 | u32 magic `VGPU` (0x55504756) |
-| +4 | u32 version (3) |
+| +4 | u32 version (4) |
 | +8 | u64 ring base (linear-memory offset) |
 | +16 | u64 ring capacity |
 | +24 | u64 write position (monotonic bytes; release-stored on publish) |
@@ -139,6 +139,18 @@ table, `wgsl.h`) and emits the pixel program's varyings. The provoking
 vertex comes first in each triangle. The pipeline culls with `cull_mode`
 and `front_face`. WebGPU judges winding in framebuffer coordinates (y
 down), so `front_face` is the guest's winding on screen.
+
+### Indexed vertex-stage draws (version 4)
+
+`Gpu_Rec_Draw.index_count` (then a reserved word) follows `front_face`.
+When a vertex-stage draw has `index_count` > 0, its `vertex_count`
+vertices are the draw's distinct vertices: each guest vertex once per
+record, in first-use order. They are followed by `index_count` u32
+indices, a triangle list with each triangle's provoking vertex first,
+and then the record's padding. The consumer stages the indices after the
+vertices in the same buffer and calls `drawIndexed`. Silksong's 250k-slice
+stream shrinks from 197 to 128 MB, and an SSBU fight's vertex data was
+about 27 MB per frame before this.
 
 ## Verification
 

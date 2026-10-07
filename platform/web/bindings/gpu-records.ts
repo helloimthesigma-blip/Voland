@@ -5,7 +5,7 @@
  */
 
 export const GPU_STREAM_MAGIC = 0x55504756;
-export const GPU_STREAM_VERSION = 3;
+export const GPU_STREAM_VERSION = 4;
 export const GPU_STREAM_HEADER_BYTES = 56;
 export const GPU_STREAM_RECORD_HEADER_BYTES = 8;
 export const OFF_MAGIC = 0;
@@ -96,8 +96,9 @@ export const TEXTURE_WRITE_BYTES = 32;
 export const CLEAR_BYTES = 60;
 export const TARGET_BYTES = 36;
 export const STENCIL_FACE_BYTES = 16;
-/* Version 3 adds the GPU vertex stage's four words (vs shader, inputs, cull, front face). */
-export const DRAW_BYTES = 4 + 4 + TARGET_BYTES * MAX_TARGETS + 16 + 4 + STENCIL_FACE_BYTES * 2 + 12 + 16 + 16 + 16 + 16;
+/* Version 3 adds the GPU vertex stage's four words (vs shader, inputs, cull, front face);
+ * version 4 the index count (and a reserved word). */
+export const DRAW_BYTES = 4 + 4 + TARGET_BYTES * MAX_TARGETS + 16 + 4 + STENCIL_FACE_BYTES * 2 + 12 + 16 + 16 + 16 + 16 + 8;
 export const CULL_NONE = 0;
 export const CULL_FRONT = 1;
 export const CULL_BACK = 2;
@@ -183,6 +184,9 @@ export interface Draw {
   readonly vertexInputCount: number;
   readonly cullMode: number;
   readonly frontFace: number;
+  /** With a vertex stage: indexCount u32 indices into the vertexCount
+   * distinct vertices follow them (0: the vertices are the triangle list). */
+  readonly indexCount: number;
 }
 
 export interface Copy {
@@ -257,6 +261,7 @@ export function parseDraw(v: DataView): Draw {
     scissor: i32s(v, at + 28, 4), varyingCount: u32(v, at + 44), flatMask: u32(v, at + 48),
     bindingCount: u32(v, at + 52), vertexCount: u32(v, at + 56),
     vsShaderId: u32(v, at + 60), vertexInputCount: u32(v, at + 64), cullMode: u32(v, at + 68), frontFace: u32(v, at + 72),
+    indexCount: u32(v, at + 76),
   };
 }
 
