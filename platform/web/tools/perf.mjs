@@ -6,7 +6,7 @@
  *   node tools/perf.mjs --game FILE [--warmup-slices N] [--seconds S]
  *                       [--profile S] [--port P] [--debug-port P] [--no-build] [--software]
  *                       [--url-params "a=1&b=2"] [--browser-arg ARG]...
- *                       [--press SLICE:KEY:SLICES]... [--shot FILE.png]
+ *                       [--press SLICE:KEY:SLICES]... [--shot FILE.png] [--shots-every SLICES DIR]
  *                       [--phases NAME:SLICE,NAME:SLICE,...,end:SLICE] [--json FILE]
  *                       [--restore-saves BACKUP.tar] [--user-data-dir DIR]
  *
@@ -116,6 +116,7 @@ function parseArgs(argv) {
     else if (a === "--url-params") opts.urlParams = next();
     else if (a === "--out-dir") opts.outDir = next();
     else if (a === "--shot") opts.shot = next();
+    else if (a === "--shots-every") { opts.shotsEvery = Number(next()); opts.shotsDir = next(); }
     else if (a === "--restore-saves") opts.restoreSaves = next();
     else if (a === "--json") opts.json = next();
     else if (a === "--web-dir") WEB_DIR = resolve(next()); /* another checkout's platform/web */
@@ -484,6 +485,12 @@ async function main() {
         console.log(`warmup: ${s.perf.slices} slices, ${(s.perf.ticks / TICKS_PER_SECOND).toFixed(1)} s virtual, ${s.presents} frames`);
       }
       await servicePresses(progress(s));
+      /* --shots-every N DIR: the screen every N warm-up slices (to see where a recipe goes). */
+      if (opts.shotsEvery && progress(s) >= (opts.nextShot ?? opts.shotsEvery)) {
+        opts.nextShot = (Math.floor(progress(s) / opts.shotsEvery) + 1) * opts.shotsEvery;
+        const box = await page.getByTestId("screen").boundingBox();
+        if (box) await page.screenshot({ clip: box, path: `${opts.shotsDir}/w${progress(s)}.png` });
+      }
       if (opts.mash && Date.now() - opts.mash.last >= opts.mash.every) {
         opts.mash.last = Date.now();
         await page.keyboard.down(opts.mash.key);

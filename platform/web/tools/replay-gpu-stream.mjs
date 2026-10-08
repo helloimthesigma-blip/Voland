@@ -123,7 +123,7 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
   /* Every RGBA8 render target, as it is now. */
   const dumpAll = (index) => {
     for (const [id, t] of ex.textures) {
-      if (!t.renderView || !["rgba8unorm", "rgba8unorm-srgb", "bgra8unorm"].includes(t.format)) continue;
+      if (!t.renderView || !["rgba8unorm", "rgba8unorm-srgb", "bgra8unorm", "rgb10a2unorm"].includes(t.format)) continue;
       const bytesPerRow = Math.ceil((t.width * 4) / 256) * 256;
       const buffer = device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       const enc = device.createCommandEncoder();
