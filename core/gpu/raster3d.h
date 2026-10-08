@@ -166,6 +166,8 @@ typedef struct Raster3d_Gpu_Stats {
   uint64_t draw_data_bytes, pulled_bytes, vertex_bytes, index_bytes;
   uint64_t probe_runs;   /* draws whose pixel program ran once on the CPU to find its textures */
   uint64_t bulk_triangles; /* pulled list triangles that skipped the assembler */
+  /* Draw inputs a compute dispatch wrote (diagnostics: where compute output goes) */
+  uint64_t compute_fed_streams, compute_fed_stream_bytes, compute_fed_cbufs;
 } Raster3d_Gpu_Stats;
 
 typedef struct Raster3d_Stats {
@@ -207,6 +209,7 @@ typedef struct Raster3d {
   Sm_Thread *band_threads[WORKERS_MAX];
   Raster3d_Stats stats;
   bool trace_draws;          /* log every draw's state and result (diagnostics) */
+  bool trace_compute; /* log the first dispatches (voland-cli: VOLAND_COMPUTE_TRACE) */
   bool skip_draws;           /* frame skip: draws and clears are not rasterised */
   /* Diagnostics: called with every newly decoded texture (may be NULL). */
   void (*on_texture_decoded)(void *user, const Tex_Image *image, uint64_t address);

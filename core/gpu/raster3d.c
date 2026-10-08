@@ -1370,6 +1370,24 @@ static bool env_global_write(void *user, uint64_t va, const void *src, uint32_t 
   return ok;
 }
 
+/* Recent compute dispatches' write ranges (diagnostics): draws count the
+ * inputs they read from them (gpu_stats.compute_fed_*). */
+#define COMPUTE_OUTPUTS 64u
+static uint64_t g_compute_out_lo[COMPUTE_OUTPUTS], g_compute_out_hi[COMPUTE_OUTPUTS];
+static uint32_t g_compute_out_next;
+
+static void compute_output_note(uint64_t lo, uint64_t hi) {
+  g_compute_out_lo[g_compute_out_next % COMPUTE_OUTPUTS] = lo;
+  g_compute_out_hi[g_compute_out_next % COMPUTE_OUTPUTS] = hi;
+  g_compute_out_next++;
+}
+
+static bool compute_output_overlaps(uint64_t lo, uint64_t hi) {
+  for (uint32_t i = 0; i < COMPUTE_OUTPUTS && i < g_compute_out_next; i++)
+    if (lo < g_compute_out_hi[i] && hi > g_compute_out_lo[i]) return true;
+  return false;
+}
+
 /* Binds the constant buffers `program` reads from `group`. */
 static void env_setup(Draw_Context *ctx, uint32_t stage, const Sm_Program *program, const Raster3d_Bindings *b,
                       uint32_t group) {
@@ -1392,6 +1410,8 @@ static void env_setup(Draw_Context *ctx, uint32_t stage, const Sm_Program *progr
     if (slot == env->texture_cbuf_slot || !want || want > size) want = size;
     uint8_t *dst = ctx->r->cbuf_data + ((size_t)stage * SM_CBUF_SLOTS + slot) * CBUF_SLOT_BYTES;
     if (!ctx->mem->read(ctx->mem->user, b->address[group][slot], dst, want)) continue;
+    if (g_compute_out_next && compute_output_overlaps(b->address[group][slot], b->address[group][slot] + want))
+      ctx->r->gpu_stats.compute_fed_cbufs++;
     env->cbuf[slot] = dst;
     env->cbuf_size[slot] = want;
   }
@@ -3908,6 +3928,10 @@ static void gpu_emit_draw(Raster_State *rs) {
       const uint64_t from = streams[k].address + (streams[k].instanced ? 0u : (uint64_t)g->id_lo * streams[k].stride);
       if (!rs->ctx->mem->read(rs->ctx->mem->user, from, blob + stream_at[k], stream_bytes[k]))
         memset(blob + stream_at[k], 0, (size_t)stream_bytes[k]); /* unreadable: the inputs read zeros */
+      if (g_compute_out_next && compute_output_overlaps(from, from + stream_bytes[k])) {
+        r->gpu_stats.compute_fed_streams++;
+        r->gpu_stats.compute_fed_stream_bytes += stream_bytes[k];
+      }
     }
   }
   p += (size_t)data_bytes;
@@ -4671,6 +4695,79 @@ static bool compute_block(const Compute_Job *job, const Sm_Env *env, uint32_t b,
   return true;
 }
 
+/* One block's lane groups shared out among the workers, from barrier to
+ * barrier (a dispatch of a single large block - SSBU's are 256 threads,
+ * eight groups - would otherwise run on one thread). The groups share
+ * the block's shared memory, as warps do; between barriers they are
+ * independent. */
+typedef struct Block_Phase {
+  const Compute_Job *job;
+  const Sm_Env *env;
+  Sm_Thread *groups;
+  Sm_Group_State *states;
+  bool *running;
+} Block_Phase;
+
+static void block_phase_task(void *user, uint32_t index, uint32_t count) {
+  const Block_Phase *phase = (const Block_Phase *)user;
+  Compute_Worker *w = &g_compute_workers[index];
+  if (!w->used) { /* the first phase of the block */
+    w->env = *phase->env;
+    w->env.global_read = compute_read_unlocked;
+    w->env.global_write = compute_write_unlocked;
+    w->writes.count = 0;
+    w->faulted = false;
+    w->used = true;
+  }
+  t_compute_writes = &w->writes;
+  for (uint32_t g = index; g < phase->job->group_count; g += count) {
+    if (!phase->running[g]) continue;
+    const Sm_Group_Status status = sm_group_run(phase->job->program, &w->env, &phase->groups[g], &phase->states[g]);
+    if (status == SM_GROUP_FAULT) w->faulted = true;
+    phase->running[g] = status == SM_GROUP_BARRIER;
+  }
+  t_compute_writes = NULL;
+}
+
+/* compute_block with the groups on the workers; false on a fault. */
+static bool compute_block_split(const Compute_Job *job, const Sm_Env *env, Sm_Thread *groups, Sm_Group_State *states) {
+  const Compute_Launch *launch = job->launch;
+  memset(env->shared, 0, env->shared_bytes);
+  bool running[COMPUTE_GROUPS];
+  for (uint32_t g = 0; g < job->group_count; g++) {
+    Sm_Thread *t = &groups[g];
+    const uint32_t first = g * SM_LANES, lanes = job->threads - first < SM_LANES ? job->threads - first : SM_LANES;
+    sm_thread_reset(t, lanes);
+    for (uint32_t l = 0; l < lanes; l++) {
+      const uint32_t id = first + l;
+      t->tid[0][l] = id % launch->block[0];
+      t->tid[1][l] = (id / launch->block[0]) % launch->block[1];
+      t->tid[2][l] = id / (launch->block[0] * launch->block[1]);
+    }
+    t->ctaid[0] = t->ctaid[1] = t->ctaid[2] = 0;
+    sm_group_begin(&states[g], t);
+    running[g] = true;
+  }
+  for (uint32_t i = 0; i < WORKERS_MAX; i++) g_compute_workers[i].used = false;
+  Block_Phase phase = {job, env, groups, states, running};
+  const uint32_t n = job->group_count < job->workers->count ? job->group_count : job->workers->count;
+  for (bool any = true; any;) {
+    workers_run(job->workers, n, block_phase_task, &phase);
+    any = false;
+    for (uint32_t g = 0; g < job->group_count; g++) any = any || running[g];
+    for (uint32_t i = 0; i < n; i++)
+      if (g_compute_workers[i].faulted) any = false;
+  }
+  bool faulted = false;
+  for (uint32_t i = 0; i < WORKERS_MAX; i++) {
+    const Compute_Worker *w = &g_compute_workers[i];
+    if (!w->used) continue;
+    faulted = faulted || w->faulted;
+    for (uint32_t k = 0; k < w->writes.count; k++) compute_note_write(w->writes.lo[k], w->writes.hi[k]);
+  }
+  return !faulted;
+}
+
 static void compute_task(void *user, uint32_t index, uint32_t count) {
   (void)count;
   Compute_Job *job = (Compute_Job *)user;
@@ -4746,12 +4843,22 @@ void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t 
       faulted = faulted || w->faulted;
       for (uint32_t k = 0; k < w->writes.count; k++) compute_note_write(w->writes.lo[k], w->writes.hi[k]);
     }
+  } else if (blocks == 1u && group_count > 1u && r->workers.count > 1u && !program_samples_textures(program)) {
+    faulted = !compute_block_split(&job, env, groups, states);
   } else {
     for (uint32_t b = 0; b < blocks && !faulted; b++) faulted = !compute_block(&job, env, b, groups, states);
   }
   r->stats.compute_threads += (uint64_t)threads * blocks;
   r->stats.compute_dispatches++;
   if (faulted) r->stats.compute_faults++;
-  for (uint32_t i = 0; i < g_compute_writes.count; i++)
+  if (r->trace_compute && r->stats.compute_dispatches <= 60u)
+    log_warn("[gpu] compute @%llx (%u words): grid %ux%ux%u block %ux%ux%u shared %u, %u write range(s), first 0x%llx+0x%llx",
+             (unsigned long long)address, program->word_count, launch->grid[0], launch->grid[1], launch->grid[2],
+             launch->block[0], launch->block[1], launch->block[2], launch->shared_bytes, g_compute_writes.count,
+             (unsigned long long)(g_compute_writes.count ? g_compute_writes.lo[0] : 0),
+             (unsigned long long)(g_compute_writes.count ? g_compute_writes.hi[0] - g_compute_writes.lo[0] : 0));
+  for (uint32_t i = 0; i < g_compute_writes.count; i++) {
+    compute_output_note(g_compute_writes.lo[i], g_compute_writes.hi[i]);
     raster3d_sync_range(r, mem, g_compute_writes.lo[i], g_compute_writes.hi[i] - g_compute_writes.lo[i], true);
+  }
 }

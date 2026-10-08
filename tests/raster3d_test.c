@@ -841,16 +841,18 @@ static void test_compute(Raster3d *r) {
   static uint32_t cregs[COMPUTE_REGISTER_WORDS];
   cregs[COMPUTE_METHOD_PROGRAM_REGION] = (uint32_t)(PROGRAM_REGION >> 32);
   cregs[COMPUTE_METHOD_PROGRAM_REGION + 1u] = (uint32_t)PROGRAM_REGION;
-  /* Serially and on four workers (blocks shared out): the same output. */
-  const uint32_t worker_counts[2] = {1u, 4u};
-  for (uint32_t pass = 0; pass < 2u; pass++) {
+  /* Serially, on four workers (blocks shared out), and one block on four
+   * workers (its lane groups shared out between barriers): the same output. */
+  const uint32_t worker_counts[3] = {1u, 4u, 4u}, block_counts[3] = {COMPUTE_BLOCKS, COMPUTE_BLOCKS, 1u};
+  for (uint32_t pass = 0; pass < 3u; pass++) {
     raster3d_set_workers(r, worker_counts[pass]);
+    launch.grid[0] = block_counts[pass];
     memset(g_gpu + (COMPUTE_OUT - GPU_BASE), 0xee, COMPUTE_BLOCKS * COMPUTE_THREADS * 4u);
     const uint64_t before = r->stats.compute_threads;
     raster3d_compute(r, &launch, cregs, &k_mem);
-    CHECK(r->stats.compute_threads - before == COMPUTE_BLOCKS * COMPUTE_THREADS, "every thread of every block ran");
+    CHECK(r->stats.compute_threads - before == block_counts[pass] * COMPUTE_THREADS, "every thread of every block ran");
     uint32_t wrong = 0;
-    for (uint32_t b = 0; b < COMPUTE_BLOCKS; b++) {
+    for (uint32_t b = 0; b < block_counts[pass]; b++) {
       for (uint32_t i = 0; i < COMPUTE_THREADS; i++) {
         uint32_t v;
         memcpy(&v, g_gpu + (COMPUTE_OUT - GPU_BASE) + 4u * (b * COMPUTE_THREADS + i), 4);
@@ -860,8 +862,8 @@ static void test_compute(Raster3d *r) {
         }
       }
     }
-    CHECK(wrong == 0, "out[block][tid] = shared[63 - tid] (other lane group, before the barrier) + block, %u workers (%u wrong)",
-          worker_counts[pass], wrong);
+    CHECK(wrong == 0, "out[block][tid] = shared[63 - tid] (other lane group, before the barrier) + block, %u workers, %u blocks (%u wrong)",
+          worker_counts[pass], block_counts[pass], wrong);
   }
   CHECK(r->stats.compute_faults == 0, "no compute faults");
 }
