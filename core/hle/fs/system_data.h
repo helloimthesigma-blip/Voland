@@ -26,6 +26,14 @@
 /* True (and *out set) when Voland synthesizes `data_id`. */
 bool system_data_open(uint64_t data_id, Byte_Source *out);
 
+/* The user's own copy, preferred over any stand-in: a file on the SD card
+ * named after the data id (16 lowercase hex digits) in the root or in
+ * /systemdata, either a pre-decrypted data NCA (.nca: its RomFS section
+ * is served) or a bare RomFS image (.romfs). Dumped from the user's own
+ * console like their games (§1.6). True (and *out set) when found. */
+struct Ramfs_Pool;
+bool system_data_open_user(struct Ramfs_Pool *pool, uint32_t sd_root, uint64_t data_id, Byte_Source *out);
+
 /* A RomFS image with the given files in its root directory, into `out`
  * (at most `capacity` bytes). Returns the image size, 0 when it does not
  * fit. Exposed for tests. */

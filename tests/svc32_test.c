@@ -7,6 +7,7 @@
 #include <string.h>
 
 #include "common/arena.h"
+#include "hle/fs/ramfs.h"
 #include "hle/fs/system_data.h"
 #include "hle/kernel/svc32.h"
 #include "hle/loader/romfs.h"
@@ -97,7 +98,39 @@ static void test_system_data(void) {
   arena_destroy(&arena);
 }
 
+/* The user's own archive on the SD card wins: a bare RomFS here. */
+static void test_user_system_data(void) {
+  Ramfs_Pool pool;
+  CHECK(ramfs_pool_init(&pool, 1u << 20));
+  uint32_t root = RAMFS_NO_NODE;
+  CHECK(ramfs_create_filesystem(&pool, &root) == 0);
+  Byte_Source src;
+  CHECK(!system_data_open_user(&pool, root, SYSTEM_DATA_MII_MODEL, &src));
+  static const uint8_t body[] = "user data";
+  const System_Data_File files[] = {{"Only.dat", body, sizeof(body)}};
+  static uint8_t image[1024];
+  const uint64_t size = system_data_build_romfs(files, 1, image, sizeof(image));
+  CHECK(size > 0);
+  CHECK(ramfs_create_directory(&pool, root, "/systemdata") == 0);
+  CHECK(ramfs_create_file(&pool, root, "/systemdata/0100000000000802.romfs", size) == 0);
+  uint32_t node = RAMFS_NO_NODE;
+  CHECK(ramfs_lookup(&pool, root, "/systemdata/0100000000000802.romfs", &node) == 0);
+  CHECK(ramfs_write(&pool, node, 0, image, size) == 0);
+  CHECK(system_data_open_user(&pool, root, SYSTEM_DATA_MII_MODEL, &src));
+  CHECK(src.size == size);
+  Arena arena;
+  CHECK(arena_create(&arena, 1u << 16));
+  RomFS fs;
+  CHECK_OK(romfs_open(&src, &arena, &fs));
+  RomFS_File_Entry e;
+  CHECK_OK(romfs_find_file(&fs, "Only.dat", &e));
+  CHECK(e.data_size == sizeof(body));
+  arena_destroy(&arena);
+  ramfs_pool_destroy(&pool);
+}
+
 int main(void) {
+  test_user_system_data();
   test_get_info();
   test_create_thread();
   test_timeouts_and_ticks();

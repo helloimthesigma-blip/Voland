@@ -2,7 +2,12 @@
 
 #include <string.h>
 
+#include "common/log.h"
+#include "hle/fs/ramfs.h"
+#include "hle/loader/nca_parse.h"
 #include "hle/loader/romfs.h"
+
+#include <stdio.h>
 
 #define RD_DATA_OFFSET 0x200u      /* file data after the header, as packed images place it */
 #define RD_ALIGN_DATA 0x10u        /* each file's data alignment */
@@ -109,5 +114,73 @@ bool system_data_open(uint64_t data_id, Byte_Source *out) {
   if (!g_mii_model_size) build_mii_model();
   if (!g_mii_model_size) return false;
   *out = byte_source_from_memory(g_mii_model, g_mii_model_size);
+  return true;
+}
+
+/* ---- the user's own archives --------------------------------------------- */
+
+#define USER_DATA_SLOTS 4u
+#define USER_DATA_PATH_BYTES 64u
+
+typedef struct User_Data {
+  uint64_t id;
+  Ramfs_Pool *pool;
+  uint32_t node;
+  Byte_Source file;
+  NCA_File nca;
+  bool used;
+} User_Data;
+
+static User_Data g_user[USER_DATA_SLOTS];
+
+static Error ramfs_source_read(void *user, uint64_t offset, void *out, uint64_t size) {
+  const User_Data *d = (const User_Data *)user;
+  uint64_t got = 0;
+  if (ramfs_read(d->pool, d->node, offset, out, size, &got) != 0 || got != size)
+    return ERR(RESULT_IO_ERROR, "system data: short read from the SD card");
+  return OK;
+}
+
+bool system_data_open_user(Ramfs_Pool *pool, uint32_t sd_root, uint64_t data_id, Byte_Source *out) {
+  if (!pool || sd_root == RAMFS_NO_NODE) return false;
+  static const char *const forms[] = {"/%016llx.nca", "/systemdata/%016llx.nca", "/%016llx.romfs", "/systemdata/%016llx.romfs"};
+  uint32_t node = RAMFS_NO_NODE;
+  uint32_t form = 0;
+  char path[USER_DATA_PATH_BYTES];
+  for (; form < sizeof(forms) / sizeof(forms[0]); form++) {
+    snprintf(path, sizeof(path), forms[form], (unsigned long long)data_id);
+    if (ramfs_lookup(pool, sd_root, path, &node) == 0) break;
+  }
+  if (form == sizeof(forms) / sizeof(forms[0])) return false;
+  User_Data *d = NULL;
+  for (uint32_t i = 0; i < USER_DATA_SLOTS && !d; i++)
+    if (!g_user[i].used || g_user[i].id == data_id) d = &g_user[i];
+  if (!d) return false;
+  memset(d, 0, sizeof(*d));
+  d->id = data_id;
+  d->pool = pool;
+  d->node = node;
+  const uint64_t size = pool->nodes[node].size;
+  d->file.user = d;
+  d->file.size = size;
+  d->file.read = ramfs_source_read;
+  d->used = true;
+  if (form >= 2u) { /* a bare RomFS */
+    *out = d->file;
+    log_info("[fs] system data %016llx: the user's RomFS %s (%llu bytes)", (unsigned long long)data_id, path,
+             (unsigned long long)size);
+    return true;
+  }
+  int section = -1;
+  if (!error_is_ok(nca_open(&d->file, &d->nca)) || (section = nca_find_section(&d->nca, NCA_FS_ROMFS)) < 0 ||
+      d->nca.header.sections[section].has_compression_info ||
+      !error_is_ok(nca_probe_section(&d->nca, (uint32_t)section))) {
+    log_warn("[fs] system data %016llx: %s is not a pre-decrypted data NCA with an uncompressed RomFS",
+             (unsigned long long)data_id, path);
+    d->used = false;
+    return false;
+  }
+  *out = *nca_section_source(&d->nca, (uint32_t)section);
+  log_info("[fs] system data %016llx: the user's NCA %s", (unsigned long long)data_id, path);
   return true;
 }

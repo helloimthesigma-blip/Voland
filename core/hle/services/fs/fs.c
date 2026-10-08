@@ -246,8 +246,14 @@ static HLE_ServiceResult cmd_open_data_storage_by_id(HLE_Context *c, Service_Obj
   Fs_State *s = state_of(self);
   uint64_t data_id = 0;
   (void)ipc_request_read_u64(req, 8, &data_id);
+  if (system_data_open_user(s->pool, s->sd_root, data_id, &s->system_data)) {
+    (void)ipc_response_push_object(res, &s->storage, FS_STORAGE_SYSTEM_DATA);
+    return HLE_RESULT_SUCCESS;
+  }
   if (system_data_open(data_id, &s->system_data)) {
-    log_info("[fs] OpenDataStorageByDataId(%016llx): Voland's stand-in archive", (unsigned long long)data_id);
+    log_warn("[fs] OpenDataStorageByDataId(%016llx): Voland's stand-in (no model data). A title that draws Miis "
+             "needs your console's copy: add %016llx.nca (pre-decrypted) or .romfs to the SD card",
+             (unsigned long long)data_id, (unsigned long long)data_id);
     (void)ipc_response_push_object(res, &s->storage, FS_STORAGE_SYSTEM_DATA);
     return HLE_RESULT_SUCCESS;
   }
@@ -622,6 +628,9 @@ static HLE_ServiceResult cmd_storage_read(HLE_Context *c, Service_Object *self, 
   const IPC_Buffer *buf = service_out_buffer(req, 0);
   if (!buf) return size ? FS_RESULT_OUT_OF_RANGE : HLE_RESULT_SUCCESS;
   if (size > buf->size) size = buf->size;
+  if (self->state == FS_STORAGE_SYSTEM_DATA)
+    log_debug("[fs] system data read 0x%llx+0x%llx of 0x%llx", (unsigned long long)offset, (unsigned long long)size,
+              (unsigned long long)source->size);
   if (offset > source->size || size > source->size - offset) return FS_RESULT_OUT_OF_RANGE;
   for (uint64_t done = 0; done < size;) {
     const uint64_t chunk = size - done < FS_BOUNCE_BYTES ? size - done : FS_BOUNCE_BYTES;

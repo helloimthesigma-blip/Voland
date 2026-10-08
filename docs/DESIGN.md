@@ -2498,6 +2498,11 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - System data 0100000000000802 (MiiModel) is a stand-in made by Voland (`hle/fs/system_data.{h,c}`): a RomFS holding the archive's files, each with only a resource header. A title that draws Miis mounts it at start and aborts without it. No Nintendo content is shipped (§1.6).
   - svcBreak logs the link register and the stack's return addresses as module+offset.
   - `VOLAND_DUMP_MODULES` also writes each module's whole image, so the dynamic symbols can name them.
+- **User-supplied system data (§1.6).** `OpenDataStorageByDataId` first looks on the SD card for the user's own dump, named after the data id (`/<id>.nca` or `/<id>.romfs`, also under `/systemdata/`).
+  - A pre-decrypted data NCA has its RomFS section served; a bare RomFS is served as is.
+  - Only then does Voland's stand-in apply.
+  - MK8DX needs this: its Mii renderer cannot build its resources from the header-only MiiModel stand-in, and NVN later faults on the uninitialized texture objects (~4.4 s after boot, under the interpreter and the JIT alike).
+  - On the web, "Add to SD card" puts a file at `/<name>`, so a file named `0100000000000802.nca` is found.
 - **A32 JIT (docs/JIT.md "AArch32").** 32-bit titles run on `CPU_BACKEND_A32_JIT`, the ARM64→WASM JIT's runtime with an A32 front end (`jit_compile_a32.inc`) and the A32 interpreter as its cold path and fallback.
   - `CPU_Backend.aarch32` replaces the backend-pointer test in HLE.
   - `A32_State` overlays `Jit_State`, which gains `isa`.
