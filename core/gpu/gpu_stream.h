@@ -57,6 +57,7 @@ typedef struct Gpu_Stream {
   uint64_t capacity;        /* a multiple of GPU_STREAM_ALIGN */
   uint64_t write;           /* local write position (published by gpu_stream_publish) */
   uint64_t record_start;    /* the open record's position */
+  uint64_t published;       /* the write position last made visible */
   bool open;
   Gpu_Stream_Wait wait;
   void *wait_user;

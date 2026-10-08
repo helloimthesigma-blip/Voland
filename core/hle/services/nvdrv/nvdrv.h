@@ -85,8 +85,17 @@ typedef enum Nv_Device {
   NV_DEVICE_NVJPG,
 } Nv_Device;
 
-#define NVDRV_GRANULE_HINTS 1024u /* power of two */
+/* GPU page table (GPU VA -> mapping slot): 64 KiB granules, two levels.
+ * An L1 entry covers 64 MiB and names an L2 table from a fixed pool; an
+ * L2 entry is a slot + 1, 0 (none) or NVDRV_PT_MIXED (several mappings
+ * share the granule: translation scans). */
 #define NVDRV_GRANULE_SHIFT 16u
+#define NVDRV_PT_L2_BITS 10u
+#define NVDRV_PT_VA_BITS 40u
+#define NVDRV_PT_L1_ENTRIES (1u << (NVDRV_PT_VA_BITS - NVDRV_GRANULE_SHIFT - NVDRV_PT_L2_BITS))
+#define NVDRV_PT_L2_ENTRIES (1u << NVDRV_PT_L2_BITS)
+#define NVDRV_PT_L2_TABLES 512u /* 32 GiB of GPU VA with entries; beyond, translation scans */
+#define NVDRV_PT_MIXED 0xFFFFu
 
 typedef struct Nv_Fd {
   Nv_Device device;
@@ -130,9 +139,11 @@ typedef struct Nvdrv_State {
   Gpu_Mapping mappings[NVDRV_MAX_GPU_MAPPINGS];
   uint32_t mapping_end;    /* one past the highest slot ever used: scans stop here */
   uint32_t last_mapping;   /* the slot the last translation hit (checked first) */
-  /* Then a hint per 64 KiB GPU granule (direct mapped): compute and vertex
-   * fetch alternate between buffers, and a miss scans every mapping. */
-  uint32_t granule_hint[NVDRV_GRANULE_HINTS];
+  /* Then the GPU page table: compute and vertex fetch alternate between
+   * buffers, and a scan of every mapping costs thousands of compares. */
+  uint16_t pt_l1[NVDRV_PT_L1_ENTRIES];                      /* L2 table + 1, 0 = none */
+  uint16_t pt_l2[NVDRV_PT_L2_TABLES][NVDRV_PT_L2_ENTRIES];  /* slot + 1, 0, or NVDRV_PT_MIXED */
+  uint32_t pt_l2_used;
   uint64_t next_gpu_va;
   Syncpoints syncpoints;
   Nv_Event_Slot events[NVDRV_MAX_EVENTS];

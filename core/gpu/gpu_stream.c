@@ -87,12 +87,20 @@ uint8_t *gpu_stream_begin(Gpu_Stream *s, uint32_t type, uint32_t payload_bytes) 
   return record + GPU_STREAM_RECORD_HEADER_BYTES;
 }
 
-void gpu_stream_end(Gpu_Stream *s) { s->open = false; }
+/* Unpublished bytes that make a closed record publish: the consumer then
+ * works beside the producer instead of waiting for a full ring. */
+#define GPU_STREAM_PUBLISH_FRACTION 8u
+
+void gpu_stream_end(Gpu_Stream *s) {
+  s->open = false;
+  if (s->write - s->published >= s->capacity / GPU_STREAM_PUBLISH_FRACTION) gpu_stream_publish(s);
+}
 
 void gpu_stream_publish(Gpu_Stream *s) {
   const uint64_t visible = s->open ? s->record_start : s->write;
   if (load64(s->header, GPU_STREAM_OFF_WRITE) == visible) return;
   store64(s->header, GPU_STREAM_OFF_WRITE, visible);
+  s->published = visible;
   bump_and_notify(s->header, GPU_STREAM_OFF_WRITE_SIGNAL);
 }
 

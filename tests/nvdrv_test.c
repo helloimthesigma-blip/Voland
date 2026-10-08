@@ -151,6 +151,57 @@ int main(void) {
   CHECK(ioctl(as, IOWR(0x41u, 0x05u, 8), d) == 0);
   CHECK(ioctl(as, IOWR(0x41u, 0x05u, 8), d) == NV_BAD_VALUE); /* already unmapped */
 
+  /* The GPU page table (nvdrv.h): fixed-VA maps (flag 1) of the buffer.
+   * A whole granule; two mappings sharing one; a newer mapping over an
+   * older one wins, and unmapping it brings the older one back. */
+  {
+    const uint64_t buffer = stack + 0x10000, a_va = 0x10000000ull, shared_va = 0x10020000ull;
+    const struct { uint64_t va, size, offset; } maps[4] = {
+        {a_va, 0x10000, 0}, {shared_va, 0x1000, 0x2000}, {shared_va + 0x1000, 0x1000, 0x5000}, {a_va, 0x10000, 0x8000}};
+    for (uint32_t i = 0; i < 4u; i++) {
+      memset(d, 0, sizeof(d));
+      wr32(d, 1); wr32(d + 8, handle); wr64(d + 16, maps[i].offset); wr64(d + 24, maps[i].size); wr64(d + 32, maps[i].va);
+      CHECK(ioctl(as, IOWR(0x41u, 0x06u, 40), d) == 0 && rd64(d + 32) == maps[i].va);
+      if (i == 0) {
+        uint64_t guest = 0, run = 0;
+        CHECK(nvdrv_gpu_translate(&g_emu.nvdrv, a_va + 0x123, &guest, &run) && guest == buffer + 0x123 && run == 0x10000 - 0x123);
+      }
+    }
+    uint64_t guest = 0, run = 0;
+    CHECK(nvdrv_gpu_translate(&g_emu.nvdrv, shared_va + 0x10, &guest, &run) && guest == buffer + 0x2010 && run == 0xFF0);
+    CHECK(nvdrv_gpu_translate(&g_emu.nvdrv, shared_va + 0x1010, &guest, &run) && guest == buffer + 0x5010);
+    CHECK(!nvdrv_gpu_translate(&g_emu.nvdrv, shared_va + 0x2000, &guest, &run)); /* the granule's unmapped rest */
+    CHECK(nvdrv_gpu_translate(&g_emu.nvdrv, a_va + 0x40, &guest, &run) && guest == buffer + 0x8040);
+    memset(d, 0, sizeof(d));
+    wr64(d, a_va);
+    CHECK(ioctl(as, IOWR(0x41u, 0x05u, 8), d) == 0); /* the first match by VA: map 0 */
+    CHECK(nvdrv_gpu_translate(&g_emu.nvdrv, a_va + 0x40, &guest, &run) && guest == buffer + 0x8040);
+    CHECK(ioctl(as, IOWR(0x41u, 0x05u, 8), d) == 0); /* map 3 */
+    CHECK(!nvdrv_gpu_translate(&g_emu.nvdrv, a_va + 0x40, &guest, &run));
+    wr64(d, shared_va);
+    CHECK(ioctl(as, IOWR(0x41u, 0x05u, 8), d) == 0);
+    CHECK(!nvdrv_gpu_translate(&g_emu.nvdrv, shared_va + 0x10, &guest, &run));
+    CHECK(nvdrv_gpu_translate(&g_emu.nvdrv, shared_va + 0x1010, &guest, &run) && guest == buffer + 0x5010);
+    wr64(d, shared_va + 0x1000);
+    CHECK(ioctl(as, IOWR(0x41u, 0x05u, 8), d) == 0);
+    /* An older two-granule mapping under a newer one-granule mapping. */
+    const uint64_t old_va = 0x10100000ull;
+    const uint64_t layered[2][3] = {{old_va, 0x20000, 0}, {old_va + 0x10000, 0x10000, 0x8000}};
+    for (uint32_t i = 0; i < 2u; i++) {
+      memset(d, 0, sizeof(d));
+      wr32(d, 1); wr32(d + 8, handle); wr64(d + 16, layered[i][2]); wr64(d + 24, layered[i][1]); wr64(d + 32, layered[i][0]);
+      CHECK(ioctl(as, IOWR(0x41u, 0x06u, 40), d) == 0);
+    }
+    CHECK(nvdrv_gpu_translate(&g_emu.nvdrv, old_va + 0x10040, &guest, &run) && guest == buffer + 0x8040);
+    memset(d, 0, sizeof(d));
+    wr64(d, old_va + 0x10000);
+    CHECK(ioctl(as, IOWR(0x41u, 0x05u, 8), d) == 0);
+    CHECK(nvdrv_gpu_translate(&g_emu.nvdrv, old_va + 0x10040, &guest, &run) && guest == buffer + 0x10040);
+    CHECK(nvdrv_gpu_translate(&g_emu.nvdrv, old_va + 0x10080, &guest, &run) && guest == buffer + 0x10080); /* re-entered */
+    wr64(d, old_va);
+    CHECK(ioctl(as, IOWR(0x41u, 0x05u, 8), d) == 0);
+  }
+
   /* GPU channel: GPFIFO gives a fence; a submission with FENCE_GET completes it. */
   memset(d, 0, sizeof(d));
   wr32(d, 0x800);

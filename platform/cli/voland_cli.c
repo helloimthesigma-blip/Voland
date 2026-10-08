@@ -643,7 +643,27 @@ static void cxx_exception_scan(Emulator *emu, const Sched_Thread *th) {
   }
 }
 
+/* Pointers on the stack to printable C strings (an abort message's
+ * arguments, e.g. libc++abi's "terminating with uncaught exception of
+ * type %s: %s"). */
+#define STACK_STRINGS_MAX 48u
+#define STACK_STRING_MIN 6u
+static void stack_strings_scan(Emulator *emu, const Sched_Thread *th) {
+  const CPU_Register_File *rf = emu->cpu_backend->get_register_file(th->thread.cpu_state);
+  uint32_t printed = 0;
+  for (uint64_t at = rf->sp & ~7ull; at < rf->sp + IL2CPP_SCAN_STACK_BYTES && printed < STACK_STRINGS_MAX; at += 8u) {
+    uint64_t candidate = 0;
+    char text[IL2CPP_TEXT_MAX];
+    if (!error_is_ok(vmm_read64(emu->vmm, at, &candidate))) break;
+    if (!candidate || !guest_cstring(emu, candidate, text, sizeof(text)) || strlen(text) < STACK_STRING_MIN) continue;
+    fprintf(stderr, "    string at stack +0x%llx -> 0x%llx: \"%s\"\n", (unsigned long long)(at - rf->sp),
+            (unsigned long long)candidate, text);
+    printed++;
+  }
+}
+
 static void il2cpp_exception_scan(Emulator *emu, const Sched_Thread *th) {
+  if (th->thread_id == 1u || th->state == THREAD_STATE_RUNNABLE) stack_strings_scan(emu, th);
   cxx_exception_scan(emu, th);
   const CPU_Register_File *rf = emu->cpu_backend->get_register_file(th->thread.cpu_state);
   uint64_t seen[32];

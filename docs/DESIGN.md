@@ -2507,6 +2507,12 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - Before this, dozens of SSBU match shaders had undecoded instructions.
   - New `wgsl_test` vectors (`iadd3`, `texture_half`) match the interpreter on WebGPU.
 
+- **§13, SSBU fight speed (browser profile of a real match, serial, pacing off).** Guest code was only 15% of the CPU worker; GPU command processing was the rest.
+  - **GPU page table in nvdrv** (`pt_l1`/`pt_l2`): GPU VA → mapping slot at 64 KiB granules, kept exact by map and unmap, so a lookup that misses the last-hit hint is two loads. A granule several mappings share says so and scans. `nvdrv_gpu_translate` went from 31% of the fight to 1%: vertex-stream window reads run past mapping ends, and every failed lookup used to scan all 16384 slots.
+  - **GPU stream publishing:** a closed record publishes once 1/8 of the ring is unpublished. Before, the producer published only when the 4 MiB ring was full, so the GPU worker idled while it filled and the producer stalled while it drained (1740 stalls in 43 s; 7 after).
+  - Together: 3.4 → 4.8 fps in the fight, 804 → 1127 slices/s. Compute on the CPU (24%) and vertex fetch and assembly (~40%) are what remain.
+  - **Parallel mode:** every SVC, and so all of this GPU work, runs under the kernel lock. With 3 cores in an SSBU match the cores waited on it 45–73% of the time.
+
 ### Changelog v3.73 → v3.74 (summary)
 
 - **§15, per-title saves:** fsp-srv fills program id 0 in a title save's attribute with the running program's id; a save keyed with 0 by older builds is taken over by the first title that opens it (its committed archive is renamed, and the web mirror removes the old stored name).

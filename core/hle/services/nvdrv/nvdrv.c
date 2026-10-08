@@ -314,6 +314,9 @@ static uint32_t ctrl_gpu_ioctl(uint32_t nr, uint8_t *d, uint32_t size, uint8_t *
 /* /dev/nvhost-as-gpu                                                  */
 /* ------------------------------------------------------------------ */
 
+static void pt_map(Nvdrv_State *s, uint32_t slot);
+static void pt_unmap(Nvdrv_State *s, uint32_t slot);
+
 static uint32_t as_gpu_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
   switch (nr) {
   case 0x01: case 0x03: case 0x09: /* BIND_CHANNEL, FREE_SPACE, INITIALIZE_EX */
@@ -334,6 +337,7 @@ static uint32_t as_gpu_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
   case 0x05: { /* UNMAP_BUFFER {u64 offset} */
     for (uint32_t i = 0; i < s->mapping_end; i++) {
       if (s->mappings[i].in_use && s->mappings[i].gpu_va == rd64(d)) {
+        pt_unmap(s, i);
         s->mappings[i].in_use = false;
         return NV_SUCCESS;
       }
@@ -371,6 +375,7 @@ static uint32_t as_gpu_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
       if (m->in_use) continue;
       *m = (Gpu_Mapping){true, gpu_va, size, handle, rd64(d + 16)};
       if (i + 1u > s->mapping_end) s->mapping_end = i + 1u;
+      pt_map(s, i);
       log_debug("[as] MAP_BUFFER_EX flags 0x%x kind 0x%x handle %u page 0x%x buf_off 0x%llx size 0x%llx -> va 0x%llx",
                 flags, rd32(d + 4), handle, page_size, (unsigned long long)rd64(d + 16), (unsigned long long)size,
                 (unsigned long long)gpu_va);
@@ -417,26 +422,95 @@ static uint32_t complete_submission(Nvdrv_State *s, Nv_Fd *f, uint32_t increment
 
 /* ---- GPU memory for the command processor ------------------------- */
 
+/* ---- The GPU page table (nvdrv.h) --------------------------------- */
+
+#define PT_GRANULE_BYTES (1ull << NVDRV_GRANULE_SHIFT)
+
+/* The L2 entry of granule `g`, or NULL when its table does not exist
+ * (and cannot be made: `make` false, or the pool is used up). */
+static uint16_t *pt_entry(Nvdrv_State *s, uint64_t g, bool make) {
+  const uint64_t l1 = g >> NVDRV_PT_L2_BITS;
+  if (l1 >= NVDRV_PT_L1_ENTRIES) return NULL;
+  if (!s->pt_l1[l1]) {
+    if (!make || s->pt_l2_used == NVDRV_PT_L2_TABLES) return NULL;
+    s->pt_l1[l1] = (uint16_t)(++s->pt_l2_used);
+  }
+  return &s->pt_l2[s->pt_l1[l1] - 1u][g & (NVDRV_PT_L2_ENTRIES - 1u)];
+}
+
 static bool mapping_covers(const Gpu_Mapping *m, uint64_t gpu_va) {
   return m->in_use && gpu_va >= m->gpu_va && gpu_va - m->gpu_va < m->size;
 }
 
-/* Linear over the used slots, but the previous hit is tried first:
- * consecutive GPU accesses nearly always fall in the same buffer. The
- * cached index is only a hint (a stale one just misses). */
+/* A slot may own a granule's entry alone when it covers all of it, or
+ * when nothing else live is there. */
+static bool covers_granule(const Gpu_Mapping *m, uint64_t g) {
+  return m->gpu_va <= g * PT_GRANULE_BYTES && m->gpu_va + m->size >= (g + 1u) * PT_GRANULE_BYTES;
+}
+
+static void pt_map(Nvdrv_State *s, uint32_t slot) {
+  const Gpu_Mapping *m = &s->mappings[slot];
+  if (!m->size) return;
+  const uint64_t first = m->gpu_va >> NVDRV_GRANULE_SHIFT, last = (m->gpu_va + m->size - 1u) >> NVDRV_GRANULE_SHIFT;
+  for (uint64_t g = first; g <= last; g++) {
+    uint16_t *e = pt_entry(s, g, true);
+    if (!e) continue;
+    const uint32_t old = *e;
+    const bool alone = !old || (old != NVDRV_PT_MIXED && !s->mappings[old - 1u].in_use);
+    /* The newest mapping wins a granule it covers whole, as page table
+     * entries written over older ones would. */
+    *e = (uint16_t)(alone || covers_granule(m, g) ? slot + 1u : NVDRV_PT_MIXED);
+  }
+}
+
+/* Granule `g`'s entry from scratch, `skip` left out: a live mapping that
+ * covers it whole, else the only one touching it, else MIXED. */
+static uint16_t pt_rebuild_entry(const Nvdrv_State *s, uint64_t g, uint32_t skip) {
+  uint32_t touching = 0, last = 0;
+  for (uint32_t i = 0; i < s->mapping_end; i++) {
+    const Gpu_Mapping *m = &s->mappings[i];
+    if (i == skip || !m->in_use || !m->size) continue;
+    if (m->gpu_va >= (g + 1u) * PT_GRANULE_BYTES || m->gpu_va + m->size <= g * PT_GRANULE_BYTES) continue;
+    if (covers_granule(m, g)) return (uint16_t)(i + 1u);
+    touching++;
+    last = i;
+  }
+  return touching == 0 ? 0 : touching == 1 ? (uint16_t)(last + 1u) : (uint16_t)NVDRV_PT_MIXED;
+}
+
+static void pt_unmap(Nvdrv_State *s, uint32_t slot) {
+  const Gpu_Mapping *m = &s->mappings[slot];
+  if (!m->size) return;
+  const uint64_t first = m->gpu_va >> NVDRV_GRANULE_SHIFT, last = (m->gpu_va + m->size - 1u) >> NVDRV_GRANULE_SHIFT;
+  for (uint64_t g = first; g <= last; g++) {
+    uint16_t *e = pt_entry(s, g, false);
+    /* What this mapping hid or shared the granule with takes it back. */
+    if (e && (*e == slot + 1u || *e == NVDRV_PT_MIXED)) *e = pt_rebuild_entry(s, g, slot);
+  }
+}
+
+/* The previous hit first (consecutive accesses nearly always fall in the
+ * same buffer; only a hint), then the page table, which is exact: a
+ * granule's entry names the one mapping there or says none is. Only
+ * granules several mappings share, and VA the table could not cover (its
+ * pool used up), scan every mapping. */
 bool nvdrv_gpu_translate(const Nvdrv_State *s, uint64_t gpu_va, uint64_t *guest_va, uint64_t *contiguous) {
   const uint32_t hint = __atomic_load_n(&s->last_mapping, __ATOMIC_RELAXED);
   uint32_t found = UINT32_MAX;
   if (hint < s->mapping_end && mapping_covers(&s->mappings[hint], gpu_va)) found = hint;
-  const uint32_t granule = (uint32_t)(gpu_va >> NVDRV_GRANULE_SHIFT) & (NVDRV_GRANULE_HINTS - 1u);
   if (found == UINT32_MAX) {
-    const uint32_t g = __atomic_load_n(&s->granule_hint[granule], __ATOMIC_RELAXED);
-    if (g < s->mapping_end && mapping_covers(&s->mappings[g], gpu_va)) found = g;
+    const uint64_t g = gpu_va >> NVDRV_GRANULE_SHIFT, l1 = g >> NVDRV_PT_L2_BITS;
+    if (l1 >= NVDRV_PT_L1_ENTRIES) return false;
+    const bool exact = s->pt_l1[l1] || s->pt_l2_used < NVDRV_PT_L2_TABLES; /* no table and room left: nothing mapped */
+    const uint32_t e = s->pt_l1[l1] ? s->pt_l2[s->pt_l1[l1] - 1u][g & (NVDRV_PT_L2_ENTRIES - 1u)] : 0u;
+    if (exact && e != NVDRV_PT_MIXED) {
+      if (!e || !mapping_covers(&s->mappings[e - 1u], gpu_va)) return false;
+      found = e - 1u;
+    }
+    for (uint32_t i = 0; found == UINT32_MAX && i < s->mapping_end; i++)
+      if (mapping_covers(&s->mappings[i], gpu_va)) found = i;
+    if (found == UINT32_MAX) return false;
   }
-  for (uint32_t i = 0; found == UINT32_MAX && i < s->mapping_end; i++)
-    if (mapping_covers(&s->mappings[i], gpu_va)) found = i;
-  if (found == UINT32_MAX) return false;
-  __atomic_store_n((uint32_t *)&s->granule_hint[granule], found, __ATOMIC_RELAXED);
   const Gpu_Mapping *m = &s->mappings[found];
   uint64_t base = 0, size = 0;
   if (!nvdrv_nvmap_lookup(s, m->nvmap_handle, &base, &size)) return false;

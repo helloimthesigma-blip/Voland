@@ -56,6 +56,13 @@
  *   figure much less sensitive to a busy machine than wall time.
  * - --web-dir DIR builds and serves another checkout's platform/web (its
  *   core staged there), so this harness can measure older commits.
+ * - --drive FILE: after the warm-up, take commands appended to FILE (one
+ *   per line) before measuring - to steer a game by eye, e.g. through
+ *   menus to the scene to profile: "press KEY MS" (hold KEY for MS wall
+ *   milliseconds), "shot FILE.png", "stats", "click TESTID" (e.g.
+ *   state-save, state-load), "status TESTID" (prints its text), "go"
+ *   (measure now). Each
+ *   command prints "drive: N done ...".
  * - --restore-saves BACKUP.tar imports a saves backup (the Saves panel's
  *   "Back up saves" file) before the game loads, so a run can start from
  *   any save point.
@@ -117,6 +124,7 @@ function parseArgs(argv) {
     else if (a === "--out-dir") opts.outDir = next();
     else if (a === "--shot") opts.shot = next();
     else if (a === "--shots-every") { opts.shotsEvery = Number(next()); opts.shotsDir = next(); }
+    else if (a === "--drive") opts.drive = next();
     else if (a === "--restore-saves") opts.restoreSaves = next();
     else if (a === "--json") opts.json = next();
     else if (a === "--web-dir") WEB_DIR = resolve(next()); /* another checkout's platform/web */
@@ -368,7 +376,7 @@ async function main() {
       console.log(`restore saves: ${await note.textContent()}`);
     }
     await page.getByTestId("load-input").setInputFiles(opts.game);
-    await page.getByTestId("load-success").waitFor({ timeout: 120_000 });
+    await page.getByTestId("load-success").waitFor({ timeout: 600_000 });
     const worker = await (async () => {
       for (let i = 0; i < 100; i++) {
         const w = page.workers().find((x) => /cpu\.worker/.test(x.url()));
@@ -500,6 +508,38 @@ async function main() {
       await sleep(250);
       s = await sample();
       await servicePhases(s);
+    }
+    if (opts.drive) {
+      /* Commands appended to the drive file, until "go". */
+      const { readFileSync } = await import("node:fs");
+      let done = 0;
+      console.log(`drive: waiting for commands in ${opts.drive}`);
+      for (;;) {
+        let lines = [];
+        try { lines = readFileSync(opts.drive, "utf8").split("\n").map((l) => l.trim()).filter(Boolean); } catch { /* not yet */ }
+        if (done >= lines.length) { await sleep(200); continue; }
+        const [cmd, arg, arg2] = lines[done].split(/\s+/);
+        let note = "";
+        if (cmd === "press") {
+          await page.keyboard.down(arg);
+          await sleep(Number(arg2 ?? 150));
+          await page.keyboard.up(arg);
+        } else if (cmd === "shot") {
+          const box = await page.getByTestId("screen").boundingBox();
+          if (box) await page.screenshot({ clip: box, path: arg });
+        } else if (cmd === "click") {
+          await page.getByTestId(arg).first().click();
+        } else if (cmd === "status") {
+          note = (await page.getByTestId(arg).first().textContent().catch(() => "")) ?? "";
+        } else if (cmd === "stats") {
+          const now = await sample();
+          note = `slices ${now.perf.slices} virtual ${(now.perf.ticks / TICKS_PER_SECOND).toFixed(1)} s presents ${now.presents} fps ${now.fps}`;
+        }
+        done++;
+        console.log(`drive: ${done} done ${lines[done - 1]} ${note}`);
+        if (cmd === "go") break;
+      }
+      s = await sample();
     }
     const warm = s;
     if (opts.phases.length) {
