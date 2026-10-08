@@ -58,6 +58,8 @@ EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
 EXPORT void emulator_set_frame_skip_ffi(uint32_t frames);
 EXPORT void emulator_set_gpu_mode_ffi(uint32_t on);
 EXPORT uint32_t emulator_set_host_cores_ffi(uint32_t cores);
+EXPORT uint32_t emulator_set_gpu_async_ffi(uint32_t on);
+EXPORT uint32_t emulator_set_render_workers_ffi(uint32_t count);
 EXPORT void emulator_set_poll_coalescing_ffi(uint32_t on);
 EXPORT void emulator_set_free_running_ffi(uint32_t on);
 EXPORT void emulator_set_pacing_ffi(uint32_t on);
@@ -358,6 +360,22 @@ EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds)
 EXPORT void emulator_set_frame_skip_ffi(uint32_t frames)
 {
   if (g_initialised) emulator_set_frame_skip(&g_emulator, frames);
+}
+
+/* The renderer's worker threads, caller included (raster3d_set_workers;
+ * never more than it has). Returns the count in effect. */
+EXPORT uint32_t emulator_set_render_workers_ffi(uint32_t count)
+{
+  if (!g_initialised) return 0;
+  gpu_thread_drain(&g_emulator.gpu_thread);
+  if (count && count < g_emulator.renderer.workers.count) raster3d_set_workers(&g_emulator.renderer, count);
+  return g_emulator.renderer.workers.count;
+}
+
+/* Asynchronous GPU (emulator_set_gpu_async): 1 if it is on. */
+EXPORT uint32_t emulator_set_gpu_async_ffi(uint32_t on)
+{
+  return g_initialised && emulator_set_gpu_async(&g_emulator, on != 0) ? 1u : 0u;
 }
 
 /* Parallel guest threads (emulator_set_host_cores; 0 = serial). Returns

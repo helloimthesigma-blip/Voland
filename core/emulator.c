@@ -311,6 +311,7 @@ static void reset_process_services(Emulator* emulator) {
   event_pool_init(&emulator->events);
   nvdrv_init(&emulator->nvdrv, emulator->gpu_channels); /* fds, nvmap handles, syncpoints die with the process */
   emulator->nvdrv.renderer = emulator->renderer.ready ? &emulator->renderer : NULL;
+  emulator->nvdrv.gpu_thread = &emulator->gpu_thread;
   if (!emulator->video_ready) { /* the video worker reads the region's header once: never re-laid out */
     video_stream_init(&emulator->video, (uint8_t *)(uintptr_t)layout_get()->video_region_base, gpu_stream_wait,
                       emulator->video.backend);
@@ -452,6 +453,7 @@ Error emulator_create_with_backend(Emulator* out, const CPU_Backend* backend) {
 
 void emulator_destroy(Emulator* emulator) {
   if (!emulator) return;
+  gpu_thread_stop(&emulator->gpu_thread);
   (void)emulator_set_host_cores(emulator, 0);
   emulator_unload_program(emulator);
   if (emulator->cpu_backend && emulator->cpu_state) {
@@ -647,6 +649,7 @@ Error emulator_load(Emulator* emulator, const Byte_Source* source, uint64_t aslr
 
 void emulator_unload_program(Emulator* emulator) {
   if (!emulator || !emulator->program_loaded) return;
+  gpu_thread_drain(&emulator->gpu_thread); /* queued work names this process's memory */
   const Thread_Env env = {emulator->cpu_backend, emulator->vmm, &emulator->process.tls, &emulator->hle};
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     Sched_Thread* t = &emulator->scheduler.threads[i];
@@ -758,12 +761,30 @@ void emulator_pacing_resync(Emulator* emulator) {
   if (emulator) emulator->pacing_origin_ns = 0;
 }
 
+/* Asynchronous GPU: while no guest thread can run and the GPU thread has
+ * work, the guest is waiting for it (a fence, a present) - wait in host
+ * time instead of letting virtual time jump past it. Synchronously the
+ * GPU's work took no virtual time either. */
+#define EMULATOR_GPU_WAIT_NS 1000000ull
+
+static void wait_for_gpu(Emulator* emulator) {
+  Gpu_Thread* gpu = &emulator->gpu_thread;
+  /* Parallel slice mode checks between slices, with every core parked;
+   * free-running cores take their own idle steps. */
+  if (!gpu_thread_async(gpu) || (emulator->parallel && emulator->free_running)) return;
+  while (scheduler_pick(&emulator->scheduler) < 0 && gpu_thread_busy(gpu)) {
+    gpu_thread_wait(gpu, gpu_thread_progress(gpu), EMULATOR_GPU_WAIT_NS);
+    update_devices(emulator);
+  }
+}
+
 Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
   SWITCH_ASSERT_ALWAYS(emulator != NULL, "emulator_run_slice: emulator is NULL");
   if (!emulator->program_loaded) return EMULATOR_NOT_LOADED;
   CPU_ExitReason reason = CPU_EXIT_CYCLES_ELAPSED;
   pace(emulator);
   update_devices(emulator);
+  wait_for_gpu(emulator);
   const Scheduler_Status tick = emulator->parallel
                                     ? parallel_tick(emulator->parallel, cycle_budget)
                                     : scheduler_tick(&emulator->scheduler, emulator->cpu_backend, cycle_budget, &reason);
@@ -826,6 +847,7 @@ static void report_jit(void) {
 
 uint32_t emulator_set_host_cores(Emulator* emulator, uint32_t cores) {
   if (!emulator) return 0;
+  gpu_thread_drain(&emulator->gpu_thread);
   if (cores > PARALLEL_MAX_CORES) cores = PARALLEL_MAX_CORES;
   if (emulator->parallel && parallel_core_count(emulator->parallel) == cores) return cores;
   if (emulator->parallel) {
@@ -843,7 +865,7 @@ uint32_t emulator_set_host_cores(Emulator* emulator, uint32_t cores) {
 #ifdef __EMSCRIPTEN__
   /* Every host thread comes from the fixed pthread pool (§24): the pixel
    * workers give up as many as the cores take (never grow). */
-  const uint32_t pixel_workers = WORKERS_MAX + 1u - cores;
+  const uint32_t pixel_workers = WORKERS_MAX + 1u - cores - (gpu_thread_async(&emulator->gpu_thread) ? 1u : 0u);
   if (emulator->renderer.workers.count > pixel_workers) raster3d_set_workers(&emulator->renderer, pixel_workers);
 #endif
   emulator->parallel = parallel_create(&emulator->scheduler, emulator->cpu_backend, cores);
@@ -1129,8 +1151,24 @@ static void gpu_stream_wait(void *user, volatile int32_t *word, int32_t expected
 #endif
 }
 
+bool emulator_set_gpu_async(Emulator *emulator, bool on) {
+  if (!emulator) return false;
+  if (!on) {
+    gpu_thread_stop(&emulator->gpu_thread);
+    return false;
+  }
+  if (gpu_thread_async(&emulator->gpu_thread)) return true;
+#ifdef __EMSCRIPTEN__
+  /* The thread comes from the fixed pthread pool (§24): a pixel worker
+   * gives up its place. */
+  if (emulator->renderer.workers.count > 1u) raster3d_set_workers(&emulator->renderer, emulator->renderer.workers.count - 1u);
+#endif
+  return gpu_thread_start(&emulator->gpu_thread);
+}
+
 void emulator_set_gpu_mode(Emulator *emulator, bool on) {
   if (!emulator) return;
+  gpu_thread_drain(&emulator->gpu_thread);
   if (on && !emulator->gpu_stream_ready) {
     const Memory_Layout *layout = layout_get();
     uint8_t *header = (uint8_t *)(uintptr_t)layout->gpu_ring_base;
@@ -1149,7 +1187,11 @@ void emulator_set_frame_skip(Emulator* emulator, uint32_t n) {
   if (!emulator) return;
   emulator->frame_skip = n > EMULATOR_MAX_FRAME_SKIP ? EMULATOR_MAX_FRAME_SKIP : n;
   emulator->vi.frame_skip = emulator->frame_skip;
-  if (!emulator->frame_skip) emulator->renderer.skip_draws = false;
+  if (!emulator->frame_skip) {
+    gpu_thread_drain(&emulator->gpu_thread);
+    emulator->renderer.skip_draws = false;
+    emulator->vi.skipping = false;
+  }
 }
 
 void emulator_set_rtc(Emulator* emulator, int64_t unix_seconds) {
@@ -1262,6 +1304,7 @@ static void savestate_plan(Emulator *emu, Savestate_Plan *plan) {
 /* Back to the serial scheduler: no guest code runs on another host
  * thread while ranges are copied (docs/PARALLEL.md). */
 static void savestate_quiesce(Emulator *emu) {
+  gpu_thread_drain(&emu->gpu_thread);
   g_savestate_cores = emu->parallel ? parallel_core_count(emu->parallel) : 0;
   (void)emulator_set_host_cores(emu, 0);
 }

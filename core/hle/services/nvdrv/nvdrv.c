@@ -44,7 +44,8 @@
 #define GPU_BIG_PAGE_SIZE 0x10000u
 #define GPU_COMPRESSION_PAGE_SIZE 0x20000u
 #define GPU_SMALL_PAGE_SIZE 0x1000u
-#define SUBMIT_FLAG_FENCE_GET (1u << 1)
+#define SUBMIT_FLAG_FENCE_GET (1u << 1)       /* the driver appends one increment and returns the fence */
+#define SUBMIT_FLAG_INCREMENT_VALUE (1u << 8) /* fence.value in: the increments the commands make */
 #define MAP_FLAG_MODIFY (1u << 8)
 
 /* GM20B (Tegra X1) facts returned by GET_CHARACTERISTICS. */
@@ -187,7 +188,7 @@ static uint32_t ctrl_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
   switch (nr) {
   case 0x14: /* SYNCPT_READ {id; value out} */
     if (rd32(d) >= SYNCPOINT_COUNT) return NV_BAD_VALUE;
-    wr32(d + 4, sp->min[rd32(d)]);
+    wr32(d + 4, syncpoint_min(sp, rd32(d)));
     return NV_SUCCESS;
   case 0x15: { /* SYNCPT_INCR {id} */
     const uint32_t id = rd32(d);
@@ -199,20 +200,20 @@ static uint32_t ctrl_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
   case 0x19: { /* SYNCPT_WAIT_EX {id, threshold, timeout, value inout} */
     const uint32_t id = rd32(d);
     if (id >= SYNCPOINT_COUNT) return NV_BAD_VALUE;
-    if (nr == 0x19) wr32(d + 12, sp->min[id]);
+    if (nr == 0x19) wr32(d + 12, syncpoint_min(sp, id));
     return syncpoint_reached(sp, id, rd32(d + 4)) ? NV_SUCCESS : NV_TIMEOUT;
   }
   case 0x1D: { /* EVENT_WAIT {id, threshold, timeout, value inout} */
     const uint32_t id = rd32(d);
     if (id >= SYNCPOINT_COUNT) return NV_BAD_VALUE;
-    wr32(d + 12, sp->min[id]);
+    wr32(d + 12, syncpoint_min(sp, id));
     return syncpoint_reached(sp, id, rd32(d + 4)) ? NV_SUCCESS : NV_TIMEOUT;
   }
   case 0x1E: { /* EVENT_WAIT_ASYNC {id, threshold, timeout, event_id} */
     const uint32_t id = rd32(d), threshold = rd32(d + 4), event_id = rd32(d + 12);
     if (id >= SYNCPOINT_COUNT || event_id >= NVDRV_MAX_EVENTS) return NV_BAD_VALUE;
     log_debug("[nvdrv] EVENT_WAIT_ASYNC syncpoint %u threshold %u (min %u max %u) event %u timeout %d", id, threshold,
-              sp->min[id], sp->max[id], event_id, (int32_t)rd32(d + 8));
+              syncpoint_min(sp, id), syncpoint_max(sp, id), event_id, (int32_t)rd32(d + 8));
     if (syncpoint_reached(sp, id, threshold)) return NV_SUCCESS;
     s->events[event_id].waiting = true;
     s->events[event_id].syncpoint = id;
@@ -411,15 +412,7 @@ static uint32_t ensure_syncpoint(Nvdrv_State *s, Nv_Fd *f) {
   return f->syncpoint;
 }
 
-/* A submission completes at once (nvdrv.h): returns the reached fence. */
-static uint32_t complete_submission(Nvdrv_State *s, Nv_Fd *f, uint32_t increments) {
-  const uint32_t id = ensure_syncpoint(s, f);
-  uint32_t value = s->syncpoints.max[id];
-  for (uint32_t i = 0; i < increments; i++) value = syncpoint_increment_max(&s->syncpoints, id);
-  syncpoint_complete(&s->syncpoints, id, value);
-  f->submissions++;
-  return value;
-}
+
 
 /* ---- GPU memory for the command processor ------------------------- */
 
@@ -545,27 +538,23 @@ static bool gpu_translate(void *user, uint64_t gpu_va, uint64_t *guest_va) {
   return nvdrv_gpu_translate((const Nvdrv_State *)user, gpu_va, guest_va, &contiguous);
 }
 
-/* In-stream syncpoint increments of the GPFIFO being processed: applied
- * once the submission has the kernel lock back (scheduler_gpu_begin lets
- * other cores' SVCs at the syncpoints meanwhile). One submission runs at
- * a time (the GPU lock). */
-#define DEFERRED_INCREMENTS 256u
-static uint32_t g_deferred_increment[DEFERRED_INCREMENTS];
-static uint32_t g_deferred_increments;
-static bool g_deferring_increments;
-
-static void syncpoint_increment_now(Nvdrv_State *s, uint32_t id) {
-  syncpoint_complete(&s->syncpoints, id, syncpoint_increment_max(&s->syncpoints, id));
-}
+/* The submission being processed (on the GPU thread, or the submitting
+ * thread when synchronous): its channel syncpoint and the fence its
+ * increments may reach. Increments the submission promised advance only
+ * the reached value, up to that fence - a later submission's fence is
+ * never reached early. Unpromised ones promise and reach at once. */
+static _Thread_local uint32_t t_submit_syncpoint, t_submit_fence;
+static _Thread_local bool t_submit_promised;
 
 static void gpu_syncpoint_increment(void *user, uint32_t id) {
   Nvdrv_State *s = (Nvdrv_State *)user;
   if (id == 0 || id >= SYNCPOINT_COUNT) return;
-  if (g_deferring_increments && g_deferred_increments < DEFERRED_INCREMENTS) {
-    g_deferred_increment[g_deferred_increments++] = id;
+  if (t_submit_promised && id == t_submit_syncpoint &&
+      (int32_t)(t_submit_fence - syncpoint_min(&s->syncpoints, id)) > 0) {
+    (void)syncpoint_increment_min(&s->syncpoints, id, t_submit_fence);
     return;
   }
-  syncpoint_increment_now(s, id);
+  syncpoint_complete(&s->syncpoints, id, syncpoint_increment_max(&s->syncpoints, id));
 }
 
 static Gpu_Channel *channel_of(Nvdrv_State *s, Nv_Fd *f) {
@@ -588,19 +577,65 @@ static Gpu_Channel *channel_of(Nvdrv_State *s, Nv_Fd *f) {
 #define GPFIFO_HEADER_BYTES 24u
 #define GPFIFO_MAX_ENTRIES ((NVDRV_IOCTL_MAX_BYTES - GPFIFO_HEADER_BYTES) / 8u)
 
-static void run_gpfifo(Nvdrv_State *s, Nv_Fd *f, uint8_t *d) {
+/* One submission for the GPU thread: its entries follow. */
+typedef struct Gpfifo_Call {
+  Nvdrv_State *s;
+  Gpu_Channel *channel;
+  uint32_t syncpoint;
+  uint32_t fence;    /* the promised value: reached once the commands ran */
+  bool promised;     /* increments were promised */
+  uint32_t count;
+} Gpfifo_Call;
+
+static void gpfifo_run(void *user, const void *payload, uint32_t bytes) {
+  (void)user;
+  (void)bytes;
+  Gpfifo_Call call;
+  memcpy(&call, payload, sizeof(call));
+  uint64_t entries[GPFIFO_MAX_ENTRIES];
+  memcpy(entries, (const uint8_t *)payload + sizeof(call), (size_t)call.count * 8u);
+  Nvdrv_State *s = call.s;
+  const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate};
+  t_submit_syncpoint = call.syncpoint;
+  t_submit_fence = call.fence;
+  t_submit_promised = call.promised;
+  gpu_channel_submit(call.channel, &memory, entries, call.count);
+  t_submit_promised = false;
+  /* Whatever the commands did, the promise is kept. */
+  if (call.promised) syncpoint_complete(&s->syncpoints, call.syncpoint, call.fence);
+}
+
+/* Queues the submission (or runs it, synchronously): its syncpoint
+ * promise is made now, in submission order; returns the fence. */
+static uint32_t run_gpfifo(Nvdrv_State *s, Nv_Fd *f, uint8_t *d) {
+  const uint32_t flags = rd32(d + 12);
+  const uint32_t id = ensure_syncpoint(s, f);
+  const uint32_t increments = ((flags & SUBMIT_FLAG_INCREMENT_VALUE) ? rd32(d + 20) : 0u) +
+                              ((flags & SUBMIT_FLAG_FENCE_GET) ? 1u : 0u);
+  const uint32_t fence = increments ? syncpoint_add_max(&s->syncpoints, id, increments) : syncpoint_max(&s->syncpoints, id);
+  f->submissions++;
   Gpu_Channel *channel = channel_of(s, f);
-  if (!channel || !s->hle) return;
+  if (!channel || !s->hle) {
+    syncpoint_complete(&s->syncpoints, id, fence);
+    return fence;
+  }
   uint32_t count = rd32(d + 8);
   if (count > GPFIFO_MAX_ENTRIES) count = GPFIFO_MAX_ENTRIES;
-  uint64_t entries[GPFIFO_MAX_ENTRIES];
-  memcpy(entries, d + GPFIFO_HEADER_BYTES, (size_t)count * 8u);
-  const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate};
-  /* The commands run outside the kernel lock (scheduler.h scheduler_gpu_*).
-   * Other cores' ioctls may reuse the shared ioctl buffer meanwhile: the
-   * request's bytes are put back afterwards for the reply - from a buffer
-   * of this host thread's own, since another core's submission may run
-   * between the GPU lock's release and the kernel lock's return. */
+  static _Thread_local uint8_t payload[sizeof(Gpfifo_Call) + GPFIFO_MAX_ENTRIES * 8u];
+  const Gpfifo_Call call = {s, channel, id, fence, increments != 0u, count};
+  memcpy(payload, &call, sizeof(call));
+  memcpy(payload + sizeof(call), d + GPFIFO_HEADER_BYTES, (size_t)count * 8u);
+  const uint32_t bytes = (uint32_t)sizeof(call) + count * 8u;
+  if (gpu_thread_async(s->gpu_thread)) {
+    gpu_thread_call(s->gpu_thread, gpfifo_run, NULL, payload, bytes);
+    return fence;
+  }
+  /* Synchronously the commands run outside the kernel lock
+   * (scheduler.h scheduler_gpu_*). Other cores' ioctls may reuse the
+   * shared ioctl buffer meanwhile: the request's bytes are put back
+   * afterwards for the reply - from a buffer of this host thread's own,
+   * since another core's submission may run between the GPU lock's
+   * release and the kernel lock's return. */
   static _Thread_local uint8_t saved_request[NVDRV_IOCTL_MAX_BYTES];
   const uint32_t request_bytes = GPFIFO_HEADER_BYTES + count * 8u;
   memcpy(saved_request, d, request_bytes);
@@ -608,18 +643,12 @@ static void run_gpfifo(Nvdrv_State *s, Nv_Fd *f, uint8_t *d) {
   Scheduler *sched = s->hle->scheduler;
   Kernel_Suspend suspended;
   scheduler_gpu_begin(sched, &suspended);
-  g_deferring_increments = true;
-  g_deferred_increments = 0;
-  gpu_channel_submit(channel, &memory, entries, count);
-  g_deferring_increments = false;
-  const uint32_t increments = g_deferred_increments;
-  static _Thread_local uint32_t ids[DEFERRED_INCREMENTS];
-  memcpy(ids, g_deferred_increment, increments * sizeof(ids[0]));
+  gpu_thread_call(s->gpu_thread, gpfifo_run, NULL, payload, bytes);
   scheduler_gpu_end(sched, &suspended);
   memcpy(d, saved_request, request_bytes);
   s->extra_out = extra_out;
   if (extra_out) memset(s->extra_buffer, 0, sizeof(s->extra_buffer));
-  for (uint32_t i = 0; i < increments; i++) syncpoint_increment_now(s, ids[i]);
+  return fence;
 }
 
 static uint32_t gpu_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint8_t *d) {
@@ -628,9 +657,8 @@ static uint32_t gpu_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint8_t *d) {
   case 0x03: case 0x0B: case 0x0C: case 0x0D: return NV_SUCCESS; /* SET_TIMEOUT, ZCULL_BIND, SET_ERROR_NOTIFIER, SET_PRIORITY */
   case 0x08: case 0x1B: { /* SUBMIT_GPFIFO / KICKOFF_PB {u64 gpfifo, u32 num, u32 flags, fence io} */
     const uint32_t flags = rd32(d + 12);
-    run_gpfifo(s, f, d);
-    const uint32_t value = complete_submission(s, f, 1);
-    if (flags & SUBMIT_FLAG_FENCE_GET) {
+    const uint32_t value = run_gpfifo(s, f, d);
+    if (flags & (SUBMIT_FLAG_FENCE_GET | SUBMIT_FLAG_INCREMENT_VALUE)) {
       wr32(d + 16, f->syncpoint);
       wr32(d + 20, value);
     }
@@ -643,7 +671,7 @@ static uint32_t gpu_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint8_t *d) {
     const uint32_t id = ensure_syncpoint(s, f);
     if (!id) return NV_INSUFFICIENT_MEMORY;
     wr32(d + 12, id);
-    wr32(d + 16, s->syncpoints.max[id]);
+    wr32(d + 16, syncpoint_max(&s->syncpoints, id));
     return NV_SUCCESS;
   }
   default:
@@ -703,8 +731,7 @@ static uint32_t channel_common_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint
       const uint8_t *e = d + incr_at + i * SUBMIT_INCR_BYTES;
       uint32_t id = rd32(e);
       if (id == 0 || id >= SYNCPOINT_COUNT) id = own;
-      uint32_t value = s->syncpoints.max[id];
-      for (uint32_t k = 0; k < rd32(e + 4); k++) value = syncpoint_increment_max(&s->syncpoints, id);
+      const uint32_t value = syncpoint_add_max(&s->syncpoints, id, rd32(e + 4));
       syncpoint_complete(&s->syncpoints, id, value);
       if (i < fences) wr32(d + fence_at + i * 4u, value);
     }
@@ -762,9 +789,15 @@ static uint32_t dispatch_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t request, uint8
   const bool gpu_state = f->device == NV_DEVICE_NVMAP || f->device == NV_DEVICE_AS_GPU || f->device == NV_DEVICE_NVDEC ||
                          f->device == NV_DEVICE_VIC || f->device == NV_DEVICE_NVJPG;
   Scheduler *sched = s->hle ? s->hle->scheduler : NULL;
-  if (gpu_state) scheduler_gpu_lock(sched);
+  if (gpu_state) {
+    scheduler_gpu_lock(sched);
+    gpu_thread_lock(s->gpu_thread); /* and the GPU thread is between calls */
+  }
   const uint32_t result = dispatch_device_ioctl(s, f, request, data);
-  if (gpu_state) scheduler_gpu_unlock(sched);
+  if (gpu_state) {
+    gpu_thread_unlock(s->gpu_thread);
+    scheduler_gpu_unlock(sched);
+  }
   return result;
 }
 

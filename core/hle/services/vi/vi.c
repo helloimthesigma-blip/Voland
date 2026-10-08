@@ -270,9 +270,34 @@ static void convert_row(uint8_t *row, uint32_t width, uint32_t format) {
 
 static void composite_locked(Vi_State *s, HLE_Context *c, const Vi_Slot *slot);
 
+/* A present for the GPU thread (gpu_thread.h): after the submissions
+ * queued before it, like the display engine reading a finished frame. */
+typedef struct Composite_Call {
+  Vi_State *s;
+  HLE_Context *c;
+  Vi_Slot slot;
+} Composite_Call;
+
+static void composite_run(void *user, const void *payload, uint32_t bytes) {
+  (void)user;
+  (void)bytes;
+  static Composite_Call call; /* one GPU thread (or caller) at a time */
+  memcpy(&call, payload, sizeof(call));
+  composite_locked(call.s, call.c, &call.slot);
+}
+
 /* The renderer's present and surfaces under the GPU lock (scheduler.h):
  * a GPFIFO submission on another core may be drawing. */
 static void composite(Vi_State *s, HLE_Context *c, const Vi_Slot *slot) {
+  Gpu_Thread *gpu_thread = s->nvdrv ? s->nvdrv->gpu_thread : NULL;
+  static Composite_Call call;
+  call.s = s;
+  call.c = c;
+  call.slot = *slot;
+  if (gpu_thread_async(gpu_thread)) {
+    gpu_thread_call(gpu_thread, composite_run, NULL, &call, sizeof(call));
+    return;
+  }
   scheduler_gpu_lock(c->scheduler);
   composite_locked(s, c, slot);
   scheduler_gpu_unlock(c->scheduler);
@@ -439,6 +464,20 @@ static void parse_graphic_buffer(Vi_Slot *slot, const uint8_t *gbfr, uint32_t si
  * pixels (games read presented buffers back; in GPU mode those live on the
  * GPU, so there is nothing to copy) and is not shown. Then
  * decide whether the next frame is rasterised. */
+typedef struct Frame_End_Call {
+  Raster3d *renderer;
+  bool skip_next;
+} Frame_End_Call;
+
+static void frame_end_run(void *user, const void *payload, uint32_t bytes) {
+  (void)user;
+  (void)bytes;
+  Frame_End_Call call;
+  memcpy(&call, payload, sizeof(call));
+  raster3d_end_frame(call.renderer);
+  call.renderer->skip_draws = call.skip_next;
+}
+
 static void frame_skip_on_queue(Vi_State *s, HLE_Context *c, Vi_Slot *slot) {
   Raster3d *renderer = s->nvdrv ? s->nvdrv->renderer : NULL;
   uint64_t base = 0, nvmap_size = 0;
@@ -446,7 +485,7 @@ static void frame_skip_on_queue(Vi_State *s, HLE_Context *c, Vi_Slot *slot) {
   const uint64_t bytes = slot->layout == NV_LAYOUT_BLOCK_LINEAR
                              ? block_linear_size(slot->pitch, slot->height, slot->block_height_log2)
                              : (uint64_t)slot->pitch * slot->height;
-  slot->skipped = renderer && renderer->skip_draws;
+  slot->skipped = renderer && s->skipping;
   if (mapped && slot->offset + bytes <= nvmap_size) {
     const uint64_t buffer = base + slot->offset;
     if (!slot->skipped) {
@@ -458,9 +497,18 @@ static void frame_skip_on_queue(Vi_State *s, HLE_Context *c, Vi_Slot *slot) {
     }
   }
   s->frames_queued++;
+  /* Whether the next frame's draws are skipped: decided here, applied in
+   * order with the submissions (frame_end_run). */
+  s->skipping = s->frame_skip && (s->frames_queued % (s->frame_skip + 1u)) != 0u;
+  if (!renderer) return;
+  const Frame_End_Call call = {renderer, s->skipping};
+  Gpu_Thread *gpu_thread = s->nvdrv->gpu_thread;
+  if (gpu_thread_async(gpu_thread)) {
+    gpu_thread_call(gpu_thread, frame_end_run, NULL, &call, sizeof(call));
+    return;
+  }
   scheduler_gpu_lock(c->scheduler);
-  if (renderer) raster3d_end_frame(renderer);
-  if (renderer) renderer->skip_draws = s->frame_skip && (s->frames_queued % (s->frame_skip + 1u)) != 0u;
+  frame_end_run(NULL, &call, sizeof(call));
   scheduler_gpu_unlock(c->scheduler);
 }
 

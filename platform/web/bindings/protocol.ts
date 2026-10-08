@@ -60,6 +60,8 @@ export type MainToCPUMessage =
   | { readonly type: "text-input-response"; readonly text: string; readonly accepted: boolean }
   /* Frame skip, a user setting: rasterise one of every frames + 1 frames. */
   | { readonly type: "set-frame-skip"; readonly frames: number }
+  | { readonly type: "set-gpu-async"; readonly on: boolean }
+  | { readonly type: "set-render-workers"; readonly count: number }
   /* The renderer: the GPU worker's WebGPU renderer (draws stream through the
    * gpu_ring region) or the software reference renderer. */
   | { readonly type: "set-gpu-mode"; readonly on: boolean }

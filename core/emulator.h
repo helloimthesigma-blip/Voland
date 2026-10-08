@@ -13,6 +13,7 @@
 #include "common/result.h"
 #include "common/vmm.h"
 #include "cpu/cpu.h"
+#include "gpu/gpu_thread.h"
 #include "gpu/gpu_stream.h"
 #include "video/video_stream.h"
 #include "hle/hle.h"
@@ -110,6 +111,7 @@ typedef struct Emulator
   Gpu_Channel *gpu_channels; /* NVDRV_MAX_CHANNELS */
   Arena renderer_arena;      /* the 3D reference renderer's surfaces, caches */
   Raster3d renderer;
+  Gpu_Thread gpu_thread; /* emulator_set_gpu_async; the renderer's work runs here (gpu_thread.h) */
   bool ramfs_ready;
 
   /* The loaded program's file (§12): kept readable until unload so the
@@ -274,6 +276,11 @@ void emulator_set_frame_skip(Emulator *emulator, uint32_t n);
  * The platform turns it on once a consumer exists (the producer waits for
  * room in the ring). Off: the software reference renderer. */
 void emulator_set_gpu_mode(Emulator *emulator, bool on);
+/* Asynchronous GPU (gpu/gpu_thread.h, docs/ASYNC_GPU.md): submissions,
+ * presents and frame ends run on a GPU thread, beside the guest. Off (the
+ * default): they run inside the submitting ioctl - deterministic, for
+ * tests. Returns whether it is on. */
+bool emulator_set_gpu_async(Emulator *emulator, bool on);
 /* Host nanoseconds the core has waited for the GPU or video worker to
  * drain a full stream ring (web only; 0 natively). */
 uint64_t emulator_stream_wait_ns(void);

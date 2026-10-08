@@ -255,6 +255,16 @@ let freeFromSlice = 0;
  * real speed with fewer frames instead of in slow motion. */
 let pacing = true;
 let freeRunning = false;
+/** Asynchronous GPU (set-gpu-async; ?gpuasync=1): GPU command processing on
+ * its own thread beside the guest (docs/ASYNC_GPU.md). */
+let gpuAsync = false;
+/** The renderer's threads (set-render-workers; ?rworkers=N): 0 = as many as it starts with. */
+let renderWorkers = 0;
+
+function applyGpuAsync(target: SwitchCoreExports): void {
+  const on = target._emulator_set_gpu_async_ffi(gpuAsync ? 1 : 0) === 1;
+  log("info", `asynchronous GPU ${on ? "on" : gpuAsync ? "unavailable" : "off"}`);
+}
 
 function applyHostCores(target: SwitchCoreExports): void {
   const hostCores = requestedHostCores ?? DEFAULT_HOST_CORES;
@@ -801,7 +811,9 @@ function loadGame(file: File): CPUToMainMessage {
   loadingCore._emulator_set_rtc_ffi(BigInt(Math.floor(Date.now() / 1000)));
   loadingCore._emulator_set_frame_skip_ffi(frameSkip);
   loadingCore._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
+  applyGpuAsync(loadingCore);
   applyHostCores(loadingCore);
+  if (renderWorkers > 0) log("info", `renderer workers: ${loadingCore._emulator_set_render_workers_ffi(renderWorkers)}`);
   loadingCore._emulator_set_poll_coalescing_ffi(pollCoalescing ? 1 : 0);
   freeRunning = false;
   loadingCore._emulator_set_free_running_ffi(0);
@@ -1001,6 +1013,18 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     requestedHostCores = msg.cores < 0 ? null : msg.cores; /* negative: back to the default */
     /* Takes effect between slices; a running game switches at once. */
     if (core) applyHostCores(core);
+    return;
+  }
+
+  if (msg.type === "set-render-workers") {
+    renderWorkers = msg.count;
+    if (core && renderWorkers > 0) log("info", `renderer workers: ${core._emulator_set_render_workers_ffi(renderWorkers)}`);
+    return;
+  }
+
+  if (msg.type === "set-gpu-async") {
+    gpuAsync = msg.on;
+    if (core) applyGpuAsync(core);
     return;
   }
 

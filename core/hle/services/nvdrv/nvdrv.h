@@ -43,6 +43,7 @@
 #include <stdint.h>
 
 #include "gpu/gpu_channel.h"
+#include "gpu/gpu_thread.h"
 #include "gpu/syncpoint.h"
 #include "hle/kernel/event.h"
 #include "hle/services/nvdrv/nvdec.h"
@@ -158,6 +159,9 @@ typedef struct Nvdrv_State {
   bool channel_used[NVDRV_MAX_CHANNELS];
   HLE_Context *hle;
   Raster3d *renderer; /* 3D reference renderer for submissions (NULL: none) */
+  /* Runs submissions and everything else that touches the renderer
+   * (gpu_thread.h); never NULL once the emulator is set up. */
+  Gpu_Thread *gpu_thread;
   /* Host1x multimedia engines (nvdec.h): buffer IOVAs and register files. */
   Video_Stream *video; /* decode requests and frames (NULL: decoding off) */
   Mm_Iova iova;

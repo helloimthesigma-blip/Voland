@@ -280,6 +280,7 @@ Scheduler_Status scheduler_finish_run(Scheduler *sched, const CPU_Backend *backe
     if (end > sched->ticks) sched->ticks = end;
   }
   thread->last_run = ++sched->run_counter;
+  thread->cycles_run += cycles;
   if (exit_reason != CPU_EXIT_SVC) thread->spinning = false; /* it ran its budget: real work */
   if (!thread->spinning) sched->work_epoch++;
 

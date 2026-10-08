@@ -77,6 +77,7 @@ typedef struct Sched_Thread {
   uint64_t poll_wake_at;    /* a coalesced poll sleep: the wake it asked for; 0 = not coalesced */
   uint64_t work_epoch_seen; /* Scheduler.work_epoch when it was last picked */
   uint64_t last_run;        /* round-robin stamp */
+  uint64_t cycles_run;      /* guest cycles it has run (diagnostics: where guest time goes) */
 } Sched_Thread;
 
 typedef struct Parallel Parallel; /* hle/kernel/parallel.h */

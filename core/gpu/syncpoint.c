@@ -11,7 +11,8 @@ uint32_t syncpoint_allocate(Syncpoints *sp) {
   for (uint32_t id = 1; id < SYNCPOINT_COUNT; id++) {
     if (sp->allocated[id]) continue;
     sp->allocated[id] = true;
-    sp->min[id] = sp->max[id] = 0;
+    __atomic_store_n(&sp->min[id], 0u, __ATOMIC_RELEASE);
+    __atomic_store_n(&sp->max[id], 0u, __ATOMIC_RELEASE);
     return id;
   }
   return SYNCPOINT_INVALID;
@@ -25,18 +26,40 @@ bool syncpoint_valid(const Syncpoints *sp, uint32_t id) {
   return id != SYNCPOINT_INVALID && id < SYNCPOINT_COUNT && sp->allocated[id];
 }
 
-uint32_t syncpoint_increment_max(Syncpoints *sp, uint32_t id) {
+uint32_t syncpoint_increment_max(Syncpoints *sp, uint32_t id) { return syncpoint_add_max(sp, id, 1u); }
+
+uint32_t syncpoint_add_max(Syncpoints *sp, uint32_t id, uint32_t count) {
   if (id >= SYNCPOINT_COUNT) return 0;
-  return ++sp->max[id];
+  return __atomic_add_fetch(&sp->max[id], count, __ATOMIC_ACQ_REL);
+}
+
+uint32_t syncpoint_min(const Syncpoints *sp, uint32_t id) {
+  return id < SYNCPOINT_COUNT ? __atomic_load_n(&sp->min[id], __ATOMIC_ACQUIRE) : 0u;
+}
+
+uint32_t syncpoint_max(const Syncpoints *sp, uint32_t id) {
+  return id < SYNCPOINT_COUNT ? __atomic_load_n(&sp->max[id], __ATOMIC_ACQUIRE) : 0u;
 }
 
 void syncpoint_complete(Syncpoints *sp, uint32_t id, uint32_t value) {
   if (id >= SYNCPOINT_COUNT) return;
-  if ((int32_t)(value - sp->min[id]) > 0) sp->min[id] = value;
+  uint32_t now = __atomic_load_n(&sp->min[id], __ATOMIC_ACQUIRE);
+  while ((int32_t)(value - now) > 0 &&
+         !__atomic_compare_exchange_n(&sp->min[id], &now, value, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+  }
+}
+
+uint32_t syncpoint_increment_min(Syncpoints *sp, uint32_t id, uint32_t limit) {
+  if (id >= SYNCPOINT_COUNT) return 0;
+  uint32_t now = __atomic_load_n(&sp->min[id], __ATOMIC_ACQUIRE);
+  while ((int32_t)(limit - now) > 0 &&
+         !__atomic_compare_exchange_n(&sp->min[id], &now, now + 1u, true, __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+  }
+  return __atomic_load_n(&sp->min[id], __ATOMIC_ACQUIRE);
 }
 
 bool syncpoint_reached(const Syncpoints *sp, uint32_t id, uint32_t threshold) {
-  return id < SYNCPOINT_COUNT && (int32_t)(sp->min[id] - threshold) >= 0;
+  return id < SYNCPOINT_COUNT && (int32_t)(syncpoint_min(sp, id) - threshold) >= 0;
 }
 
 static uint8_t *ring(void) { return (uint8_t *)(uintptr_t)layout_get()->gpu_completion_ring_base; }

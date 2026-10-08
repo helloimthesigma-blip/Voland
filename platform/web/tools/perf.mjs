@@ -62,7 +62,7 @@
  * - --drive FILE: after the warm-up, take commands appended to FILE (one
  *   per line) before measuring - to steer a game by eye, e.g. through
  *   menus to the scene to profile: "press KEY MS" (hold KEY for MS wall
- *   milliseconds), "shot FILE.png", "stats", "click TESTID" (e.g.
+ *   milliseconds), "shot FILE.png", "slices N" (wait for N more guest slices), "stats", "click TESTID" (e.g.
  *   state-save, state-load), "status TESTID" (prints its text), "select TESTID VALUE" (a
  *   setting, e.g. frame-skip 2), "sleep MS", "go"
  *   (measure now). Each
@@ -534,6 +534,11 @@ async function main() {
           if (box) await page.screenshot({ clip: box, path: arg });
         } else if (cmd === "sleep") {
           await sleep(Number(arg));
+        } else if (cmd === "slices") {
+          /* Guest progress rather than wall time: the same point in the game
+           * whatever the host's speed. */
+          const until = (await sample()).perf.slices + Number(arg);
+          while ((await sample()).perf.slices < until) await sleep(100);
         } else if (cmd === "select") {
           await page.getByTestId(arg).locator("select").selectOption(arg2 ?? "");
         } else if (cmd === "click") {

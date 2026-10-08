@@ -1048,6 +1048,8 @@ static int run(int argc, char **argv) {
   uint32_t restore_save_count = 0;
   /* --free-running-from N; --measure-from N --measure-seconds S */
   uint64_t free_from = 0, measure_from = 0, measure_seconds = 0;
+  bool gpu_async = false;
+  static uint64_t measure_cycles[SCHEDULER_MAX_THREADS];
   bool poll_coalescing = true;
   bool test_card = false, svc_stats = false, swkbd_cancel = false, jit_fallbacks = false;
   uint64_t jit_fallbacks_from = 0;
@@ -1115,6 +1117,8 @@ static int run(int argc, char **argv) {
       gpu_stats_from = strtoull(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--no-vertex-pull")) {
       no_vertex_pull = true;
+    } else if (!strcmp(argv[i], "--gpu-async")) {
+      gpu_async = true;
     } else if (!strcmp(argv[i], "--dump-shaders") && has_value) {
       g_dump_shaders_dir = argv[++i];
     } else if (!strcmp(argv[i], "--dump-wgsl") && has_value) {
@@ -1211,6 +1215,7 @@ static int run(int argc, char **argv) {
     fprintf(stderr, "voland-cli: %u host core(s) for guest threads\n", cores);
   }
 
+  if (gpu_async) fprintf(stderr, "voland-cli: asynchronous GPU %s\n", emulator_set_gpu_async(&emu, true) ? "on" : "unavailable");
   setup_call_trace(&emu);
   Emulator_Status status = EMULATOR_RUNNING;
   uint64_t slices = 0, audio_frames = 0;
@@ -1363,7 +1368,9 @@ static int run(int argc, char **argv) {
       emulator_set_free_running(&emu, true);
       fprintf(stderr, "voland-cli: free-running from slice %llu\n", (unsigned long long)slices);
     }
+    emu.renderer.trace_compute = getenv("VOLAND_COMPUTE_TRACE") != NULL;
     if (measure_seconds && slices == measure_from) {
+      for (uint32_t t = 0; t < SCHEDULER_MAX_THREADS; t++) measure_cycles[t] = emu.scheduler.threads[t].cycles_run;
       measure_start_ns = cli_now_ns();
       measure_ticks = emu.scheduler.ticks;
       measure_presents = emu.renderer.gpu_stats.presents;
@@ -1376,6 +1383,17 @@ static int run(int argc, char **argv) {
               (unsigned long long)measure_from, (double)(emu.scheduler.ticks - measure_ticks) / secs,
               (double)(emu.renderer.gpu_stats.presents - measure_presents) / secs,
               emu.free_running ? "free-running" : "slices");
+      /* Where guest time went: each thread's share of the cycles run. */
+      uint64_t total = 0;
+      for (uint32_t t = 0; t < SCHEDULER_MAX_THREADS; t++) total += emu.scheduler.threads[t].cycles_run - measure_cycles[t];
+      for (uint32_t t = 0; t < SCHEDULER_MAX_THREADS && total; t++) {
+        const Sched_Thread *th = &emu.scheduler.threads[t];
+        const uint64_t ran = th->cycles_run - measure_cycles[t];
+        if (ran * 100u < total) continue; /* under 1% */
+        fprintf(stderr, "voland-cli:   thread %llu (prio %u, core %u): %.1f%% of %llu guest cycles\n",
+                (unsigned long long)th->thread_id, th->thread.priority, th->thread.preferred_core, 100.0 * (double)ran / (double)total,
+                (unsigned long long)total);
+      }
       break;
     }
     if (pc_profile && slices >= pc_profile_from) pc_profile_sample(&emu);
@@ -1392,7 +1410,7 @@ static int run(int argc, char **argv) {
       }
     }
     framebuffer_consume_all(); /* the CLI "displays" every frame at once */
-    if (g_gpu_file) gpu_stream_drain();
+    if (g_gpu_file && !gpu_thread_async(&emu.gpu_thread)) gpu_stream_drain(); /* else the GPU thread drains as it writes */
     if (getenv("VOLAND_WATCH_TIME") && slices == strtoull(getenv("VOLAND_WATCH_TIME"), NULL, 0) &&
         emu.time.shared_memory) {
       const uint64_t host = layout_get()->guest_ram_base + emu.time.shared_memory->guest_pa;
@@ -1418,6 +1436,7 @@ static int run(int argc, char **argv) {
     }
   }
 
+  gpu_thread_drain(&emu.gpu_thread); /* the renderer's counters are complete */
   if (g_gpu_file) {
     gpu_stream_publish(&g_gpu_stream);
     gpu_stream_drain();
@@ -1444,6 +1463,9 @@ static int run(int argc, char **argv) {
     fprintf(stderr, "voland-cli: GPU probe runs %llu (bindless pixel programs), bulk triangles %llu of %llu\n",
             (unsigned long long)gs->probe_runs, (unsigned long long)gs->bulk_triangles,
             (unsigned long long)gs->triangles);
+    fprintf(stderr, "voland-cli: GPU compute output read by draws: %llu vertex streams (%llu MB), %llu constant buffers\n",
+            (unsigned long long)gs->compute_fed_streams, (unsigned long long)(gs->compute_fed_stream_bytes >> 20),
+            (unsigned long long)gs->compute_fed_cbufs);
   }
   if (g_watch_count) {
     fprintf(stderr, "voland-cli: %llu time shared memory reads; the last ones (offset size bytes @ pc):\n",
@@ -1727,6 +1749,7 @@ static void usage(void) {
           "             --snapshot-at SLICE --snapshot-dir DIR  --frame-skip N\n"
           "             --dump-shaders DIR  --dump-wgsl DIR (each decoded program)\n"
           "             --no-vertex-pull (GPU vertex stages take CPU-decoded inputs)\n"
+          "             --gpu-async (GPU work on its own thread, beside the guest; not deterministic)\n"
           "             --gpu-stats-from SLICE (GPU counters from that slice on)\n"
           "  checking:  --test-card  --expect-output TEXT  --expect-frame-hash HEX\n"
           "             --svc-stats  --measure-from SLICE [--measure-seconds S]\n"

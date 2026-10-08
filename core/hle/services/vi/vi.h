@@ -117,6 +117,7 @@ typedef struct Vi_State {
    * draws and clears are skipped (every other GPU command still runs).
    * Rendering is most of the cost on the reference renderer (§13). */
   uint32_t frame_skip;
+  bool skipping;            /* the frame being drawn now is skipped (the renderer's skip_draws, in queue order) */
   uint64_t frames_queued;
   uint64_t frames_skipped;
   /* The last rendered frame's buffer: a skipped frame's buffer gets its

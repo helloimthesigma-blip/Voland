@@ -27,6 +27,10 @@ add_executable(workers_test workers_test.c)
 target_link_libraries(workers_test PRIVATE switch_core)
 add_test(NAME workers_test COMMAND workers_test)
 
+add_executable(gpu_thread_test gpu_thread_test.c)
+target_link_libraries(gpu_thread_test PRIVATE switch_core)
+add_test(NAME gpu_thread_test COMMAND gpu_thread_test)
+
 #
 # core/hle/loader (§1.6, §12): one unit test per parser over synthesized
 # images from loader_fixtures.c, plus loader_smoke for the composed

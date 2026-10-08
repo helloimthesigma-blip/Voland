@@ -20,6 +20,9 @@
 #define SYNCPOINT_COUNT 192u
 #define SYNCPOINT_INVALID 0u   /* id 0 is never handed out */
 
+/* min and max are read and written atomically (the accessors below): the
+ * GPU thread (gpu_thread.h) completes while the guest's threads promise
+ * and read. */
 typedef struct Syncpoints {
   uint32_t min[SYNCPOINT_COUNT];
   uint32_t max[SYNCPOINT_COUNT];
@@ -33,6 +36,13 @@ void syncpoint_free(Syncpoints *sp, uint32_t id);
 bool syncpoint_valid(const Syncpoints *sp, uint32_t id);
 /* Promises one more increment; returns the new fence threshold. */
 uint32_t syncpoint_increment_max(Syncpoints *sp, uint32_t id);
+/* Promises `count` more increments; returns the new fence threshold. */
+uint32_t syncpoint_add_max(Syncpoints *sp, uint32_t id, uint32_t count);
+uint32_t syncpoint_min(const Syncpoints *sp, uint32_t id);
+uint32_t syncpoint_max(const Syncpoints *sp, uint32_t id);
+/* One increment reached, but never past `limit` (the submission's own
+ * promise): returns the value now reached. */
+uint32_t syncpoint_increment_min(Syncpoints *sp, uint32_t id, uint32_t limit);
 /* Records that `id` reached `value` (never moves backwards). */
 void syncpoint_complete(Syncpoints *sp, uint32_t id, uint32_t value);
 bool syncpoint_reached(const Syncpoints *sp, uint32_t id, uint32_t threshold);
