@@ -358,7 +358,8 @@ static void store_value(uint8_t *host, uint64_t value, uint32_t size) {
 static inline uint8_t *fast_translate(const Interp_State *s, uint64_t address, uint32_t bytes, uint32_t perm) {
   if (vmm_access_crosses_page(address, bytes)) return NULL;
   VMM_Fault fault;
-  return vmm_translate_inline(s->l1, address, perm, &fault);
+  uint8_t *host = vmm_translate_inline(s->l1, address, perm, &fault);
+  return host && interp_watched(host) ? NULL : host; /* a watched read takes the reference path */
 }
 
 /* LDR/LDRB/LDRH/LDRS* unsigned offset: imm = byte offset. */

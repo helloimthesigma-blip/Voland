@@ -85,6 +85,15 @@ bool interp_decode_bit_masks(uint32_t n, uint32_t imms, uint32_t immr, bool imme
   return true;
 }
 
+uint64_t g_interp_watch_host, g_interp_watch_bytes;
+static Interp_Read_Hook g_interp_watch_hook;
+
+void interp_set_read_watch(uint64_t host, uint64_t bytes, Interp_Read_Hook hook) {
+  g_interp_watch_host = host;
+  g_interp_watch_hook = hook;
+  g_interp_watch_bytes = hook ? bytes : 0;
+}
+
 bool interp_read(Interp_State *s, uint64_t address, void *out, uint32_t size) {
   VMM_Fault fault;
   if (vmm_access_crosses_page(address, size)) {
@@ -93,6 +102,7 @@ bool interp_read(Interp_State *s, uint64_t address, void *out, uint32_t size) {
     const uint8_t *host = vmm_translate_inline(s->l1, address, VMM_PERM_R, &fault);
     if (host) {
       memcpy(out, host, size);
+      if (interp_watched(host)) g_interp_watch_hook(s->regs.pc, address, size, out);
       return true;
     }
   }

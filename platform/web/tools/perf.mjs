@@ -56,6 +56,9 @@
  *   figure much less sensitive to a busy machine than wall time.
  * - --web-dir DIR builds and serves another checkout's platform/web (its
  *   core staged there), so this harness can measure older commits.
+ * - --profile-all (with --profile): also samples every other worker (the
+ *   core's pthreads: parallel guest cores, renderer workers) and prints
+ *   their merged self time - where parallel mode's time goes.
  * - --drive FILE: after the warm-up, take commands appended to FILE (one
  *   per line) before measuring - to steer a game by eye, e.g. through
  *   menus to the scene to profile: "press KEY MS" (hold KEY for MS wall
@@ -114,6 +117,7 @@ function parseArgs(argv) {
     }
     else if (a === "--seconds") opts.seconds = Number(next());
     else if (a === "--profile") opts.profile = Number(next());
+    else if (a === "--profile-all") opts.profileAll = true;
     else if (a === "--port") opts.port = Number(next());
     else if (a === "--debug-port") opts.debugPort = Number(next());
     else if (a === "--no-build") opts.build = false;
@@ -610,7 +614,52 @@ async function main() {
       }
     }
 
-    if (opts.profile > 0) {
+    if (opts.profile > 0 && opts.profileAll) {
+      /* Every worker target (the pthreads too), sampled together. */
+      const cdp = await Cdp.connect(opts.debugPort);
+      try {
+        const { targetInfos } = await cdp.send("Target.getTargets");
+        const pageTarget = targetInfos.find((t) => t.type === "page" && t.url.startsWith(baseUrl));
+        const { sessionId: pageSession } = await cdp.send("Target.attachToTarget", { targetId: pageTarget.targetId, flatten: true });
+        const sessions = [];
+        cdp.listeners.push((msg) => {
+          if (msg.method !== "Target.attachedToTarget") return;
+          sessions.push({ id: msg.params.sessionId, url: msg.params.targetInfo.url });
+          /* Workers a worker started (the core's pthreads): attach to those too. */
+          void cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+                        msg.params.sessionId).catch(() => undefined);
+        });
+        await cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, pageSession);
+        await sleep(3000);
+        for (const s of sessions) {
+          await cdp.send("Profiler.enable", {}, s.id);
+          await cdp.send("Profiler.setSamplingInterval", { interval: 1000 }, s.id);
+          await cdp.send("Profiler.start", {}, s.id);
+        }
+        await sleep(opts.profile * 1000);
+        const merged = new Map();
+        let total = 0;
+        mkdirSync(opts.outDir, { recursive: true });
+        for (const [i, s] of sessions.entries()) {
+          const { profile } = await cdp.send("Profiler.stop", {}, s.id);
+          writeFileSync(join(opts.outDir, `worker-${i}-${Date.now()}.cpuprofile`), JSON.stringify(profile));
+          const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+          for (let k = 0; k < profile.samples.length; k++) {
+            const frame = byId.get(profile.samples[k])?.callFrame;
+            const name = frame?.functionName || "(anonymous)";
+            if (name === "(idle)" || name === "(program)" || /futex_wait|atomic_wait|cond_timedwait/.test(name)) continue;
+            const us = profile.timeDeltas[k] ?? 0;
+            merged.set(name, (merged.get(name) ?? 0) + us);
+            total += us;
+          }
+        }
+        console.log(`\nAll ${sessions.length} workers (${opts.profile} s, busy self time, waits left out):`);
+        for (const [name, us] of [...merged.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40))
+          console.log(`  ${((100 * us) / total).toFixed(1).padStart(5)}%  ${(us / 1000).toFixed(0).padStart(7)} ms  ${name}`);
+      } finally {
+        cdp.close();
+      }
+    } else if (opts.profile > 0) {
       const cdp = await Cdp.connect(opts.debugPort);
       try {
         /* The GPU worker runs beside the CPU worker: sampled at the same time. */

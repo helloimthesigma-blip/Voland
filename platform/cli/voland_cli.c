@@ -567,6 +567,26 @@ static bool cli_savestate_restore(Emulator *emu, const Cli_Savestate *in) {
   return error_is_ok(emulator_savestate_finish_restore(emu, true));
 }
 
+/* VOLAND_WATCH_TIME=SLICE (diagnostics, interpreter): from that slice on,
+ * the guest's reads of the time service's shared memory; the last
+ * WATCH_RING are printed at exit (pc, offset in the page, bytes). */
+#define WATCH_RING 256u
+typedef struct Watch_Read {
+  uint64_t pc, address;
+  uint32_t size;
+  uint8_t data[16];
+} Watch_Read;
+static Watch_Read g_watch[WATCH_RING];
+static uint64_t g_watch_count, g_watch_base_gva;
+static void watch_read(uint64_t pc, uint64_t address, uint32_t size, const void *data) {
+  Watch_Read *w = &g_watch[g_watch_count++ % WATCH_RING];
+  w->pc = pc;
+  w->address = address;
+  w->size = size < 16u ? size : 16u;
+  memcpy(w->data, data, w->size);
+  if (!g_watch_base_gva) g_watch_base_gva = address & ~0xfffull;
+}
+
 /* VOLAND_EXCEPTION_SCAN=1 (diagnostics): after a run, look on each thread's
  * stack for IL2CPP managed objects whose class name ends in "Exception" and
  * print their string fields (message, stack trace) - what a Unity title
@@ -1373,6 +1393,12 @@ static int run(int argc, char **argv) {
     }
     framebuffer_consume_all(); /* the CLI "displays" every frame at once */
     if (g_gpu_file) gpu_stream_drain();
+    if (getenv("VOLAND_WATCH_TIME") && slices == strtoull(getenv("VOLAND_WATCH_TIME"), NULL, 0) &&
+        emu.time.shared_memory) {
+      const uint64_t host = layout_get()->guest_ram_base + emu.time.shared_memory->guest_pa;
+      interp_set_read_watch(host, TIME_SHARED_MEMORY_BYTES, watch_read);
+      fprintf(stderr, "voland-cli: watching the time shared memory from slice %llu\n", (unsigned long long)slices);
+    }
     if (gpu_stats_from && slices == gpu_stats_from) {
       memset(&emu.renderer.gpu_stats, 0, sizeof(emu.renderer.gpu_stats));
       g_gpu_stream.bytes = g_gpu_stream.records = 0;
@@ -1415,6 +1441,26 @@ static int run(int argc, char **argv) {
     fprintf(stderr, "voland-cli: GPU draw MB: data %llu, pulled vertex streams %llu, vertices %llu, indices %llu\n",
             (unsigned long long)(gs->draw_data_bytes >> 20), (unsigned long long)(gs->pulled_bytes >> 20),
             (unsigned long long)(gs->vertex_bytes >> 20), (unsigned long long)(gs->index_bytes >> 20));
+  }
+  if (g_watch_count) {
+    fprintf(stderr, "voland-cli: %llu time shared memory reads; the last ones (offset size bytes @ pc):\n",
+            (unsigned long long)g_watch_count);
+    const uint64_t first = g_watch_count > WATCH_RING ? g_watch_count - WATCH_RING : 0;
+    for (uint64_t i = first; i < g_watch_count; i++) {
+      const Watch_Read *w = &g_watch[i % WATCH_RING];
+      const char *m = "?";
+      uint64_t off = w->pc;
+      for (uint32_t k = 0; k < emu.process.module_count; k++) {
+        const Process_Module *mod = &emu.process.modules[k];
+        if (w->pc >= mod->base_gva && w->pc < mod->base_gva + mod->image_size) {
+          m = mod->name;
+          off = w->pc - mod->base_gva;
+        }
+      }
+      fprintf(stderr, "    +0x%03llx %u ", (unsigned long long)(w->address & 0xfffu), w->size);
+      for (uint32_t b = 0; b < w->size; b++) fprintf(stderr, "%02x", w->data[b]);
+      fprintf(stderr, " @ %s+0x%llx\n", m, (unsigned long long)off);
+    }
   }
   if (pc_profile) pc_profile_print(&emu);
   if (stats_from) time_stats_print(&emu);

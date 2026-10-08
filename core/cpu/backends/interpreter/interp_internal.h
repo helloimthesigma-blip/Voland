@@ -40,6 +40,12 @@ typedef enum Interp_Status {
  * exclusive monitor is held, so LDXR/STXR loops complete (§7). */
 #define INTERP_EXCLUSIVE_GRACE_INSTRUCTIONS 64u
 
+/* interp_set_read_watch: the watched host range (bytes 0: off). */
+extern uint64_t g_interp_watch_host, g_interp_watch_bytes;
+static inline bool interp_watched(const void *host) {
+  return (uint64_t)(uintptr_t)host - g_interp_watch_host < g_interp_watch_bytes;
+}
+
 typedef struct Interp_State {
   CPU_Register_File regs;
   CPU_Vector_Register v[CPU_VECTOR_REGISTER_COUNT];
