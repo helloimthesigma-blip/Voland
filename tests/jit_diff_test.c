@@ -221,7 +221,7 @@ static uint32_t ftype(void) { return pick(8) == 0 ? 3u : pick(2); } /* single/do
 static uint32_t fp_vreg(void) { return pick(4) ? 16u + pick(12) : vreg(); }
 static uint32_t gen_simd_inline(void) {
   const uint32_t q = pick(4) ? 1u : 0u, u = pick(2);
-  switch (pick(11)) {
+  switch (pick(12)) {
   case 0: /* copy: DUP/INS/SMOV/UMOV general, INS element, scalar DUP */
     if (pick(4) == 0) return 0x5E000400u | ((1u + pick(31)) << 16) | (fp_vreg() << 5) | vreg();
     static const uint32_t moves[4] = {1, 3, 5, 7}; /* DUP, INS, SMOV, UMOV (general) */
@@ -248,6 +248,18 @@ static uint32_t gen_simd_inline(void) {
            (vreg() << 5) | vreg();
   case 5: /* SSHLL/USHLL(2) */
     return 0x0F00A400u | (q << 30) | (u << 29) | ((1u + pick(15)) << 19) | (pick(8) << 16) | (vreg() << 5) | vreg();
+  case 10: /* XTN(2), SHL (immediate), SHRN(2) */
+    switch (pick(3)) {
+    case 0: return 0x0E212800u | (q << 30) | (pick(3) << 22) | (vreg() << 5) | vreg();
+    case 1: {
+      const uint32_t size = pick(4), immhb = (8u << size) + pick(8u << size);
+      return 0x0F005400u | ((size == 3u ? 1u : q) << 30) | (immhb << 16) | (vreg() << 5) | vreg();
+    }
+    default: {
+      const uint32_t size = pick(3), immhb = (16u << size) - 1u - pick(8u << size);
+      return 0x0F008400u | (q << 30) | (immhb << 16) | (vreg() << 5) | vreg();
+    }
+    }
   case 9: /* FMUL (by element, scalar), single and double */
     if (pick(2)) return 0x5F809000u | ((pick(4) & 1u) << 21) | (pick(2) << 11) | (fp_vreg() << 16) | (fp_vreg() << 5) | vreg();
     return 0x5FC09000u | (pick(2) << 11) | (fp_vreg() << 16) | (fp_vreg() << 5) | vreg();

@@ -3486,6 +3486,74 @@ static bool c_simd_shift_long(Ctx *c, uint32_t insn) {
   return true;
 }
 
+/* Byte lanes keeping the low half of each 2^(size+1)-byte element of a
+ * vector: the narrowed elements, packed (XTN, SHRN). */
+static void narrow_lanes(uint8_t lanes[SIMD_LANE_BYTES], uint32_t size) {
+  const uint32_t half = 1u << size, count = SIMD_LANE_BYTES / (2u * half);
+  memset(lanes, 0, SIMD_LANE_BYTES);
+  for (uint32_t i = 0; i < count; i++)
+    for (uint32_t b = 0; b < half; b++) lanes[i * half + b] = (uint8_t)(i * 2u * half + b);
+}
+
+/* The v128 on the stack narrowed (low halves of its elements) into Vd:
+ * the low 64 bits (Q 0, upper cleared) or, for the "2" forms, the high
+ * 64 bits with Vd's low half kept. */
+static void store_narrowed(Ctx *c, uint32_t size, bool upper, uint32_t d) {
+  uint8_t lanes[SIMD_LANE_BYTES];
+  narrow_lanes(lanes, size);
+  lset(c, L_VA);
+  lget(c, L_VA);
+  lget(c, L_VA);
+  v128_shuffle(c, lanes); /* narrowed in bytes 0-7 */
+  if (upper) {
+    lset(c, L_VA);
+    static const uint8_t join[SIMD_LANE_BYTES] = {0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23};
+    load_v(c, d);
+    lget(c, L_VA);
+    v128_shuffle(c, join);
+  }
+  lset(c, L_VR);
+  store_v(c, d, L_VR, upper);
+}
+
+/* XTN/XTN2 (two-register misc), SHL and SHRN/SHRN2 (shift by immediate). */
+static bool c_simd_narrow_shift(Ctx *c, uint32_t insn) {
+  if (bit(insn, 31)) return false;
+  const bool q = bit(insn, 30);
+  const uint32_t rn = bits(insn, 9, 5), rd = bits(insn, 4, 0);
+  if ((insn & 0xBF3FFC00u) == 0x0E212800u) { /* XTN */
+    const uint32_t size = bits(insn, 23, 22);
+    if (size == 3u) return false;
+    load_v(c, rn);
+    store_narrowed(c, size, q, rd);
+    return true;
+  }
+  if (bits(insn, 29, 23) != 0x1Eu) return false; /* shift by immediate, U = 0 */
+  const uint32_t immh = bits(insn, 22, 19), immhb = bits(insn, 22, 16), opcode = bits(insn, 15, 10);
+  if (!immh) return false;
+  const uint32_t size = immh & 8u ? 3u : immh & 4u ? 2u : immh & 2u ? 1u : 0u;
+  static const uint32_t shl[4] = {WASM_SIMD_I8X16_SHL, WASM_SIMD_I16X8_SHL, WASM_SIMD_I32X4_SHL, WASM_SIMD_I64X2_SHL};
+  static const uint32_t shr[3] = {WASM_SIMD_I16X8_SHR_U, WASM_SIMD_I32X4_SHR_U, WASM_SIMD_I64X2_SHR_U};
+  if (opcode == 0x15) { /* SHL: element << (immh:immb - esize) */
+    if (size == 3u && !q) return false;
+    load_v(c, rn);
+    i32c(c, immhb - (8u << size));
+    simd(c, shl[size]);
+    lset(c, L_VR);
+    store_v(c, rd, L_VR, q);
+    return true;
+  }
+  if (opcode == 0x21) { /* SHRN: (2 esize element >> (2 esize - immh:immb)), narrowed */
+    if (size == 3u) return false;
+    load_v(c, rn);
+    i32c(c, (16u << size) - immhb);
+    simd(c, shr[size]);
+    store_narrowed(c, size, q, rd);
+    return true;
+  }
+  return false;
+}
+
 /* TBL/TBX: byte lookups in one to four consecutive table registers
  * (wrapping past V31). i8x16.swizzle yields 0 for an index past 15, so
  * table k is looked up with the index minus 16 k (wrapping), and TBX keeps
@@ -3523,7 +3591,8 @@ static bool c_simd_table(Ctx *c, uint32_t insn) {
 
 static bool c_simd_fp(Ctx *c, uint32_t insn) {
   if (c_scalar_fp_fast(c, insn) || c_vector_fp_fast(c, insn) || c_vector_int_fast(c, insn) || c_simd_copy(c, insn) ||
-      c_simd_misc_fp(c, insn) || c_simd_pairwise(c, insn) || c_simd_shift_long(c, insn) || c_simd_table(c, insn))
+      c_simd_misc_fp(c, insn) || c_simd_pairwise(c, insn) || c_simd_shift_long(c, insn) || c_simd_table(c, insn) ||
+      c_simd_narrow_shift(c, insn))
     return true;
   Sync sync = {0};
   simd_fp_sync(insn, &sync);
