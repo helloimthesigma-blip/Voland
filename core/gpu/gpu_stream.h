@@ -28,7 +28,7 @@
 #include <stdint.h>
 
 #define GPU_STREAM_MAGIC 0x55504756u /* "VGPU" */
-#define GPU_STREAM_VERSION 4u
+#define GPU_STREAM_VERSION 5u
 #define GPU_STREAM_HEADER_BYTES 56u
 #define GPU_STREAM_RECORD_HEADER_BYTES 8u
 #define GPU_STREAM_ALIGN 8u

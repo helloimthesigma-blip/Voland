@@ -63,6 +63,8 @@ export interface VertexStageSpec {
   readonly inputs: number;
   readonly cull: number;  /* CULL_* (gpu-records.ts) */
   readonly front: number; /* FRONT_CCW or not */
+  /** The inputs are pulled from the data binding: no vertex buffer. */
+  readonly pull?: boolean;
 }
 
 /** Everything a draw pipeline is built from. */

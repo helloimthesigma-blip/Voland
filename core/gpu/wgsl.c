@@ -1868,10 +1868,82 @@ static void emit_io(Out *o, const Wgsl_Program_Desc *d, bool depth) {
  * epilogue that turns the position output into clip space - x, y, z
  * become to_screen's window coordinates and gpu_put_vertex's NDC once
  * divided by w - and the outputs into the pixel program's varyings. */
+/* Vertex pulling: the attribute formats of raster3d's fetch_attribute,
+ * decoded from the copied stream bytes (WGSL_DRAW_VS_INPUTS). */
+static const char k_vertex_pull[] =
+    "fn vword(b: u32) -> u32 {\n"
+    "  let s = (b & 3u) * 8u; let lo = D[b >> 2u];\n"
+    "  if (s == 0u) { return lo; }\n"
+    "  return (lo >> s) | (D[(b >> 2u) + 1u] << (32u - s));\n"
+    "}\n"
+    "fn vconv(v: u32, n: u32, ty: u32) -> u32 {\n"
+    "  let mx = select((1u << n) - 1u, 0xffffffffu, n >= 32u);\n"
+    "  let sv = select(i32(v << (32u - n)) >> (32u - n), i32(v), n >= 32u);\n"
+    "  switch (ty) {\n"
+    "    case 1u: { return bitcast<u32>(max(f32(sv) / f32(mx >> 1u), -1.0)); }\n"  /* SNORM */
+    "    case 2u: { return bitcast<u32>(f32(v) / f32(mx)); }\n"                    /* UNORM */
+    "    case 3u: { return u32(sv); }\n"                                           /* SINT */
+    "    case 4u: { return v; }\n"                                                 /* UINT */
+    "    case 5u: { return bitcast<u32>(f32(v)); }\n"                              /* USCALED */
+    "    case 6u: { return bitcast<u32>(f32(sv)); }\n"                             /* SSCALED */
+    "    default: {\n"                                                             /* FLOAT */
+    "      if (n == 32u) { return v; }\n"
+    "      if (n == 16u) { return bitcast<u32>(unpack2x16float(v).x); }\n"
+    "      if (n == 11u) { return bitcast<u32>(unpack2x16float(v << 4u).x); }\n"
+    "      if (n == 10u) { return bitcast<u32>(unpack2x16float(v << 5u).x); }\n"
+    "      return 0u;\n"
+    "    }\n"
+    "  }\n"
+    "}\n"
+    "fn vfetch(at: u32, vid: u32) -> vec4<u32> {\n"
+    "  let st = D[at + 1u]; let a = D[at + 2u];\n"
+    "  let ty = (a >> 27u) & 7u;\n"
+    "  var o = vec4<u32>(0u, 0u, 0u, select(0x3f800000u, 1u, ty == 3u || ty == 4u));\n"
+    "  if ((st & 0x40000000u) == 0u) { return o; }\n"
+    "  let size = (a >> 21u) & 0x3fu;\n"
+    "  var cnt = 0u; var bits = vec4<u32>(0u);\n"
+    "  switch (size) {\n"
+    "    case 0x01u: { cnt = 4u; bits = vec4<u32>(32u); }\n"
+    "    case 0x02u: { cnt = 3u; bits = vec4<u32>(32u); }\n"
+    "    case 0x03u: { cnt = 4u; bits = vec4<u32>(16u); }\n"
+    "    case 0x04u: { cnt = 2u; bits = vec4<u32>(32u); }\n"
+    "    case 0x05u: { cnt = 3u; bits = vec4<u32>(16u); }\n"
+    "    case 0x0Au, 0x2Fu: { cnt = 4u; bits = vec4<u32>(8u); }\n"
+    "    case 0x0Fu: { cnt = 2u; bits = vec4<u32>(16u); }\n"
+    "    case 0x12u: { cnt = 1u; bits = vec4<u32>(32u); }\n"
+    "    case 0x13u, 0x33u: { cnt = 3u; bits = vec4<u32>(8u); }\n"
+    "    case 0x18u, 0x32u: { cnt = 2u; bits = vec4<u32>(8u); }\n"
+    "    case 0x1Bu: { cnt = 1u; bits = vec4<u32>(16u); }\n"
+    "    case 0x1Du, 0x34u: { cnt = 1u; bits = vec4<u32>(8u); }\n"
+    "    case 0x30u: { cnt = 4u; bits = vec4<u32>(10u, 10u, 10u, 2u); }\n"
+    "    case 0x31u: { cnt = 3u; bits = vec4<u32>(11u, 11u, 10u, 0u); }\n"
+    "    default: { return o; }\n"
+    "  }\n"
+    "  let elem = select(vid - D[at + 3u], 0u, (st & 0x80000000u) != 0u);\n"
+    "  let b = D[at] + elem * (st & 0xfffu) + ((a >> 7u) & 0x3fffu);\n"
+    "  var bit = 0u;\n"
+    "  for (var c = 0u; c < cnt; c = c + 1u) {\n"
+    "    let n = bits[c];\n"
+    "    let w = vword(b + (bit >> 3u)) >> (bit & 7u);\n"
+    "    o[c] = vconv(select(w & ((1u << n) - 1u), w, n >= 32u), n, ty);\n"
+    "    bit = bit + n;\n"
+    "  }\n"
+    "  if (size == 0x34u) { o.w = o.x; o.x = 0u; }\n"
+    "  if ((a >> 31u) != 0u) { let t = o.x; o.x = o.z; o.z = t; }\n"
+    "  return o;\n"
+    "}\n";
+
+const char *wgsl_vertex_pull_source(void) { return k_vertex_pull; }
+
 static void emit_vertex_io(Out *o, const Wgsl_Program_Desc *d) {
-  out_add(o, "struct VIn {\n  @location(%u) ids: vec4<u32>,\n", WGSL_VERTEX_ID_LOCATION);
-  for (uint32_t i = 0; i < d->input_count; i++) out_add(o, "  @location(%u) a%u: vec4<u32>,\n", i + 1u, i);
-  out_add(o, "}\n");
+  if (d->vertex_pull) {
+    out_add(o, "%s", k_vertex_pull);
+    out_add(o, "struct VIn {\n  @builtin(vertex_index) vi: u32,\n}\n");
+  } else {
+    out_add(o, "struct VIn {\n  @location(%u) ids: vec4<u32>,\n", WGSL_VERTEX_ID_LOCATION);
+    for (uint32_t i = 0; i < d->input_count; i++) out_add(o, "  @location(%u) a%u: vec4<u32>,\n", i + 1u, i);
+    out_add(o, "}\n");
+  }
   emit_vout(o, d);
 }
 
@@ -1968,7 +2040,8 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   t->cbt = t->vertex ? WGSL_DRAW_VS_CBUF_TABLE : WGSL_DRAW_CBUF_TABLE;
   if (program->header.stage != (t->vertex ? SM_STAGE_VERTEX : SM_STAGE_PIXEL))
     fail(t, t->vertex ? "not a vertex program" : "not a pixel program");
-  if (t->vertex && desc->input_count + 1u > 16u) fail(t, "%u vertex inputs", desc->input_count);
+  if (t->vertex && desc->input_count + 1u > (desc->vertex_pull ? WGSL_VSI_MAX : 16u))
+    fail(t, "%u vertex inputs", desc->input_count);
   /* A vertex stage has no quads (derivatives, discard) and, for now, no
    * textures or pixel inputs: such programs stay on the CPU path. */
   for (uint32_t pc = 0; t->vertex && pc < program->word_count && t->ok; pc++) {
@@ -2022,14 +2095,23 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
                            ((desc->hw_sample_mask >> i) & 1u) && desc->sample_type[i] == WGSL_SAMPLE_FLOAT);
   if (t->vertex) {
     emit_vertex_io(&head, desc);
-    out_add(&head, "@vertex fn vs(vin: VIn) -> VOut {\n  let vid = vin.ids.x; let iid = vin.ids.y;\n");
+    if (desc->vertex_pull)
+      out_add(&head, "@vertex fn vs(vin: VIn) -> VOut {\n  let vid = vin.vi; let iid = D[%uu];\n", WGSL_DRAW_VS_INSTANCE);
+    else
+      out_add(&head, "@vertex fn vs(vin: VIn) -> VOut {\n  let vid = vin.ids.x; let iid = vin.ids.y;\n");
     out_add(&head, "  var ain: array<u32, %u>; var aout: array<u32, %u>;\n  aout[%uu] = 0x3f800000u;\n",
             SM_ATTRIBUTE_WORDS, SM_ATTRIBUTE_WORDS, SM_ATTR_POSITION / 4u + 3u);
     for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++) {
       const uint8_t loc = desc->input_location[v];
       if (loc == 0xffu || loc >= desc->input_count) continue;
-      for (uint32_t c = 0; c < 4u; c++)
-        out_add(&head, "  ain[%uu] = vin.a%u[%u];\n", SM_ATTR_GENERIC / 4u + 4u * v + c, loc, c);
+      if (desc->vertex_pull) {
+        out_add(&head, "  { let a = vfetch(%uu, vid);", WGSL_DRAW_VS_INPUTS + WGSL_VSI_WORDS * loc);
+        for (uint32_t c = 0; c < 4u; c++) out_add(&head, " ain[%uu] = a[%u];", SM_ATTR_GENERIC / 4u + 4u * v + c, c);
+        out_add(&head, " }\n");
+      } else {
+        for (uint32_t c = 0; c < 4u; c++)
+          out_add(&head, "  ain[%uu] = vin.a%u[%u];\n", SM_ATTR_GENERIC / 4u + 4u * v + c, loc, c);
+      }
     }
   } else {
     emit_io(&head, desc, program->header.omap_depth);
@@ -2164,6 +2246,7 @@ uint64_t wgsl_desc_hash(const Wgsl_Program_Desc *desc, const Sm_Program *program
   MIX(&desc->hw_sample_mask, sizeof(desc->hw_sample_mask));
   MIX(&desc->stage, sizeof(desc->stage));
   if (desc->stage == SM_STAGE_VERTEX) {
+    MIX(&desc->vertex_pull, sizeof(desc->vertex_pull));
     MIX(desc->input_location, sizeof(desc->input_location));
     MIX(&desc->input_count, sizeof(desc->input_count));
     MIX(desc->output_word, sizeof(desc->output_word));

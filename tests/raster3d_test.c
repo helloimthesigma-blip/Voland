@@ -14,6 +14,7 @@
 #include "gpu/gpu_records.h"
 #include "gpu/gpu_stream.h"
 #include "gpu/raster3d.h"
+#include "gpu/wgsl.h"
 
 static int g_failures;
 
@@ -44,6 +45,7 @@ static int g_failures;
 #define RT (GPU_BASE + 0x10000u)
 #define RT_BL (GPU_BASE + 0x30000u)
 #define RT_SIZE 64u
+#define REG_VERTEX_ATTRIB_TEST 0x458u /* raster3d.c REG_VERTEX_ATTRIB */
 #define REG_CULL_ENABLE_TEST 0x646u
 #define REG_FRONT_FACE_TEST 0x647u
 #define REG_CULL_FACE_TEST 0x648u
@@ -544,7 +546,10 @@ typedef struct Seen_Draw {
   uint32_t indices[SEEN_INDICES];
   uint32_t index_count;
   bool vertex_shader;
+  uint32_t data_bytes;          /* the data binding (constants, constant buffers, pulled streams) */
 } Seen_Draw;
+#define SEEN_DATA_BYTES (256u * 1024u)
+static uint8_t g_seen_data[SEEN_DATA_BYTES];
 
 static void stream_drain(Seen_Draw *seen) {
   Gpu_Stream_Record rec;
@@ -560,6 +565,10 @@ static void stream_drain(Seen_Draw *seen) {
     if (rec.type == GPU_REC_DRAW) {
       memcpy(&seen->last, rec.payload, sizeof(Gpu_Rec_Draw));
       seen->count++;
+      Gpu_Rec_Binding data;
+      memcpy(&data, rec.payload + sizeof(Gpu_Rec_Draw), sizeof(data));
+      seen->data_bytes = data.bytes < SEEN_DATA_BYTES ? data.bytes : SEEN_DATA_BYTES;
+      memcpy(g_seen_data, rec.payload + sizeof(Gpu_Rec_Draw) + sizeof(data), seen->data_bytes);
       /* Bindings: the data binding's bytes follow it; vertices come last. */
       const uint32_t vertex_bytes = seen->last.vs_shader_id ? 16u * (1u + seen->last.vertex_input_count) : 0u;
       const uint32_t index_bytes = seen->last.index_count * 4u;
@@ -622,8 +631,9 @@ static void test_gpu_vertex_stage(Raster3d *r) {
         "CPU vertices: the front face is drawn pre-transformed");
   /* GPU vertices: the triangle goes out raw; the pipeline culls with the
    * same winding rule (WebGPU's front face is judged in framebuffer
-   * coordinates, y down - the CPU's screen space). */
+   * coordinates, y down - the CPU's screen space). Decoded inputs first. */
   r->cpu_vertices = false;
+  r->no_vertex_pull = true;
   Seen_Draw gpu = gpu_draw_once(r, FRONT_CW_REG);
   CHECK(gpu.count == 1 && gpu.last.vs_shader_id != 0, "GPU vertices: a vertex stage is used");
   CHECK(gpu.vertex_shader, "the vertex stage's WGSL is streamed");
@@ -649,6 +659,29 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   bool in_range = true;
   for (uint32_t i = 0; i < strip.index_count; i++) in_range = in_range && strip.indices[i] < 4u;
   CHECK(in_range, "indices address the record's vertices");
+
+  /* Vertex pulling: no vertices; the indices are vertex ids and the data
+   * binding carries each input's descriptor and its stream's bytes. */
+  r->no_vertex_pull = false;
+  gpu = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(gpu.count == 1 && (gpu.last.flags & GPU_DRAW_VERTEX_PULL) && gpu.last.vertex_count == 0u &&
+            gpu.last.index_count == 3u && gpu.last.vertex_input_count == 2u,
+        "pulled: flags %u, %u vertices, %u indices, %u inputs", gpu.last.flags, gpu.last.vertex_count,
+        gpu.last.index_count, gpu.last.vertex_input_count);
+  CHECK(gpu.indices[0] == 0u && gpu.indices[1] == 1u && gpu.indices[2] == 2u, "pulled indices are the vertex ids");
+  uint32_t vsi[WGSL_VSI_WORDS];
+  memcpy(vsi, g_seen_data + 4u * WGSL_DRAW_VS_INPUTS, sizeof(vsi));
+  const uint32_t attrib = g_regs[REG_VERTEX_ATTRIB_TEST];
+  CHECK((vsi[1] & WGSL_VSI_ACTIVE) && !(vsi[1] & WGSL_VSI_INSTANCED) && vsi[2] == attrib && vsi[3] == 0u,
+        "input 0's descriptor: active, the attribute word, first id 0");
+  float px = 0.0f;
+  const uint32_t at = vsi[0] + (vsi[1] & WGSL_VSI_STRIDE_MASK) * 1u + ((attrib >> 7) & 0x3fffu); /* vertex 1's position */
+  CHECK(at + 4u <= gpu.data_bytes, "the stream's bytes are in the data binding (%u of %u)", at, gpu.data_bytes);
+  memcpy(&px, g_seen_data + at, 4);
+  CHECK(px == 1.0f, "vertex 1's x is copied as stored (%f)", (double)px);
+  const Seen_Draw pulled_strip = gpu_draw_topology(r, FRONT_CW_REG, TOPOLOGY_STRIP_TEST, 4);
+  CHECK(pulled_strip.count == 1 && pulled_strip.last.vertex_count == 0u && pulled_strip.last.index_count == 6u,
+        "pulled strip: %u vertices, %u indices", pulled_strip.last.vertex_count, pulled_strip.last.index_count);
 }
 
 /* ---- compute: a block of two lane groups meeting at BAR.SYNC --------- */

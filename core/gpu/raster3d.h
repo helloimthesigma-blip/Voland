@@ -161,6 +161,9 @@ typedef struct Raster3d_Gpu_Stats {
    * a write over it (textures_invalidate); and the whole hashes done. */
   uint64_t hashed_new, hashed_unsampled, hashed_changed, hashed_periodic, hashed_forced;
   uint64_t full_hashes;
+  /* Draw record bytes by part: per-draw data (constants and constant
+   * buffers), pulled vertex streams, vertices, indices. */
+  uint64_t draw_data_bytes, pulled_bytes, vertex_bytes, index_bytes;
 } Raster3d_Gpu_Stats;
 
 typedef struct Raster3d_Stats {
@@ -229,6 +232,7 @@ typedef struct Raster3d {
   /* GPU mode: vertex programs run on the CPU for every draw (the path
    * before GPU vertex stages; diagnostics and comparison). */
   bool cpu_vertices;
+  bool no_vertex_pull; /* GPU vertex stages take decoded inputs (the CPU fetches them) */
 } Raster3d;
 
 /* Bytes of backing storage raster3d_init needs (one allocation). */
@@ -294,6 +298,14 @@ void raster3d_flush(Raster3d *r, const struct Gpu_Memory *mem);
  * work, assembly, clipping and culling stay on this side, pixel programs
  * are translated to WGSL (gpu/wgsl.h). NULL returns to software. */
 void raster3d_set_gpu(Raster3d *r, struct Gpu_Stream *stream);
+
+/* One vertex attribute decoded from its element's bytes (raw: the bytes
+ * at the attribute's offset) under VERTEX_ATTRIB word `attrib`: the four
+ * words a vertex program reads (float bits, or integers), defaults (0, 0,
+ * 0, 1) where the format has fewer components. The vertex-pulling WGSL
+ * (wgsl.c vfetch) must agree with it. */
+#define RASTER_ATTRIBUTE_BYTES 16u
+void raster3d_decode_attribute(uint32_t attrib, const uint8_t raw[RASTER_ATTRIBUTE_BYTES], uint32_t out[4]);
 
 /* GPU mode: the guest presents the buffer at `address` (width x height,
  * QueueBuffer's crop rectangle x, y, w, h - w 0 for all - and

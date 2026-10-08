@@ -40,6 +40,7 @@ import {
   type Copy,
   CULL_FRONT,
   CULL_NONE,
+  DRAW_VERTEX_PULL,
   DRAW_BYTES,
   FRONT_CCW,
   type Draw,
@@ -628,6 +629,7 @@ export class GpuExecutor {
       vs: d.vsShaderId ? {
         wgsl: this.shaderHashes.get(d.vsShaderId) ?? `id${d.vsShaderId}`,
         inputs: d.vertexInputCount, cull: d.cullMode, front: d.frontFace,
+        ...((d.flags & DRAW_VERTEX_PULL) !== 0 ? { pull: true } : {}),
       } : null,
       varyings: d.varyingCount,
       textures: textures.map((t, i) => (filtered[i] ? "F" : t.sampleType)),
@@ -683,7 +685,9 @@ export class GpuExecutor {
      * stage, the ids and input vectors - every one a vec4<u32>. */
     const attributes: GPUVertexAttribute[] = [];
     let stride: number;
-    if (spec.vs) {
+    if (spec.vs?.pull) {
+      stride = 0; /* the inputs come from the data binding */
+    } else if (spec.vs) {
       for (let i = 0; i <= spec.vs.inputs; i++) attributes.push({ shaderLocation: i, offset: 16 * i, format: "uint32x4" });
       stride = 16 * (spec.vs.inputs + 1);
     } else {
@@ -715,7 +719,7 @@ export class GpuExecutor {
     });
     const desc: GPURenderPipelineDescriptor = {
       layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-      vertex: { module: vsModule, entryPoint: "vs", buffers: [{ arrayStride: stride, attributes }] },
+      vertex: { module: vsModule, entryPoint: "vs", buffers: spec.vs?.pull ? [] : [{ arrayStride: stride, attributes }] },
       fragment: { module, entryPoint: "fs", targets },
       primitive: {
         topology: "triangle-list",
@@ -873,7 +877,7 @@ export class GpuExecutor {
     }
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, group, [dataOffset]);
-    pass.setVertexBuffer(0, this.vertexBuffer, vertexOffset, vertices.byteLength);
+    if (vertices.byteLength) pass.setVertexBuffer(0, this.vertexBuffer, vertexOffset, vertices.byteLength);
     pass.setBlendConstant({ r: d.blendConstant[0] ?? 0, g: d.blendConstant[1] ?? 0, b: d.blendConstant[2] ?? 0, a: d.blendConstant[3] ?? 0 });
     pass.setStencilReference(d.stencilRef);
     if (indices) {

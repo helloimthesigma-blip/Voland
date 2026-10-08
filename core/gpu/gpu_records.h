@@ -153,8 +153,14 @@ typedef struct Gpu_Rec_Draw {
    * them (a triangle list, each triangle's provoking vertex first) follow
    * the vertices. */
   uint32_t index_count;
-  uint32_t reserved;
+  /* Version 5: GPU_DRAW_VERTEX_PULL - no vertices; the index_count indices
+   * are guest vertex ids (the shader's vertex_index) and the vertex stage
+   * decodes its inputs from vertex buffer bytes in the data binding
+   * (gpu/wgsl.h WGSL_DRAW_VS_INPUTS). */
+  uint32_t flags;
 } Gpu_Rec_Draw;
+
+#define GPU_DRAW_VERTEX_PULL 1u
 
 #define GPU_CULL_NONE 0u
 #define GPU_CULL_FRONT 1u

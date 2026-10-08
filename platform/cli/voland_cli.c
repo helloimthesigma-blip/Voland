@@ -1022,6 +1022,8 @@ static int run(int argc, char **argv) {
   uint64_t savestate_hash = 0, savestate_ticks = 0, savestate_svcs = 0;
   bool savestate_replaying = false;
   uint32_t frame_skip = 0, host_cores = 0;
+  bool no_vertex_pull = false;
+  uint64_t gpu_stats_from = 0; /* --gpu-stats-from N: GPU counters cover slices N.. */
   const char *restore_saves[MAX_RESTORE_SAVES];
   uint32_t restore_save_count = 0;
   /* --free-running-from N; --measure-from N --measure-seconds S */
@@ -1089,6 +1091,10 @@ static int run(int argc, char **argv) {
       audio_path = argv[++i];
     } else if (!strcmp(argv[i], "--font") && has_value) {
       font_path = argv[++i];
+    } else if (!strcmp(argv[i], "--gpu-stats-from") && has_value) {
+      gpu_stats_from = strtoull(argv[++i], NULL, 0);
+    } else if (!strcmp(argv[i], "--no-vertex-pull")) {
+      no_vertex_pull = true;
     } else if (!strcmp(argv[i], "--dump-shaders") && has_value) {
       g_dump_shaders_dir = argv[++i];
     } else if (!strcmp(argv[i], "--dump-wgsl") && has_value) {
@@ -1230,6 +1236,7 @@ static int run(int argc, char **argv) {
     if (getenv("VOLAND_GPU_MIPMAPS") && !strcmp(getenv("VOLAND_GPU_MIPMAPS"), "0")) emu.renderer.gpu_mipmaps = false;
     /* VOLAND_CPU_VERTICES=1: vertex programs on the CPU (the old path), to compare. */
     if (getenv("VOLAND_CPU_VERTICES")) emu.renderer.cpu_vertices = true;
+    if (no_vertex_pull || getenv("VOLAND_NO_VERTEX_PULL")) emu.renderer.no_vertex_pull = true;
   }
   const bool pc_profile = getenv("VOLAND_PC_PROFILE") != NULL;
   const uint64_t stats_from = getenv("VOLAND_STATS_FROM") ? strtoull(getenv("VOLAND_STATS_FROM"), NULL, 0) : 0;
@@ -1366,6 +1373,10 @@ static int run(int argc, char **argv) {
     }
     framebuffer_consume_all(); /* the CLI "displays" every frame at once */
     if (g_gpu_file) gpu_stream_drain();
+    if (gpu_stats_from && slices == gpu_stats_from) {
+      memset(&emu.renderer.gpu_stats, 0, sizeof(emu.renderer.gpu_stats));
+      g_gpu_stream.bytes = g_gpu_stream.records = 0;
+    }
     audio_frames += drain_audio(wav); /* and plays (or discards) every sample */
     slices++;
     if (g_gpu_file && dump_every && slices % dump_every == 0) {
@@ -1401,6 +1412,9 @@ static int run(int argc, char **argv) {
             (unsigned long long)gs->full_hashes, (unsigned long long)(gs->hashed_new >> 20),
             (unsigned long long)(gs->hashed_unsampled >> 20), (unsigned long long)(gs->hashed_changed >> 20),
             (unsigned long long)(gs->hashed_periodic >> 20), (unsigned long long)(gs->hashed_forced >> 20));
+    fprintf(stderr, "voland-cli: GPU draw MB: data %llu, pulled vertex streams %llu, vertices %llu, indices %llu\n",
+            (unsigned long long)(gs->draw_data_bytes >> 20), (unsigned long long)(gs->pulled_bytes >> 20),
+            (unsigned long long)(gs->vertex_bytes >> 20), (unsigned long long)(gs->index_bytes >> 20));
   }
   if (pc_profile) pc_profile_print(&emu);
   if (stats_from) time_stats_print(&emu);
@@ -1663,6 +1677,8 @@ static void usage(void) {
           "             --gpu-stream FILE (GPU records; /dev/null renders nothing)\n"
           "             --snapshot-at SLICE --snapshot-dir DIR  --frame-skip N\n"
           "             --dump-shaders DIR  --dump-wgsl DIR (each decoded program)\n"
+          "             --no-vertex-pull (GPU vertex stages take CPU-decoded inputs)\n"
+          "             --gpu-stats-from SLICE (GPU counters from that slice on)\n"
           "  checking:  --test-card  --expect-output TEXT  --expect-frame-hash HEX\n"
           "             --svc-stats  --measure-from SLICE [--measure-seconds S]\n"
           "             --savestate-check N:M (save at N, run to M, restore, re-run: same frame?)\n"

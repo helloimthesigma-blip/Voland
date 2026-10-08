@@ -1446,29 +1446,13 @@ static bool attrib_layout(uint32_t size, Attrib_Layout *out) {
 #define NUM_SSCALED 6u
 #define NUM_FLOAT 7u
 
-static void fetch_attribute(Draw_Context *ctx, uint32_t attrib, uint32_t vertex, uint32_t out[4]) {
-  const uint32_t *regs = ctx->regs;
-  const uint32_t a = regs[REG_VERTEX_ATTRIB + attrib];
+void raster3d_decode_attribute(uint32_t a, const uint8_t raw[RASTER_ATTRIBUTE_BYTES], uint32_t out[4]) {
   const uint32_t type = (a >> 27) & 7u;
   const bool integer = type == NUM_SINT || type == NUM_UINT;
   out[0] = out[1] = out[2] = 0;
   out[3] = integer ? 1u : u32f(1.0f);
-  if ((a >> 6) & 1u) return; /* inactive: constant default */
-  const uint32_t stream = a & 0x1fu;
-  const uint32_t *st = regs + REG_STREAM + 4u * stream;
-  if (!((st[0] >> 12) & 1u)) return;
   Attrib_Layout layout;
   if (!attrib_layout((a >> 21) & 0x3fu, &layout)) return;
-  const uint32_t stride = st[0] & 0xfffu;
-  uint32_t element = vertex;
-  if (regs[REG_STREAM_INSTANCED + stream] & 1u) {
-    const uint32_t divisor = st[3] ? st[3] : 1u;
-    element = ctx->instance / divisor + regs[REG_BASE_INSTANCE];
-  }
-  const uint64_t address = addr40(st[1], st[2]) + (uint64_t)element * stride + ((a >> 7) & 0x3fffu);
-  uint8_t raw[16];
-  memset(raw, 0, sizeof(raw));
-  if (!stream_read(ctx, stream, address, raw, layout.bytes)) return;
   if (type == NUM_FLOAT && layout.bits[0] == 32u && !((a >> 31) & 1u)) { /* 32-bit floats: the bytes as they are */
     memcpy(out, raw, (size_t)layout.count * 4u);
     return;
@@ -1511,6 +1495,31 @@ static void fetch_attribute(Draw_Context *ctx, uint32_t attrib, uint32_t vertex,
     out[0] = out[2];
     out[2] = t;
   }
+}
+
+static void fetch_attribute(Draw_Context *ctx, uint32_t attrib, uint32_t vertex, uint32_t out[4]) {
+  const uint32_t *regs = ctx->regs;
+  const uint32_t a = regs[REG_VERTEX_ATTRIB + attrib];
+  const uint32_t type = (a >> 27) & 7u;
+  out[0] = out[1] = out[2] = 0;
+  out[3] = type == NUM_SINT || type == NUM_UINT ? 1u : u32f(1.0f);
+  if ((a >> 6) & 1u) return; /* inactive: constant default */
+  const uint32_t stream = a & 0x1fu;
+  const uint32_t *st = regs + REG_STREAM + 4u * stream;
+  if (!((st[0] >> 12) & 1u)) return;
+  Attrib_Layout layout;
+  if (!attrib_layout((a >> 21) & 0x3fu, &layout)) return;
+  const uint32_t stride = st[0] & 0xfffu;
+  uint32_t element = vertex;
+  if (regs[REG_STREAM_INSTANCED + stream] & 1u) {
+    const uint32_t divisor = st[3] ? st[3] : 1u;
+    element = ctx->instance / divisor + regs[REG_BASE_INSTANCE];
+  }
+  const uint64_t address = addr40(st[1], st[2]) + (uint64_t)element * stride + ((a >> 7) & 0x3fffu);
+  uint8_t raw[RASTER_ATTRIBUTE_BYTES];
+  memset(raw, 0, sizeof(raw));
+  if (!stream_read(ctx, stream, address, raw, layout.bytes)) return;
+  raster3d_decode_attribute(a, raw, out);
 }
 
 /* ---- vertices ----------------------------------------------------- */
@@ -3148,6 +3157,12 @@ typedef struct Gpu_Draw {
   uint32_t input_count;
   uint8_t input_vector[WGSL_MAX_VARYINGS + 2u]; /* vertex input i + 1 -> generic vector */
   uint32_t cull_mode, front_face;
+  /* Vertex pulling (vs_desc.vertex_pull): records carry the ids and each
+   * stream's raw bytes over the ids' span [id_lo, id_hi]; the WGSL decodes
+   * the inputs. pull_bytes_per_id and pull_fixed_bytes size that copy. */
+  bool pull;
+  uint32_t id_lo, id_hi;
+  uint64_t pull_bytes_per_id, pull_fixed_bytes;
   Wgsl_Program_Desc desc;
   Wgsl_Program_Desc vs_desc;
 } Gpu_Draw;
@@ -3219,6 +3234,70 @@ static bool vs_topology(uint32_t topology) {
 /* The vertex program on the GPU when it translates for this draw's pixel
  * program: its outputs feed the pixel program's locations exactly as
  * gpu_put_vertex would (perspective-divided where interpolated so). */
+/* ---- vertex pulling ------------------------------------------------ */
+
+/* One stream a pulled draw copies: where its elements are and how much
+ * of each its attributes read. */
+typedef struct Pull_Stream {
+  uint64_t address;   /* element 0 (non-instanced) or the draw's element (instanced) */
+  uint32_t stride;
+  uint32_t end;       /* bytes of an element the attributes read */
+  bool instanced;
+} Pull_Stream;
+
+/* The streams the translated program's inputs read (input location l ->
+ * stream_of[l], 0xff: the input is inactive and reads its default). False
+ * when an input cannot be pulled (a format the WGSL does not decode). */
+static bool pull_streams(const Draw_Context *ctx, const Gpu_Draw *g, Pull_Stream streams[RASTER_STREAMS],
+                         uint8_t stream_of[WGSL_VSI_MAX], uint32_t *count) {
+  const uint32_t *regs = ctx->regs;
+  *count = 0;
+  for (uint32_t l = 0; l < g->vs_desc.input_count && l < WGSL_VSI_MAX; l++) {
+    stream_of[l] = 0xffu;
+    const uint32_t a = regs[REG_VERTEX_ATTRIB + g->input_vector[l]];
+    if ((a >> 6) & 1u) continue; /* inactive: constant default */
+    const uint32_t stream = a & 0x1fu;
+    const uint32_t *st = regs + REG_STREAM + 4u * stream;
+    if (!((st[0] >> 12) & 1u)) continue;
+    Attrib_Layout layout;
+    if (!attrib_layout((a >> 21) & 0x3fu, &layout)) return false;
+    const bool instanced = (regs[REG_STREAM_INSTANCED + stream] & 1u) != 0;
+    uint64_t address = addr40(st[1], st[2]);
+    const uint32_t stride = st[0] & 0xfffu;
+    if (instanced) {
+      const uint32_t divisor = st[3] ? st[3] : 1u;
+      address += (uint64_t)(ctx->instance / divisor + regs[REG_BASE_INSTANCE]) * stride;
+    }
+    const uint32_t end = ((a >> 7) & 0x3fffu) + layout.bytes;
+    uint32_t k = 0;
+    while (k < *count && !(streams[k].address == address && streams[k].stride == stride && streams[k].instanced == instanced))
+      k++;
+    if (k == *count) {
+      streams[k] = (Pull_Stream){address, stride, end, instanced};
+      (*count)++;
+    } else if (end > streams[k].end) {
+      streams[k].end = end;
+    }
+    stream_of[l] = (uint8_t)k;
+  }
+  return true;
+}
+
+/* Whether this draw's inputs can be pulled, and the copy's size terms. */
+static bool gpu_pull_plan(const Draw_Context *ctx, Gpu_Draw *g) {
+  Pull_Stream streams[RASTER_STREAMS];
+  uint8_t stream_of[WGSL_VSI_MAX];
+  uint32_t count = 0;
+  if (g->vs_desc.input_count > WGSL_VSI_MAX || !pull_streams(ctx, g, streams, stream_of, &count)) return false;
+  g->pull_bytes_per_id = 0;
+  g->pull_fixed_bytes = 0;
+  for (uint32_t k = 0; k < count; k++) {
+    if (!streams[k].instanced) g->pull_bytes_per_id += streams[k].stride;
+    g->pull_fixed_bytes += ((uint64_t)streams[k].end + 7u) & ~(uint64_t)7u;
+  }
+  return true;
+}
+
 /* Draws that kept CPU vertices for points/lines or an overflowing constant
  * window: each reason is logged on its first draw (diagnostics). */
 static uint64_t g_vs_cpu_topology, g_vs_cpu_window;
@@ -3255,13 +3334,22 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
       if (rs->varyings.interp[i] == SM_INTERP_PERSPECTIVE) d->perspective_mask |= 1ull << (l * 4u + c);
     }
   }
-  const uint32_t id = gpu_shader_for(ctx->r, ctx->vs, d);
-  if (id == GPU_SHADER_FAILED) return;
-  g->vs_mode = true;
-  g->vs_shader_id = id;
   g->input_count = d->input_count;
   for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++)
     if (d->input_location[v] < d->input_count) g->input_vector[d->input_location[v]] = (uint8_t)v;
+  uint32_t id = GPU_SHADER_FAILED;
+  if (!ctx->r->no_vertex_pull && gpu_pull_plan(ctx, g)) {
+    d->vertex_pull = true;
+    id = gpu_shader_for(ctx->r, ctx->vs, d);
+    g->pull = id != GPU_SHADER_FAILED;
+  }
+  if (!g->pull) {
+    d->vertex_pull = false;
+    id = gpu_shader_for(ctx->r, ctx->vs, d);
+  }
+  if (id == GPU_SHADER_FAILED) return;
+  g->vs_mode = true;
+  g->vs_shader_id = id;
   g->stride = 16u * (1u + g->input_count);
   /* Culling moves to the pipeline. WebGPU judges winding in framebuffer
    * coordinates (y down) - the screen space gpu_triangle's area uses. */
@@ -3554,12 +3642,28 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
 static void gpu_emit_draw(Raster_State *rs) {
   Raster3d *r = rs->ctx->r;
   Gpu_Draw *g = &g_gpu_draw;
-  if (!g->vertices) return;
+  if (!g->vertices && !(g->pull && g->index_count)) return;
   uint32_t samplers = 0;
   for (uint32_t i = 0; i < g->texture_count; i++) samplers += (g->desc.hw_sample_mask >> i) & 1u;
   const uint32_t bindings = 1u + g->texture_count + samplers;
-  const uint64_t bytes = sizeof(Gpu_Rec_Draw) + sizeof(Gpu_Rec_Binding) * bindings + (uint64_t)g->data_words * 4u +
-                         g->vertex_bytes + (uint64_t)g->index_count * sizeof(uint32_t);
+  /* Pulled: each stream's bytes over the record's ids follow the data. */
+  Pull_Stream streams[RASTER_STREAMS];
+  uint8_t stream_of[WGSL_VSI_MAX];
+  uint32_t stream_count = 0;
+  uint64_t stream_at[RASTER_STREAMS], stream_bytes[RASTER_STREAMS], pull_bytes = 0;
+  if (g->pull) {
+    if (!pull_streams(rs->ctx, g, streams, stream_of, &stream_count)) stream_count = 0;
+    for (uint32_t k = 0; k < stream_count; k++) {
+      stream_at[k] = pull_bytes;
+      stream_bytes[k] = streams[k].instanced ? streams[k].end
+                                             : (uint64_t)(g->id_hi - g->id_lo) * streams[k].stride + streams[k].end;
+      pull_bytes += (stream_bytes[k] + 7u) & ~(uint64_t)7u;
+    }
+    if (g->data_words & 1u) pull_bytes += 4u; /* the data stays a multiple of 8 bytes */
+  }
+  const uint64_t data_bytes = (uint64_t)g->data_words * 4u + pull_bytes;
+  const uint64_t bytes = sizeof(Gpu_Rec_Draw) + sizeof(Gpu_Rec_Binding) * bindings + data_bytes + g->vertex_bytes +
+                         (uint64_t)g->index_count * sizeof(uint32_t);
   if (bytes > gpu_stream_max_payload(r->gpu)) {
     log_warn("[gpu] draw of %u bytes exceeds the stream's record limit: dropped", (uint32_t)bytes);
     g->vertices = g->vertex_bytes = g->index_count = 0;
@@ -3616,14 +3720,39 @@ static void gpu_emit_draw(Raster_State *rs) {
     d.cull_mode = g->cull_mode;
     d.front_face = g->front_face;
     d.index_count = g->index_count;
+    if (g->pull) d.flags = GPU_DRAW_VERTEX_PULL;
   }
   memcpy(p, &d, sizeof(d));
   p += sizeof(d);
-  Gpu_Rec_Binding b = {GPU_BIND_DATA, WGSL_DATA_BINDING, g->data_words * 4u, 0};
+  Gpu_Rec_Binding b = {GPU_BIND_DATA, WGSL_DATA_BINDING, (uint32_t)data_bytes, 0};
   memcpy(p, &b, sizeof(b));
   p += sizeof(b);
   memcpy(p, r->gpu_data, (size_t)g->data_words * 4u);
-  p += (size_t)g->data_words * 4u;
+  if (g->pull) {
+    /* The input descriptors (WGSL_DRAW_VS_INPUTS), then the streams. */
+    uint32_t *words = (uint32_t *)(void *)p;
+    for (uint32_t l = 0; l < g->input_count && l < WGSL_VSI_MAX; l++) {
+      uint32_t *at = words + WGSL_DRAW_VS_INPUTS + WGSL_VSI_WORDS * l;
+      const uint8_t k = stream_of[l];
+      if (k == 0xffu || k >= stream_count) {
+        at[0] = at[1] = at[2] = at[3] = 0;
+        continue;
+      }
+      at[0] = (uint32_t)((uint64_t)g->data_words * 4u + stream_at[k]);
+      at[1] = (streams[k].stride & WGSL_VSI_STRIDE_MASK) | WGSL_VSI_ACTIVE | (streams[k].instanced ? WGSL_VSI_INSTANCED : 0u);
+      at[2] = rs->ctx->regs[REG_VERTEX_ATTRIB + g->input_vector[l]];
+      at[3] = streams[k].instanced ? 0u : g->id_lo;
+    }
+    words[WGSL_DRAW_VS_INSTANCE] = rs->ctx->instance;
+    uint8_t *blob = p + (size_t)g->data_words * 4u;
+    memset(blob, 0, (size_t)pull_bytes);
+    for (uint32_t k = 0; k < stream_count; k++) {
+      const uint64_t from = streams[k].address + (streams[k].instanced ? 0u : (uint64_t)g->id_lo * streams[k].stride);
+      if (!rs->ctx->mem->read(rs->ctx->mem->user, from, blob + stream_at[k], stream_bytes[k]))
+        memset(blob + stream_at[k], 0, (size_t)stream_bytes[k]); /* unreadable: the inputs read zeros */
+    }
+  }
+  p += (size_t)data_bytes;
   for (uint32_t i = 0; i < g->texture_count; i++) {
     const bool hw = (g->desc.hw_sample_mask >> i) & 1u;
     const Gpu_Rec_Binding tb = {GPU_BIND_TEXTURE, WGSL_TEXTURE_BINDING_BASE + i, hw ? GPU_BIND_FILTERED : 0u,
@@ -3640,6 +3769,10 @@ static void gpu_emit_draw(Raster_State *rs) {
   memcpy(p, g_gpu_indices, (size_t)g->index_count * sizeof(uint32_t));
   gpu_stream_end(r->gpu);
   r->gpu_stats.draws++;
+  r->gpu_stats.draw_data_bytes += (uint64_t)g->data_words * 4u;
+  r->gpu_stats.pulled_bytes += pull_bytes;
+  r->gpu_stats.vertex_bytes += g->vertex_bytes;
+  r->gpu_stats.index_bytes += (uint64_t)g->index_count * sizeof(uint32_t);
   g->vertices = 0;
   g->vertex_bytes = 0;
   g->index_count = 0;
@@ -3697,6 +3830,57 @@ static uint32_t gpu_vertex_slot(Raster_State *rs, uint32_t id) {
   }
 }
 
+/* The bytes a pulled record copies for ids [lo, hi], and what one draw's
+ * data window leaves for them. */
+static uint64_t pull_copy_bytes(const Gpu_Draw *g, uint32_t lo, uint32_t hi) {
+  return (uint64_t)(hi - lo) * g->pull_bytes_per_id + g->pull_fixed_bytes;
+}
+#define PULL_ALIGN_SLACK (8u * (RASTER_STREAMS + 1u)) /* each stream's 8-byte alignment, and the data's */
+static uint64_t pull_budget(const Gpu_Draw *g) {
+  return (uint64_t)GPU_DATA_WINDOW_WORDS * 4u - (uint64_t)g->data_words * 4u - PULL_ALIGN_SLACK;
+}
+
+/* The rest of the draw takes decoded inputs (ids too far apart to copy
+ * the span between them): the program translated without pulling. */
+static void gpu_pull_off(Raster_State *rs) {
+  Gpu_Draw *g = &g_gpu_draw;
+  g->pull = false;
+  Wgsl_Program_Desc d = g->vs_desc;
+  d.vertex_pull = false;
+  g->vs_shader_id = gpu_shader_for(rs->ctx->r, rs->ctx->vs, &d);
+  if (g->vs_shader_id == GPU_SHADER_FAILED) g->dead = true;
+}
+
+/* Appends a pulled triangle's ids (provoking first). A record ends where
+ * its ids' span would outgrow the data window; false when even this
+ * triangle's does - the draw stops pulling and the caller adds it. */
+static bool gpu_pull_triangle(Raster_State *rs, const uint32_t ids[3], uint32_t provoking) {
+  Gpu_Draw *g = &g_gpu_draw;
+  uint32_t lo = ids[0], hi = ids[0];
+  for (uint32_t k = 1; k < 3u; k++) {
+    if (ids[k] < lo) lo = ids[k];
+    if (ids[k] > hi) hi = ids[k];
+  }
+  if (pull_copy_bytes(g, lo, hi) > pull_budget(g)) {
+    gpu_emit_draw(rs);
+    gpu_pull_off(rs);
+    return !g->dead;
+  }
+  if (g->index_count) {
+    const uint32_t span_lo = lo < g->id_lo ? lo : g->id_lo, span_hi = hi > g->id_hi ? hi : g->id_hi;
+    if (pull_copy_bytes(g, span_lo, span_hi) > pull_budget(g) || g->index_count + 3u > GPU_MAX_INDICES) {
+      gpu_emit_draw(rs);
+    } else {
+      lo = span_lo;
+      hi = span_hi;
+    }
+  }
+  g->id_lo = lo;
+  g->id_hi = hi;
+  for (uint32_t k = 0; k < 3u; k++) g_gpu_indices[g->index_count++] = ids[(provoking + k) % 3u];
+  return true;
+}
+
 /* A triangle for the GPU vertex stage, by guest vertex ids: untransformed,
  * provoking vertex (ids[provoking]) first - WebGPU's flat interpolation
  * takes the first; the rotation keeps the winding. The draw is prepared
@@ -3723,6 +3907,11 @@ static void gpu_vs_triangle_ids(Raster_State *rs, const uint32_t ids[3], uint32_
       rs->ctx->r->gpu_stats.untranslated_draws++;
       return;
     }
+  }
+  if (g->pull && !gpu_pull_triangle(rs, ids, provoking)) return;
+  if (g->pull) {
+    rs->ctx->r->gpu_stats.triangles++;
+    return;
   }
   if (g->vertex_bytes + 3u * g->stride > GPU_VERTEX_BYTES || g->index_count + 3u > GPU_MAX_INDICES) gpu_emit_draw(rs);
   for (uint32_t k = 0; k < 3u; k++) g_gpu_indices[g->index_count++] = gpu_vertex_slot(rs, ids[(provoking + k) % 3u]);

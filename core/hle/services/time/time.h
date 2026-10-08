@@ -31,6 +31,12 @@
 #define TIME_SHMEM_LOCAL_CONTEXT 0x38u
 #define TIME_SHMEM_NETWORK_CONTEXT 0x80u
 #define TIME_SHMEM_AUTOMATIC_CORRECTION 0xC8u
+/* Newer SDKs' steady clock reads its continuous adjustment time point
+ * here: {s64 clock offset (ns), s64 multiplier, s64 divisor log2, steady
+ * clock time point}, a rate of multiplier / 2^divisor_log2. Left zero,
+ * its clock source id matched no context and CLOCK_REALTIME failed
+ * (Silksong aborted on every save: std::system_error from clock_gettime). */
+#define TIME_SHMEM_CONTINUOUS_ADJUSTMENT 0xD0u
 #define TIME_MODULE 116u
 #define TIME_RESULT_OUT_OF_RANGE ((902u << 9) | TIME_MODULE)
 

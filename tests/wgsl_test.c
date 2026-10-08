@@ -18,6 +18,7 @@
 
 #include "gpu/maxwell_shader.h"
 #include "gpu/texture.h"
+#include "gpu/raster3d.h"
 #include "gpu/wgsl.h"
 
 /* ---- assembler (field layouts as tests/maxwell_shader_test.c) ----- */
@@ -603,6 +604,114 @@ static void lod_selection(void) {
   CHECK(strstr(g_text, "t0_lod(tc") == NULL && strstr(g_text, "vec2<i32>(0), 0.0); ") != NULL);
 }
 
+/* ---- vertex pulling: the WGSL decoder against raster3d's ------------ */
+
+/* Every attribute format and number type (and the BGRA swap) on one
+ * element of a 20-byte stride, at unaligned offsets; the expected words
+ * come from raster3d_decode_attribute (the CPU path's decoder).
+ * tools/vertex-pull-vectors.mjs runs wgsl_vertex_pull_source on WebGPU. */
+#define VP_STRIDE 20u
+#define VP_ELEMENTS 2u
+static uint32_t vp_rand(uint32_t *state) {
+  *state = *state * 1664525u + 1013904223u;
+  return *state >> 8;
+}
+static uint16_t vp_half(uint32_t *state) { /* finite: exponent below 31 */
+  return (uint16_t)((vp_rand(state) & 0x83ffu) | ((vp_rand(state) % 31u) << 10));
+}
+static void vertex_pull_vectors(void) {
+  static const uint32_t sizes[] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x0A, 0x0F, 0x12, 0x13, 0x18, 0x1B, 0x1D,
+                                   0x2F, 0x30, 0x31, 0x32, 0x33, 0x34};
+  const uint32_t n_sizes = sizeof(sizes) / sizeof(sizes[0]);
+  enum { TYPES = 7, CASES_MAX = 18 * 7 * 2 + 2 };
+  static uint32_t words[WGSL_VSI_WORDS * CASES_MAX + (CASES_MAX * VP_STRIDE * VP_ELEMENTS) / 4u + 16u];
+  static uint32_t expected[CASES_MAX][4];
+  static uint32_t vid[CASES_MAX], ulps[CASES_MAX];
+  uint32_t cases = 0, state = 12345u;
+  const uint32_t blob_word = WGSL_VSI_WORDS * CASES_MAX;
+  uint8_t *blob = (uint8_t *)(words + blob_word);
+  for (uint32_t si = 0; si < n_sizes; si++) {
+    for (uint32_t type = 1; type <= TYPES; type++) {
+      for (uint32_t swap = 0; swap < 2u; swap++) {
+        const uint32_t c = cases++;
+        const uint32_t offset = c % 4u;           /* the attribute's offset in its element */
+        uint8_t *element = blob + c * VP_STRIDE * VP_ELEMENTS;
+        for (uint32_t i = 0; i < VP_STRIDE * VP_ELEMENTS; i++) element[i] = (uint8_t)vp_rand(&state);
+        uint8_t *raw = element + VP_STRIDE + offset; /* element 1 */
+        if (type == 7u) { /* floats: finite values only (NaN payloads are not compared) */
+          for (uint32_t k = 0; k < 8u; k++) {
+            const uint16_t h = vp_half(&state);
+            memcpy(raw + 2u * k, &h, 2);
+          }
+          if (sizes[si] == 0x01 || sizes[si] == 0x02 || sizes[si] == 0x04 || sizes[si] == 0x12) {
+            for (uint32_t k = 0; k < 4u; k++) {
+              const float f = (float)(int32_t)(vp_rand(&state) % 2001u) / 7.0f - 140.0f;
+              memcpy(raw + 4u * k, &f, 4);
+            }
+          }
+        }
+        const uint32_t a = (swap << 31) | (type << 27) | (sizes[si] << 21) | (offset << 7);
+        uint32_t *d = words + WGSL_VSI_WORDS * c;
+        d[0] = (uint32_t)(blob_word * 4u + c * VP_STRIDE * VP_ELEMENTS);
+        d[1] = VP_STRIDE | WGSL_VSI_ACTIVE;
+        d[2] = a;
+        d[3] = 7u; /* the first element's id: vertex 8 is element 1 */
+        vid[c] = 8u;
+        uint8_t padded[RASTER_ATTRIBUTE_BYTES];
+        memcpy(padded, raw, sizeof(padded));
+        raster3d_decode_attribute(a, padded, expected[c]);
+        /* WGSL's f32 division need not round correctly (2.5 ULP). */
+        ulps[c] = (type == 1u || type == 2u) ? 3u : 0u;
+      }
+    }
+  }
+  /* Instanced (element 0 whatever the id) and inactive (the defaults). */
+  {
+    const uint32_t c = cases++;
+    uint32_t *d = words + WGSL_VSI_WORDS * c;
+    uint8_t *element = blob + c * VP_STRIDE * VP_ELEMENTS;
+    const float v[4] = {1.5f, -2.0f, 3.25f, 4.0f};
+    memcpy(element, v, sizeof(v));
+    d[0] = (uint32_t)(blob_word * 4u + c * VP_STRIDE * VP_ELEMENTS);
+    d[1] = VP_STRIDE | WGSL_VSI_ACTIVE | WGSL_VSI_INSTANCED;
+    d[2] = (7u << 27) | (0x01u << 21);
+    d[3] = 0;
+    vid[c] = 1234u;
+    raster3d_decode_attribute(d[2], element, expected[c]);
+    ulps[c] = 0;
+    const uint32_t i = cases++;
+    uint32_t *e = words + WGSL_VSI_WORDS * i;
+    e[0] = 0;
+    e[1] = 0; /* not active */
+    e[2] = (4u << 27) | (0x0Au << 21);
+    e[3] = 0;
+    vid[i] = 0;
+    expected[i][0] = expected[i][1] = expected[i][2] = 0;
+    expected[i][3] = 1u; /* integer default w */
+    ulps[i] = 0;
+  }
+  g_vectors++;
+  if (!g_dir) return;
+  char path[1024];
+  snprintf(path, sizeof(path), "%s/vertex_pull.json", g_dir);
+  FILE *f = fopen(path, "w");
+  CHECK(f != NULL);
+  const uint32_t word_count = blob_word + (cases * VP_STRIDE * VP_ELEMENTS + 3u) / 4u + 4u;
+  fprintf(f, "{\"words\":[");
+  for (uint32_t i = 0; i < word_count; i++) fprintf(f, "%s%u", i ? "," : "", words[i]);
+  fprintf(f, "],\"cases\":[");
+  for (uint32_t c = 0; c < cases; c++)
+    fprintf(f, "%s[%u,%u,%u,%u,%u,%u,%u]", c ? "," : "", WGSL_VSI_WORDS * c, vid[c], expected[c][0], expected[c][1],
+            expected[c][2], expected[c][3], ulps[c]);
+  fprintf(f, "]}\n");
+  fclose(f);
+  snprintf(path, sizeof(path), "%s/vertex_pull.wgsl", g_dir);
+  f = fopen(path, "w");
+  CHECK(f != NULL);
+  fputs(wgsl_vertex_pull_source(), f);
+  fclose(f);
+}
+
 int main(int argc, char **argv) {
   g_dir = argc > 1 ? argv[1] : NULL;
   tex_init_tables();
@@ -613,6 +722,7 @@ int main(int argc, char **argv) {
   vector_integer();
   vector_iadd3();
   vector_i2i_abs_neg();
+  vertex_pull_vectors();
   vector_branches();
   vector_select_texture();
   vector_texture_half();

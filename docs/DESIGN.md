@@ -2518,6 +2518,8 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - **WGSL: I2I with abs/neg** (sign-and-magnitude, exact against the interpreter's 64-bit arithmetic). 68 SSBU vertex programs failed to translate for that alone and shaded on the CPU. A `wgsl_test` vector covers it.
   - **GPU ring 16 MiB** (was 4): a fight frame streams ~24 MB, and the producer stalled whenever the GPU worker paused.
   - Fight: 3.4 → 7.1 fps across these changes, 804 → 1693 slices/s (serial, pacing off). What remains: CPU attribute fetch (~31%) and stream volume (168 MiB/s).
+  - **Vertex pulling (stream version 5,** docs/GPU_COMMAND_STREAM.md): vertex-stage records carry each stream's raw bytes over the record's vertex ids, and the WGSL vertex program decodes its inputs (`vfetch`). The CPU no longer fetches or decodes attributes. `fetch_attribute` and its window refills, a third of the CPU worker, are gone from the profile. The decoder matches `raster3d_decode_attribute` on 254 format cases on Metal (`vertex-pull-vectors.mjs`).
+  - Now the GPU worker is the limit in a fight: `writeBuffer` and `writeTexture` take ~73% of it, and the producer waits on the ring.
 
 ### Changelog v3.73 → v3.74 (summary)
 

@@ -18,7 +18,9 @@
 #define TIME_RULE_BYTES 0x4000u
 #define TIME_RULE_VERSION_BYTES 0x10u
 #define TIME_SNAPSHOT_BYTES 0xD0u
-#define TIME_SHMEM_COPY_OFFSET 0x8u
+#define TIME_SHMEM_COPY_OFFSET 0x8u        /* the two copies after the u32 counter, 8-aligned */
+#define TIME_SHMEM_BOOL_COPY_OFFSET 0x4u   /* a bool's copies right after the counter */
+#define TIME_ADJUSTMENT_BYTES 0x30u
 #define TIME_INITIAL_YEAR 2026u
 
 /* Kinds of ISystemClock (object state). */
@@ -126,10 +128,11 @@ static void encode_context(uint8_t out[TIME_CONTEXT_BYTES], const Time_State *s)
  * (green threads), so both copies end up current. */
 static void write_shmem_object(HLE_Context *c, const Time_State *s, uint32_t offset, const void *data, uint32_t size) {
   const uint64_t base = s->shared_memory->guest_pa + offset;
+  const uint64_t copies = size == 1u ? TIME_SHMEM_BOOL_COPY_OFFSET : TIME_SHMEM_COPY_OFFSET;
   uint32_t counter = 0;
   (void)vmm_read_physical(c->vmm, base, &counter, sizeof(counter));
   counter++;
-  (void)vmm_write_physical(c->vmm, base + TIME_SHMEM_COPY_OFFSET + (uint64_t)(counter & 1u) * size, data, size);
+  (void)vmm_write_physical(c->vmm, base + copies + (uint64_t)(counter & 1u) * size, data, size);
   (void)vmm_write_physical(c->vmm, base, &counter, sizeof(counter));
 }
 
@@ -141,11 +144,17 @@ static void refresh_shared_memory(HLE_Context *c, const Time_State *s) {
   uint8_t context[TIME_CONTEXT_BYTES];
   encode_context(context, s);
   const uint8_t automatic = 0;
+  /* The steady clock unadjusted: offset 0, rate 1/2^0, from steady zero. */
+  uint8_t adjustment[TIME_ADJUSTMENT_BYTES];
+  memset(adjustment, 0, sizeof(adjustment));
+  wr64(adjustment + 8, 1u);
+  encode_steady_point(adjustment + 0x18, 0);
   for (int copy = 0; copy < 2; copy++) { /* write both copies */
     write_shmem_object(c, s, TIME_SHMEM_STEADY, steady, sizeof(steady));
     write_shmem_object(c, s, TIME_SHMEM_LOCAL_CONTEXT, context, sizeof(context));
     write_shmem_object(c, s, TIME_SHMEM_NETWORK_CONTEXT, context, sizeof(context));
     write_shmem_object(c, s, TIME_SHMEM_AUTOMATIC_CORRECTION, &automatic, sizeof(automatic));
+    write_shmem_object(c, s, TIME_SHMEM_CONTINUOUS_ADJUSTMENT, adjustment, sizeof(adjustment));
   }
 }
 

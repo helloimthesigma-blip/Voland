@@ -1,4 +1,4 @@
-# GPU command stream (version 4)
+# GPU command stream (version 5)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -142,7 +142,7 @@ down), so `front_face` is the guest's winding on screen.
 
 ### Indexed vertex-stage draws (version 4)
 
-`Gpu_Rec_Draw.index_count` (then a reserved word) follows `front_face`.
+`Gpu_Rec_Draw.index_count` (then a flags word, version 5) follows `front_face`.
 When a vertex-stage draw has `index_count` > 0, its `vertex_count`
 vertices are the draw's distinct vertices: each guest vertex once per
 record, in first-use order. They are followed by `index_count` u32
@@ -152,10 +152,43 @@ vertices in the same buffer and calls `drawIndexed`. Silksong's 250k-slice
 stream shrinks from 197 to 128 MB, and an SSBU fight's vertex data was
 about 27 MB per frame before this.
 
+### Vertex pulling (version 5)
+
+With `GPU_DRAW_VERTEX_PULL` in `Gpu_Rec_Draw.flags` a vertex-stage draw
+has no vertices (`vertex_count` 0). Its `index_count` u32 indices are
+guest vertex ids, the vertex stage's `@builtin(vertex_index)`, and the
+pipeline has no vertex buffers. The vertex program decodes its inputs
+itself (`vfetch` in `core/gpu/wgsl.c`). It reads them from the draw's
+data binding, which carries after the constants and constant buffers:
+
+- per input location l, four words at `WGSL_DRAW_VS_INPUTS + 4 l`
+  (`core/gpu/wgsl.h`):
+  - the byte offset in the binding of its stream's first copied element;
+  - the stride | `WGSL_VSI_ACTIVE` | `WGSL_VSI_INSTANCED`;
+  - the guest's VERTEX_ATTRIB word (offset, size, number type, BGRA swap);
+  - the vertex id of the first copied element;
+- the instance id at `WGSL_DRAW_VS_INSTANCE`;
+- each stream's bytes over the record's id span (an instanced stream:
+  the draw's one element), 8-byte aligned.
+
+A record ends where its ids' span would no longer fit the 2 MiB data
+window. A triangle whose own ids are too far apart switches the rest of
+the draw to the version-4 form, with decoded inputs from the CPU.
+
+The CPU's work per vertex goes away: no attribute fetch, no format
+decoding and no per-record vertex map. In an SSBU fight, `fetch_attribute`
+and its vertex window refills were about a third of the CPU worker before.
+`voland-cli --no-vertex-pull` keeps the version-4 form.
+
 ## Verification
 
 - `tests/wgsl_test.c` writes differential vectors (the interpreter is the
   oracle); `platform/web/tools/wgsl-vectors.mjs` renders them on WebGPU.
+- It also writes `vertex_pull.json`: every attribute format, number type
+  and BGRA swap at unaligned offsets, with raster3d's CPU decoder
+  (`raster3d_decode_attribute`) as the oracle.
+  `platform/web/tools/vertex-pull-vectors.mjs` runs the WGSL decoder in a
+  compute shader on WebGPU and compares (254 cases on Metal).
 - `voland-cli run X --gpu-stream F` records a stream. `node
   platform/web/tools/replay-gpu-stream.mjs F OUT [--adapter default]`
   replays it through the executor and writes the presented frames.

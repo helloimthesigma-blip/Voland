@@ -78,7 +78,20 @@
 #define WGSL_VP_FLAGS 8u      /* WGSL_VP_TRANSFORM */
 #define WGSL_VP_WORDS 10u
 #define WGSL_VP_TRANSFORM 1u  /* the viewport transform is enabled */
-#define WGSL_DRAW_CONSTANT_WORDS (WGSL_DRAW_VIEWPORT + WGSL_VP_WORDS)
+/* Vertex pulling (Wgsl_Program_Desc.vertex_pull): per vertex input location
+ * l, words WGSL_DRAW_VS_INPUTS + 4 l: the byte offset in this buffer of its
+ * stream's first copied element, the stride (bits 0-11) | WGSL_VSI_ACTIVE |
+ * WGSL_VSI_INSTANCED, the guest's VERTEX_ATTRIB word (offset, size, type,
+ * BGRA swap), and the vertex id of the first copied element. Then the
+ * instance id. */
+#define WGSL_DRAW_VS_INPUTS (WGSL_DRAW_VIEWPORT + WGSL_VP_WORDS)
+#define WGSL_VSI_WORDS 4u
+#define WGSL_VSI_MAX 16u
+#define WGSL_VSI_STRIDE_MASK 0xfffu
+#define WGSL_VSI_ACTIVE 0x40000000u    /* else the input reads (0, 0, 0, 1) */
+#define WGSL_VSI_INSTANCED 0x80000000u /* one element (the draw's instance) is copied */
+#define WGSL_DRAW_VS_INSTANCE (WGSL_DRAW_VS_INPUTS + WGSL_VSI_WORDS * WGSL_VSI_MAX)
+#define WGSL_DRAW_CONSTANT_WORDS (WGSL_DRAW_VS_INSTANCE + 2u)
 #define WGSL_VERTEX_ID_LOCATION 0u /* vertex input: vec4<u32>(vertex id, instance id, 0, 0) */
 #define WGSL_MAX_VARYINGS 14u /* + 1/w, within WebGPU's 16 inter-stage vectors */
 #define WGSL_DRAW_LOWER_LEFT 1u /* position y counts from the bottom */
@@ -139,11 +152,19 @@ typedef struct Wgsl_Program_Desc {
    * input vector v arrives at vertex input input_location[v] (0xff: not
    * supplied; reads 0); input 0 is the vertex and instance id. */
   uint8_t stage;
+  /* Vertex programs: the inputs are decoded in WGSL from raw vertex
+   * buffer bytes in the data buffer (WGSL_DRAW_VS_INPUTS), with the vertex
+   * id from @builtin(vertex_index); else they arrive as vertex attributes. */
+  bool vertex_pull;
   uint8_t input_location[SM_ATTR_GENERIC_COUNT];
   uint32_t input_count;
   uint16_t output_word[WGSL_MAX_VARYINGS][4];
   uint64_t perspective_mask;
 } Wgsl_Program_Desc;
+
+/* The vertex-pulling decoder's WGSL (vword, vconv, vfetch over a global
+ * `D: array<u32>`), as pulled vertex programs include it - for tests. */
+const char *wgsl_vertex_pull_source(void);
 
 typedef struct Wgsl_Result {
   char *text;          /* NUL-terminated; in the caller's buffer */
