@@ -70,11 +70,12 @@ void hle_svc_send_sync_request(HLE_Context *context, CPU_State *cpu_state) {
   }
 
   const uint64_t tls = context->cpu_backend->get_sys_reg(cpu_state, CPU_SYSREG_TPIDRRO_EL0);
-  /* Static: an IPC_Request + IPC_Response is ~1.5KB, and HLE is
-   * single-threaded by construction (§12), so one of each suffices and
-   * keeps the guest-thread host stack small. */
-  static IPC_Request request;
-  static IPC_Response response;
+  /* Per host thread: an IPC_Request + IPC_Response is ~1.5KB (kept off
+   * small guest-thread host stacks). HLE runs under the kernel lock, but a
+   * GPFIFO submission releases it mid-dispatch (scheduler_gpu_begin), and
+   * another core's IPC must not overwrite the suspended call's. */
+  static _Thread_local IPC_Request request;
+  static _Thread_local IPC_Response response;
   if (!error_is_ok(vmm_read_block(context->vmm, tls, request.buffer, IPC_COMMAND_BUFFER_BYTES))) {
     regs->x[0] = HLE_RESULT_INVALID_USER_POINTER;
     return;

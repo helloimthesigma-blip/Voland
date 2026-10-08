@@ -604,6 +604,7 @@ static void run_gpfifo(Nvdrv_State *s, Nv_Fd *f, uint8_t *d) {
   static _Thread_local uint8_t saved_request[NVDRV_IOCTL_MAX_BYTES];
   const uint32_t request_bytes = GPFIFO_HEADER_BYTES + count * 8u;
   memcpy(saved_request, d, request_bytes);
+  const bool extra_out = s->extra_out; /* Ioctl3's second output: zeros for a submission */
   Scheduler *sched = s->hle->scheduler;
   Kernel_Suspend suspended;
   scheduler_gpu_begin(sched, &suspended);
@@ -616,6 +617,8 @@ static void run_gpfifo(Nvdrv_State *s, Nv_Fd *f, uint8_t *d) {
   memcpy(ids, g_deferred_increment, increments * sizeof(ids[0]));
   scheduler_gpu_end(sched, &suspended);
   memcpy(d, saved_request, request_bytes);
+  s->extra_out = extra_out;
+  if (extra_out) memset(s->extra_buffer, 0, sizeof(s->extra_buffer));
   for (uint32_t i = 0; i < increments; i++) syncpoint_increment_now(s, ids[i]);
 }
 

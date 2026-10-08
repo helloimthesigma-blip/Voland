@@ -135,6 +135,10 @@ the other cores waiting 45–73% of the time. So it runs outside it.
 - **`current`:** `gpu_begin` gives `sched->current` back to its value outside
   the SVC, and `gpu_end` restores the SVC's thread.
 - **While the submission runs:**
+  - Other cores' IPC must not touch the suspended call's state: the IPC
+    request and response (`svc_ipc.c`) are per host thread. They were one
+    static pair, and SSBU crashed at boot on 3 cores (a reply overwritten
+    mid-call, then a jump to address 0).
   - Other cores' ioctls may reuse nvdrv's shared ioctl buffer. The request's
     bytes are saved in a thread-local buffer and put back before the reply.
   - In-stream syncpoint increments are queued and applied once the kernel
