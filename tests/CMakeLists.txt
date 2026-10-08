@@ -23,6 +23,11 @@ add_executable(wgsl_test wgsl_test.c)
 target_link_libraries(wgsl_test PRIVATE switch_core)
 add_test(NAME wgsl_test COMMAND wgsl_test)
 
+# The A32 interpreter's side of the AArch32 differential test (run by
+# platform/web/../tools/a32-oracle.py against Unicorn; not a ctest).
+add_executable(a32_runner a32_runner.c)
+target_link_libraries(a32_runner PRIVATE switch_core)
+
 add_executable(wgsl_compute_test wgsl_compute_test.c)
 target_link_libraries(wgsl_compute_test PRIVATE switch_core)
 add_test(NAME wgsl_compute_test COMMAND wgsl_compute_test)

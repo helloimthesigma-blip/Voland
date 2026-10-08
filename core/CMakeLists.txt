@@ -19,6 +19,8 @@ set(SWITCH_CORE_SOURCES
   cpu/backends/interpreter/interp_simd_ldst.c
   cpu/backends/interpreter/interp_predecode.c
   cpu/backends/interpreter/softfloat.c
+  cpu/backends/a32/a32.c
+  cpu/backends/a32/a32_vfp.c
   cpu/backends/jit/jit.c
   cpu/backends/jit/jit_compile.c
   hle/hle.c
