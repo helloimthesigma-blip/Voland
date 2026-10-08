@@ -36,6 +36,8 @@
 #include "common/assert.h"
 #include "common/log.h"
 #include "cpu/backends/jit/jit_internal.h"
+#include "cpu/backends/a32/a32.h"
+#include "cpu/backends/a32/a32_internal.h"
 #include "cpu/backends/jit/jit_wasm.h"
 
 #ifdef __EMSCRIPTEN__
@@ -570,6 +572,11 @@ static void count_helper(uint32_t insn) {
 }
 
 uint32_t jit_helper_interpret(Jit_State *state, uint32_t insn) {
+  if (state->isa == JIT_ISA_A32) {
+    thread_stats()->helper_other++;
+    if (g_fallback_profile) profile_fallback(insn);
+    return a32_jit_interpret((A32_State *)state, insn);
+  }
   count_helper(insn);
   Interp_State *s = &state->interp;
   const uint64_t pc = s->regs.pc;
@@ -591,6 +598,11 @@ uint32_t jit_helper_read(Jit_State *state, uint64_t address, uint32_t size) {
 
 uint32_t jit_helper_simd(Jit_State *state, uint32_t insn) {
   Jit_Stats *const st = thread_stats();
+  if (state->isa == JIT_ISA_A32) {
+    st->direct_simd++;
+    if (g_fallback_profile) profile_fallback(insn);
+    return a32_execute((A32_State *)state, insn) == INTERP_CONTINUE ? 0u : 1u;
+  }
   if (g_fallback_profile) profile_fallback(insn);
   if (state->interp.fpcr != 0) st->simd_fpcr_nonzero++;
   else if (!(state->interp.fpsr & 0x10u)) st->simd_ixc_clear++;
@@ -730,6 +742,7 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
   link.generation_address = (uint64_t)(uintptr_t)&g_vmm_generation;
   link.count_entries = g_hot_profile;
   link.span_calls = g_span_calls;
+  link.aarch32 = ((const Jit_State *)s)->isa == JIT_ISA_A32;
   Jit_Compiled compiled;
   const uint64_t lock_start = jit_now_ns();
   compiler_lock();
@@ -828,7 +841,7 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
    * barriers fences (jit_compile.c, c_exclusive / c_system). */
   Jit_Thread *const t = thread_jit();
   if (!t || !interp_predecode_enabled() || !can_install()) {
-    return CPU_BACKEND_INTERPRETER.run(state, cycle_budget);
+    return j->isa == JIT_ISA_A32 ? CPU_BACKEND_A32.run(state, cycle_budget) : CPU_BACKEND_INTERPRETER.run(state, cycle_budget);
   }
   if (async_compile_possible()) finish_pending(t, s, interp_code_generation());
   s->cycles_consumed = 0;
@@ -874,7 +887,9 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
     }
     t->stats.interpreted_blocks++;
     note_block(t, pc);
-    if (!interp_predecode_run_block(s, cycle_budget, &grace, &exit_reason)) {
+    const bool more = j->isa == JIT_ISA_A32 ? a32_run_block((A32_State *)j, cycle_budget, &grace, &exit_reason)
+                                            : interp_predecode_run_block(s, cycle_budget, &grace, &exit_reason);
+    if (!more) {
       if (exit_reason == CPU_EXIT_FAULT || exit_reason == CPU_EXIT_BREAKPOINT) report_stop(t, s, exit_reason);
       return exit_reason;
     }
@@ -958,4 +973,58 @@ const CPU_Backend CPU_BACKEND_JIT = {
     .version = "0.2.0",
     .supports_jit = true,
     .supports_multicore = true, /* per-host-thread code caches (Jit_Thread) */
+};
+
+/* ------------------------------------------------------------------ */
+/* The A32 JIT: AArch32 titles (cpu/backends/a32) on the same runtime.  */
+/* ------------------------------------------------------------------ */
+
+static CPU_State *a32_jit_create(VMM_Context *vmm, void *userdata) {
+  CPU_State *state = CPU_BACKEND_A32.create(vmm, userdata);
+  if (state) ((A32_State *)(void *)state)->j.isa = JIT_ISA_A32;
+  return state;
+}
+static CPU_ExitReason a32_jit_step(CPU_State *state) { return CPU_BACKEND_A32.step(state); }
+static uint64_t a32_jit_get_sp(CPU_State *state) { return CPU_BACKEND_A32.get_sp(state); }
+static void a32_jit_set_sp(CPU_State *state, uint64_t value) { CPU_BACKEND_A32.set_sp(state, value); }
+static uint64_t a32_jit_get_reg(CPU_State *state, uint8_t index) { return CPU_BACKEND_A32.get_reg(state, index); }
+static void a32_jit_set_reg(CPU_State *state, uint8_t index, uint64_t value) {
+  CPU_BACKEND_A32.set_reg(state, index, value);
+}
+static void a32_jit_set_pc(CPU_State *state, uint64_t value) { CPU_BACKEND_A32.set_pc(state, value); }
+static uint64_t a32_jit_get_sys_reg(CPU_State *state, uint32_t reg) { return CPU_BACKEND_A32.get_sys_reg(state, reg); }
+static void a32_jit_set_sys_reg(CPU_State *state, uint32_t reg, uint64_t value) {
+  CPU_BACKEND_A32.set_sys_reg(state, reg, value);
+}
+
+const CPU_Backend CPU_BACKEND_A32_JIT = {
+    .create = a32_jit_create,
+    .destroy = jit_destroy,
+    .run = jit_run,
+    .step = a32_jit_step,
+    .get_fault_address = jit_get_fault_address,
+    .get_cycles_consumed = jit_get_cycles_consumed,
+    .get_reg = a32_jit_get_reg,
+    .set_reg = a32_jit_set_reg,
+    .get_pc = jit_get_pc,
+    .set_pc = a32_jit_set_pc,
+    .get_sp = a32_jit_get_sp,
+    .set_sp = a32_jit_set_sp,
+    .get_pstate = jit_get_pstate,
+    .set_pstate = jit_set_pstate,
+    .get_register_file = jit_get_register_file,
+    .get_sys_reg = a32_jit_get_sys_reg,
+    .set_sys_reg = a32_jit_set_sys_reg,
+    .get_vector_reg = jit_get_vector_reg,
+    .set_vector_reg = jit_set_vector_reg,
+    .invalidate_cache = jit_invalidate_cache,
+    .clear_cache = jit_clear_cache,
+    .set_svc_handler = jit_set_svc_handler,
+    .set_undefined_handler = jit_set_undefined_handler,
+    .set_breakpoint_handler = jit_set_breakpoint_handler,
+    .name = "a32jit",
+    .version = "0.1.0",
+    .supports_jit = true,
+    .supports_multicore = false, /* the A32 interpreter's exclusive monitor is per thread */
+    .aarch32 = true,
 };

@@ -2498,6 +2498,11 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - System data 0100000000000802 (MiiModel) is a stand-in made by Voland (`hle/fs/system_data.{h,c}`): a RomFS holding the archive's files, each with only a resource header. A title that draws Miis mounts it at start and aborts without it. No Nintendo content is shipped (§1.6).
   - svcBreak logs the link register and the stack's return addresses as module+offset.
   - `VOLAND_DUMP_MODULES` also writes each module's whole image, so the dynamic symbols can name them.
+- **A32 JIT (docs/JIT.md "AArch32").** 32-bit titles run on `CPU_BACKEND_A32_JIT`, the ARM64→WASM JIT's runtime with an A32 front end (`jit_compile_a32.inc`) and the A32 interpreter as its cold path and fallback.
+  - `CPU_Backend.aarch32` replaces the backend-pointer test in HLE.
+  - `A32_State` overlays `Jit_State`, which gains `isa`.
+  - Tested by `a32_jit_diff_test` (Node, 20,000 streams).
+  - MK8DX matches the interpreter bit for bit in virtual time and SVCs, and the first 20,000 slices run 2.7x faster.
 
 - **§13, vertex programs on the GPU (stage 1 of GPU vertex shading).** In the WebGPU renderer, a draw whose vertex program translates to WGSL no longer shades vertices on the CPU.
   - **Translation.** `wgsl.c` translates vertex programs (`stage` vertex in `Wgsl_Program_Desc`): ALD/AST on `ain`/`aout` arrays, and VERTEX_ID/INSTANCE_ID from the vertex input. Programs with KIL, IPA, quad ops or texture reads stay on the CPU.

@@ -492,6 +492,15 @@ static Error use_backend(Emulator* emulator, const CPU_Backend* backend) {
   return OK;
 }
 
+/* AArch32 code: the A32 JIT where the Emulator runs the JIT, else the A32 interpreter. */
+static const CPU_Backend* a32_backend_for(const CPU_Backend* base) {
+#ifdef SWITCH_CPU_BACKEND_JIT
+  if (base == &CPU_BACKEND_JIT) return &CPU_BACKEND_A32_JIT;
+#endif
+  (void)base;
+  return &CPU_BACKEND_A32;
+}
+
 /* Shared tail of every load: arm the main thread (Horizon entry ABI) and
  * adopt it into the scheduler. On failure the process is torn down. */
 static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_nro) {
@@ -617,7 +626,7 @@ Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
   if (!error_is_ok(err)) return err;
 
   /* AArch32 code runs on the A32 interpreter (cpu/backends/a32). */
-  err = use_backend(emulator, npdm.is_64bit_instruction ? emulator->base_backend : &CPU_BACKEND_A32);
+  err = use_backend(emulator, npdm.is_64bit_instruction ? emulator->base_backend : a32_backend_for(emulator->base_backend));
   if (!error_is_ok(err)) {
     process_teardown(&emulator->process, emulator->vmm, &emulator->pages);
     page_allocator_reset(&emulator->pages);

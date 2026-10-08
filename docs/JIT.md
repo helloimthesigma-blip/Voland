@@ -517,6 +517,39 @@ that point the CPU worker's profile was dominated by JIT-compiled code,
 with the remaining interpreter fallbacks mostly SIMD&FP instructions
 without a fast path.
 
+## AArch32
+
+32-bit titles (Mario Kart 8 Deluxe) run on `CPU_BACKEND_A32_JIT` (`jit.c`), which is this runtime over the A32 interpreter (`cpu/backends/a32`).
+
+**State and runtime.**
+- `A32_State` overlays `Jit_State`: a union of the interpreter's `Interp_State` and the JIT's state, followed by the A32-only fields. `Jit_State.isa` says which instruction set a state runs.
+- The runtime is unchanged: the region cache, chaining, async compile and code generations work the same way.
+- Three things dispatch on the ISA:
+  - the cold path (`a32_run_block`: up to a branch, 64 instructions at most);
+  - the per-instruction fallback (`jit_helper_interpret` → `a32_jit_interpret`);
+  - the direct call (`jit_helper_simd` → `a32_execute`).
+
+**Front end.** `jit_compile_a32.inc` is included by `jit_compile.c` and uses its emitter, chosen by `Jit_Link.aarch32`.
+- r0-r14 are x0-x14 in locals, zero-extended. NZCV uses the same lazy flags at 32-bit width; A32 ADDS/SUBS/CMP set flags as A64's W forms do.
+- A new lazy kind, `FLAGS_NZ`, covers A32 logical ops with S and MULS: N and Z come from the result, while C (the shifter's carry, written eagerly) and V stay in L_NZCV.
+- A conditional instruction is wrapped in `if (cond)`. When its body reads or writes the flags, they are made live before the `if`, so both arms agree.
+- Inlined:
+  - data processing in all three operand forms, including ALU writes to the PC (jump tables, `MOV pc, lr`);
+  - MOVW/MOVT, MUL/MLA/MLS and the long multiplies;
+  - LDR/STR/LDRB/STRB, LDRH/LDRSB/LDRSH/STRH and LDRD/STRD;
+  - LDM/STM in all four modes, using one softmmu walk for the whole run, with POP-PC returns;
+  - B/BL, BX/BLX (register);
+  - SXT/UXT(A)B/H, BFI/BFC/UBFX/SBFX, CLZ, REV/REV16.
+- A loaded or computed PC with bit 0 set (Thumb) goes to the interpreter before anything is committed.
+- VFP and Advanced SIMD instructions are direct calls to the A32 interpreter, synchronizing only the general registers they name. Inside a compiled condition they are passed with the condition rewritten to AL.
+- Everything else goes to the interpreter one instruction at a time. Instructions that may write the PC end the block.
+
+**Tested by** `tests/a32_jit_diff_test.c` (`a32_jit_diff_test_node`), which runs random A32 streams through both backends with the same budgets. The streams use every inlined form plus VFP/NEON, conditions, PUSH/POP and BX LR returns, and loops. Registers, PC, NZCV, D registers, FPSCR, exit, fault, cycles and memory are compared. A planted carry bug fails it within 31 streams.
+
+Measured on MK8DX with voland-cli under Node, no rendering:
+- **First 20,000 slices:** 29.2 s on the A32 interpreter, 10.7 s on the JIT (first cut, before the media and VFP direct paths). Virtual time and SVC counts are identical.
+- **60,000 slices, to the title screen:** 11.1 s on the JIT, about 34% of real time including boot.
+
 ## Limits and next steps
 
 - Compiled modules are one function per region; batching several regions

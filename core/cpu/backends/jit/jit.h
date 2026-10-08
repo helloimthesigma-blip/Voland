@@ -18,7 +18,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* CPU_BACKEND_JIT is declared in cpu.h. */
+/* CPU_BACKEND_JIT is declared in cpu.h. The same JIT for AArch32 titles
+ * (the A32 front end; state and cold path are cpu/backends/a32's): */
+extern const CPU_Backend CPU_BACKEND_A32_JIT;
 
 /* Process-wide counters, for measurement (voland-cli prints them). */
 typedef struct Jit_Stats {

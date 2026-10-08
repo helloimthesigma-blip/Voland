@@ -877,6 +877,45 @@ static bool run_one(A32_State *a, CPU_ExitReason *exit_reason) {
   return interp_retire(&a->s, a32_execute(a, insn), pc, insn, exit_reason);
 }
 
+#define A32_BLOCK_MAX_INSNS 64u
+
+/* One block for the JIT's cold path: instructions until one writes the
+ * PC (a branch), the budget runs out, or A32_BLOCK_MAX_INSNS. False when
+ * the run must stop (*exit_reason says why). */
+bool a32_run_block(A32_State *a, uint64_t cycle_budget, uint32_t *grace, CPU_ExitReason *exit_reason) {
+  for (uint32_t i = 0; i < A32_BLOCK_MAX_INSNS; i++) {
+    if (a->s.cycles_consumed >= cycle_budget) {
+      if (!a->s.exclusive_valid || *grace >= INTERP_EXCLUSIVE_GRACE_INSTRUCTIONS) {
+        *exit_reason = CPU_EXIT_CYCLES_ELAPSED;
+        return false;
+      }
+      (*grace)++;
+    }
+    if (!run_one(a, exit_reason)) return false;
+    if (a->pc_written) return true;
+  }
+  return true;
+}
+
+#define A32_MCR_CACHE_MASK 0x0FFF0F1Fu
+#define A32_MCR_ICACHE_C7_C5 0x0E070F15u /* MCR p15, 0, Rt, c7, c5, opc2 */
+
+bool a32_is_code_maintenance(uint32_t insn) {
+  const uint32_t opc2 = f(insn, 7, 5);
+  return (insn & A32_MCR_CACHE_MASK) == A32_MCR_ICACHE_C7_C5 && (opc2 == 1u || opc2 == 6u || opc2 == 7u);
+}
+
+/* The JIT's fallback for one instruction at regs.pc (jit_helper_interpret). */
+uint32_t a32_jit_interpret(A32_State *a, uint32_t insn) {
+  const uint64_t pc = a->s.regs.pc;
+  CPU_ExitReason exit_reason = CPU_EXIT_CYCLES_ELAPSED;
+  if (!interp_retire(&a->s, a32_execute(a, insn), pc, insn, &exit_reason)) {
+    a->j.exit_reason = exit_reason;
+    return JIT_BLOCK_STOP;
+  }
+  return a32_is_code_maintenance(insn) ? JIT_HELPER_LEAVE : JIT_BLOCK_CONTINUE;
+}
+
 static CPU_ExitReason a32_run(CPU_State *state, uint64_t cycle_budget) {
   A32_State *a = as_a32(state);
   SWITCH_ASSERT_ALWAYS(a->s.l1 != NULL, "a32 run() without a vmm");
@@ -966,6 +1005,7 @@ const CPU_Backend CPU_BACKEND_A32 = {
     .version = "0.1.0",
     .supports_jit = false,
     .supports_multicore = false, /* the exclusive monitor is not shared across host threads */
+    .aarch32 = true,
 };
 
 uint32_t a32_cpsr(const CPU_State *state) { return read_cpsr((const A32_State *)state); }

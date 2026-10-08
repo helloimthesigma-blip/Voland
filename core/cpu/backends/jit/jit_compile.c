@@ -197,6 +197,7 @@ typedef enum Flag_Kind {
   FLAGS_LIVE,  /* L_NZCV holds the flags */
   FLAGS_ADD,   /* AddWithCarry(L_FA, L_FB, flag_carry) = L_FR */
   FLAGS_LOGIC, /* N and Z of L_FR; C = V = 0 */
+  FLAGS_NZ,    /* N and Z of L_FR; C and V as in L_NZCV (A32 logical ops, MULS) */
 } Flag_Kind;
 
 typedef enum Flag_Event { FLAG_EVENT_NONE, FLAG_EVENT_READ, FLAG_EVENT_WRITE } Flag_Event;
@@ -229,6 +230,7 @@ typedef struct Ctx {
   uint32_t insn;
   uint32_t max_local;     /* highest local used (this pass) */
   uint32_t declared_local; /* how many to declare (the analysis pass's max_local) */
+  bool a32;               /* the code is A32 (jit_compile_a32.inc) */
 } Ctx;
 
 /* ------------------------------------------------------------------ */
@@ -654,6 +656,22 @@ static void emit_flag_c(Ctx *c) {
  * can sit on one arm of a branch). */
 static void emit_materialize(Ctx *c) {
   if (c->flag_kind == FLAGS_LIVE) return;
+  if (c->flag_kind == FLAGS_NZ) {
+    lget(c, L_NZCV);
+    i32c(c, CPU_PSTATE_C | CPU_PSTATE_V);
+    op(c, WASM_OP_I32_AND);
+    emit_flag_n(c);
+    i32c(c, NZCV_SHIFT_N);
+    op(c, WASM_OP_I32_SHL);
+    op(c, WASM_OP_I32_OR);
+    lget(c, L_FR);
+    op(c, WASM_OP_I64_EQZ);
+    i32c(c, NZCV_SHIFT_Z);
+    op(c, WASM_OP_I32_SHL);
+    op(c, WASM_OP_I32_OR);
+    lset(c, L_NZCV);
+    return;
+  }
   emit_flag_n(c);
   i32c(c, NZCV_SHIFT_N);
   op(c, WASM_OP_I32_SHL);
@@ -872,7 +890,7 @@ static bool emit_condition_fused(Ctx *c, uint32_t cond) {
     default: emit_result_signed(c); i64c(c, 0); op(c, WASM_OP_I64_GT_S); return true; /* GT: r > 0 */
     }
   }
-  if (c->flag_kind == FLAGS_ADD) { /* ADDS/CMN: only the result's own flags */
+  if (c->flag_kind == FLAGS_ADD || c->flag_kind == FLAGS_NZ) { /* only the result's own flags */
     switch (base) {
     case 0: lget(c, L_FR); op(c, WASM_OP_I64_EQZ); return true;
     case 2: emit_flag_n(c); return true;
@@ -4441,7 +4459,11 @@ static Outcome c_branch_system(Ctx *c, uint32_t insn) {
 /* Blocks and modules.                                                 */
 /* ------------------------------------------------------------------ */
 
+/* The A32 front end shares this file's emitter. */
+#include "cpu/backends/jit/jit_compile_a32.inc"
+
 static Outcome compile_instruction(Ctx *c, uint32_t insn) {
+  if (c->a32) return a32_compile_instruction(c, insn);
   switch (bits(insn, 28, 25)) {
   case 0x8: case 0x9: return c_dp_immediate(c, insn) ? OUTCOME_NEXT : OUTCOME_HELPER;
   case 0xA: case 0xB: return c_branch_system(c, insn);
@@ -4803,6 +4825,7 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     analysis.b = &scratch;
     analysis.link = link;
     analysis.discover = true;
+    analysis.a32 = link->aarch32;
     analysis.source = source;
     analysis.max_blocks = max_blocks;
     analysis.max_block_insns = max_block_insns;
@@ -4821,6 +4844,7 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     memset(&c, 0, sizeof(c));
     c.b = &b;
     c.link = link;
+    c.a32 = link->aarch32;
     c.source = source;
     memcpy(c.pages, analysis.pages, sizeof(c.pages));
     c.page_count = analysis.page_count;

@@ -42,7 +42,11 @@ typedef struct Jit_State {
    * address in, so a region compiles to the same bytes on every core and
    * the engine shares one compiled module between them (docs/PARALLEL.md). */
   uint64_t thread_cache;
+  uint32_t isa; /* JIT_ISA_*: what the state's code is (an A32 state is cpu/backends/a32's A32_State) */
 } Jit_State;
+
+#define JIT_ISA_A64 0u
+#define JIT_ISA_A32 1u
 
 /* A region may span this many code pages (calls and PLT stubs). */
 #define JIT_MAX_REGION_PAGES 4u
@@ -97,6 +101,7 @@ typedef struct Jit_Link {
   uint64_t generation_address; /* the uint64_t generation chained blocks must carry */
   bool count_entries;          /* chained entries increment the `entries` of the entry they enter */
   bool span_calls;             /* regions follow BL/RET and predicted PLT branches */
+  bool aarch32;                /* the code is A32 (the A32 front end, jit_compile_a32.inc) */
 } Jit_Link;
 
 typedef uint32_t (*Jit_Block_Fn)(Jit_State *state);

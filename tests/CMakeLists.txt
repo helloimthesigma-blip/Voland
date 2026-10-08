@@ -168,6 +168,9 @@ add_test(NAME predecode_test COMMAND predecode_test)
 add_executable(jit_diff_test jit_diff_test.c)
 target_link_libraries(jit_diff_test PRIVATE switch_core)
 add_test(NAME jit_diff_test COMMAND jit_diff_test 5000)
+add_executable(a32_jit_diff_test a32_jit_diff_test.c)
+target_link_libraries(a32_jit_diff_test PRIVATE switch_core)
+add_test(NAME a32_jit_diff_test COMMAND a32_jit_diff_test 3000)
 
 #
 # Guest threads end to end (§7): real ARM64 programs (tests/guest/*.s,

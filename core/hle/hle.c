@@ -1,7 +1,6 @@
 #include "hle/hle.h"
 #include "common/assert.h"
 #include "common/log.h"
-#include "cpu/backends/a32/a32.h"
 #include "hle/kernel/svc32.h"
 #include "hle/kernel/scheduler.h"
 #include "hle/kernel/svc_ipc.h"
@@ -119,7 +118,7 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
   /* A 32-bit process (it runs on the A32 backend) has its arguments
    * rearranged into the AArch64 calling convention around the call
    * (hle/kernel/svc32.h). */
-  if (context->cpu_backend == &CPU_BACKEND_A32) {
+  if (context->cpu_backend->aarch32) {
     CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
     Svc32_Frame frame;
     svc32_enter(regs, swi, &frame);

@@ -127,6 +127,9 @@ struct CPU_Backend
    * (docs/PARALLEL.md): per-host-thread caches, and store-exclusive /
    * barriers honoured when cpu_multicore() is set. */
   bool supports_multicore;
+  /* Runs AArch32 (A32) code: HLE takes SVC arguments in the 32-bit
+   * calling convention (hle/kernel/svc32.h). */
+  bool aarch32;
 };
 
 /* ------------------------------------------------------------------ */

@@ -24,6 +24,7 @@
 
 #include "cpu/backends/interpreter/interp_internal.h"
 #include "cpu/backends/interpreter/softfloat.h"
+#include "cpu/backends/jit/jit_internal.h"
 
 #define A32_PC 15u
 #define A32_LR 14u
@@ -36,8 +37,14 @@
 #define A32_FPSCR_CONTROL_MASK 0x07FF9F00u /* AHP DN FZ RMode Stride Len, trap enables */
 #define A32_FPSCR_STATUS_MASK 0x0800009Fu  /* QC, IDC IXC UFC OFC DZC IOC */
 
+/* The interpreter state first (every interpreter entry point takes the
+ * same pointer), overlaid by the JIT's (it starts with an Interp_State):
+ * the same layout serves the A32 interpreter and the A32 JIT. */
 typedef struct A32_State {
-  Interp_State s;
+  union {
+    Interp_State s;
+    Jit_State j;
+  };
   uint32_t q;          /* CPSR.Q */
   uint32_t ge;         /* CPSR.GE[3:0] */
   uint32_t fpscr_nzcv; /* FPSCR.NZCV (VCMP/VCMPE) */
@@ -96,6 +103,13 @@ static inline bool a32_write(A32_State *a, uint32_t address, const void *data, u
 /* One instruction at regs.pc (a32.c): PC advanced, branched, or left on
  * the instruction for UNDEFINED/FAULT. */
 Interp_Status a32_execute(A32_State *a, uint32_t insn);
+
+/* For the JIT (jit.c): a cold block through the interpreter, and one
+ * instruction with full retirement (JIT_BLOCK_CONTINUE / _STOP /
+ * JIT_HELPER_LEAVE after an instruction-cache maintenance op). */
+bool a32_run_block(A32_State *a, uint64_t cycle_budget, uint32_t *grace, CPU_ExitReason *exit_reason);
+uint32_t a32_jit_interpret(A32_State *a, uint32_t insn);
+bool a32_is_code_maintenance(uint32_t insn);
 
 /* VFP and Advanced SIMD (a32_vfp.c): coprocessor 10/11 instructions in the
  * conditional space, and the unconditional Advanced SIMD space. */
