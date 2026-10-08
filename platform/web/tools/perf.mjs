@@ -62,7 +62,7 @@
  * - --drive FILE: after the warm-up, take commands appended to FILE (one
  *   per line) before measuring - to steer a game by eye, e.g. through
  *   menus to the scene to profile: "press KEY MS" (hold KEY for MS wall
- *   milliseconds), "shot FILE.png", "slices N" (wait for N more guest slices), "stats", "click TESTID" (e.g.
+ *   milliseconds), "shot FILE.png", "slices N" (wait for N more guest slices), "threads" (guest threads to the log), "stats", "click TESTID" (e.g.
  *   state-save, state-load), "status TESTID" (prints its text), "select TESTID VALUE" (a
  *   setting, e.g. frame-skip 2), "sleep MS", "go"
  *   (measure now). Each
@@ -492,7 +492,12 @@ async function main() {
     let lastPrint = 0;
     while (progress(s) < opts.warmupSlices) {
       const state = await page.getByTestId("run-state").getAttribute("data-state");
-      if (state === "crashed" || state === "deadlock" || state === "exited") throw new Error(`run state ${state}`);
+      if (state === "crashed" || state === "deadlock" || state === "exited") {
+        /* Where every guest thread stopped, into the log, before giving up. */
+        await page.evaluate(() => window.__VOLAND_DEBUG__?.dumpThreads(true));
+        await sleep(2000);
+        throw new Error(`run state ${state}`);
+      }
       if (s.at - lastPrint > 15_000) {
         lastPrint = s.at;
         console.log(`warmup: ${s.perf.slices} slices, ${(s.perf.ticks / TICKS_PER_SECOND).toFixed(1)} s virtual, ${s.presents} frames`);
@@ -534,6 +539,9 @@ async function main() {
           if (box) await page.screenshot({ clip: box, path: arg });
         } else if (cmd === "sleep") {
           await sleep(Number(arg));
+        } else if (cmd === "threads") {
+          await page.evaluate(() => window.__VOLAND_DEBUG__?.dumpThreads(true));
+          await sleep(500);
         } else if (cmd === "slices") {
           /* Guest progress rather than wall time: the same point in the game
            * whatever the host's speed. */

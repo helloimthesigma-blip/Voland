@@ -1151,6 +1151,61 @@ static void gpu_stream_wait(void *user, volatile int32_t *word, int32_t expected
 #endif
 }
 
+static const char *module_of(const Emulator *emulator, uint64_t pc, uint64_t *offset) {
+  *offset = pc;
+  for (uint32_t m = 0; m < emulator->process.module_count; m++) {
+    const Process_Module *mod = &emulator->process.modules[m];
+    if (pc >= mod->base_gva && pc < mod->base_gva + mod->image_size) {
+      *offset = pc - mod->base_gva;
+      return mod->name;
+    }
+  }
+  return "?";
+}
+
+#define DUMP_BACKTRACE_DEPTH 24u
+#define DUMP_WAIT_HANDLES 4u
+
+void emulator_dump_threads(Emulator *emulator, bool backtrace) {
+  if (!emulator || !emulator->program_loaded) return;
+  static const char *const k_state[] = {"free", "created", "runnable", "waiting", "dead"};
+  log_warn("[threads] at tick %llu:", (unsigned long long)emulator->scheduler.ticks);
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    const Sched_Thread *th = &emulator->scheduler.threads[i];
+    if (th->state == THREAD_STATE_FREE || th->state == THREAD_STATE_DEAD || !th->thread.cpu_state) continue;
+    const uint64_t pc = emulator->cpu_backend->get_pc(th->thread.cpu_state);
+    uint64_t offset = 0;
+    const char *module = module_of(emulator, pc, &offset);
+    log_warn("[threads] %llu (handle 0x%x, prio %u) %s pc %s+0x%llx", (unsigned long long)th->thread_id, th->handle,
+             th->thread.priority, k_state[th->state], module, (unsigned long long)offset);
+    if (th->state == THREAD_STATE_WAITING) {
+      uint32_t word = 0;
+      (void)vmm_read32(emulator->vmm, th->wait_address, &word);
+      char handles[96] = "";
+      int n = 0;
+      for (uint32_t h = 0; h < th->wait_handle_count && h < DUMP_WAIT_HANDLES && n >= 0 && (size_t)n < sizeof(handles); h++)
+        n += snprintf(handles + n, sizeof(handles) - (size_t)n, " 0x%x(type %d)", th->wait_handles[h],
+                      (int)handle_table_type_of(&emulator->process.handles, th->wait_handles[h]));
+      log_warn("[threads]   wait kind %d, wake_at %llu, address 0x%llx (= 0x%x), handles%s", (int)th->wait,
+               (unsigned long long)th->wake_at, (unsigned long long)th->wait_address, word, handles);
+    }
+    if (!backtrace) continue;
+    const CPU_Register_File *rf = emulator->cpu_backend->get_register_file(th->thread.cpu_state);
+    uint64_t fp = rf->x[29], lr = rf->x[30];
+    for (uint32_t depth = 0; depth < DUMP_BACKTRACE_DEPTH; depth++) {
+      uint64_t off = 0;
+      const char *m = module_of(emulator, lr, &off);
+      log_warn("[threads]     #%u %s+0x%llx", depth, m, (unsigned long long)off);
+      uint64_t next_fp = 0, next_lr = 0;
+      if (!fp || !error_is_ok(vmm_read64(emulator->vmm, fp, &next_fp)) ||
+          !error_is_ok(vmm_read64(emulator->vmm, fp + 8u, &next_lr)))
+        break;
+      fp = next_fp;
+      lr = next_lr;
+    }
+  }
+}
+
 bool emulator_set_gpu_async(Emulator *emulator, bool on) {
   if (!emulator) return false;
   if (!on) {

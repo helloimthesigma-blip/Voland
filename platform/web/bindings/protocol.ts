@@ -62,6 +62,7 @@ export type MainToCPUMessage =
   | { readonly type: "set-frame-skip"; readonly frames: number }
   | { readonly type: "set-gpu-async"; readonly on: boolean }
   | { readonly type: "set-render-workers"; readonly count: number }
+  | { readonly type: "dump-threads"; readonly backtrace: boolean }
   /* The renderer: the GPU worker's WebGPU renderer (draws stream through the
    * gpu_ring region) or the software reference renderer. */
   | { readonly type: "set-gpu-mode"; readonly on: boolean }

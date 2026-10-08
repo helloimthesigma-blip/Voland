@@ -54,6 +54,7 @@ export interface SwitchCoreExports {
   readonly _emulator_set_host_cores_ffi:   (cores: number) => number; /* cores in effect */
   readonly _emulator_set_gpu_async_ffi:    (on: number) => number;    /* 1: asynchronous GPU on */
   readonly _emulator_set_render_workers_ffi: (count: number) => number; /* workers in effect */
+  readonly _emulator_dump_threads_ffi:     (backtrace: number) => void;
   readonly _emulator_set_poll_coalescing_ffi: (on: number) => void;
   readonly _emulator_set_free_running_ffi: (on: number) => void;
   readonly _emulator_set_pacing_ffi:       (on: number) => void;

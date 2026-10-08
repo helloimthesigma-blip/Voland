@@ -281,6 +281,9 @@ void emulator_set_gpu_mode(Emulator *emulator, bool on);
  * default): they run inside the submitting ioctl - deterministic, for
  * tests. Returns whether it is on. */
 bool emulator_set_gpu_async(Emulator *emulator, bool on);
+/* Logs every live guest thread: state, module + offset, what it waits on,
+ * and (backtrace) its frame-record chain - for stalls and hangs. */
+void emulator_dump_threads(Emulator *emulator, bool backtrace);
 /* Host nanoseconds the core has waited for the GPU or video worker to
  * drain a full stream ring (web only; 0 natively). */
 uint64_t emulator_stream_wait_ns(void);

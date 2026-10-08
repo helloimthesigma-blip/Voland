@@ -32,8 +32,15 @@ export interface VolandStats {
   readonly presents: number;
 }
 
+/** Diagnostics for tools (tools/perf.mjs drive "threads"): log output only. */
+export interface VolandDebug {
+  /** Every guest thread's state, wait and (backtrace) frame chain to the log. */
+  readonly dumpThreads: (backtrace: boolean) => void;
+}
+
 declare global {
   interface Window {
+    __VOLAND_DEBUG__?: VolandDebug;
     __VOLAND_E2E__?: VolandE2EBootMilestone;
     __VOLAND_STATS__?: VolandStats;
     __VOLAND_AUDIO__?: VolandAudioReport;

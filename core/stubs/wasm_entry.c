@@ -60,6 +60,7 @@ EXPORT void emulator_set_gpu_mode_ffi(uint32_t on);
 EXPORT uint32_t emulator_set_host_cores_ffi(uint32_t cores);
 EXPORT uint32_t emulator_set_gpu_async_ffi(uint32_t on);
 EXPORT uint32_t emulator_set_render_workers_ffi(uint32_t count);
+EXPORT void emulator_dump_threads_ffi(uint32_t backtrace);
 EXPORT void emulator_set_poll_coalescing_ffi(uint32_t on);
 EXPORT void emulator_set_free_running_ffi(uint32_t on);
 EXPORT void emulator_set_pacing_ffi(uint32_t on);
@@ -370,6 +371,12 @@ EXPORT uint32_t emulator_set_render_workers_ffi(uint32_t count)
   gpu_thread_drain(&g_emulator.gpu_thread);
   if (count && count < g_emulator.renderer.workers.count) raster3d_set_workers(&g_emulator.renderer, count);
   return g_emulator.renderer.workers.count;
+}
+
+/* Every guest thread's state to the log (diagnostics; emulator_dump_threads). */
+EXPORT void emulator_dump_threads_ffi(uint32_t backtrace)
+{
+  if (g_initialised) emulator_dump_threads(&g_emulator, backtrace != 0);
 }
 
 /* Asynchronous GPU (emulator_set_gpu_async): 1 if it is on. */

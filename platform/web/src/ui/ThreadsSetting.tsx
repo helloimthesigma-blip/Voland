@@ -2,10 +2,11 @@
  * platform/web/src/ui/ThreadsSetting.tsx
  *
  * Guest CPU threads: Automatic runs the game's threads on several host
- * cores (docs/PARALLEL.md); Serial runs them all on one, which has less
- * overhead - faster for games whose threads mostly wait on each other
- * (Super Smash Bros. Ultimate fights: about 13 fps serial, 11 on three
- * cores). It applies at once, mid-game. ?cores=N in the URL wins over it.
+ * cores (docs/PARALLEL.md), except for games known to run faster serially
+ * (cpu.worker.ts SERIAL_TITLES: Super Smash Bros. Ultimate); Serial runs
+ * them all on one, which has less overhead - faster for games whose
+ * threads mostly wait on each other. It applies at once, mid-game.
+ * ?cores=N in the URL wins over it.
  * Remembered per browser (a convenience; storage may be unavailable).
  */
 import { For, createSignal, onMount } from "solid-js";
@@ -17,7 +18,7 @@ interface ThreadsSettingProps {
 
 const STORAGE_KEY = "voland.hostCores";
 const CHOICES: readonly { readonly cores: number; readonly label: string }[] = [
-  { cores: -1, label: "Automatic - several cores" },
+  { cores: -1, label: "Automatic" },
   { cores: 0, label: "Serial - one core" },
 ];
 
@@ -59,7 +60,7 @@ function ThreadsSetting(props: ThreadsSettingProps) {
       <select value={String(cores())} onChange={(e) => choose(Number(e.currentTarget.value))}>
         <For each={CHOICES}>{(c) => <option value={String(c.cores)}>{c.label}</option>}</For>
       </select>
-      <small>Serial is faster in some games (Smash Ultimate fights).</small>
+      <small>Automatic picks serial for games that run faster that way (Smash Ultimate).</small>
     </label>
   );
 }

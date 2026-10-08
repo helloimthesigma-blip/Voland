@@ -308,12 +308,16 @@ async function boot(): Promise<BootResult | null> {
         }
         /* ?pacing=0: no wall-clock pacing (the game runs in slow motion when
          * the host is slower than the Switch). */
+        window.__VOLAND_DEBUG__ = {
+          dumpThreads: (backtrace: boolean) =>
+            cpuWorker.postMessage({ type: "dump-threads", backtrace } satisfies MainToCPUMessage),
+        };
         /* ?rworkers=N: the renderer's threads (tuning). */
         const rworkers = new URLSearchParams(location.search).get("rworkers");
         if (rworkers !== null && /^[0-9]+$/.test(rworkers)) {
           cpuWorker.postMessage({ type: "set-render-workers", count: Number(rworkers) } satisfies MainToCPUMessage);
         }
-        /* ?gpuasync=1: GPU command processing on its own thread. */
+        /* ?gpuasync=0: GPU command processing back in the guest's ioctls. */
         const gpuAsyncParam = new URLSearchParams(location.search).get("gpuasync");
         if (gpuAsyncParam === "0" || gpuAsyncParam === "1") {
           cpuWorker.postMessage({ type: "set-gpu-async", on: gpuAsyncParam === "1" } satisfies MainToCPUMessage);

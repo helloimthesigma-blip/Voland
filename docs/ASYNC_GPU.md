@@ -1,9 +1,10 @@
 # Asynchronous GPU
 
 GPU command processing on its own host thread, beside the guest
-(`core/gpu/gpu_thread.{h,c}`). It is off by default; turn it on with
-`emulator_set_gpu_async`, `voland-cli --gpu-async`, or `?gpuasync=1` in
-the browser.
+(`core/gpu/gpu_thread.{h,c}`). The browser turns it on by default
+(`?gpuasync=0` turns it off). Natively it is off, which keeps runs
+deterministic for tests; `voland-cli --gpu-async` or
+`emulator_set_gpu_async` turns it on.
 
 ## Why
 
@@ -23,7 +24,7 @@ each core was busy only about 40% of the time.
 - **The queue.** Work for the renderer goes through `gpu_thread_call(fn,
   payload)`. Asynchronously, the payload is copied into an 8 MiB FIFO and
   the call returns. The GPU thread runs the calls one at a time, in
-  order. Synchronously (the default), the call runs at once on the
+  order. Synchronously (natively, by default), the call runs at once on the
   caller, exactly as before, so runs stay deterministic and frame hashes
   and save-state checks hold.
 - **What is queued:**

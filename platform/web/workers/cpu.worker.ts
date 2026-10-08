@@ -244,6 +244,11 @@ const DEFAULT_HOST_CORES = Math.max(
   1, Math.min(MAX_DEFAULT_HOST_CORES, (self.navigator.hardwareConcurrency || 4) - HOST_THREADS_RESERVED));
 /** Cores chosen with ?cores=N (set-host-cores); null = the default. */
 let requestedHostCores: number | null = null;
+/** Titles that run faster on the serial scheduler, where the default picks
+ * it: their guest threads hand work to each other so tightly that, with
+ * the GPU thread beside them, parallel cores mostly wait (Super Smash
+ * Bros. Ultimate fight: 18-22 fps serial, 9.5 on three cores). */
+const SERIAL_TITLES: ReadonlySet<string> = new Set(["01006A800016E000"]);
 
 
 /** Poll coalescing (set-poll-coalescing; ?polls=0 turns it off). */
@@ -255,9 +260,9 @@ let freeFromSlice = 0;
  * real speed with fewer frames instead of in slow motion. */
 let pacing = true;
 let freeRunning = false;
-/** Asynchronous GPU (set-gpu-async; ?gpuasync=1): GPU command processing on
- * its own thread beside the guest (docs/ASYNC_GPU.md). */
-let gpuAsync = false;
+/** Asynchronous GPU (set-gpu-async; ?gpuasync=0 turns it off): GPU command
+ * processing on its own thread beside the guest (docs/ASYNC_GPU.md). */
+let gpuAsync = true;
 /** The renderer's threads (set-render-workers; ?rworkers=N): 0 = as many as it starts with. */
 let renderWorkers = 0;
 
@@ -267,7 +272,8 @@ function applyGpuAsync(target: SwitchCoreExports): void {
 }
 
 function applyHostCores(target: SwitchCoreExports): void {
-  const hostCores = requestedHostCores ?? DEFAULT_HOST_CORES;
+  const serialTitle = loadedTitleId !== null && SERIAL_TITLES.has(loadedTitleId);
+  const hostCores = requestedHostCores ?? (serialTitle ? 0 : DEFAULT_HOST_CORES);
   const inEffect = target._emulator_set_host_cores_ffi(hostCores);
   log("info", `guest threads on ${inEffect === 0 ? "the serial scheduler" : `${inEffect} host core(s)`}`);
 }
@@ -829,6 +835,7 @@ function loadGame(file: File): CPUToMainMessage {
   }
 
   loadedTitleId = formatTitleId(core._emulator_program_id_ffi());
+  if (requestedHostCores === null) applyHostCores(core); /* the default may depend on the title */
   return {
     type: "game-loaded",
     titleId: loadedTitleId,
@@ -1013,6 +1020,11 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     requestedHostCores = msg.cores < 0 ? null : msg.cores; /* negative: back to the default */
     /* Takes effect between slices; a running game switches at once. */
     if (core) applyHostCores(core);
+    return;
+  }
+
+  if (msg.type === "dump-threads") {
+    core?._emulator_dump_threads_ffi(msg.backtrace ? 1 : 0);
     return;
   }
 
