@@ -1441,6 +1441,9 @@ static int run(int argc, char **argv) {
     fprintf(stderr, "voland-cli: GPU draw MB: data %llu, pulled vertex streams %llu, vertices %llu, indices %llu\n",
             (unsigned long long)(gs->draw_data_bytes >> 20), (unsigned long long)(gs->pulled_bytes >> 20),
             (unsigned long long)(gs->vertex_bytes >> 20), (unsigned long long)(gs->index_bytes >> 20));
+    fprintf(stderr, "voland-cli: GPU probe runs %llu (bindless pixel programs), bulk triangles %llu of %llu\n",
+            (unsigned long long)gs->probe_runs, (unsigned long long)gs->bulk_triangles,
+            (unsigned long long)gs->triangles);
   }
   if (g_watch_count) {
     fprintf(stderr, "voland-cli: %llu time shared memory reads; the last ones (offset size bytes @ pc):\n",
