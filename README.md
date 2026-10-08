@@ -8,7 +8,7 @@ to install, and no keys or firmware.
 tab**: real commercial Switch games booting, running cutscenes and playing at
 full game speed, at a stable ~15 fps on a fast desktop.
 
-> **Status:** Phase 4 (First Boot). Silksong and Hollow Knight run at real speed (~22 fps in gameplay), and Silksong saves no longer crash. Super Smash Bros. Ultimate plays matches with correct colours and saves, now at 11-14 fps in a fight (was ~4): vertex pulling, parallel compute and cheaper GPU uploads. Its game speed still follows its frame rate (frame skip raises it; serial guest threads are faster for it). Not done yet: VP9 video and Opus audio (SSBU movies are black and silent); full task list in [DESIGN.md §25](docs/DESIGN.md).
+> **Status:** Phase 4 (First Boot). Silksong and Hollow Knight run at real speed (~22 fps in gameplay), and Silksong saves no longer crash. Super Smash Bros. Ultimate plays matches with correct colours and saves, now at 11-14 fps in a fight (was ~4): vertex pulling, parallel compute and cheaper GPU uploads. Its game speed still follows its frame rate (frame skip raises it; serial guest threads are faster for it). Not done yet: VP9 video and Opus audio (SSBU movies are black and silent); full task list in [DESIGN.md §25](docs/DESIGN.md#25-development-phases).
 
 ### What works today
 

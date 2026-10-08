@@ -39,7 +39,7 @@ struct Gpu_Stream;
 #define RASTER_BIND_GROUPS 5u
 #define RASTER_SURFACES 12u
 #define RASTER_MAX_SURFACE_BYTES ((size_t)2048 * 1280 * 4)
-#define RASTER_PROGRAMS 64u
+#define RASTER_PROGRAMS 160u
 #define RASTER_TEXTURES 256u
 #define RASTER_SURFACE_VIEWS 32u
 /* Decoded textures. A commercial scene's working set reaches ~500MB
