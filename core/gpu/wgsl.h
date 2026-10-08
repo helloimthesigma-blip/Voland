@@ -91,7 +91,13 @@
 #define WGSL_VSI_ACTIVE 0x40000000u    /* else the input reads (0, 0, 0, 1) */
 #define WGSL_VSI_INSTANCED 0x80000000u /* one element (the draw's instance) is copied */
 #define WGSL_DRAW_VS_INSTANCE (WGSL_DRAW_VS_INPUTS + WGSL_VSI_WORDS * WGSL_VSI_MAX)
-#define WGSL_DRAW_CONSTANT_WORDS (WGSL_DRAW_VS_INSTANCE + 2u)
+/* Global memory a vertex program reads (wgsl_find_globals): per buffer k,
+ * words WGSL_DRAW_GLOBALS + 4 k hold its base address (low, high), its size
+ * and the byte offset in this buffer where its bytes were copied. */
+#define WGSL_MAX_GLOBALS 4u
+#define WGSL_GLOBAL_WORDS 4u
+#define WGSL_DRAW_GLOBALS (WGSL_DRAW_VS_INSTANCE + 2u)
+#define WGSL_DRAW_CONSTANT_WORDS (WGSL_DRAW_GLOBALS + WGSL_GLOBAL_WORDS * WGSL_MAX_GLOBALS)
 #define WGSL_VERTEX_ID_LOCATION 0u /* vertex input: vec4<u32>(vertex id, instance id, 0, 0) */
 #define WGSL_MAX_VARYINGS 14u /* + 1/w, within WebGPU's 16 inter-stage vectors */
 #define WGSL_DRAW_LOWER_LEFT 1u /* position y counts from the bottom */
@@ -161,6 +167,22 @@ typedef struct Wgsl_Program_Desc {
   uint16_t output_word[WGSL_MAX_VARYINGS][4];
   uint64_t perspective_mask;
 } Wgsl_Program_Desc;
+
+/* The storage buffers a vertex program's LDGs read: each LDG's 64-bit
+ * address is a buffer base from a constant buffer plus an offset -
+ * IADD Rlo = Rx + c[slot][offset] (carry out), IADD.X Rhi = RZ +
+ * c[slot][offset + 4] - as NVN's storage buffers compile; the buffer's
+ * size is the word after (c[slot][offset + 8]). buffer_of[pc] is each
+ * LDG's buffer (0xff: not an LDG). False when an LDG does not follow the
+ * pattern, or the program writes global memory. */
+typedef struct Wgsl_Globals {
+  uint32_t count;
+  uint8_t slot[WGSL_MAX_GLOBALS];
+  uint16_t offset[WGSL_MAX_GLOBALS];
+  uint8_t buffer_of[SM_MAX_WORDS];
+} Wgsl_Globals;
+bool wgsl_find_globals(const Sm_Program *program, Wgsl_Globals *out);
+bool wgsl_reads_globals(const Sm_Program *program);
 
 /* The vertex-pulling decoder's WGSL (vword, vconv, vfetch over a global
  * `D: array<u32>`), as pulled vertex programs include it - for tests. */

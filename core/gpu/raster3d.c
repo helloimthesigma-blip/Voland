@@ -151,7 +151,12 @@ static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); 
 #define GPU_VERTICES_STORAGE ((size_t)768 * 1024)
 #define GPU_DATA_OFFSET (GPU_VERTICES_OFFSET + GPU_VERTICES_STORAGE)
 /* Both stages' constant buffers (a GPU vertex stage reads its own). */
-#define GPU_DATA_STORAGE (((size_t)WGSL_DRAW_CONSTANT_WORDS + (size_t)2u * SM_CBUF_SLOTS * (CBUF_SLOT_BYTES / 4u) + 2u) * 4u)
+/* Global memory a GPU vertex program reads (wgsl_find_globals) is copied
+ * into the draw's data, all buffers together at most this many bytes. */
+#define GPU_GLOBAL_BYTES (256u << 10)
+#define GPU_DATA_STORAGE                                                                                           \
+  (((size_t)WGSL_DRAW_CONSTANT_WORDS + (size_t)2u * SM_CBUF_SLOTS * (CBUF_SLOT_BYTES / 4u) + 2u) * 4u +            \
+   GPU_GLOBAL_BYTES + 4u * WGSL_MAX_GLOBALS * 4u)
 #define STORAGE_BYTES (GPU_DATA_OFFSET + GPU_DATA_STORAGE + 64u)
 
 size_t raster3d_storage_bytes(void) { return STORAGE_BYTES; }
@@ -889,6 +894,7 @@ typedef struct Draw_Context {
   const Sm_Program *ps;
   uint32_t instance;
   Tex_Resolver resolver; /* the vertex stage's (and the pixel template's) */
+  uint64_t cbuf_address[2][SM_CBUF_SLOTS]; /* each stage's bound constant buffers (0: none) */
   /* vertex fetch windows */
   uint64_t window_base[RASTER_STREAMS];
   uint32_t window_size[RASTER_STREAMS];
@@ -1369,6 +1375,7 @@ static void env_setup(Draw_Context *ctx, uint32_t stage, const Sm_Program *progr
                       uint32_t group) {
   Sm_Env *env = &ctx->env[stage];
   memset(env, 0, sizeof(*env));
+  memset(ctx->cbuf_address[stage], 0, sizeof(ctx->cbuf_address[stage]));
   env->user = &ctx->resolver;
   env->texture = env_texture;
   env->texture_batch = env_texture_batch;
@@ -1378,6 +1385,7 @@ static void env_setup(Draw_Context *ctx, uint32_t stage, const Sm_Program *progr
   uint32_t used = program->cbuf_used | (1u << env->texture_cbuf_slot);
   for (uint32_t slot = 0; slot < SM_CBUF_SLOTS; slot++) {
     if (!(used & (1u << slot)) || group >= RASTER_BIND_GROUPS || !b->address[group][slot]) continue;
+    ctx->cbuf_address[stage][slot] = b->address[group][slot];
     uint32_t size = b->size[group][slot];
     if (size > CBUF_SLOT_BYTES) size = CBUF_SLOT_BYTES;
     uint32_t want = program->cbuf_extent[slot];
@@ -3181,6 +3189,10 @@ typedef struct Gpu_Draw {
   bool pull;
   uint32_t id_lo, id_hi;
   uint64_t pull_bytes_per_id, pull_fixed_bytes;
+  /* The vertex program's global memory (wgsl_find_globals): copied whole. */
+  uint32_t global_count;
+  uint64_t global_base[WGSL_MAX_GLOBALS];
+  uint32_t global_size[WGSL_MAX_GLOBALS];
   Wgsl_Program_Desc desc;
   Wgsl_Program_Desc vs_desc;
 } Gpu_Draw;
@@ -3320,7 +3332,49 @@ static bool gpu_pull_plan(const Draw_Context *ctx, Gpu_Draw *g) {
  * window: each reason is logged on its first draw (diagnostics). */
 static uint64_t g_vs_cpu_topology, g_vs_cpu_window;
 
-static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_t topology) {
+static uint32_t cbuf_words_read(const Sm_Program *program, const Sm_Env *env, uint32_t slot) {
+  if (!((program->cbuf_used >> slot) & 1u)) return 0;
+  const uint32_t extent = program->cbuf_extent[slot];
+  const uint32_t bytes = extent < env->cbuf_size[slot] ? extent : env->cbuf_size[slot];
+  return (bytes + 3u) / 4u;
+}
+
+/* Each storage buffer the vertex program reads: NVN's descriptor in the
+ * constant buffer is {address low, address high, size}. Too large or
+ * unbound buffers keep the vertices on the CPU (env_global_read). */
+static uint64_t g_vs_cpu_globals;
+
+static bool gpu_plan_globals(Draw_Context *ctx, Gpu_Draw *g, uint64_t *words) {
+  Wgsl_Globals found;
+  if (!wgsl_find_globals(ctx->vs, &found)) return false;
+  uint64_t total = 0;
+  for (uint32_t k = 0; k < found.count; k++) {
+    const uint64_t at = ctx->cbuf_address[0][found.slot[k]];
+    uint32_t desc[3];
+    if (!at || !ctx->mem->read(ctx->mem->user, at + found.offset[k], desc, sizeof(desc))) return false;
+    g->global_base[k] = (uint64_t)desc[0] | (uint64_t)desc[1] << 32;
+    g->global_size[k] = desc[2];
+    total += ((uint64_t)desc[2] + 7u) & ~(uint64_t)3u;
+    if (!g->global_base[k] || !desc[2] || total > GPU_GLOBAL_BYTES) {
+      if (!g_vs_cpu_globals++)
+        log_warn("[gpu] vertices on the CPU: global buffer of %u bytes at 0x%llx", desc[2],
+                 (unsigned long long)g->global_base[k]);
+      return false;
+    }
+  }
+  g->global_count = found.count;
+  *words += total / 4u;
+  return true;
+}
+
+/* A vertex program whose constants (or global memory) are large costs a
+ * copy per draw on the GPU; below one vertex per this many bytes of them
+ * shading on the CPU is cheaper (2-triangle quads of a program indexing a
+ * 64 KiB constant buffer). */
+#define GPU_VS_BYTES_PER_VERTEX 256u
+static uint64_t g_vs_cpu_small;
+
+static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_t topology, uint32_t vertex_count) {
   Gpu_Draw *g = &g_gpu_draw;
   if (ctx->r->cpu_vertices) return;
   if (!vs_topology(topology)) {
@@ -3333,11 +3387,22 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
     if (ctx->env[0].cbuf[s]) words += ctx->env[0].cbuf_size[s] / 4u;
     if (ctx->env[1].cbuf[s]) words += ctx->env[1].cbuf_size[s] / 4u;
   }
+  if (ctx->vs->uses_bindless_textures) return; /* its handles need a shaded probe: the CPU path */
+  if (wgsl_reads_globals(ctx->vs) && !gpu_plan_globals(ctx, g, &words)) return;
+  uint64_t vs_words = 0;
+  for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++)
+    if (ctx->env[0].cbuf[s]) vs_words += cbuf_words_read(ctx->vs, &ctx->env[0], s);
+  for (uint32_t k = 0; k < g->global_count; k++) vs_words += g->global_size[k] / 4u;
+  if (vs_words * 4u > (uint64_t)vertex_count * GPU_VS_BYTES_PER_VERTEX) {
+    if (!g_vs_cpu_small++)
+      log_info("[gpu] vertices on the CPU: %u vertices, %llu bytes of vertex constants", vertex_count,
+               (unsigned long long)vs_words * 4u);
+    return;
+  }
   if (words > GPU_DATA_WINDOW_WORDS) {
     if (!g_vs_cpu_window++) log_warn("[gpu] vertices on the CPU: constant buffers of %llu words", (unsigned long long)words);
     return;
   }
-  if (ctx->vs->uses_bindless_textures) return; /* its handles need a shaded probe: the CPU path */
   Wgsl_Program_Desc *d = &g->vs_desc;
   wgsl_default_desc(ctx->vs, d);
   /* Texture bindings come with the pixel program's (gpu_prepare_textures). */
@@ -3384,7 +3449,7 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
   }
 }
 
-static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs, uint32_t topology) {
+static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs, uint32_t topology, uint32_t vertex_count) {
   Raster3d *r = ctx->r;
   Gpu_Draw *g = &g_gpu_draw;
   memset(g, 0, offsetof(Gpu_Draw, desc));
@@ -3429,7 +3494,7 @@ static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs, uint32_t topolog
   g->stride = GPU_VERTEX_HEADER_BYTES + 16u * g->locations;
   g->active = true;
   gpu_vertex_map_reset();
-  gpu_choose_vertex_stage(ctx, rs, topology);
+  gpu_choose_vertex_stage(ctx, rs, topology, vertex_count);
   return true;
 }
 
@@ -3491,12 +3556,6 @@ static uint32_t gpu_shader_for(Raster3d *r, const Sm_Program *program, const Wgs
  * never touches the slot, up to its highest direct offset, or the whole
  * bound buffer when it indexes it (cbuf_extent). An unread tail reads 0
  * in WGSL - the same as the program never reading it. */
-static uint32_t cbuf_words_read(const Sm_Program *program, const Sm_Env *env, uint32_t slot) {
-  if (!((program->cbuf_used >> slot) & 1u)) return 0;
-  const uint32_t extent = program->cbuf_extent[slot];
-  const uint32_t bytes = extent < env->cbuf_size[slot] ? extent : env->cbuf_size[slot];
-  return (bytes + 3u) / 4u;
-}
 
 static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *probe);
 
@@ -3708,6 +3767,20 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
       memcpy(data + words, venv->cbuf[s], (size_t)n * 4u);
       data[WGSL_DRAW_VS_CBUF_TABLE + 2u * s] = words;
       data[WGSL_DRAW_VS_CBUF_TABLE + 2u * s + 1u] = n;
+      words += n;
+    }
+    /* Global memory: each buffer's bytes and a word of slack (gword reads
+     * two words at an unaligned address). */
+    for (uint32_t k = 0; k < g->global_count; k++) {
+      uint32_t *at = data + WGSL_DRAW_GLOBALS + WGSL_GLOBAL_WORDS * k;
+      at[0] = (uint32_t)g->global_base[k];
+      at[1] = (uint32_t)(g->global_base[k] >> 32);
+      at[2] = g->global_size[k];
+      at[3] = words * 4u;
+      const uint32_t n = (g->global_size[k] + 3u) / 4u + 1u;
+      memset(data + words, 0, (size_t)n * 4u);
+      if (!ctx->mem->read(ctx->mem->user, g->global_base[k], data + words, g->global_size[k]))
+        memset(data + words, 0, (size_t)n * 4u); /* unreadable: the loads read zeros */
       words += n;
     }
     uint32_t *vp = data + WGSL_DRAW_VIEWPORT;
@@ -4312,7 +4385,7 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     r->stats.skipped_draws++;
     return;
   }
-  if (r->gpu && !gpu_draw_begin(ctx, &rs, draw->topology)) {
+  if (r->gpu && !gpu_draw_begin(ctx, &rs, draw->topology, draw->count)) {
     r->stats.skipped_draws++;
     return;
   }

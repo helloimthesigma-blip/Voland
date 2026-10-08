@@ -79,11 +79,14 @@ typedef struct Tr {
   bool guarded;       /* emitting a predicated instruction */
   bool vertex;        /* a vertex program (desc->stage == SM_STAGE_VERTEX) */
   uint32_t cbt;       /* the draw-constant word of this stage's constant-buffer table */
+  Wgsl_Globals globals; /* a vertex program's storage buffers (LDG) */
+  bool uses_globals;
   bool leader[SM_MAX_WORDS];
   bool reached[SM_MAX_WORDS];
 } Tr;
 
 static bool is_texture_op(uint16_t op);
+static void emit_ldg(Tr *t, const Sm_Insn *in, uint32_t pc);
 
 static void out_add(Out *o, const char *fmt, ...) {
   if (o->overflow) return;
@@ -1613,9 +1616,9 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
     if (t->vertex) emit_ast(t, in);
     else fail(t, "AST in a pixel program");
     return;
+  case SM_OP_LDG: emit_ldg(t, in, pc); return;
   case SM_OP_LD:
   case SM_OP_ST:
-  case SM_OP_LDG:
   case SM_OP_STG: fail(t, "global memory (%s)", sm_op_name((Sm_Op)in->op)); return;
   default:
     /* NOP, SCHED, BARRIER and unknown words: nothing (as the interpreter). */
@@ -1934,6 +1937,126 @@ static const char k_vertex_pull[] =
     "  return o;\n"
     "}\n";
 
+/* ---- global memory (vertex programs) ------------------------------- */
+
+#define IADD_CBUF_X_BIT 43u  /* IADD (constant buffer): carry in */
+#define IADD_CBUF_CC_BIT 47u /* IADD (constant buffer): carry out */
+#define LDG_WIDE_BIT 45u     /* a 64-bit address (Ra, Ra + 1) */
+#define GLOBAL_DEF_SEARCH 64u
+
+/* The latest instruction before `pc` writing register r, or -1 when it is
+ * not certain: a control transfer or a branch target lies in between (another
+ * path may join), the write is predicated, or a load that may write several
+ * registers covers r. Flow-stack pushes (SSY, PBK, PCNT) change nothing. */
+static int32_t last_def(const Sm_Program *p, const bool *targeted, uint32_t pc, uint32_t r) {
+  for (uint32_t back = 1; back <= GLOBAL_DEF_SEARCH && back <= pc; back++) {
+    const uint32_t at = pc - back;
+    const Sm_Insn *in = &p->insns[at];
+    if (targeted[at + 1u]) return -1;
+    if (in->op == SM_OP_SCHED || in->op == SM_OP_NOP || in->op == SM_OP_SSY || in->op == SM_OP_PBK ||
+        in->op == SM_OP_PCNT)
+      continue;
+    if (is_flow(in->op)) return -1;
+    const uint32_t d = REG_D(in->raw);
+    uint32_t span = 1;
+    if (in->op == SM_OP_LDG || in->op == SM_OP_LDC || in->op == SM_OP_LDL || in->op == SM_OP_LD)
+      span = (access_bytes(BITS(in->raw, 48, 3)) + 3u) / 4u;
+    else if (in->op == SM_OP_ALD)
+      span = BITS(in->raw, 47, 2) + 1u;
+    else if (is_texture_op(in->op))
+      span = 4;
+    if (span > 1u && r > d && r < d + span) return -1; /* written by a multi-register load */
+    if (d != r) continue;
+    return (in->pred & 7u) == SM_PT && !(in->pred & 8u) ? (int32_t)at : -1;
+  }
+  return -1;
+}
+
+bool wgsl_reads_globals(const Sm_Program *program) {
+  for (uint32_t pc = 0; pc < program->word_count; pc++)
+    if (program->insns[pc].op == SM_OP_LDG || program->insns[pc].op == SM_OP_STG ||
+        program->insns[pc].op == SM_OP_LD || program->insns[pc].op == SM_OP_ST)
+      return true;
+  return false;
+}
+
+bool wgsl_find_globals(const Sm_Program *program, Wgsl_Globals *out) {
+  memset(out, 0, sizeof(*out));
+  memset(out->buffer_of, 0xff, sizeof(out->buffer_of));
+  static _Thread_local bool targeted[SM_MAX_WORDS + 1u];
+  memset(targeted, 0, sizeof(targeted));
+  for (uint32_t pc = 0; pc < program->word_count; pc++) {
+    const int32_t target = program->insns[pc].target;
+    if (target >= 0 && (uint32_t)target < SM_MAX_WORDS) targeted[target] = true;
+  }
+  for (uint32_t pc = 0; pc < program->word_count; pc++) {
+    const Sm_Insn *in = &program->insns[pc];
+    if (in->op == SM_OP_STG || in->op == SM_OP_LD || in->op == SM_OP_ST) return false;
+    if (in->op != SM_OP_LDG) continue;
+    const uint64_t w = in->raw;
+    const uint32_t ra = REG_A(w);
+    if (!BIT(w, LDG_WIDE_BIT) || ra == SM_RZ) return false;
+    const int32_t lo_at = last_def(program, targeted, pc, ra), hi_at = last_def(program, targeted, pc, (ra + 1u) & 0xffu);
+    if (lo_at < 0 || hi_at < 0) return false;
+    const Sm_Insn *lo = &program->insns[lo_at], *hi = &program->insns[hi_at];
+    if (lo->op != SM_OP_IADD || hi->op != SM_OP_IADD || lo->form != SM_FORM_CBUF || hi->form != SM_FORM_CBUF) return false;
+    if (!BIT(lo->raw, IADD_CBUF_CC_BIT) || BIT(lo->raw, IADD_CBUF_X_BIT) || !BIT(hi->raw, IADD_CBUF_X_BIT) ||
+        REG_A(hi->raw) != SM_RZ || BIT(lo->raw, 48) || BIT(lo->raw, 49) || BIT(hi->raw, 48) || BIT(hi->raw, 49))
+      return false; /* no negations */
+    if (hi->cbuf != lo->cbuf || hi->imm != lo->imm + 4u || lo->imm > 0xfff0u) return false;
+    uint32_t k = 0;
+    while (k < out->count && !(out->slot[k] == lo->cbuf && out->offset[k] == lo->imm)) k++;
+    if (k == out->count) {
+      if (k == WGSL_MAX_GLOBALS) return false;
+      out->slot[k] = (uint8_t)lo->cbuf;
+      out->offset[k] = (uint16_t)lo->imm;
+      out->count++;
+    }
+    out->buffer_of[pc] = (uint8_t)k;
+  }
+  return true;
+}
+
+/* LDG from buffer k: the 64-bit address relative to its base, in range,
+ * read from its copy in D; zeros outside (wgsl_find_globals). */
+static void emit_ldg(Tr *t, const Sm_Insn *in, uint32_t pc) {
+  const uint64_t w = in->raw;
+  const uint32_t k = t->globals.buffer_of[pc];
+  if (!t->vertex || k == 0xffu) {
+    fail(t, "global memory (LDG)");
+    return;
+  }
+  t->uses_globals = true;
+  const uint32_t size = BITS(w, 48, 3), n = access_bytes(size), gb = WGSL_DRAW_GLOBALS + WGSL_GLOBAL_WORDS * k;
+  const int32_t off = (int32_t)(BITS(w, 20, 24) << 8) >> 8;
+  const uint32_t ra = REG_A(w), dr = REG_D(w);
+  EMIT("{ let a0 = %s; let ga = a0 + 0x%xu; let gh = %s %s; ", reg(t, ra).s, (uint32_t)off, reg(t, (ra + 1u) & 0xffu).s,
+       off >= 0 ? "+ select(0u, 1u, ga < a0)" : "- select(0u, 1u, ga > a0)");
+  EMIT("let rel = ga - D[%uu]; let rh = gh - D[%uu] - select(0u, 1u, ga < D[%uu]); ", gb, gb + 1u, gb);
+  EMIT("let gok = rh == 0u && rel <= D[%uu] && D[%uu] - rel >= %uu; let gat = D[%uu] + rel; ", gb + 2u, gb + 2u, n,
+       gb + 3u);
+  if (n < 4u) {
+    if (dr != SM_RZ) {
+      const Ex d = reg_dst(t, dr);
+      EMIT("%s = select(0u, gword(gat) & 0x%xu, gok); ", d.s, n == 1u ? 0xffu : 0xffffu);
+      sign_extend_small(t, size, &d);
+    }
+  } else {
+    for (uint32_t i = 0; i < n / 4u; i++) {
+      if (dr == SM_RZ || ((dr + i) & 0xffu) == SM_RZ) continue;
+      EMIT("%s = select(0u, gword(gat + %uu), gok); ", reg_dst(t, dr + i).s, 4u * i);
+    }
+  }
+  EMIT("} ");
+}
+
+static const char k_gword[] =
+    "fn gword(b: u32) -> u32 {\n"
+    "  let s = (b & 3u) * 8u; let lo = D[b >> 2u];\n"
+    "  if (s == 0u) { return lo; }\n"
+    "  return (lo >> s) | (D[(b >> 2u) + 1u] << (32u - s));\n"
+    "}\n";
+
 const char *wgsl_vertex_pull_source(void) { return k_vertex_pull; }
 
 static void emit_vertex_io(Out *o, const Wgsl_Program_Desc *d) {
@@ -2039,6 +2162,9 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   t->ok = true;
   t->vertex = desc->stage == SM_STAGE_VERTEX;
   t->cbt = t->vertex ? WGSL_DRAW_VS_CBUF_TABLE : WGSL_DRAW_CBUF_TABLE;
+  memset(t->globals.buffer_of, 0xff, sizeof(t->globals.buffer_of));
+  if (t->vertex && wgsl_reads_globals(program) && !wgsl_find_globals(program, &t->globals))
+    memset(t->globals.buffer_of, 0xff, sizeof(t->globals.buffer_of)); /* its LDGs stay untranslated */
   if (program->header.stage != (t->vertex ? SM_STAGE_VERTEX : SM_STAGE_PIXEL))
     fail(t, t->vertex ? "not a vertex program" : "not a pixel program");
   if (t->vertex && desc->input_count + 1u > (desc->vertex_pull ? WGSL_VSI_MAX : 16u))
@@ -2092,6 +2218,7 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   for (size_t i = 0; i < sizeof(k_prelude) / sizeof(k_prelude[0]); i++)
     out_add(&head, k_prelude[i], t->cbt, t->cbt, t->cbt);
   if (!t->vertex) out_add(&head, "%s", k_quad);
+  if (t->uses_globals) out_add(&head, "%s", k_gword);
   for (uint32_t i = 0; i < desc->texture_count && i < WGSL_MAX_TEXTURES; i++)
     if ((t->textures_used >> i) & 1u)
       emit_texture_helpers(&head, i, desc->sample_type[i],

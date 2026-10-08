@@ -38,6 +38,9 @@ static int g_failures;
 #define PS_TEX_OFFSET 0x1000u
 #define PS_DERIV_OFFSET 0x1800u
 #define VS_TEX_OFFSET 0x3000u /* a vertex program that samples a texture */
+#define VS_LDG_OFFSET 0x3800u /* a vertex program that reads a storage buffer */
+#define SSBO_DESC 0x110u      /* the storage buffer's descriptor in c[0] (NVN) */
+#define SSBO (GPU_BASE + 0xC000u)
 #define VERTICES (GPU_BASE + 0x4000u)
 #define CBUF (GPU_BASE + 0x6000u)
 #define TIC_POOL (GPU_BASE + 0x7000u)
@@ -89,6 +92,17 @@ static uint64_t TEXS_RGBA(uint32_t d0, uint32_t d1, uint32_t a, uint32_t b) {
   return (0xd800ull << 48) | GUARD | (1ull << 53) | (4ull << 50) | ((uint64_t)d1 << 28) | ((uint64_t)b << 20) |
          ((uint64_t)a << 8) | d0;
 }
+/* IADD Rd = Ra + c[0][offset]: the low half (carry out) and the high half
+ * (RZ + carry in) of a storage buffer address; LDG.E.128 Rd, [Ra]. */
+static uint64_t IADD_C_CC(uint32_t d, uint32_t a, uint32_t offset) {
+  return (0x4c10ull << 48) | (1ull << 47) | GUARD | ((uint64_t)(offset / 4u) << 20) | ((uint64_t)a << 8) | d;
+}
+static uint64_t IADD_C_X(uint32_t d, uint32_t offset) {
+  return (0x4c10ull << 48) | (1ull << 43) | GUARD | ((uint64_t)(offset / 4u) << 20) | (RZ << 8) | d;
+}
+static uint64_t LDG_E128(uint32_t d, uint32_t a) {
+  return (0xeed0ull << 48) | (6ull << 48) | (1ull << 45) | GUARD | ((uint64_t)a << 8) | d;
+}
 static uint64_t EXIT(void) { return (0xe300ull << 48) | GUARD | 0xfull; }
 static uint64_t MOV32I(uint32_t d, uint32_t imm) { return (0x0100ull << 48) | GUARD | ((uint64_t)imm << 20) | (0xfull << 12) | d; }
 /* SHFL.BFLY within a quad (segment mask 0x1c, clamp 3), and FSWZADD. */
@@ -134,6 +148,10 @@ static void build_programs(void) {
   const uint64_t vst[] = {ALD(0, 0x80, 4), ALD(4, 0x90, 4), TEXS_RGBA(8, 10, 4, 5), AST(0, 0x70, 4), AST(8, 0x80, 4),
                           EXIT()};
   write_program(VS_TEX_OFFSET, vs_sph, vst, 6);
+  /* VS: position = attr0, generic0 = the storage buffer's first four words. */
+  const uint64_t vsg[] = {MOV32I(12, 0), IADD_C_CC(4, 12, SSBO_DESC), IADD_C_X(5, SSBO_DESC + 4u), LDG_E128(8, 4),
+                          ALD(0, 0x80, 4), AST(0, 0x70, 4), AST(8, 0x80, 4), EXIT()};
+  write_program(VS_LDG_OFFSET, vs_sph, vsg, 8);
   /* PS: colour = generic0 (screen-linear). */
   uint8_t ps_sph[SM_SPH_BYTES];
   memset(ps_sph, 0, sizeof(ps_sph));
@@ -316,9 +334,9 @@ static void texture_state(void) {
   g_regs[0x982] = 0;       /* bound textures: c[0] */
   put32(CBUF, 0x00000000u); /* handle 0: TIC 0, TSC 0 */
   g_bindings.address[4][0] = CBUF;
-  g_bindings.size[4][0] = 0x100;
+  g_bindings.size[4][0] = 0x200;
   g_bindings.address[0][0] = CBUF; /* the vertex stage's texture handles too */
-  g_bindings.size[0][0] = 0x100;
+  g_bindings.size[0][0] = 0x200;
 }
 
 static void test_texture(Raster3d *r) {
@@ -729,6 +747,33 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   CHECK(vs_tex.count == 1 && vs_tex.last.vs_shader_id != 0 && vs_tex.last.binding_count >= 2u,
         "texturing vertex program on the GPU: %u draws, vs %u, %u bindings", vs_tex.count, vs_tex.last.vs_shader_id,
         vs_tex.last.binding_count);
+
+  /* A vertex program that reads a storage buffer runs on the GPU: the
+   * buffer (its NVN descriptor in c[0]) is copied into the draw's data. */
+  const float ssbo[4] = {0.25f, 0.5f, 0.75f, 1.0f};
+  memcpy(g_gpu + (SSBO - GPU_BASE), ssbo, sizeof(ssbo));
+  g_gpu_textured = true; /* binds c[0] for both stages */
+  g_vs_offset = VS_LDG_OFFSET;
+  put32(CBUF + SSBO_DESC, (uint32_t)SSBO);
+  put32(CBUF + SSBO_DESC + 4u, (uint32_t)(SSBO >> 32));
+  put32(CBUF + SSBO_DESC + 8u, sizeof(ssbo));
+  const Seen_Draw vs_ldg = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(vs_ldg.count == 1 && vs_ldg.last.vs_shader_id != 0, "storage-buffer vertex program on the GPU: %u draws, vs %u",
+        vs_ldg.count, vs_ldg.last.vs_shader_id);
+  uint32_t gdesc[WGSL_GLOBAL_WORDS];
+  memcpy(gdesc, g_seen_data + 4u * WGSL_DRAW_GLOBALS, sizeof(gdesc));
+  float copied[4] = {0};
+  if (gdesc[3] + sizeof(copied) <= vs_ldg.data_bytes) memcpy(copied, g_seen_data + gdesc[3], sizeof(copied));
+  CHECK(gdesc[0] == (uint32_t)SSBO && gdesc[1] == 0u && gdesc[2] == sizeof(ssbo) && copied[0] == 0.25f &&
+            copied[3] == 1.0f,
+        "the buffer's descriptor (0x%x, %u bytes at %u) and bytes are in the data", gdesc[0], gdesc[2], gdesc[3]);
+  /* An unbound buffer (size 0) keeps the vertices on the CPU. */
+  put32(CBUF + SSBO_DESC + 8u, 0);
+  const Seen_Draw vs_ldg_cpu = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(vs_ldg_cpu.count == 1 && vs_ldg_cpu.last.vs_shader_id == 0, "an empty buffer: CPU vertices (vs %u)",
+        vs_ldg_cpu.last.vs_shader_id);
+  g_vs_offset = VS_OFFSET;
+  g_gpu_textured = false;
 }
 
 /* ---- compute: a block of two lane groups meeting at BAR.SYNC --------- */
