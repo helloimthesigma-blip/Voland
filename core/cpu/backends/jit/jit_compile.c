@@ -3435,9 +3435,44 @@ static bool c_simd_shift_long(Ctx *c, uint32_t insn) {
   return true;
 }
 
+/* TBL/TBX: byte lookups in one to four consecutive table registers
+ * (wrapping past V31). i8x16.swizzle yields 0 for an index past 15, so
+ * table k is looked up with the index minus 16 k (wrapping), and TBX keeps
+ * Vd's byte where the index is past the whole table. */
+#define TBL_TABLE_BYTES 16u
+static bool c_simd_table(Ctx *c, uint32_t insn) {
+  if (bit(insn, 31) || bits(insn, 29, 21) != 0x070u || bit(insn, 15) || bits(insn, 11, 10) != 0) return false;
+  const bool q = bit(insn, 30), tbx = bit(insn, 12);
+  const uint32_t regs = bits(insn, 14, 13) + 1u, rm = bits(insn, 20, 16), rn = bits(insn, 9, 5), rd = bits(insn, 4, 0);
+  load_v(c, rm);
+  lset(c, L_VB); /* the indices */
+  for (uint32_t k = 0; k < regs; k++) {
+    load_v(c, (rn + k) % 32u);
+    lget(c, L_VB);
+    if (k) {
+      i32c(c, TBL_TABLE_BYTES * k);
+      simd(c, WASM_SIMD_I8X16_SPLAT);
+      simd(c, WASM_SIMD_I8X16_SUB);
+    }
+    simd(c, WASM_SIMD_I8X16_SWIZZLE);
+    if (k) simd(c, WASM_SIMD_V128_OR);
+  }
+  if (tbx) {
+    load_v(c, rd);
+    lget(c, L_VB);
+    i32c(c, TBL_TABLE_BYTES * regs);
+    simd(c, WASM_SIMD_I8X16_SPLAT);
+    simd(c, WASM_SIMD_I8X16_LT_U);
+    simd(c, WASM_SIMD_V128_BITSELECT); /* in range: the lookup, else Vd */
+  }
+  lset(c, L_VR);
+  store_v(c, rd, L_VR, q);
+  return true;
+}
+
 static bool c_simd_fp(Ctx *c, uint32_t insn) {
   if (c_scalar_fp_fast(c, insn) || c_vector_fp_fast(c, insn) || c_vector_int_fast(c, insn) || c_simd_copy(c, insn) ||
-      c_simd_misc_fp(c, insn) || c_simd_pairwise(c, insn) || c_simd_shift_long(c, insn))
+      c_simd_misc_fp(c, insn) || c_simd_pairwise(c, insn) || c_simd_shift_long(c, insn) || c_simd_table(c, insn))
     return true;
   Sync sync = {0};
   simd_fp_sync(insn, &sync);

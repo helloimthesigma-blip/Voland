@@ -283,10 +283,9 @@ static void test_triangle_and_blend(Raster3d *r, bool block_linear) {
   r->skip_draws = false;
 }
 
-static void test_texture(Raster3d *r) {
-  base_state(RT, false, PS_TEX_OFFSET);
-  raster3d_begin_submission(r);
-  /* 2x2 A8B8G8R8 pitch texture (32-byte rows): red, green / blue, white. */
+/* A 2x2 A8B8G8R8 pitch texture (32-byte rows): red, green / blue, white;
+ * TIC/TSC 0, bound through handle 0 in c[0] of the pixel stage. */
+static void texture_state(void) {
   uint32_t tic[8];
   memset(tic, 0, sizeof(tic));
   tic[0] = 0x08u | (2u << 7) | (2u << 10) | (2u << 13) | (2u << 16) | (2u << 19) | (3u << 22) | (4u << 25) | (5u << 28);
@@ -312,6 +311,12 @@ static void test_texture(Raster3d *r) {
   put32(CBUF, 0x00000000u); /* handle 0: TIC 0, TSC 0 */
   g_bindings.address[4][0] = CBUF;
   g_bindings.size[4][0] = 0x100;
+}
+
+static void test_texture(Raster3d *r) {
+  base_state(RT, false, PS_TEX_OFFSET);
+  raster3d_begin_submission(r);
+  texture_state();
   clear_to(r, 0, 0, 0, 1);
   /* Full-screen quad as a strip, uv 0..1 in generic0.xy. */
   vertex(0, -1.0f, -1.0f, 0, 0, 0, 0);
@@ -596,13 +601,15 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
 static Seen_Draw gpu_draw_once(Raster3d *r, uint32_t front_face_reg) {
   return gpu_draw_topology(r, front_face_reg, 4, 3);
 }
+static bool g_gpu_textured; /* gpu_draw_topology: the texturing pixel program */
 static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_t topology, uint32_t count) {
   static Gpu_Stream stream;
   Seen_Draw seen;
   memset(&seen, 0, sizeof(seen));
   gpu_stream_init(&stream, g_stream_header, (uint8_t *)g_stream_ring, GPU_RING_BYTES, stream_wait, &seen);
   raster3d_set_gpu(r, &stream);
-  base_state(RT, false, PS_OFFSET);
+  base_state(RT, false, g_gpu_textured ? PS_TEX_OFFSET : PS_OFFSET);
+  if (g_gpu_textured) texture_state();
   g_regs[REG_CULL_ENABLE_TEST] = 1;
   g_regs[REG_CULL_FACE_TEST] = CULL_BACK_REG;
   g_regs[REG_FRONT_FACE_TEST] = front_face_reg;
@@ -682,6 +689,17 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   const Seen_Draw pulled_strip = gpu_draw_topology(r, FRONT_CW_REG, TOPOLOGY_STRIP_TEST, 4);
   CHECK(pulled_strip.count == 1 && pulled_strip.last.vertex_count == 0u && pulled_strip.last.index_count == 6u,
         "pulled strip: %u vertices, %u indices", pulled_strip.last.vertex_count, pulled_strip.last.index_count);
+
+  /* A texturing pixel program (bound handle, no TEX.B): its texture comes
+   * from the constant buffer without shading a first triangle on the CPU. */
+  g_gpu_textured = true;
+  const uint64_t threads_before = r->stats.shader_faults, probes_before = r->gpu_stats.probe_runs;
+  const Seen_Draw textured = gpu_draw_once(r, FRONT_CW_REG);
+  g_gpu_textured = false;
+  CHECK(r->gpu_stats.probe_runs == probes_before, "the handles came without a probe run");
+  CHECK(textured.count == 1 && textured.last.binding_count >= 2u, "textured: %u draws, %u bindings (data + texture)",
+        textured.count, textured.last.binding_count);
+  CHECK(r->stats.shader_faults == threads_before, "no faults");
 }
 
 /* ---- compute: a block of two lane groups meeting at BAR.SYNC --------- */

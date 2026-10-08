@@ -330,6 +330,7 @@ void sm_program_decode(const uint8_t *bytes, uint32_t size, uint64_t address, Sm
   out->reads_fragcoord_xy = false;
   out->reads_fragcoord_z = false;
   out->uses_quads = false;
+  out->uses_bindless_textures = false;
   memset(out->cbuf_extent, 0, sizeof(out->cbuf_extent));
   uint32_t sph[SM_SPH_WORDS];
   memset(sph, 0, sizeof(sph));
@@ -352,6 +353,7 @@ void sm_program_decode(const uint8_t *bytes, uint32_t size, uint64_t address, Sm
     if (in->form == SM_FORM_CBUF || in->form == SM_FORM_REG_CBUF) note_cbuf(out, in->cbuf, in->imm + 4u);
     if (in->op == SM_OP_LDC) note_cbuf(out, BITS(w, 36, 5), 0x10000u);
     if (in->op == SM_OP_FSWZADD || in->op == SM_OP_SHFL) out->uses_quads = true;
+    if (in->op == SM_OP_TEX_B) out->uses_bindless_textures = true;
     if (in->op == SM_OP_IPA) {
       const uint32_t addr = BITS(w, 28, 10);
       if (BIT(w, 38) || addr == SM_ATTR_POSITION || addr == SM_ATTR_POSITION + 4u) out->reads_fragcoord_xy = true;

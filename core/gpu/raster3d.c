@@ -3129,6 +3129,7 @@ static void gpu_probe_texture(void *user, const Sm_Tex_Request *requests, Sm_Mas
 typedef struct Gpu_Draw {
   bool active;      /* raster3d_draw in GPU mode is assembling into this */
   bool prepared;    /* the shader and bindings are known (first triangle) */
+  bool prepared_shaded; /* ...from the first triangle shaded on the CPU (a bindless pixel program's probe) */
   bool dead;        /* the draw cannot be expressed: its triangles are dropped */
   uint32_t width, height;
   uint32_t target_id[MAX_TARGETS];
@@ -3475,10 +3476,10 @@ static uint32_t cbuf_words_read(const Sm_Program *program, const Sm_Env *env, ui
   return (bytes + 3u) / 4u;
 }
 
+static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *probe);
+
 static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex *provoking, bool front) {
   Draw_Context *ctx = rs->ctx;
-  Raster3d *r = ctx->r;
-  Gpu_Draw *g = &g_gpu_draw;
   Sm_Thread *t = rs->thread;
   sm_thread_reset_light(t, 1u);
   t->front_facing = front ? SM_ALL_LANES : 0;
@@ -3498,6 +3499,39 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
   env.texture_batch = gpu_probe_texture;
   env.user = &probe;
   (void)sm_run(ctx->ps, &env, t);
+  ctx->r->gpu_stats.probe_runs++;
+  return gpu_prepare_textures(rs, &probe);
+}
+
+/* Without TEX.B every texture instruction's handle is a word of the
+ * texture constant buffer at an index the instruction names: the probe
+ * needs no shading, and covers instructions on every path. */
+static bool gpu_static_probe(const Draw_Context *ctx, Gpu_Probe *probe) {
+  const Sm_Program *ps = ctx->ps;
+  if (ps->uses_bindless_textures) return false;
+  const Sm_Env *env = &ctx->env[1];
+  const uint32_t slot = env->texture_cbuf_slot;
+  probe->count = 0;
+  for (uint32_t pc = 0; pc < ps->word_count && probe->count < GPU_MAX_PROBE_TEXTURES; pc++) {
+    const Sm_Insn *in = &ps->insns[pc];
+    if (in->op < SM_OP_TEX || in->op > SM_OP_TXD) continue;
+    const uint32_t offset = (uint32_t)((in->raw >> 36) & 0x1fffu) * 4u;
+    uint32_t handle = 0;
+    if (slot < SM_CBUF_SLOTS && env->cbuf[slot] && offset + 4u <= env->cbuf_size[slot])
+      memcpy(&handle, env->cbuf[slot] + offset, sizeof(handle));
+    probe->pc[probe->count] = pc;
+    probe->handle[probe->count] = handle;
+    probe->count++;
+  }
+  return true;
+}
+
+/* The draw's textures, shader, constants and constant buffers from the
+ * texture instructions' handles (probe). */
+static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *probe) {
+  Draw_Context *ctx = rs->ctx;
+  Raster3d *r = ctx->r;
+  Gpu_Draw *g = &g_gpu_draw;
   /* One binding per distinct handle. */
   Wgsl_Program_Desc *desc = &g->desc;
   memset(desc->binding_of, WGSL_NO_BINDING, sizeof(desc->binding_of));
@@ -3509,12 +3543,12 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
   const uint32_t *regs = ctx->regs;
   const uint64_t tic_pool = addr40(regs[REG_TEX_HEADER_POOL], regs[REG_TEX_HEADER_POOL + 1u]);
   const uint64_t tsc_pool = addr40(regs[REG_SAMPLER_POOL], regs[REG_SAMPLER_POOL + 1u]);
-  for (uint32_t i = 0; i < probe.count; i++) {
+  for (uint32_t i = 0; i < probe->count; i++) {
     uint32_t b = 0;
-    while (b < desc->texture_count && handles[b] != probe.handle[i]) b++;
+    while (b < desc->texture_count && handles[b] != probe->handle[i]) b++;
     if (b == desc->texture_count) {
       if (b >= WGSL_MAX_TEXTURES) continue;
-      const uint32_t handle = probe.handle[i];
+      const uint32_t handle = probe->handle[i];
       const uint32_t tic_index = handle & 0xfffffu;
       const uint32_t tsc_index = (regs[REG_SAMPLER_BINDING] & 1u) ? tic_index : (handle >> 20) & 0xfffu;
       uint32_t tic[8], tsc[8];
@@ -3580,7 +3614,7 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
       for (uint32_t c = 0; c < 4; c++) p[WGSL_TEXP_BORDER + c] = u32f(s.border[c]);
       desc->texture_count++;
     }
-    desc->binding_of[probe.pc[i]] = (uint8_t)b;
+    desc->binding_of[probe->pc[i]] = (uint8_t)b;
   }
   g->texture_count = desc->texture_count;
   /* Targets. */
@@ -3891,6 +3925,18 @@ static void gpu_vs_triangle_ids(Raster_State *rs, const uint32_t ids[3], uint32_
   if (!g->active || g->dead) return;
   if (!g->prepared) {
     g->prepared = true;
+    /* Handles known without shading: no first triangle on the CPU. */
+    static Gpu_Probe static_probe;
+    if (gpu_static_probe(rs->ctx, &static_probe)) {
+      if (!gpu_prepare_textures(rs, &static_probe)) {
+        g->dead = true;
+        rs->ctx->r->gpu_stats.untranslated_draws++;
+        return;
+      }
+    }
+  }
+  if (!g->prepared_shaded && !g->shader_id) {
+    g->prepared_shaded = true;
     static Vertex shaded[3];
     Vertex *outs[3] = {&shaded[0], &shaded[1], &shaded[2]};
     bool ok = shade_vertices(rs->ctx, ids, 3u, outs);

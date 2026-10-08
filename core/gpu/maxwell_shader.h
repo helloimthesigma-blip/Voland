@@ -165,6 +165,9 @@ typedef struct Sm_Program {
    * 2x2 quads, lanes 4q..4q+3 = top-left, top-right, bottom-left,
    * bottom-right, with helper lanes for uncovered quad members. */
   bool uses_quads;
+  /* Has TEX.B: a texture handle comes from a register, not from the
+   * texture constant buffer at an index the instruction names. */
+  bool uses_bindless_textures;
   Sm_Insn insns[SM_MAX_WORDS];
 } Sm_Program;
 
