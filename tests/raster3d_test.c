@@ -690,6 +690,16 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   CHECK(pulled_strip.count == 1 && pulled_strip.last.vertex_count == 0u && pulled_strip.last.index_count == 6u,
         "pulled strip: %u vertices, %u indices", pulled_strip.last.vertex_count, pulled_strip.last.index_count);
 
+  /* A triangle list of two: the first through the assembler (it prepares
+   * the draw), the second in bulk - the ids as the guest ordered them. */
+  const uint64_t bulk_before = r->gpu_stats.bulk_triangles;
+  const Seen_Draw list = gpu_draw_topology(r, FRONT_CW_REG, 4, 6);
+  CHECK(r->gpu_stats.bulk_triangles - bulk_before == 1u, "the second triangle went in bulk");
+  bool in_order = list.index_count == 6u;
+  for (uint32_t i = 0; i < list.index_count && in_order; i++) in_order = list.indices[i] == i;
+  CHECK(list.count == 1 && list.last.vertex_count == 0u && list.last.index_count == 6u && in_order,
+        "pulled list: %u indices, in order %d", list.last.index_count, in_order);
+
   /* A texturing pixel program (bound handle, no TEX.B): its texture comes
    * from the constant buffer without shading a first triangle on the CPU. */
   g_gpu_textured = true;

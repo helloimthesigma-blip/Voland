@@ -2784,6 +2784,21 @@ static void assemble(Raster_State *rs, Vertex_Cache *cache, Assembler *as, uint3
   as->prev[0] = index;
 }
 
+static uint32_t gpu_pull_bulk(Raster_State *rs, const uint32_t *ids, uint32_t count);
+static bool gpu_draw_prepared(void);
+
+/* Triangles of a list from ids[0..count): the assembler until the draw is
+ * prepared and at a triangle boundary, then whole triangles in bulk
+ * (gpu_pull_bulk). Returns how many ids were consumed; the caller
+ * assembles the rest. */
+static uint32_t assemble_bulk(Raster_State *rs, Vertex_Cache *cache, Assembler *as, const uint32_t *ids, uint32_t count) {
+  uint32_t i = 0;
+  while (i < count && (!gpu_draw_prepared() || as->n % 3u != 0)) assemble(rs, cache, as, ids[i++]);
+  const uint32_t took = gpu_pull_bulk(rs, ids + i, count - i);
+  as->n += took;
+  return i + took;
+}
+
 static void assemble_end(Raster_State *rs, Vertex_Cache *cache, Assembler *as) {
   if (as->topology == TOPOLOGY_LINE_LOOP && as->n >= 2u) emit_line(rs, cache, as->prev[0], as->first);
   as->n = 0;
@@ -3964,6 +3979,49 @@ static void gpu_vs_triangle_ids(Raster_State *rs, const uint32_t ids[3], uint32_
   rs->ctx->r->gpu_stats.triangles++;
 }
 
+static bool gpu_draw_prepared(void) { return g_gpu_draw.prepared; }
+
+/* Whole triangles of a pulled triangle list appended in bulk: without flat
+ * varyings neither the order within a triangle nor its provoking vertex
+ * matters, so the ids go into the record as they are. Returns how many
+ * ids it took (whole triangles; 0 until the draw is prepared, or when it
+ * does not pull) - the rest go through the assembler. */
+static uint32_t gpu_pull_bulk(Raster_State *rs, const uint32_t *ids, uint32_t count) {
+  Gpu_Draw *g = &g_gpu_draw;
+  if (!g->active || g->dead || !g->pull || !g->prepared || !g->shader_id || g->flat_mask) return 0;
+  count -= count % 3u;
+  uint32_t taken = 0;
+  while (taken < count) {
+    uint32_t n = count - taken;
+    const uint32_t room = (GPU_MAX_INDICES - g->index_count) / 3u * 3u;
+    if (!room) {
+      gpu_emit_draw(rs);
+      continue;
+    }
+    if (n > room) n = room;
+    uint32_t lo = g->index_count ? g->id_lo : ids[taken], hi = g->index_count ? g->id_hi : ids[taken];
+    for (uint32_t i = taken; i < taken + n; i++) {
+      if (ids[i] < lo) lo = ids[i];
+      if (ids[i] > hi) hi = ids[i];
+    }
+    if (pull_copy_bytes(g, lo, hi) > pull_budget(g)) {
+      if (g->index_count) { /* this record is full: the next one may hold the chunk */
+        gpu_emit_draw(rs);
+        continue;
+      }
+      return taken; /* the chunk's own span is too wide: triangle by triangle */
+    }
+    memcpy(g_gpu_indices + g->index_count, ids + taken, (size_t)n * sizeof(uint32_t));
+    g->index_count += n;
+    g->id_lo = lo;
+    g->id_hi = hi;
+    rs->ctx->r->gpu_stats.triangles += n / 3u;
+    rs->ctx->r->gpu_stats.bulk_triangles += n / 3u;
+    taken += n;
+  }
+  return taken;
+}
+
 static void gpu_vs_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
   const uint32_t ids[3] = {RAW_VERTEX_ID(a), RAW_VERTEX_ID(b), RAW_VERTEX_ID(c)};
   gpu_vs_triangle_ids(rs, ids, provoking == b ? 1u : (provoking == c ? 2u : 0u));
@@ -4242,13 +4300,17 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
    * assembler consumes it; RESTART marks a primitive restart. */
 #define RESTART UINT32_MAX
   static uint32_t chunk[INDEX_BATCH], vertices[INDEX_BATCH];
+  /* A pulled triangle list: whole triangles skip the assembler. */
+  const bool bulk = r->gpu && draw->topology == TOPOLOGY_TRIANGLES && gpu_raw_vertices();
   switch (draw->kind) {
   case RASTER_DRAW_ARRAYS:
     for (uint32_t done = 0; done < draw->count;) {
       const uint32_t n = draw->count - done < INDEX_BATCH ? draw->count - done : INDEX_BATCH;
       for (uint32_t i = 0; i < n; i++) chunk[i] = draw->first + done + i;
       if (!gpu_raw_vertices()) vertex_prefetch(ctx, &cache, chunk, n);
-      for (uint32_t i = 0; i < n; i++) assemble(&rs, &cache, &as, chunk[i]);
+      uint32_t i = 0;
+      if (bulk) i = assemble_bulk(&rs, &cache, &as, chunk, n);
+      for (; i < n; i++) assemble(&rs, &cache, &as, chunk[i]);
       done += n;
     }
     break;
@@ -4270,7 +4332,9 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
         if (chunk[i] != RESTART) vertices[vertex_count++] = chunk[i];
       }
       if (!gpu_raw_vertices()) vertex_prefetch(ctx, &cache, vertices, vertex_count);
-      for (uint32_t i = 0; i < n; i++) {
+      uint32_t first_left = 0;
+      if (bulk && vertex_count == n) first_left = assemble_bulk(&rs, &cache, &as, chunk, n); /* no restarts here */
+      for (uint32_t i = first_left; i < n; i++) {
         if (chunk[i] == RESTART) assemble_end(&rs, &cache, &as);
         else assemble(&rs, &cache, &as, chunk[i]);
       }

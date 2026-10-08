@@ -165,6 +165,7 @@ typedef struct Raster3d_Gpu_Stats {
    * buffers), pulled vertex streams, vertices, indices. */
   uint64_t draw_data_bytes, pulled_bytes, vertex_bytes, index_bytes;
   uint64_t probe_runs;   /* draws whose pixel program ran once on the CPU to find its textures */
+  uint64_t bulk_triangles; /* pulled list triangles that skipped the assembler */
 } Raster3d_Gpu_Stats;
 
 typedef struct Raster3d_Stats {

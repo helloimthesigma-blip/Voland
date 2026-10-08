@@ -63,7 +63,8 @@
  *   per line) before measuring - to steer a game by eye, e.g. through
  *   menus to the scene to profile: "press KEY MS" (hold KEY for MS wall
  *   milliseconds), "shot FILE.png", "stats", "click TESTID" (e.g.
- *   state-save, state-load), "status TESTID" (prints its text), "sleep MS", "go"
+ *   state-save, state-load), "status TESTID" (prints its text), "select TESTID VALUE" (a
+ *   setting, e.g. frame-skip 2), "sleep MS", "go"
  *   (measure now). Each
  *   command prints "drive: N done ...".
  * - --restore-saves BACKUP.tar imports a saves backup (the Saves panel's
@@ -533,6 +534,8 @@ async function main() {
           if (box) await page.screenshot({ clip: box, path: arg });
         } else if (cmd === "sleep") {
           await sleep(Number(arg));
+        } else if (cmd === "select") {
+          await page.getByTestId(arg).locator("select").selectOption(arg2 ?? "");
         } else if (cmd === "click") {
           await page.getByTestId(arg).first().click();
         } else if (cmd === "status") {

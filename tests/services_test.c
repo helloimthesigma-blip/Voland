@@ -509,16 +509,16 @@ static void test_time(void) {
   const uint32_t counter = rd32(view + TIME_SHMEM_LOCAL_CONTEXT);
   const uint64_t copy = view + TIME_SHMEM_LOCAL_CONTEXT + 8 + (counter & 1u) * 0x20u;
   CHECK((int64_t)rd64(copy) == TIME_DEFAULT_RTC);
-  /* The continuous adjustment time point: rate 1 (multiplier 1, divisor
-   * log2 0), and the steady clock's source id - the one every context's
-   * time point carries (the steady context's and the local context's). */
+  /* The continuous adjustment (0x38 bytes per copy): no adjustment (five
+   * zero words), then the steady clock's source id - the one every
+   * context's time point carries (the steady context's and the local's). */
   const uint32_t adj_counter = rd32(view + TIME_SHMEM_CONTINUOUS_ADJUSTMENT);
-  const uint64_t adj = view + TIME_SHMEM_CONTINUOUS_ADJUSTMENT + 8 + (adj_counter & 1u) * 0x30u;
-  CHECK(rd64(adj) == 0 && rd64(adj + 8) == 1u && rd64(adj + 16) == 0);
+  const uint64_t adj = view + TIME_SHMEM_CONTINUOUS_ADJUSTMENT + 8 + (adj_counter & 1u) * 0x38u;
+  for (uint32_t w = 0; w < 5u; w++) CHECK(rd64(adj + 8u * w) == 0);
   const uint32_t steady_counter = rd32(view + TIME_SHMEM_STEADY);
   const uint64_t steady = view + TIME_SHMEM_STEADY + 8 + (steady_counter & 1u) * 0x18u;
-  CHECK(rd64(adj + 0x20) == rd64(steady + 8) && rd64(adj + 0x28) == rd64(steady + 16));
-  CHECK(rd64(adj + 0x20) == rd64(copy + 0x10) && rd64(adj + 0x28) == rd64(copy + 0x18));
+  CHECK(rd64(adj + 0x28) == rd64(steady + 8) && rd64(adj + 0x30) == rd64(steady + 16));
+  CHECK(rd64(adj + 0x28) == rd64(copy + 0x10) && rd64(adj + 0x30) == rd64(copy + 0x18));
 }
 
 static void test_set_apm_am(void) {

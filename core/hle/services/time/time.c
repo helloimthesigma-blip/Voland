@@ -20,7 +20,8 @@
 #define TIME_SNAPSHOT_BYTES 0xD0u
 #define TIME_SHMEM_COPY_OFFSET 0x8u        /* the two copies after the u32 counter, 8-aligned */
 #define TIME_SHMEM_BOOL_COPY_OFFSET 0x4u   /* a bool's copies right after the counter */
-#define TIME_ADJUSTMENT_BYTES 0x30u
+#define TIME_ADJUSTMENT_BYTES 0x38u
+#define TIME_ADJUSTMENT_SOURCE_ID 0x28u
 #define TIME_INITIAL_YEAR 2026u
 
 /* Kinds of ISystemClock (object state). */
@@ -144,11 +145,10 @@ static void refresh_shared_memory(HLE_Context *c, const Time_State *s) {
   uint8_t context[TIME_CONTEXT_BYTES];
   encode_context(context, s);
   const uint8_t automatic = 0;
-  /* The steady clock unadjusted: offset 0, rate 1/2^0, from steady zero. */
+  /* The steady clock unadjusted, from the one clock source. */
   uint8_t adjustment[TIME_ADJUSTMENT_BYTES];
   memset(adjustment, 0, sizeof(adjustment));
-  wr64(adjustment + 8, 1u);
-  encode_steady_point(adjustment + 0x18, 0);
+  memcpy(adjustment + TIME_ADJUSTMENT_SOURCE_ID, k_source_id, TIME_UUID_BYTES);
   for (int copy = 0; copy < 2; copy++) { /* write both copies */
     write_shmem_object(c, s, TIME_SHMEM_STEADY, steady, sizeof(steady));
     write_shmem_object(c, s, TIME_SHMEM_LOCAL_CONTEXT, context, sizeof(context));
