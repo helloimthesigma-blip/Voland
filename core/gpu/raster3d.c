@@ -3371,7 +3371,7 @@ static bool gpu_plan_globals(Draw_Context *ctx, Gpu_Draw *g, uint64_t *words) {
  * copy per draw on the GPU; below one vertex per this many bytes of them
  * shading on the CPU is cheaper (2-triangle quads of a program indexing a
  * 64 KiB constant buffer). */
-#define GPU_VS_BYTES_PER_VERTEX 256u
+#define GPU_VS_BYTES_PER_VERTEX 4096u
 static uint64_t g_vs_cpu_small;
 
 static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_t topology, uint32_t vertex_count) {
@@ -3395,7 +3395,7 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
   for (uint32_t k = 0; k < g->global_count; k++) vs_words += g->global_size[k] / 4u;
   if (vs_words * 4u > (uint64_t)vertex_count * GPU_VS_BYTES_PER_VERTEX) {
     if (!g_vs_cpu_small++)
-      log_info("[gpu] vertices on the CPU: %u vertices, %llu bytes of vertex constants", vertex_count,
+      log_warn("[gpu] vertices on the CPU: %u vertices, %llu bytes of vertex constants", vertex_count,
                (unsigned long long)vs_words * 4u);
     return;
   }
