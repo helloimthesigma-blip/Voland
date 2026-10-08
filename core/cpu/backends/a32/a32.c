@@ -745,6 +745,7 @@ static Interp_Status unconditional(A32_State *a, uint32_t insn) {
     return INTERP_UNDEFINED;
   }
   if (f(insn, 27, 25) == 1u || (f(insn, 27, 24) == 4u && b1(insn, 20) == 0u)) return a32_neon(a, insn);
+  if (f(insn, 27, 24) == 0xEu && f(insn, 11, 9) == 5u && !b1(insn, 4)) return a32_vfp_v8(a, insn);
   if (f(insn, 27, 20) == 0x57u) { /* CLREX, DSB, DMB, ISB */
     const uint32_t op = f(insn, 7, 4);
     if (op == 1u) a->s.exclusive_valid = false;

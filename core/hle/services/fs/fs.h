@@ -50,6 +50,7 @@
 #define FS_DIR_MODE_DIRS 1u
 #define FS_DIR_MODE_FILES 2u
 #define FS_STORAGE_CONTENT_ROMFS 0u /* IStorage object state */
+#define FS_STORAGE_SYSTEM_DATA 1u   /* a synthesized system data archive (hle/fs/system_data.h) */
 
 typedef struct Fs_Open_File {
   bool used;
@@ -97,6 +98,7 @@ typedef struct Fs_State {
   uint64_t save_commits;         /* bumped on every successful commit snapshot */
   Fs_Bis bis[FS_MAX_BIS_PARTITIONS]; /* empty NAND partitions (§1.6: no NAND image) */
   const Byte_Source *romfs;      /* the program's RomFS bytes, or NULL */
+  Byte_Source system_data;       /* the last system data archive opened (FS_STORAGE_SYSTEM_DATA) */
   uint64_t program_id;           /* the running program's; fills attribute program id 0 */
   Fs_Open_File files[FS_MAX_OPEN_FILES];
   Fs_Open_Directory directories[FS_MAX_OPEN_DIRECTORIES];

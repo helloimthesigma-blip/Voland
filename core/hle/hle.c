@@ -1,6 +1,8 @@
 #include "hle/hle.h"
 #include "common/assert.h"
 #include "common/log.h"
+#include "cpu/backends/a32/a32.h"
+#include "hle/kernel/svc32.h"
 #include "hle/kernel/scheduler.h"
 #include "hle/kernel/svc_ipc.h"
 #include "hle/kernel/svc_memory.h"
@@ -114,7 +116,18 @@ void hle_on_svc(CPU_State *cpu_state, uint32_t swi, void *userdata)
     Sched_Thread *self = context->scheduler ? scheduler_current(context->scheduler) : NULL;
     if (self) self->spinning = false;
   }
-  dispatch_svc(context, cpu_state, swi);
+  /* A 32-bit process (it runs on the A32 backend) has its arguments
+   * rearranged into the AArch64 calling convention around the call
+   * (hle/kernel/svc32.h). */
+  if (context->cpu_backend == &CPU_BACKEND_A32) {
+    CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
+    Svc32_Frame frame;
+    svc32_enter(regs, swi, &frame);
+    dispatch_svc(context, cpu_state, swi);
+    svc32_exit(regs, swi, &frame);
+  } else {
+    dispatch_svc(context, cpu_state, swi);
+  }
   scheduler_kernel_exit(context->scheduler);
 }
 
@@ -200,6 +213,13 @@ static void dispatch_svc(HLE_Context *context, CPU_State *cpu_state, uint32_t sw
   case 0x17: hle_svc_reset_signal(context, cpu_state); break;
   case 0x45: hle_svc_create_event(context, cpu_state); break;
   case 0x35: hle_svc_signal_to_address(context, cpu_state); break;
+  /* FlushEntireDataCache, FlushDataCache, FlushProcessDataCache: guest
+   * memory is one coherent host buffer, there is nothing to write back. */
+  case 0x2A:
+  case 0x2B:
+  case 0x5F:
+    regs->x[0] = HLE_RESULT_SUCCESS;
+    break;
   case HLE_SVC_CLOSE_HANDLE:
     hle_svc_close_handle(context, cpu_state);
     break;

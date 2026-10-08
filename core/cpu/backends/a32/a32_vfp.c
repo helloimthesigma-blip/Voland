@@ -331,10 +331,43 @@ Interp_Status a32_vfp(A32_State *a, uint32_t insn) {
   return INTERP_UNDEFINED;
 }
 
-/* Advanced SIMD: decoded as the title needs it (the unconditional space:
- * 1111 001x data processing, 1111 0100 xxx0 loads and stores). */
-Interp_Status a32_neon(A32_State *a, uint32_t insn) {
-  (void)a;
-  (void)insn;
+/* ---- the ARMv8 unconditional VFP forms (1111 1110, coprocessor 10/11) --- */
+
+/* VSEL, VMAXNM/VMINNM, VRINTA/N/P/M, VCVTA/N/P/M (to 32-bit integers). */
+Interp_Status a32_vfp_v8(A32_State *a, uint32_t insn) {
+  const bool dbl = b1(insn, 8);
+  const FP_Format fmt = dbl ? FP_DOUBLE : FP_SINGLE;
+  FP_Env env = env_of(a);
+  static const FP_Rounding RM[4] = {FP_ROUND_TIE_AWAY, FP_ROUND_NEAREST_EVEN, FP_ROUND_PLUS_INF, FP_ROUND_MINUS_INF};
+  if (!b1(insn, 23)) { /* VSEL: EQ, VS, GE, GT on CPSR */
+    const uint32_t nzcv = (uint32_t)(a->s.regs.pstate >> 28);
+    const bool n = nzcv & 8u, z = nzcv & 4u, v = nzcv & 1u;
+    bool take;
+    switch (f(insn, 21, 20)) {
+      case 0: take = z; break;
+      case 1: take = v; break;
+      case 2: take = n == v; break;
+      default: take = !z && n == v; break;
+    }
+    if (b1(insn, 6)) return INTERP_UNDEFINED;
+    set_fp(a, vd(insn, dbl), dbl, get_fp(a, take ? vn(insn, dbl) : vm(insn, dbl), dbl));
+    return INTERP_CONTINUE;
+  }
+  if (f(insn, 21, 20) == 0u) { /* VMAXNM / VMINNM */
+    const uint64_t x = get_fp(a, vn(insn, dbl), dbl), y = get_fp(a, vm(insn, dbl), dbl);
+    set_fp(a, vd(insn, dbl), dbl, b1(insn, 6) ? fp_min_num(fmt, x, y, &env) : fp_max_num(fmt, x, y, &env));
+    return INTERP_CONTINUE;
+  }
+  if (f(insn, 21, 18) == 0xEu && b1(insn, 6)) { /* VRINTA/N/P/M */
+    const uint64_t x = get_fp(a, vm(insn, dbl), dbl);
+    set_fp(a, vd(insn, dbl), dbl, fp_round_int(fmt, x, RM[f(insn, 17, 16)], false, &env));
+    return INTERP_CONTINUE;
+  }
+  if (f(insn, 21, 18) == 0xFu && b1(insn, 6)) { /* VCVTA/N/P/M: to S32/U32 in Sd */
+    const uint64_t x = get_fp(a, vm(insn, dbl), dbl);
+    const bool is_signed = b1(insn, 7);
+    a32_set_s(a, vd(insn, false), (uint32_t)fp_to_int(fmt, x, 0, !is_signed, 32u, RM[f(insn, 17, 16)], &env));
+    return INTERP_CONTINUE;
+  }
   return INTERP_UNDEFINED;
 }

@@ -319,8 +319,44 @@ static uint32_t ctrl_gpu_ioctl(uint32_t nr, uint8_t *d, uint32_t size, uint8_t *
 static void pt_map(Nvdrv_State *s, uint32_t slot);
 static void pt_unmap(Nvdrv_State *s, uint32_t slot);
 
+#define AS_REMAP_NR 0x14u
+#define AS_REMAP_ENTRY_BYTES 0x14u
+#define AS_REMAP_PAGE_SHIFT 16u /* Remap counts in 64KB big pages */
+
+/* REMAP: entries {u16 flags, u16 kind, u32 nvmap handle, u32 buffer
+ * offset, u32 GPU offset, u32 pages}, all in big pages, as many as the
+ * buffer holds - sparse resources point VA ranges at memory (handle) or
+ * back at nothing (handle 0). */
+static uint32_t as_remap(Nvdrv_State *s, uint8_t *d, uint32_t bytes) {
+  for (uint32_t at = 0; at + AS_REMAP_ENTRY_BYTES <= bytes; at += AS_REMAP_ENTRY_BYTES) {
+    const uint8_t *e = d + at;
+    const uint32_t handle = rd32(e + 4);
+    const uint64_t buffer_offset = (uint64_t)rd32(e + 8) << AS_REMAP_PAGE_SHIFT;
+    const uint64_t gpu_va = (uint64_t)rd32(e + 12) << AS_REMAP_PAGE_SHIFT;
+    const uint64_t size = (uint64_t)rd32(e + 16) << AS_REMAP_PAGE_SHIFT;
+    for (uint32_t i = 0; i < s->mapping_end; i++) { /* whatever was at that VA goes */
+      Gpu_Mapping *m = &s->mappings[i];
+      if (m->in_use && m->gpu_va == gpu_va) {
+        pt_unmap(s, i);
+        m->in_use = false;
+      }
+    }
+    if (!handle || !size) continue;
+    if (!nvmap_of(s, handle)) return NV_BAD_VALUE;
+    uint32_t i = 0;
+    while (i < NVDRV_MAX_GPU_MAPPINGS && s->mappings[i].in_use) i++;
+    if (i == NVDRV_MAX_GPU_MAPPINGS) return NV_INSUFFICIENT_MEMORY;
+    s->mappings[i] = (Gpu_Mapping){true, gpu_va, size, handle, buffer_offset};
+    if (i + 1u > s->mapping_end) s->mapping_end = i + 1u;
+    pt_map(s, i);
+  }
+  return NV_SUCCESS;
+}
+
 static uint32_t as_gpu_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
   switch (nr) {
+  case AS_REMAP_NR:
+    return as_remap(s, d, s->ioctl_in_bytes);
   case 0x01: case 0x03: case 0x09: /* BIND_CHANNEL, FREE_SPACE, INITIALIZE_EX */
     return NV_SUCCESS;
   case 0x02: { /* ALLOC_SPACE {pages, page_size, flags, pad, offset/align} */
@@ -840,7 +876,14 @@ static uint32_t run_ioctl(HLE_Context *c, Nvdrv_State *s, const IPC_Request *req
   }
   Nv_Fd *f = fd_of(s, fd);
   if (!f) return NV_BAD_VALUE;
-  const uint32_t size = NV_IOC_SIZE(request), dir = NV_IOC_DIR(request);
+  uint32_t size = NV_IOC_SIZE(request);
+  const uint32_t dir = NV_IOC_DIR(request);
+  /* REMAP's struct is one entry; the buffer holds as many as are passed. */
+  if (f->device == NV_DEVICE_AS_GPU && NV_IOC_NR(request) == AS_REMAP_NR) {
+    const IPC_Buffer *in = in_buffer(req, 0);
+    if (in && in->size > size) size = in->size < sizeof(s->ioctl_buffer) ? (uint32_t)in->size : (uint32_t)sizeof(s->ioctl_buffer);
+  }
+  s->ioctl_in_bytes = size;
   memset(s->ioctl_buffer, 0, sizeof(s->ioctl_buffer));
   if (dir & NV_IOC_WRITE) {
     const IPC_Buffer *in = in_buffer(req, 0);

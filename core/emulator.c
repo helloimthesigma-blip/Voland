@@ -17,6 +17,7 @@
 #include "common/workers.h"
 #include "hle/kernel/handle_table.h"
 #include "hle/kernel/parallel.h"
+#include "cpu/backends/a32/a32.h"
 #ifdef SWITCH_CPU_BACKEND_JIT
 #include "cpu/backends/jit/jit.h"
 #endif
@@ -389,6 +390,7 @@ Error emulator_create_with_backend(Emulator* out, const CPU_Backend* backend) {
   /* 3. CPU backend selected at configure time; it receives the MMU, never
    * raw guest RAM (§8). */
   out->cpu_backend = backend;
+  out->base_backend = backend;
   SWITCH_ASSERT_ALWAYS(out->cpu_backend != NULL, "no CPU backend registered");
 
   out->cpu_state = out->cpu_backend->create(out->vmm, &out->hle);
@@ -466,6 +468,28 @@ void emulator_destroy(Emulator* emulator) {
   vmm_destroy(emulator->vmm);
   layout_destroy();
   memset(emulator, 0, sizeof(*emulator));
+}
+
+/* Runs the next program on `backend`: the main CPU_State is recreated
+ * for it (a 32-bit title needs the A32 interpreter, a 64-bit one the
+ * Emulator's own backend). Only between programs: no thread holds a
+ * CPU_State of the old backend. */
+static Error use_backend(Emulator* emulator, const CPU_Backend* backend) {
+  if (emulator->cpu_backend == backend) return OK;
+  CPU_State* state = backend->create(emulator->vmm, &emulator->hle);
+  if (!state) return ERR(RESULT_OUT_OF_MEMORY, "emulator: CPU backend failed to init");
+  if (emulator->parallel && !backend->supports_multicore) (void)emulator_set_host_cores(emulator, 0);
+  emulator->cpu_backend->destroy(emulator->cpu_state);
+  emulator->cpu_backend = backend;
+  emulator->cpu_state = state;
+  emulator->hle.cpu_backend = backend;
+  backend->set_svc_handler(state, hle_on_svc);
+  backend->set_undefined_handler(state, hle_on_undefined);
+  scheduler_init(&emulator->scheduler, backend);
+  emulator->scheduler.parallel = emulator->parallel;
+  emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
+  log_info("[emulator] CPU backend for this program: %s", backend->name);
+  return OK;
 }
 
 /* Shared tail of every load: arm the main thread (Horizon entry ABI) and
@@ -592,6 +616,13 @@ Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
   arena_destroy(&scratch);
   if (!error_is_ok(err)) return err;
 
+  /* AArch32 code runs on the A32 interpreter (cpu/backends/a32). */
+  err = use_backend(emulator, npdm.is_64bit_instruction ? emulator->base_backend : &CPU_BACKEND_A32);
+  if (!error_is_ok(err)) {
+    process_teardown(&emulator->process, emulator->vmm, &emulator->pages);
+    page_allocator_reset(&emulator->pages);
+    return err;
+  }
   return finish_load(emulator, nca_source, false);
 }
 
@@ -674,6 +705,8 @@ void emulator_unload_program(Emulator* emulator) {
   emulator->content_node = RAMFS_NO_NODE;
   emulator->is_homebrew = false;
   emulator->program_loaded = false;
+  const Error backend_err = use_backend(emulator, emulator->base_backend);
+  if (!error_is_ok(backend_err)) log_warn("[emulator] %s; keeping %s", backend_err.message, emulator->cpu_backend->name);
 }
 
 /* The devices the run loop drives between guest runs (§13, §14, §18), then

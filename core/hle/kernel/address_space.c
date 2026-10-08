@@ -59,6 +59,27 @@ Error address_space_init(NPDM_Address_Space type, uint64_t code_size,
   }
   memset(out, 0, sizeof(*out));
 
+  if (type == NPDM_ADDRESS_SPACE_32_BIT || type == NPDM_ADDRESS_SPACE_32_BIT_NO_RESERVED) {
+    const uint64_t code_bytes = align_up_page(code_size);
+    if (code_bytes < code_size || code_bytes > ADDRESS_SPACE_32_CODE_END - start - stack_size - tls_io_size)
+      return ERR(RESULT_INVALID_ARGUMENT, "address_space_init: code region does not fit");
+    out->type = type;
+    out->aslr.base = start;
+    out->aslr.size = end - start;
+    out->code.base = start;
+    out->code.size = code_bytes;
+    out->tls_io.base = ADDRESS_SPACE_32_CODE_END - tls_io_size;
+    out->tls_io.size = tls_io_size;
+    out->stack.base = start + code_bytes;
+    out->stack.size = out->tls_io.base - out->stack.base;
+    out->alias.base = ADDRESS_SPACE_32_CODE_END;
+    out->alias.size = alias_size;
+    out->heap.base = ADDRESS_SPACE_32_CODE_END + alias_size;
+    out->heap.size = heap_size;
+    (void)aslr_seed; /* the modules keep the region's base, as 32-bit Horizon titles see them */
+    return OK;
+  }
+
   const uint64_t span = end - start;
   const uint64_t fixed_regions = alias_size + heap_size + stack_size + tls_io_size;
   const uint64_t code_bytes = align_up_page(code_size);

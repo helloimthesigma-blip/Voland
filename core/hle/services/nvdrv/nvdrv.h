@@ -149,6 +149,7 @@ typedef struct Nvdrv_State {
   Syncpoints syncpoints;
   Nv_Event_Slot events[NVDRV_MAX_EVENTS];
   uint8_t ioctl_buffer[NVDRV_IOCTL_MAX_BYTES];
+  uint32_t ioctl_in_bytes; /* the bytes of ioctl_buffer this ioctl's in-data fills */
   uint8_t extra_buffer[NVDRV_IOCTL_MAX_BYTES];
   bool extra_out;          /* the current ioctl has Ioctl3's second output buffer */
   uint64_t ioctl_count;

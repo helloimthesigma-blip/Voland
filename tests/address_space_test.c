@@ -129,10 +129,15 @@ int main(void) {
   CHECK(as.code.base == ADDRESS_SPACE_32_START && as.alias.size == ADDRESS_SPACE_32_ALIAS_SIZE &&
         as.heap.size == ADDRESS_SPACE_32_HEAP_SIZE);
   CHECK(as.tls_io.base + as.tls_io.size <= ADDRESS_SPACE_32_END);
+  /* Horizon's 32-bit carve: code, stack and TLS share the low gigabyte (a
+   * 32-bit SDK probes there for thread stacks), alias and heap above it. */
+  CHECK(as.stack.base == as.code.base + as.code.size && as.stack.size >= ADDRESS_SPACE_32_STACK_SIZE);
+  CHECK(as.tls_io.base + as.tls_io.size == ADDRESS_SPACE_32_CODE_END);
+  CHECK(as.alias.base == ADDRESS_SPACE_32_CODE_END && as.heap.base == as.alias.base + as.alias.size);
   CHECK_OK(address_space_init(NPDM_ADDRESS_SPACE_32_BIT_NO_RESERVED, CODE_BYTES, 0x77, &as));
   check_regions(&as, ADDRESS_SPACE_32_START, ADDRESS_SPACE_32_END);
   CHECK(as.alias.size == 0 && as.heap.size == ADDRESS_SPACE_32_NO_RESERVED_HEAP_SIZE);
-  CHECK((as.code.base - ADDRESS_SPACE_32_START) % ADDRESS_SPACE_ASLR_GRANULE == 0);
+  CHECK(as.code.base == ADDRESS_SPACE_32_START && as.heap.base == ADDRESS_SPACE_32_CODE_END);
   /* A 64-bit-sized code image does not fit 4GB. */
   CHECK_CODE(address_space_init(NPDM_ADDRESS_SPACE_32_BIT, (uint64_t)3 << 30, 0, &as), RESULT_INVALID_ARGUMENT);
 

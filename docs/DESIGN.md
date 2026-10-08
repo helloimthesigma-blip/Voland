@@ -889,6 +889,22 @@ Changes from v2: `create` takes `VMM_Context*` instead of `(guest_ram, ram_size)
 
 ---
 
+
+### AArch32 titles (v3.75)
+
+A title whose NPDM lacks the 64-bit-instruction flag (Mario Kart 8 Deluxe) runs on `CPU_BACKEND_A32` (`core/cpu/backends/a32/`). It is an interpreter for the A32 instruction set, VFP and Advanced SIMD (with the ARMv8 AES/SHA and VFP additions), behind the same interface. Its state embeds the A64 interpreter's:
+
+- r0-r14 are x0-x14 and r15 is pc;
+- CPSR.NZCV is pstate;
+- D0-D31 are the halves of V0-V15;
+- FPSCR is split into FPCR/FPSR.
+
+Memory goes through the vmm, and floating point uses the shared softfloat. The emulator recreates its main CPU_State on the A32 backend at load, and goes back to its own backend at unload. Thumb is not implemented (no title seen uses it at EL0). The backend is single-core (`supports_multicore` false) and there is no A32 JIT yet.
+
+- **SVCs** (`hle/kernel/svc32.{h,c}`): a 32-bit process passes 64-bit arguments as register pairs and rearranges calls that would spill past r3. Around each call, the arguments are rebuilt in the AArch64 registers, the registers that were overwritten are restored (r4-r11 are callee-saved), and 64-bit results are split into pairs, so the handlers are unchanged.
+- **Address space:** as Horizon carves it for 32-bit processes. The code region is [2 MB, 1 GB): the modules, then the stack region in the rest of it, then the TLS pages. Alias and heap are above 1 GB. A 32-bit SDK places thread stacks by probing random addresses below 1 GB with QueryMemory.
+- **Verification:** `tools/a32-oracle.py` runs random instruction streams on `tests/a32_runner` and on Unicorn, which is used only as a black-box reference, and compares every register, the flags, FPSCR and memory. Result: 0 mismatches over the integer, VFP, NEON, load/store, crypto and v8 VFP generators. Single-instruction mode groups any failure by encoding. Encodings that Unicorn's newer "max" CPU accepts but ARMv8.0 lacks (v8.1 RDM, FP16) stay UNDEFINED, and the oracle can filter them out.
+
 ## 9. No-Op Backend
 
 The no-op backend is the default. It builds on all platforms with zero dependencies. It maintains register state so HLE services can read and write registers, and it honors the exit-reason contract so the scheduler can be developed against it. It does not execute any ARM instructions.
@@ -2475,6 +2491,13 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 *Maintained by: proxy-alt and Null6598*
 
 ### Changelog v3.74 → v3.75 (summary)
+
+- **§8, AArch32 titles: Mario Kart 8 Deluxe boots to its title screen.** This adds the A32 interpreter backend, the 32-bit SVC calling convention and Horizon's 32-bit address-space carve (§8, "AArch32 titles"). Also:
+  - SVCs 0x2A, 0x2B and 0x5F (data-cache flushes) succeed as no-ops, because guest memory is coherent.
+  - nvhost-as-gpu REMAP (nr 0x14) maps big pages of a handle at a GPU address, or unmaps them for handle 0. Its entry count comes from the buffer size.
+  - System data 0100000000000802 (MiiModel) is a stand-in made by Voland (`hle/fs/system_data.{h,c}`): a RomFS holding the archive's files, each with only a resource header. A title that draws Miis mounts it at start and aborts without it. No Nintendo content is shipped (§1.6).
+  - svcBreak logs the link register and the stack's return addresses as module+offset.
+  - `VOLAND_DUMP_MODULES` also writes each module's whole image, so the dynamic symbols can name them.
 
 - **§13, vertex programs on the GPU (stage 1 of GPU vertex shading).** In the WebGPU renderer, a draw whose vertex program translates to WGSL no longer shades vertices on the CPU.
   - **Translation.** `wgsl.c` translates vertex programs (`stage` vertex in `Wgsl_Program_Desc`): ALD/AST on `ain`/`aout` arrays, and VERTEX_ID/INSTANCE_ID from the vertex input. Programs with KIL, IPA, quad ops or texture reads stay on the CPU.

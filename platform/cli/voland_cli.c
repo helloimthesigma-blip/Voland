@@ -808,7 +808,7 @@ static void pc_profile_print(Emulator *emu) {
 }
 
 /* VOLAND_DUMP_MODULES=DIR: at exit, each module's .text as DIR/<name>.text
- * plus DIR/modules.txt (name, base, text start, size) - for disassembling
+ * and its whole image as DIR/<name>.image, plus DIR/modules.txt (name, base, text start, size) - for disassembling
  * the PC profile's hot blocks offline. */
 #define MODULE_DUMP_CHUNK ((uint64_t)1 << 20)
 static void dump_modules(Emulator *emu, const char *dir) {
@@ -826,6 +826,15 @@ static void dump_modules(Emulator *emu, const char *dir) {
     for (uint64_t at = 0; out && at < mod->text.size; at += MODULE_DUMP_CHUNK) {
       const uint64_t n = mod->text.size - at < MODULE_DUMP_CHUNK ? mod->text.size - at : MODULE_DUMP_CHUNK;
       if (!error_is_ok(vmm_read_block(emu->vmm, mod->text.base + at, chunk, n))) break;
+      fwrite(chunk, 1, (size_t)n, out);
+    }
+    if (out) fclose(out);
+    /* The whole image too (.rodata holds the dynamic symbols to name them). */
+    snprintf(path, sizeof(path), "%s/%s.image", dir, mod->name);
+    out = fopen(path, "wb");
+    for (uint64_t at = 0; out && at < mod->image_size; at += MODULE_DUMP_CHUNK) {
+      const uint64_t n = mod->image_size - at < MODULE_DUMP_CHUNK ? mod->image_size - at : MODULE_DUMP_CHUNK;
+      if (!error_is_ok(vmm_read_block(emu->vmm, mod->base_gva + at, chunk, n))) break;
       fwrite(chunk, 1, (size_t)n, out);
     }
     if (out) fclose(out);

@@ -4,6 +4,7 @@
 #include "hle/services/fs/fs.h"
 
 #include "hle/fs/save_archive.h"
+#include "hle/fs/system_data.h"
 
 #include "common/log.h"
 #include "hle/services/service_util.h"
@@ -242,10 +243,14 @@ static HLE_ServiceResult cmd_open_data_storage_self(HLE_Context *c, Service_Obje
 static HLE_ServiceResult cmd_open_data_storage_by_id(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                                      IPC_Response *res) {
   (void)c;
-  (void)self;
-  (void)res;
+  Fs_State *s = state_of(self);
   uint64_t data_id = 0;
   (void)ipc_request_read_u64(req, 8, &data_id);
+  if (system_data_open(data_id, &s->system_data)) {
+    log_info("[fs] OpenDataStorageByDataId(%016llx): Voland's stand-in archive", (unsigned long long)data_id);
+    (void)ipc_response_push_object(res, &s->storage, FS_STORAGE_SYSTEM_DATA);
+    return HLE_RESULT_SUCCESS;
+  }
   log_warn("[fs] OpenDataStorageByDataId(%016llx): system archives are not shipped (§1.6)",
            (unsigned long long)data_id);
   return FS_RESULT_TARGET_NOT_FOUND;
@@ -598,11 +603,18 @@ static HLE_ServiceResult cmd_directory_count(HLE_Context *c, Service_Object *sel
 /* IStorage (the program's RomFS).                                     */
 /* ------------------------------------------------------------------ */
 
+/* The bytes an IStorage object serves: the program's RomFS, or a system data stand-in. */
+static const Byte_Source *storage_source(Service_Object *self) {
+  Fs_State *s = state_of(self);
+  return self->state == FS_STORAGE_SYSTEM_DATA ? (s->system_data.read ? &s->system_data : NULL) : s->romfs;
+}
+
 static HLE_ServiceResult cmd_storage_read(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                           IPC_Response *res) {
   (void)res;
   Fs_State *s = state_of(self);
-  if (!s->romfs) return FS_RESULT_TARGET_NOT_FOUND;
+  const Byte_Source *source = storage_source(self);
+  if (!source) return FS_RESULT_TARGET_NOT_FOUND;
   uint64_t offset = 0, size = 0;
   if (!error_is_ok(ipc_request_read_u64(req, 0, &offset)) || !error_is_ok(ipc_request_read_u64(req, 8, &size))) {
     return IPC_RESULT_SF_INVALID_IN_HEADER;
@@ -610,10 +622,10 @@ static HLE_ServiceResult cmd_storage_read(HLE_Context *c, Service_Object *self, 
   const IPC_Buffer *buf = service_out_buffer(req, 0);
   if (!buf) return size ? FS_RESULT_OUT_OF_RANGE : HLE_RESULT_SUCCESS;
   if (size > buf->size) size = buf->size;
-  if (offset > s->romfs->size || size > s->romfs->size - offset) return FS_RESULT_OUT_OF_RANGE;
+  if (offset > source->size || size > source->size - offset) return FS_RESULT_OUT_OF_RANGE;
   for (uint64_t done = 0; done < size;) {
     const uint64_t chunk = size - done < FS_BOUNCE_BYTES ? size - done : FS_BOUNCE_BYTES;
-    if (!error_is_ok(byte_source_read(s->romfs, offset + done, s->bounce, chunk))) return FS_RESULT_OUT_OF_RANGE;
+    if (!error_is_ok(byte_source_read(source, offset + done, s->bounce, chunk))) return FS_RESULT_OUT_OF_RANGE;
     if (!error_is_ok(vmm_write_block(c->vmm, buf->gva + done, s->bounce, chunk))) return HLE_RESULT_INVALID_POINTER;
     done += chunk;
   }
@@ -624,8 +636,8 @@ static HLE_ServiceResult cmd_storage_get_size(HLE_Context *c, Service_Object *se
                                               IPC_Response *res) {
   (void)c;
   (void)req;
-  const Fs_State *s = state_of(self);
-  (void)ipc_response_push_u64(res, s->romfs ? s->romfs->size : 0);
+  const Byte_Source *source = storage_source(self);
+  (void)ipc_response_push_u64(res, source ? source->size : 0);
   return HLE_RESULT_SUCCESS;
 }
 

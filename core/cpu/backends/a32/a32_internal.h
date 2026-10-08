@@ -101,5 +101,7 @@ Interp_Status a32_execute(A32_State *a, uint32_t insn);
  * conditional space, and the unconditional Advanced SIMD space. */
 Interp_Status a32_vfp(A32_State *a, uint32_t insn);
 Interp_Status a32_neon(A32_State *a, uint32_t insn);
+/* The ARMv8 VFP additions in the unconditional space (VSEL, VMAXNM, VRINTx, VCVTx). */
+Interp_Status a32_vfp_v8(A32_State *a, uint32_t insn);
 
 #endif /* SWITCH_CPU_BACKENDS_A32_A32_INTERNAL_H */

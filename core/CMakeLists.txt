@@ -21,6 +21,7 @@ set(SWITCH_CORE_SOURCES
   cpu/backends/interpreter/softfloat.c
   cpu/backends/a32/a32.c
   cpu/backends/a32/a32_vfp.c
+  cpu/backends/a32/a32_neon.c
   cpu/backends/jit/jit.c
   cpu/backends/jit/jit_compile.c
   hle/hle.c
@@ -68,7 +69,9 @@ set(SWITCH_CORE_SOURCES
   gpu/gpu_thread.c
   gpu/wgsl.c
   hle/fs/ramfs.c
+  hle/fs/system_data.c
   hle/fs/save_archive.c
+  hle/kernel/svc32.c
   hle/kernel/svc_thread.c
   hle/services/sm/sm.c
   hle/services/nvdrv/nvdrv.c

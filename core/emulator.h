@@ -61,6 +61,9 @@ typedef struct Emulator
    * and by HLE. */
   VMM_Context *vmm;
   const CPU_Backend *cpu_backend;
+  /* The backend the Emulator was created with: cpu_backend while a 64-bit
+   * program runs, restored when a 32-bit one (A32 backend) unloads. */
+  const CPU_Backend *base_backend;
   /* One CPU_State stands in for "the" guest thread until the Phase 2
    * scheduler (§7) exists to multiplex real ones. */
   CPU_State *cpu_state;

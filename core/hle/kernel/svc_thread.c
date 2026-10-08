@@ -598,11 +598,39 @@ void hle_svc_get_thread_id(HLE_Context *c, CPU_State *s) {
   r->x[1] = t->thread_id;
 }
 
+#define BREAK_STACK_SCAN_WORDS 128u
+#define BREAK_STACK_SCAN_SHOWN 12u
+#define A32_LR_INDEX 14u
+#define A64_LR_INDEX 30u
+
+/* Debug aid for a guest abort: the link register and the stack words that
+ * point into a loaded module (return addresses, most recent first). 32-bit
+ * processes keep 4-byte words, 64-bit ones 8-byte. */
+static void log_break_callers(HLE_Context *c, const CPU_Register_File *r) {
+  if (!c->process) return;
+  const bool narrow = c->process->module_count && !c->process->npdm.is_64bit_instruction;
+  const uint64_t lr = r->x[narrow ? A32_LR_INDEX : A64_LR_INDEX];
+  const Process_Module *m = process_find_module(c->process, lr);
+  if (m) log_error("[hle]   lr %s+0x%llx", m->name, (unsigned long long)(lr - m->base_gva));
+  const uint64_t sp = narrow ? (uint32_t)r->x[13] : r->sp;
+  const uint32_t step = narrow ? 4u : 8u;
+  uint32_t shown = 0;
+  for (uint32_t i = 0; i < BREAK_STACK_SCAN_WORDS && shown < BREAK_STACK_SCAN_SHOWN; i++) {
+    uint64_t word = 0;
+    if (!error_is_ok(vmm_read_block(c->vmm, sp + (uint64_t)i * step, &word, step))) break;
+    m = process_find_module(c->process, word);
+    if (!m || word - m->base_gva < m->text.base - m->base_gva || word >= m->text.base + m->text.size) continue;
+    log_error("[hle]   stack+0x%03x %s+0x%llx", i * step, m->name, (unsigned long long)(word - m->base_gva));
+    shown++;
+  }
+}
+
 void hle_svc_break(HLE_Context *c, CPU_State *s) {
   CPU_Register_File *r = regs(c, s);
   const uint32_t reason = (uint32_t)r->x[0];
   log_error("[hle] svcBreak reason=0x%x info=0x%llx size=0x%llx at pc=0x%010llx", reason,
             (unsigned long long)r->x[1], (unsigned long long)r->x[2], (unsigned long long)r->pc);
+  log_break_callers(c, r);
   /* libnx's fatal paths pass the failing Result as a 4-byte info block. */
   uint32_t result = 0;
   if (r->x[2] == sizeof(result) && error_is_ok(vmm_read_block(c->vmm, r->x[1], &result, sizeof(result))))

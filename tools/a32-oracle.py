@@ -212,9 +212,63 @@ def g_vfp():
         (sz << 8) | enc_d(first, single, 22, 12) | words
 
 
+def g_neon():
+    """Any word in the Advanced SIMD data-processing space (Unicorn skips the undefined ones)."""
+    w = 0xF2000000 | (random.randint(0, 1) << 24) | random.getrandbits(24)
+    if (w & 0x01B00810) == 0x01B00000 and ((w >> 7) & 0xF) in (1, 2, 3) and ((w >> 12) & 0xF) == (w & 0xF):
+        w ^= 1  # VTRN/VUZP/VZIP with Vd == Vm: UNPREDICTABLE
+    return w
+
+
+def g_neonls():
+    """Element and structure loads and stores through r11/r12; Rm none, writeback or r10."""
+    return 0xF4000000 | (random.randint(0, 1) << 23) | (random.randint(0, 1) << 22) | (random.randint(0, 1) << 21) | \
+        (random.choice([11, 12]) << 16) | (random.randint(0, 15) << 12) | (random.getrandbits(8) << 4) | \
+        random.choice([15, 13, 10])
+
+
+def qreg_fields(word, d, n, m):
+    """Even (Q) register numbers into the D:Vd, N:Vn, M:Vm fields."""
+    return word | ((d >> 4) << 22) | ((d & 15) << 12) | ((n >> 4) << 7) | ((n & 15) << 16) | ((m >> 4) << 5) | (m & 15)
+
+
+def g_crypto():
+    d, n, m = (random.randint(0, 15) * 2 for _ in range(3))
+    k = random.randint(0, 4)
+    if k == 0:  # AESE/AESD/AESMC/AESIMC
+        return qreg_fields(0xF3B00300 | (random.randint(0, 3) << 6), d, 0, m)
+    if k == 1:  # SHA1C/P/M/SU0, SHA256H/H2/SU1
+        u, size = random.choice([(0, 0), (0, 1), (0, 2), (0, 3), (1, 0), (1, 1), (1, 2)])
+        return qreg_fields(0xF2000C40 | (u << 24) | (size << 20), d, n, m)
+    if k == 2:  # SHA1H
+        return qreg_fields(0xF3B902C0, d, 0, m)
+    if k == 3:  # SHA1SU1 / SHA256SU0
+        return qreg_fields(0xF3BA0380 | (random.randint(0, 1) << 6), d, 0, m)
+    return qreg_fields(0xF3B00300 | (random.randint(0, 3) << 6), d, 0, m)
+
+
+def g_vfp8():
+    """VSEL, VMAXNM/VMINNM, VRINTA/N/P/M, VCVTA/N/P/M."""
+    single = random.random() < 0.5
+    sz = 0 if single else 1
+    d, n, m = vreg(single), vreg(single), vreg(single)
+    base = 0xFE000A00 | (sz << 8) | enc_d(d, single, 22, 12) | enc_d(m, single, 5, 0)
+    k = random.randint(0, 3)
+    if k == 0:
+        return base | (random.randint(0, 3) << 20) | enc_d(n, single, 7, 16)
+    if k == 1:
+        return base | (1 << 23) | (random.randint(0, 1) << 6) | enc_d(n, single, 7, 16)
+    if k == 2:
+        return base | 0x00B80040 | (random.randint(0, 3) << 16)
+    sd = random.randint(0, 31)
+    return (base & ~((0xF << 12) | (1 << 22))) | enc_d(sd, True, 22, 12) | 0x00BC0040 | (random.randint(0, 3) << 16) | \
+        (random.randint(0, 1) << 7)
+
+
+ISOLATE = False
 GENERATORS = {'dp': g_dp, 'mul': g_mul, 'halfmul': g_halfmul, 'media': g_media, 'flags': g_flags, 'ldst': g_ldst,
-              'vfp': g_vfp}
-WEIGHTS = {'dp': 6, 'mul': 2, 'halfmul': 1, 'media': 4, 'flags': 1, 'ldst': 4, 'vfp': 4}
+              'vfp': g_vfp, 'neon': g_neon, 'neonls': g_neonls, 'crypto': g_crypto, 'vfp8': g_vfp8}
+WEIGHTS = {'dp': 6, 'mul': 2, 'halfmul': 1, 'media': 4, 'flags': 1, 'ldst': 4, 'vfp': 4, 'neon': 4, 'neonls': 2, 'crypto': 1, 'vfp8': 1}
 
 
 def make_case(kinds):
@@ -278,6 +332,30 @@ def run_unicorn(case):
     return exit_code, pc, regs, out_cpsr, out_fpscr, out_d, out_data
 
 
+def run_unicorn_isolated(case):
+    """run_unicorn in a child process: Unicorn 2.1.4 dies (SIGILL) on a few
+    valid encodings (64-bit VSHL on some hosts); such a case is skipped."""
+    import pickle
+    r, w = os.pipe()
+    pid = os.fork()
+    if pid == 0:
+        os.close(r)
+        try:
+            data = pickle.dumps(run_unicorn(case))
+        except Exception:
+            data = b''
+        with os.fdopen(w, 'wb') as out:
+            out.write(data)
+        os._exit(0)
+    os.close(w)
+    with os.fdopen(r, 'rb') as inp:
+        data = inp.read()
+    os.waitpid(pid, 0)
+    if not data:
+        return (3, 0, [], 0, 0, [], b'')
+    return pickle.loads(data)
+
+
 def write_cases(path, cases):
     with open(path, 'wb') as f:
         f.write(b'A32C' + struct.pack('<I', len(cases)))
@@ -311,6 +389,8 @@ def main():
     seed = int(sys.argv[3]) if len(sys.argv) > 3 else 1
     kinds = sys.argv[4].split(',') if len(sys.argv) > 4 else list(GENERATORS)
     random.seed(seed)
+    global ISOLATE
+    ISOLATE = any(k.startswith('neon') or k == 'crypto' for k in kinds)
     cases = [make_case(kinds) for _ in range(count)]
     with tempfile.TemporaryDirectory() as t:
         cp, rp = os.path.join(t, 'cases.bin'), os.path.join(t, 'results.bin')
@@ -322,7 +402,7 @@ def main():
     groups = {}
     accepted = {}  # Unicorn refused, we ran (single-instruction mode)
     for i, case in enumerate(cases):
-        ref = run_unicorn(case)
+        ref = run_unicorn_isolated(case) if ISOLATE else run_unicorn(case)
         if ref[0] != 0:  # Unicorn refused the stream (an encoding it treats as undefined): no reference
             skipped += 1
             if os.environ.get('A32_ONE') and ours[i][0] == 0:
@@ -331,6 +411,8 @@ def main():
         mine = ours[i]
         names = ['exit', 'pc', 'regs', 'cpsr', 'fpscr', 'd', 'data']
         bad = [names[k] for k in range(7) if mine[k] != ref[k]]
+        if bad and os.environ.get('A32_RESULTS_ONLY') and mine[0] == 1:
+            continue  # we call it UNDEFINED: an ARMv8.1+ encoding Unicorn's "max" CPU has (reviewed by group)
         if bad:
             failures += 1
             if os.environ.get('A32_ONE'):

@@ -64,10 +64,14 @@
 #define ADDRESS_SPACE_36_TLS_IO_SIZE ((uint64_t)0x80000000)  /* 2GB */
 
 /* The 32-bit layouts (NPDM_ADDRESS_SPACE_32_BIT and _32_BIT_NO_RESERVED,
- * AArch32 titles): the same order inside [2MB, 4GB). "No reserved" drops
- * the 1GB alias region and gives the heap that room. (The layout is
- * ready; running AArch32 code still needs an A32/T32 CPU backend.) */
+ * AArch32 titles), as Horizon carves them: the low gigabyte [2MB, 1GB) is
+ * the code region - the modules, then the stack region in what is left of
+ * it (a 32-bit SDK places thread stacks there by probing random addresses
+ * with svcQueryMemory, without asking svcGetInfo), then the TLS pages at
+ * its top. Alias and heap follow from 1GB. "No reserved" drops the 1GB
+ * alias region and gives the heap that room. */
 #define ADDRESS_SPACE_32_START ((uint64_t)0x200000)          /* 2MB */
+#define ADDRESS_SPACE_32_CODE_END ((uint64_t)0x40000000)    /* 1GB */
 #define ADDRESS_SPACE_32_END ((uint64_t)1 << 32)            /* 4GB */
 #define ADDRESS_SPACE_32_ALIAS_SIZE ((uint64_t)0x40000000)   /* 1GB */
 #define ADDRESS_SPACE_32_HEAP_SIZE ((uint64_t)0x40000000)    /* 1GB */
