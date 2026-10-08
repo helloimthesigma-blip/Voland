@@ -2519,7 +2519,8 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - **GPU ring 16 MiB** (was 4): a fight frame streams ~24 MB, and the producer stalled whenever the GPU worker paused.
   - Fight: 3.4 → 7.1 fps across these changes, 804 → 1693 slices/s (serial, pacing off). What remains: CPU attribute fetch (~31%) and stream volume (168 MiB/s).
   - **Vertex pulling (stream version 5,** docs/GPU_COMMAND_STREAM.md): vertex-stage records carry each stream's raw bytes over the record's vertex ids, and the WGSL vertex program decodes its inputs (`vfetch`). The CPU no longer fetches or decodes attributes. `fetch_attribute` and its window refills, a third of the CPU worker, are gone from the profile. The decoder matches `raster3d_decode_attribute` on 254 format cases on Metal (`vertex-pull-vectors.mjs`).
-  - Now the GPU worker is the limit in a fight: `writeBuffer` and `writeTexture` take ~73% of it, and the producer waits on the ring.
+  - **The executor flushed before every texture write** ("earlier draws read the old contents"): a submit and both staging uploads per upload, many times a frame. It now tracks the textures the unsubmitted commands touch (attachments, sampled textures, copies, clears, mip builds) and flushes only when the written texture is one of them. Staging uploads pass offset and size instead of copying with `slice`. The GPU worker went from ~78% busy (`writeBuffer` 53%, `writeTexture` 20%) to 13%.
+  - Fight: 8.0 → 11.0 fps (serial, pacing off). The CPU worker is now mostly guest code (JIT 40%) and compute (14%).
 
 ### Changelog v3.73 → v3.74 (summary)
 

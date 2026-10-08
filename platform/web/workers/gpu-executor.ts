@@ -254,6 +254,9 @@ export class GpuExecutor {
   private set = 0;
   private get vertexBuffer(): GPUBuffer { return this.vertexBuffers[this.set] as GPUBuffer; }
   private get dataBuffer(): GPUBuffer { return this.dataBuffers[this.set] as GPUBuffer; }
+  /** Textures the unsubmitted commands read or write: a texture write must
+   * flush them first (writes run on the queue, before the pending encoder). */
+  private readonly touched = new Set<GPUTexture>();
   private readonly vertexStaging = new Uint8Array(VERTEX_BUFFER_BYTES);
   private readonly dataStaging = new Uint8Array(DATA_BUFFER_BYTES);
   private readonly linearSampler: GPUSampler;
@@ -305,8 +308,8 @@ export class GpuExecutor {
     this.endPass();
     if (!this.encoder) return;
     const t0 = performance.now();
-    if (this.vertexUsed) this.device.queue.writeBuffer(this.vertexBuffer, 0, this.vertexStaging.slice(0, this.vertexUsed));
-    if (this.dataUsed) this.device.queue.writeBuffer(this.dataBuffer, 0, this.dataStaging.slice(0, this.dataUsed));
+    if (this.vertexUsed) this.device.queue.writeBuffer(this.vertexBuffer, 0, this.vertexStaging, 0, this.vertexUsed);
+    if (this.dataUsed) this.device.queue.writeBuffer(this.dataBuffer, 0, this.dataStaging, 0, this.dataUsed);
     const t1 = performance.now();
     const cb = this.encoder.finish();
     const t2 = performance.now();
@@ -318,6 +321,7 @@ export class GpuExecutor {
     if (this.vertexUsed || this.dataUsed) this.set = (this.set + 1) % BUFFER_SETS;
     this.vertexUsed = 0;
     this.dataUsed = 0;
+    this.touched.clear();
     for (const t of this.pendingDestroy) t.destroy();
     this.pendingDestroy = [];
   }
@@ -341,6 +345,7 @@ export class GpuExecutor {
     this.pendingColor.delete(id);
     this.pendingDepth.delete(id);
     if (!t || !t.renderView) return;
+    this.touched.add(t.texture);
     if (color) {
       this.beginPass(`${id}|0`, [{ view: t.renderView, loadOp: "clear", storeOp: "store", clearValue: color }], null,
         [t.width, t.height]);
@@ -377,6 +382,7 @@ export class GpuExecutor {
    * passes, before later ones). */
   private buildMips(t: Tex): void {
     this.mipsStale.delete(t.texture);
+    this.touched.add(t.texture);
     this.endPass();
     const entries: GPUBindGroupLayoutEntry[] = [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
@@ -446,7 +452,7 @@ export class GpuExecutor {
     const t = this.textures.get(w.id);
     if (!t || t.fallback || isDepthFormat(t.format)) return;
     this.materialize(w.id);
-    this.flush(); /* earlier draws read the old contents */
+    if (this.touched.has(t.texture)) this.flush(); /* earlier commands use the old contents */
     this.device.queue.writeTexture(
       { texture: t.texture, origin: { x: w.x, y: w.y, z: w.layer } },
       payload.subarray(TEXTURE_WRITE_BYTES, TEXTURE_WRITE_BYTES + w.dataBytes),
@@ -561,6 +567,7 @@ export class GpuExecutor {
     const colors: (GPURenderPassColorAttachment | null)[] = colorIds.map((id) => {
       const t = id ? this.textures.get(id) : undefined;
       if (!t || !t.renderView) return null;
+      this.touched.add(t.texture);
       size = [t.width, t.height];
       const clear = this.pendingColor.get(id);
       this.pendingColor.delete(id);
@@ -568,6 +575,7 @@ export class GpuExecutor {
         : { view: t.renderView, loadOp: "load", storeOp: "store" };
     });
     const dt = depthId ? this.textures.get(depthId) : undefined;
+    if (dt) this.touched.add(dt.texture);
     const pd = this.pendingDepth.get(depthId);
     this.pendingDepth.delete(depthId);
     const depth = dt && dt.renderView ? this.depthAttachment(dt, pd?.depth ?? null, pd?.stencil ?? null) : null;
@@ -769,6 +777,7 @@ export class GpuExecutor {
   /** A copy of attachment `t` for a draw that also samples it. */
   private shadowOf(id: number, t: Tex): Tex {
     this.materialize(id);
+    this.touched.add(t.texture);
     const key = `${t.format}:${t.width}x${t.height}x${t.layers}`;
     let s = this.shadows.get(key);
     if (!s) {
@@ -839,6 +848,7 @@ export class GpuExecutor {
       }
       if (this.mipsStale.has(t.texture)) this.buildMips(t);
       if (!attached.has(id)) this.materialize(id);
+      this.touched.add(t.texture);
       textures.push(attached.has(id) ? this.shadowOf(id, t) : t);
     }
     const colorFormats = colorIds.map((id) => (id ? this.textures.get(id)?.format ?? null : null));
@@ -991,6 +1001,8 @@ export class GpuExecutor {
       return;
     }
     this.materialize(c.srcId);
+    this.touched.add(src.texture);
+    this.touched.add(dst.texture);
     const [sx, sy, sw, sh] = [c.srcRect[0] ?? 0, c.srcRect[1] ?? 0, c.srcRect[2] ?? 0, c.srcRect[3] ?? 0];
     const [dx, dy, dw, dh] = [c.dstRect[0] ?? 0, c.dstRect[1] ?? 0, c.dstRect[2] ?? 0, c.dstRect[3] ?? 0];
     if (c.srcId !== c.dstId && src.format === dst.format && sw === dw && sh === dh && sw > 0 && sh > 0 && sx >= 0 &&
