@@ -210,13 +210,45 @@ static uint32_t layer_count(const Tex_Header *h) {
   case TEX_TYPE_2D_ARRAY:
   case TEX_TYPE_CUBE:
   case TEX_TYPE_CUBE_ARRAY:
+  case TEX_TYPE_3D: /* slices decode like layers; sampling filters between them */
     return h->depth;
   default:
     return 1;
   }
 }
 
+/* 3D block-linear: blocks of one GOB across, 2^block_height GOBs down and
+ * 2^block_depth slices deep, in x, then y, then z order; inside a block
+ * the GOBs go down y first, then through the slices. */
+static uint64_t bl3d_offset(uint32_t xb, uint32_t y, uint32_t z, uint32_t width_bytes, uint32_t height,
+                            uint32_t bh_log2, uint32_t bd_log2) {
+  const uint32_t gobs_x = (width_bytes + BLOCK_LINEAR_GOB_WIDTH - 1u) / BLOCK_LINEAR_GOB_WIDTH;
+  const uint32_t bh = 1u << bh_log2, bd = 1u << bd_log2, block_rows = BLOCK_LINEAR_GOB_HEIGHT * bh;
+  const uint32_t blocks_y = (height + block_rows - 1u) / block_rows;
+  const uint64_t block_bytes = (uint64_t)BLOCK_LINEAR_GOB_BYTES * bh * bd;
+  const uint64_t block = xb / BLOCK_LINEAR_GOB_WIDTH + (uint64_t)gobs_x * (y / block_rows + (uint64_t)blocks_y * (z / bd));
+  const uint32_t gob = (z % bd) * bh + (y % block_rows) / BLOCK_LINEAR_GOB_HEIGHT;
+  return block * block_bytes + (uint64_t)gob * BLOCK_LINEAR_GOB_BYTES +
+         block_linear_offset(xb % BLOCK_LINEAR_GOB_WIDTH, y % BLOCK_LINEAR_GOB_HEIGHT, BLOCK_LINEAR_GOB_WIDTH, 0);
+}
+
+static uint64_t bl3d_bytes(uint32_t width_bytes, uint32_t height, uint32_t depth, uint32_t bh_log2, uint32_t bd_log2) {
+  const uint32_t gobs_x = (width_bytes + BLOCK_LINEAR_GOB_WIDTH - 1u) / BLOCK_LINEAR_GOB_WIDTH;
+  const uint32_t bh = 1u << bh_log2, bd = 1u << bd_log2, block_rows = BLOCK_LINEAR_GOB_HEIGHT * bh;
+  const uint32_t blocks_y = (height + block_rows - 1u) / block_rows, blocks_z = (depth + bd - 1u) / bd;
+  return (uint64_t)gobs_x * blocks_y * blocks_z * BLOCK_LINEAR_GOB_BYTES * bh * bd;
+}
+
+#define BL3D_RUN_BYTES 16u /* contiguous bytes of a GOB row */
+static bool is_bl3d(const Tex_Header *h) { return h->type == TEX_TYPE_3D && h->layout == TEX_LAYOUT_BLOCK_LINEAR; }
+
 uint64_t tex_read_bytes(const Tex_Header *h) {
+  if (is_bl3d(h)) {
+    const Format_Info *f = format_info(h->format);
+    if (!f) return 0;
+    const uint32_t cols = (h->width + f->bw - 1u) / f->bw, rows = (h->height + f->bh - 1u) / f->bh;
+    return bl3d_bytes(cols * f->bytes, rows, h->depth, h->block_height_log2, h->block_depth_log2);
+  }
   const uint32_t layers = layer_count(h);
   return tex_layer_stride(h) * (layers - 1u) + tex_level0_bytes(h);
 }
@@ -370,6 +402,15 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
   for (uint32_t layer = 0; layer < layers; layer++) {
     const uint8_t *src = raw + stride * layer;
     uint8_t *to = linear + linear_layer * layer;
+    if (is_bl3d(h)) { /* slice `layer` of a 3D block-linear texture, 16 bytes (a GOB run) at a time */
+      for (uint32_t y = 0; y < rows; y++)
+        for (uint32_t xb = 0; xb < row_bytes; xb += BL3D_RUN_BYTES) {
+          const uint32_t n = row_bytes - xb < BL3D_RUN_BYTES ? row_bytes - xb : BL3D_RUN_BYTES;
+          memcpy(to + (uint64_t)y * row_bytes + xb,
+                 raw + bl3d_offset(xb, y, layer, row_bytes, rows, h->block_height_log2, h->block_depth_log2), n);
+        }
+      continue;
+    }
     switch (h->layout) {
     case TEX_LAYOUT_BLOCK_LINEAR:
       block_linear_to_pitch(src, to, row_bytes, row_bytes, rows, h->block_height_log2);
@@ -751,8 +792,39 @@ static int32_t texel_coord(float f) {
   return (int32_t)f;
 }
 
+static void tex_sample_layer(const Tex_Image *img, const Tex_Sampler *s, const float coords[3], float layer, float dref,
+                             bool shadow, const int32_t offset[3], uint32_t out[4]);
+
+/* 3D textures: the two slices around r, each sampled in 2D, blended
+ * (linear), or the nearest slice. */
 void tex_sample(const Tex_Image *img, const Tex_Sampler *s, const float coords[3], float layer, float dref,
                 bool shadow, const int32_t offset[3], uint32_t out[4]) {
+  if (!img || !img->valid || img->header.type != TEX_TYPE_3D) {
+    tex_sample_layer(img, s, coords, layer, dref, shadow, offset, out);
+    return;
+  }
+  const float flat[3] = {coords[0], coords[1], 0.0f};
+  const int32_t slices = (int32_t)img->layers;
+  const uint32_t wrap = s ? s->wrap[2] : WRAP_CLAMP_TO_EDGE;
+  const float w = img->header.normalized ? coords[2] * (float)slices : coords[2];
+  const bool linear = s && s->mag_filter == 2u && !is_integer_type(img->header.data_type[0]);
+  if (!linear) {
+    const int32_t z = wrap_index(texel_coord(floorf(w)), slices, wrap);
+    tex_sample_layer(img, s, flat, (float)(z < 0 ? 0 : z), dref, shadow, offset, out);
+    return;
+  }
+  const float z = w - 0.5f, z0f = floorf(z), az = z - z0f;
+  int32_t z0 = wrap_index(texel_coord(z0f), slices, wrap), z1 = wrap_index(texel_coord(z0f) + 1, slices, wrap);
+  if (z0 < 0) z0 = 0; /* border slices: the nearest one */
+  if (z1 < 0) z1 = slices - 1;
+  uint32_t a[4], b[4];
+  tex_sample_layer(img, s, flat, (float)z0, dref, shadow, offset, a);
+  tex_sample_layer(img, s, flat, (float)z1, dref, shadow, offset, b);
+  for (uint32_t c = 0; c < 4u; c++) out[c] = u32f(f32(a[c]) + (f32(b[c]) - f32(a[c])) * az);
+}
+
+static void tex_sample_layer(const Tex_Image *img, const Tex_Sampler *s, const float coords[3], float layer, float dref,
+                             bool shadow, const int32_t offset[3], uint32_t out[4]) {
   if (!img || !img->valid) {
     out[0] = out[1] = out[2] = 0;
     out[3] = u32f(1.0f);

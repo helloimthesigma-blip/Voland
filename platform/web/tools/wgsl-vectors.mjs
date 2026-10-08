@@ -19,6 +19,7 @@ const CONSTANT_WORDS = CBUF_TABLE + 2 * 18;
 const TEXP_SCALE = 1;
 const TEXP_LINEAR = 2;
 const TEXP_MIN_LINEAR = 16;
+const TEXP_3D = 32;
 const TEXP_LOD_BIAS = 5; /* f32 x 3: bias, min LOD, max LOD */
 const KILLED_MARK = 0xdeadbeef;
 
@@ -50,7 +51,7 @@ const results = await page.evaluate(
       const data = new Uint32Array(k.CONSTANT_WORDS + v.cbuf.length);
       data[0] = new Uint32Array(new Float32Array([1]).buffer)[0];
       const tp = k.DRAW_TEXTURE_PARAMS;
-      data[tp + 0] = k.TEXP_SCALE | (v.texture.linear ? k.TEXP_LINEAR : 0);
+      data[tp + 0] = k.TEXP_SCALE | (v.texture.linear ? k.TEXP_LINEAR : 0) | (v.texture.is3d ? k.TEXP_3D : 0);
       data[tp + 1] = v.texture.wrap;
       data[tp + 2] = 0x5432;
       data[tp + 3] = v.texture.levels ?? 1;
@@ -64,7 +65,7 @@ const results = await page.evaluate(
       const buffer = device.createBuffer({ size: data.byteLength, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
       device.queue.writeBuffer(buffer, 0, data);
       const tex = device.createTexture({
-        size: [v.texture.width, v.texture.height, 1],
+        size: [v.texture.width, v.texture.height, v.texture.layers ?? 1],
         format: "rgba8unorm",
         usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
         mipLevelCount: v.texture.levels ?? 1,
@@ -75,8 +76,8 @@ const results = await page.evaluate(
       device.queue.writeTexture(
         { texture: tex },
         new Uint8Array(v.texture.rgba8),
-        { bytesPerRow: v.texture.width * 4 },
-        [v.texture.width, v.texture.height, 1],
+        { bytesPerRow: v.texture.width * 4, rowsPerImage: v.texture.height },
+        [v.texture.width, v.texture.height, v.texture.layers ?? 1],
       );
       const target = device.createTexture({
         size: [1, 1],
@@ -146,7 +147,7 @@ const results = await page.evaluate(
     }
     return out;
   },
-  { vectors, k: { CONSTANT_WORDS, CBUF_TABLE, DRAW_TEXTURE_PARAMS, TEXP_SCALE, TEXP_LINEAR, TEXP_MIN_LINEAR, TEXP_LOD_BIAS, KILLED_MARK } },
+  { vectors, k: { CONSTANT_WORDS, CBUF_TABLE, DRAW_TEXTURE_PARAMS, TEXP_SCALE, TEXP_LINEAR, TEXP_MIN_LINEAR, TEXP_3D, TEXP_LOD_BIAS, KILLED_MARK } },
 );
 await browser.close();
 

@@ -140,6 +140,10 @@ static uint8_t g_texels[TEX_W * TEX_H * 4u] = {
     255, 0, 0, 255, 0, 255, 0, 128, 0, 0, 255, 64, 255, 255, 255, 0,
 };
 static Tex_Image g_image;
+/* The 3D vector's texture: 2x2 texels in TEX_DEPTH slices, each slice its own colours. */
+#define TEX_DEPTH 4u
+static uint8_t g_texels3d[TEX_W * TEX_H * 4u * TEX_DEPTH];
+static bool g_vector_3d;
 static Tex_Sampler g_sampler;
 static uint32_t g_varying[2][4];
 static float g_inv_w = 0.5f;
@@ -240,8 +244,11 @@ static void finish(const Builder *b, const char *name, bool float_compare) {
   fprintf(f, "],\"varyings\":[");
   for (uint32_t v = 0; v < desc.varying_count; v++)
     fprintf(f, "%s[%u,%u,%u,%u]", v ? "," : "", g_varying[v][0], g_varying[v][1], g_varying[v][2], g_varying[v][3]);
-  fprintf(f, "],\"texture\":{\"width\":%u,\"height\":%u,\"rgba8\":[", TEX_W, TEX_H);
-  for (uint32_t i = 0; i < sizeof(g_texels); i++) fprintf(f, "%s%u", i ? "," : "", g_texels[i]);
+  fprintf(f, "],\"texture\":{\"width\":%u,\"height\":%u,\"layers\":%u,\"is3d\":%s,\"rgba8\":[", TEX_W, TEX_H,
+          g_vector_3d ? TEX_DEPTH : 1u, g_vector_3d ? "true" : "false");
+  const uint8_t *texels = g_vector_3d ? g_texels3d : g_texels;
+  const uint32_t texel_bytes = g_vector_3d ? (uint32_t)sizeof(g_texels3d) : (uint32_t)sizeof(g_texels);
+  for (uint32_t i = 0; i < texel_bytes; i++) fprintf(f, "%s%u", i ? "," : "", texels[i]);
   fprintf(f, "],\"wrap\":%u,\"linear\":%s,\"textures\":%u", 0x222u, "true", desc.texture_count);
   if (g_mip_vector) {
     uint32_t mip1[4];
@@ -265,6 +272,29 @@ static void put_varying(uint32_t v, float x, float y, float z, float w) {
   g_varying[v][1] = (uint32_t)f_bits(y);
   g_varying[v][2] = (uint32_t)f_bits(z);
   g_varying[v][3] = (uint32_t)f_bits(w);
+}
+
+/* TEXS 3D (target 10): r between two slices blends them (texture.c's
+ * tex_sample 3D path and wgsl.c's t_sample on the slices-as-layers copy). */
+static void vector_texture_3d(void) {
+  for (uint32_t i = 0; i < sizeof(g_texels3d); i++) g_texels3d[i] = (uint8_t)(i * 37u + 11u);
+  g_image.header.type = TEX_TYPE_3D;
+  g_image.layers = TEX_DEPTH;
+  g_image.texels = g_texels3d;
+  g_vector_3d = true;
+  Builder b;
+  begin(&b);
+  put_varying(0, 0.3f, 0.6f, 0.45f, 0.0f); /* r = 0.45: slices 1 and 2, mostly 1 */
+  emit(&b, IPA(4, SM_ATTR_GENERIC, 0, (uint32_t)RZ));
+  emit(&b, IPA(5, SM_ATTR_GENERIC + 4u, 0, (uint32_t)RZ));
+  emit(&b, IPA(6, SM_ATTR_GENERIC + 8u, 0, (uint32_t)RZ));
+  emit(&b, TEXS(0, 2, 4, 6, 10, 4, 0)); /* 3D: x, y in r4, r5; z in r6 */
+  emit(&b, EXIT());
+  finish(&b, "texture_3d", true);
+  g_vector_3d = false;
+  g_image.header.type = TEX_TYPE_2D;
+  g_image.layers = 1;
+  g_image.texels = g_texels;
 }
 
 static void vector_float(void) {
@@ -563,6 +593,7 @@ int main(int argc, char **argv) {
   vector_branches();
   vector_select_texture();
   vector_texture_half();
+  vector_texture_3d();
   vector_texture_hw();
   vector_texture_lod();
   vector_shfl();

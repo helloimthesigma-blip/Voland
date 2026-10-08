@@ -592,7 +592,7 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
           "}\n",
           i, i, pw + WGSL_TEXP_LOD_BIAS);
   out_add(o,
-          "fn t%u_sample(c: vec3<f32>, layer: f32, dref: f32, shadow: bool, off: vec2<i32>, lod: f32) -> vec4<u32> {\n"
+          "fn t%u_sample2(c: vec3<f32>, layer: f32, dref: f32, shadow: bool, off: vec2<i32>, lod: f32) -> vec4<u32> {\n"
           "  let fl = D[%uu]; let sw = D[%uu]; let cf = D[%uu];\n"
           "  let q0 = t%u_coords(c, layer); let l = u32(q0.z);\n"
           "  let nl = textureNumLevels(T%u); var lf = 0.0; var lv = 0u; var lin = (fl & %uu) != 0u;\n"
@@ -624,6 +624,27 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
           i, pw + WGSL_TEXP_FLAGS, pw + WGSL_TEXP_SWIZZLE, pw + WGSL_TEXP_COMPARE, i, i, WGSL_TEXP_LINEAR,
           pw + WGSL_TEXP_MIN_LOD, pw + WGSL_TEXP_MAX_LOD, WGSL_TEXP_MIN_LINEAR, i, i, WGSL_TEXP_DEPTH_COMPARE, hw_tap,
           filterable ? "true" : "false", i, i, i, i, i, i);
+  /* 3D textures arrive as layers (their slices): blend the two around r
+   * (texture.c tex_sample's arithmetic), or take the nearest. */
+  out_add(o,
+          "fn t%u_sample(c: vec3<f32>, layer: f32, dref: f32, shadow: bool, off: vec2<i32>, lod: f32) -> vec4<u32> {\n"
+          "  let fl = D[%uu];\n"
+          "  if ((fl & %uu) == 0u) { return t%u_sample2(c, layer, dref, shadow, off, lod); }\n"
+          "  let n = i32(textureNumLayers(T%u)); let wm = (D[%uu] >> 8u) & 15u;\n"
+          "  let w = select(c.z, c.z * f32(n), (fl & %uu) != 0u);\n"
+          "  if ((fl & %uu) == 0u) {\n"
+          "    let z = max(wrapi(i32(clamp(floor(w), -1073741824.0, 1073741824.0)), n, wm), 0);\n"
+          "    return t%u_sample2(vec3<f32>(c.xy, 0.0), f32(z), dref, shadow, off, lod);\n"
+          "  }\n"
+          "  let z = w - 0.5; let z0f = floor(z); let az = z - z0f;\n"
+          "  let zi = i32(clamp(z0f, -1073741824.0, 1073741824.0));\n"
+          "  var z0 = wrapi(zi, n, wm); var z1 = wrapi(zi + 1, n, wm);\n"
+          "  if (z0 < 0) { z0 = 0; } if (z1 < 0) { z1 = n - 1; }\n"
+          "  let a = bitcast<vec4<f32>>(t%u_sample2(vec3<f32>(c.xy, 0.0), f32(z0), dref, shadow, off, lod));\n"
+          "  let b = bitcast<vec4<f32>>(t%u_sample2(vec3<f32>(c.xy, 0.0), f32(z1), dref, shadow, off, lod));\n"
+          "  return bitcast<vec4<u32>>(a + (b - a) * az);\n"
+          "}\n",
+          i, pw + WGSL_TEXP_FLAGS, WGSL_TEXP_3D, i, i, pw + WGSL_TEXP_WRAP, WGSL_TEXP_SCALE, WGSL_TEXP_LINEAR, i, i, i);
   out_add(o,
           "fn t%u_gather(c: vec3<f32>, layer: f32, comp: u32, dref: f32, shadow: bool, off: vec2<i32>) -> vec4<u32> {\n"
           "  let fl = D[%uu]; let sw = D[%uu]; let cf = D[%uu];\n"

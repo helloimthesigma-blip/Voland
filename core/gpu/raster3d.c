@@ -3454,7 +3454,8 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
       const bool cube = h.type == TEX_TYPE_CUBE || h.type == TEX_TYPE_CUBE_ARRAY;
       p[WGSL_TEXP_FLAGS] = ((h.normalized || cube) ? WGSL_TEXP_SCALE : 0u) |
                            (s.mag_filter == 2u && sample_type == WGSL_SAMPLE_FLOAT ? WGSL_TEXP_LINEAR : 0u) |
-                           (cube ? WGSL_TEXP_CUBE : 0u) | (s.depth_compare ? WGSL_TEXP_DEPTH_COMPARE : 0u);
+                           (cube ? WGSL_TEXP_CUBE : 0u) | (s.depth_compare ? WGSL_TEXP_DEPTH_COMPARE : 0u) |
+                           (h.type == TEX_TYPE_3D ? WGSL_TEXP_3D : 0u);
       p[WGSL_TEXP_WRAP] = (uint32_t)s.wrap[0] | ((uint32_t)s.wrap[1] << 4) | ((uint32_t)s.wrap[2] << 8);
       p[WGSL_TEXP_SWIZZLE] = (uint32_t)h.swizzle[0] | ((uint32_t)h.swizzle[1] << 4) | ((uint32_t)h.swizzle[2] << 8) |
                              ((uint32_t)h.swizzle[3] << 12);

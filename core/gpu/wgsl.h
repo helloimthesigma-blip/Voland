@@ -98,6 +98,7 @@
 #define WGSL_TEXP_CUBE 4u    /* cube map: direction -> face layer */
 #define WGSL_TEXP_DEPTH_COMPARE 8u /* the sampler compares (shadow instructions) */
 #define WGSL_TEXP_MIN_LINEAR 16u   /* bilinear below level 0 (minified, with a mip chain) */
+#define WGSL_TEXP_3D 32u           /* a 3D texture: its slices are layers, r picks and blends them */
 
 typedef enum Wgsl_Sample_Type {
   WGSL_SAMPLE_FLOAT,

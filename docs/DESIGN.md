@@ -2494,6 +2494,11 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - **Interactions:** written ranges re-validate cached textures and GPU surfaces (`raster3d_sync_range`), and software surfaces are written back first.
   - **Why:** SSBU issues ~80 compute launches per frame. Ignoring them left the buffers its final composite reads as zeros, so fights rendered black natively.
   - **Limitations:** in GPU mode the programs still run on the CPU and cannot see GPU-only render targets. WGSL compute is future work.
+- **Textures: 3D textures.** They were decoded as 2D, first slice only, so a 3D colour-grading lookup indexed by (r, g, b) always read its b = 0 slice. Every 3D scene in SSBU lost its blue, while 2D menus were fine.
+  - **Decode:** every slice now decodes. 3D block-linear addresses come from blocks of one GOB across, 2^block_height GOBs down and 2^block_depth slices deep, in x, y, z order, with GOBs going down y first, then through the slices.
+  - **Sampling:** `tex_sample` blends the two slices around r (nearest when not filtering), with the sampler's r wrap.
+  - **GPU:** the slices upload as layers of the 2D-array texture, and WGSL's `t_sample` does the same blend when `WGSL_TEXP_3D` is set.
+  - **Verification:** the `texture_3d` vector matches the interpreter on WebGPU (Metal). The 3D block-linear layout is still to be confirmed against SSBU's own data.
 - **§13, indexed vertex-stage draws (stream version 4).** A GPU-vertex-stage record sends each distinct guest vertex once, plus a u32 triangle list with the provoking vertex first. The executor draws it with `drawIndexed`. Before, each triangle carried three full vertices: about 27 MB per frame of vertex inputs in an SSBU fight.
 - **Textures: BC6H (BPTC float, UF16/SF16)** decode from the Khronos Data Format Specification §20.2 (`bc6h_decode_block` in `gpu/bc7.c`). The 14 mode layouts are transcribed from its Table 122, and texels come out as RGBA16F. SSBU lights fighters with BC6H cube maps, which used to be texture misses. Unsigned output matches Pillow's decoder on 49152 random-block channels. Pillow's signed output disagrees on pixels containing negative or very large values, so the signed form follows the specification's text. Missing formats are now logged once per format.
 - **Maxwell shaders (SSBU fights):**
