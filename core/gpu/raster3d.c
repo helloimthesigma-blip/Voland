@@ -12,6 +12,7 @@
 #include "common/log.h"
 #include "gpu/block_linear.h"
 #include "gpu/gpu_channel.h"
+#include "gpu/gpu_mirror.h"
 #include "gpu/gpu_records.h"
 #include "gpu/gpu_stream.h"
 #include "gpu/wgsl.h"
@@ -663,6 +664,7 @@ void raster3d_sync_range(Raster3d *r, const Gpu_Memory *mem, uint64_t address, u
     /* GPU surfaces cannot be read back; written ones re-upload at their
      * next use. */
     if (!write) return;
+    gpu_mirror_cpu_wrote(address, bytes); /* mirrors take the guest's copy again */
     for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
       Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
       if (s->in_use && s->address < address + bytes && address < s->address + s->guest_bytes) s->stale = true;
@@ -2854,6 +2856,7 @@ static void assemble_end(Raster_State *rs, Vertex_Cache *cache, Assembler *as) {
 void raster3d_set_gpu(Raster3d *r, Gpu_Stream *stream) {
   if (!r->ready) return;
   r->gpu = stream;
+  gpu_mirror_reset(NULL); /* the old stream's buffers went with it */
   if (stream) log_info("[gpu] WebGPU renderer: draws stream to the GPU worker");
 }
 
@@ -3823,22 +3826,37 @@ static void gpu_emit_draw(Raster_State *rs) {
   if (!g->vertices && !(g->pull && g->index_count)) return;
   uint32_t samplers = 0;
   for (uint32_t i = 0; i < g->texture_count; i++) samplers += (g->desc.hw_sample_mask >> i) & 1u;
-  const uint32_t bindings = 1u + g->texture_count + samplers;
+  uint32_t bindings = 1u + g->texture_count + samplers;
   /* Pulled: each stream's bytes over the record's ids follow the data. */
   Pull_Stream streams[RASTER_STREAMS];
   uint8_t stream_of[WGSL_VSI_MAX];
   uint32_t stream_count = 0;
   uint64_t stream_at[RASTER_STREAMS], stream_bytes[RASTER_STREAMS], pull_bytes = 0;
+  /* Streams a compute dispatch wrote on the GPU are read from its mirror
+   * (one per draw), not copied: the guest copy is stale. */
+  uint32_t resident_id = 0, resident_offset[RASTER_STREAMS];
+  bool resident[RASTER_STREAMS];
   if (g->pull) {
     if (!pull_streams(rs->ctx, g, streams, stream_of, &stream_count)) stream_count = 0;
     for (uint32_t k = 0; k < stream_count; k++) {
-      stream_at[k] = pull_bytes;
       stream_bytes[k] = streams[k].instanced ? streams[k].end
                                              : (uint64_t)(g->id_hi - g->id_lo) * streams[k].stride + streams[k].end;
+      const uint64_t from = streams[k].address + (streams[k].instanced ? 0u : (uint64_t)g->id_lo * streams[k].stride);
+      uint32_t id = 0;
+      resident[k] = gpu_mirror_resident(from, stream_bytes[k], &id, &resident_offset[k]) &&
+                    (!resident_id || resident_id == id);
+      if (resident[k]) {
+        resident_id = id;
+        stream_at[k] = 0;
+        r->gpu_stats.resident_streams++;
+        continue;
+      }
+      stream_at[k] = pull_bytes;
       pull_bytes += (stream_bytes[k] + 7u) & ~(uint64_t)7u;
     }
     if (g->data_words & 1u) pull_bytes += 4u; /* the data stays a multiple of 8 bytes */
   }
+  if (resident_id) bindings++;
   const uint64_t data_bytes = (uint64_t)g->data_words * 4u + pull_bytes;
   const uint64_t bytes = sizeof(Gpu_Rec_Draw) + sizeof(Gpu_Rec_Binding) * bindings + data_bytes + g->vertex_bytes +
                          (uint64_t)g->index_count * sizeof(uint32_t);
@@ -3916,8 +3934,9 @@ static void gpu_emit_draw(Raster_State *rs) {
         at[0] = at[1] = at[2] = at[3] = 0;
         continue;
       }
-      at[0] = (uint32_t)((uint64_t)g->data_words * 4u + stream_at[k]);
-      at[1] = (streams[k].stride & WGSL_VSI_STRIDE_MASK) | WGSL_VSI_ACTIVE | (streams[k].instanced ? WGSL_VSI_INSTANCED : 0u);
+      at[0] = resident[k] ? resident_offset[k] : (uint32_t)((uint64_t)g->data_words * 4u + stream_at[k]);
+      at[1] = (streams[k].stride & WGSL_VSI_STRIDE_MASK) | WGSL_VSI_ACTIVE | (streams[k].instanced ? WGSL_VSI_INSTANCED : 0u) |
+              (resident[k] ? WGSL_VSI_RESIDENT : 0u);
       at[2] = rs->ctx->regs[REG_VERTEX_ATTRIB + g->input_vector[l]];
       at[3] = streams[k].instanced ? 0u : g->id_lo;
     }
@@ -3925,6 +3944,7 @@ static void gpu_emit_draw(Raster_State *rs) {
     uint8_t *blob = p + (size_t)g->data_words * 4u;
     memset(blob, 0, (size_t)pull_bytes);
     for (uint32_t k = 0; k < stream_count; k++) {
+      if (resident[k]) continue;
       const uint64_t from = streams[k].address + (streams[k].instanced ? 0u : (uint64_t)g->id_lo * streams[k].stride);
       if (!rs->ctx->mem->read(rs->ctx->mem->user, from, blob + stream_at[k], stream_bytes[k]))
         memset(blob + stream_at[k], 0, (size_t)stream_bytes[k]); /* unreadable: the inputs read zeros */
@@ -3935,6 +3955,11 @@ static void gpu_emit_draw(Raster_State *rs) {
     }
   }
   p += (size_t)data_bytes;
+  if (resident_id) {
+    const Gpu_Rec_Binding rb = {GPU_BIND_BUFFER, WGSL_VS_RESIDENT_BINDING, 0, resident_id};
+    memcpy(p, &rb, sizeof(rb));
+    p += sizeof(rb);
+  }
   for (uint32_t i = 0; i < g->texture_count; i++) {
     const bool hw = (g->desc.hw_sample_mask >> i) & 1u;
     const Gpu_Rec_Binding tb = {GPU_BIND_TEXTURE, WGSL_TEXTURE_BINDING_BASE + i, hw ? GPU_BIND_FILTERED : 0u,
@@ -4788,6 +4813,182 @@ static void compute_task(void *user, uint32_t index, uint32_t count) {
   t_compute_writes = NULL;
 }
 
+/* ---- compute on the GPU (stream version 6) ------------------------------
+ *
+ * A dispatch's global memory is its storage buffers: NVN puts each one's
+ * {address, size} at c[0][0x310 + 16 k]. They become windows the WGSL looks
+ * addresses up in (gpu/wgsl.h), bound as GPU mirrors of that memory
+ * (gpu/gpu_mirror.h). The first COMPUTE_PROFILE_RUNS dispatches of a
+ * program run here on the CPU and record which windows it writes; after
+ * that its dispatches go to the GPU, and the windows it writes become
+ * GPU-owned (draws pulling vertices from them bind the mirror). */
+#define COMPUTE_PROFILE_RUNS 2u
+#define COMPUTE_PROFILES 64u
+#define COMPUTE_SSBO_DESC 0x310u
+#define COMPUTE_SSBO_DESC_BYTES 16u
+#define COMPUTE_UNSIZED_BYTES (1u << 20) /* a storage buffer left unsized: up to this much of its mapping */
+
+typedef struct Compute_Profile {
+  uint64_t address;
+  uint32_t hash, bytes;
+  uint32_t cpu_runs;
+  uint32_t written;  /* bit per window the CPU runs wrote */
+  bool gpu_failed;   /* does not translate, or cannot be bound */
+} Compute_Profile;
+static Compute_Profile g_compute_profiles[COMPUTE_PROFILES];
+static uint32_t g_compute_profile_next;
+
+static Compute_Profile *compute_profile(const Sm_Program *program) {
+  for (uint32_t i = 0; i < COMPUTE_PROFILES; i++) {
+    Compute_Profile *p = &g_compute_profiles[i];
+    if (p->address == program->address && p->hash == program->hash && p->bytes == program->byte_size) return p;
+  }
+  Compute_Profile *p = &g_compute_profiles[g_compute_profile_next++ % COMPUTE_PROFILES];
+  memset(p, 0, sizeof(*p));
+  p->address = program->address;
+  p->hash = program->hash;
+  p->bytes = program->byte_size;
+  return p;
+}
+
+typedef struct Compute_Window {
+  uint64_t base;
+  uint32_t bytes;
+} Compute_Window;
+
+/* The descriptors come from guest memory, not the program's copy of
+ * c[0]: that holds only what the program reads (a buffer's address, often
+ * not its size). */
+static uint32_t compute_windows(const Compute_Launch *launch, const Gpu_Memory *mem, Compute_Window *w) {
+  uint32_t n = 0;
+  if (!(launch->cbuf_valid & 1u)) return 0;
+  for (uint32_t k = 0; k < WGSL_CS_MAX_WINDOWS; k++) {
+    const uint32_t at = COMPUTE_SSBO_DESC + COMPUTE_SSBO_DESC_BYTES * k;
+    if (at + 12u > launch->cbuf_size[0]) break;
+    uint32_t d[3];
+    if (!mem->read(mem->user, launch->cbuf_address[0] + at, d, sizeof(d))) break;
+    const uint64_t base = (uint64_t)d[0] | (uint64_t)d[1] << 32;
+    if (!base) break;
+    uint64_t bytes = d[2];
+    if (!bytes) {
+      const uint64_t extent = mem->extent ? mem->extent(mem->user, base) : COMPUTE_UNSIZED_BYTES;
+      bytes = extent < COMPUTE_UNSIZED_BYTES ? extent : COMPUTE_UNSIZED_BYTES;
+    }
+    w[n].base = base;
+    w[n].bytes = (uint32_t)bytes;
+    n++;
+  }
+  return n;
+}
+
+static uint32_t cbuf_words_read(const Sm_Program *program, const Sm_Env *env, uint32_t slot);
+static uint32_t gpu_shader_for(Raster3d *r, const Sm_Program *program, const Wgsl_Program_Desc *desc);
+
+/* The dispatch on the GPU; false: it runs here. */
+static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute_Launch *launch, const Sm_Env *env,
+                           const Gpu_Memory *mem, Compute_Profile *prof) {
+  if (!r->gpu || r->no_gpu_compute || prof->gpu_failed || prof->cpu_runs < COMPUTE_PROFILE_RUNS) return false;
+  const uint32_t threads = launch->block[0] * launch->block[1] * launch->block[2];
+  if (threads > WGSL_CS_MAX_INVOCATIONS || launch->shared_bytes > WGSL_CS_MAX_SHARED_BYTES ||
+      program_samples_textures(program)) {
+    prof->gpu_failed = true;
+    return false;
+  }
+  Compute_Window win[WGSL_CS_MAX_WINDOWS];
+  const uint32_t n = compute_windows(launch, mem, win);
+  /* Mirrors first: a window that cannot be mirrored keeps the CPU path.
+   * Each mirror is bound once, as a whole (WebGPU refuses one buffer in
+   * two writable bindings), however many windows lie in it. */
+  uint32_t ids[WGSL_CS_MAX_WINDOWS], mirrors = 0;
+  uint64_t mirror_va[WGSL_CS_MAX_WINDOWS];
+  uint32_t mirror_bytes[WGSL_CS_MAX_WINDOWS];
+  /* A later window may grow (replace) an earlier one's mirror: create
+   * them all, then resolve each against the final set. */
+  for (uint32_t k = 0; k < n; k++) {
+    uint32_t offset = 0;
+    if (!gpu_mirror_window(r->gpu, mem, win[k].base, win[k].bytes, r->submission, &offset)) return false;
+  }
+  for (uint32_t k = 0; k < n; k++) {
+    uint32_t offset = 0;
+    const uint32_t id = gpu_mirror_window(r->gpu, mem, win[k].base, win[k].bytes, r->submission, &offset);
+    if (!id) return false;
+    uint32_t m = 0;
+    while (m < mirrors && ids[m] != id) m++;
+    if (m == mirrors) {
+      ids[m] = id;
+      mirror_va[m] = win[k].base - offset;
+      mirror_bytes[m] = gpu_mirror_bytes(id);
+      mirrors++;
+    }
+  }
+  static Wgsl_Program_Desc desc;
+  wgsl_default_desc(program, &desc);
+  desc.stage = SM_STAGE_COMPUTE;
+  for (uint32_t i = 0; i < 3u; i++) desc.block[i] = (uint16_t)launch->block[i];
+  desc.shared_bytes = launch->shared_bytes;
+  desc.window_count = mirrors;
+  const uint32_t shader = gpu_shader_for(r, program, &desc);
+  if (shader == GPU_SHADER_FAILED) {
+    prof->gpu_failed = true;
+    return false;
+  }
+  /* The data: the window table (each window as its whole mirror, so the
+   * WGSL's offsets index the bound buffer), then the constant buffers. */
+  uint32_t *data = r->gpu_data;
+  memset(data, 0, WGSL_DRAW_CONSTANT_WORDS * 4u);
+  for (uint32_t m = 0; m < mirrors; m++) {
+    uint32_t *w = data + WGSL_CS_WINDOWS + WGSL_CS_WINDOW_WORDS * m;
+    w[0] = (uint32_t)mirror_va[m];
+    w[1] = (uint32_t)(mirror_va[m] >> 32);
+    w[2] = mirror_bytes[m];
+  }
+  uint32_t words = WGSL_DRAW_CONSTANT_WORDS;
+  for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++) {
+    if (!env->cbuf[s] || !env->cbuf_size[s]) continue;
+    const uint32_t count = cbuf_words_read(program, env, s);
+    if (!count) continue;
+    memcpy(data + words, env->cbuf[s], (size_t)count * 4u);
+    data[WGSL_DRAW_CBUF_TABLE + 2u * s] = words;
+    data[WGSL_DRAW_CBUF_TABLE + 2u * s + 1u] = count;
+    words += count;
+  }
+  if (words & 1u) data[words++] = 0;
+  const uint32_t bytes = (uint32_t)sizeof(Gpu_Rec_Compute) + (uint32_t)sizeof(Gpu_Rec_Binding) * (1u + mirrors) + words * 4u;
+  uint8_t *p = gpu_stream_begin(r->gpu, GPU_REC_COMPUTE, bytes);
+  const Gpu_Rec_Compute c = {shader, {launch->grid[0], launch->grid[1], launch->grid[2]}, 1u + mirrors};
+  memcpy(p, &c, sizeof(c));
+  p += sizeof(c);
+  const Gpu_Rec_Binding db = {GPU_BIND_DATA, WGSL_DATA_BINDING, words * 4u, 0};
+  memcpy(p, &db, sizeof(db));
+  p += sizeof(db);
+  memcpy(p, data, (size_t)words * 4u);
+  p += (size_t)words * 4u;
+  for (uint32_t m = 0; m < mirrors; m++) {
+    const Gpu_Rec_Binding wb = {GPU_BIND_BUFFER, WGSL_CS_WINDOW_BINDING_BASE + m, 0, ids[m]};
+    memcpy(p, &wb, sizeof(wb));
+    p += sizeof(wb);
+  }
+  gpu_stream_end(r->gpu);
+  for (uint32_t k = 0; k < n; k++)
+    if ((prof->written >> k) & 1u) gpu_mirror_take(mem, win[k].base, win[k].bytes);
+  r->gpu_stats.gpu_dispatches++;
+  return true;
+}
+
+/* After a dispatch ran here: which windows it wrote (the profile), and
+ * the mirrors learn the guest copy changed. */
+static void compute_cpu_wrote(const Compute_Launch *launch, const Gpu_Memory *mem, Compute_Profile *prof) {
+  Compute_Window win[WGSL_CS_MAX_WINDOWS];
+  const uint32_t n = compute_windows(launch, mem, win);
+  for (uint32_t i = 0; i < g_compute_writes.count; i++) {
+    const uint64_t lo = g_compute_writes.lo[i], hi = g_compute_writes.hi[i];
+    gpu_mirror_cpu_wrote(lo, hi - lo);
+    for (uint32_t k = 0; k < n; k++)
+      if (lo < win[k].base + win[k].bytes && hi > win[k].base) prof->written |= 1u << k;
+  }
+  prof->cpu_runs++;
+}
+
 void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t *cregs, const Gpu_Memory *mem) {
   if (!r->ready) return;
   static uint32_t regs[COMPUTE_REGS];
@@ -4832,6 +5033,13 @@ void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t 
   const uint32_t threads = launch->block[0] * launch->block[1] * launch->block[2];
   const uint32_t group_count = (threads + SM_LANES - 1u) / SM_LANES;
   const uint32_t blocks = launch->grid[0] * launch->grid[1] * launch->grid[2];
+  if (r->compute_capture) r->compute_capture(r->compute_capture_user, launch, address, env, mem, false);
+  Compute_Profile *prof = compute_profile(program);
+  if (compute_on_gpu(r, program, launch, env, mem, prof)) {
+    r->stats.compute_threads += (uint64_t)threads * blocks;
+    r->stats.compute_dispatches++;
+    return;
+  }
   Compute_Job job = {program, launch, env, &r->workers, threads, group_count, blocks, 0};
   bool faulted = false;
   if (r->workers.count > 1u && blocks > 1u && group_count <= COMPUTE_WORKER_GROUPS && !program_samples_textures(program)) {
@@ -4848,6 +5056,7 @@ void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t 
   } else {
     for (uint32_t b = 0; b < blocks && !faulted; b++) faulted = !compute_block(&job, env, b, groups, states);
   }
+  if (r->compute_capture) r->compute_capture(r->compute_capture_user, launch, address, env, mem, true);
   r->stats.compute_threads += (uint64_t)threads * blocks;
   r->stats.compute_dispatches++;
   if (faulted) r->stats.compute_faults++;
@@ -4857,6 +5066,7 @@ void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t 
              launch->block[0], launch->block[1], launch->block[2], launch->shared_bytes, g_compute_writes.count,
              (unsigned long long)(g_compute_writes.count ? g_compute_writes.lo[0] : 0),
              (unsigned long long)(g_compute_writes.count ? g_compute_writes.hi[0] - g_compute_writes.lo[0] : 0));
+  if (r->gpu) compute_cpu_wrote(launch, mem, prof);
   for (uint32_t i = 0; i < g_compute_writes.count; i++) {
     compute_output_note(g_compute_writes.lo[i], g_compute_writes.hi[i]);
     raster3d_sync_range(r, mem, g_compute_writes.lo[i], g_compute_writes.hi[i] - g_compute_writes.lo[i], true);

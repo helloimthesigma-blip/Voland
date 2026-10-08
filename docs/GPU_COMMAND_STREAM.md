@@ -1,4 +1,4 @@
-# GPU command stream (version 5)
+# GPU command stream (version 6)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -33,7 +33,7 @@ the header is at its base and the ring starts at +64. In `voland-cli
 | Offset | Field |
 |---|---|
 | +0 | u32 magic `VGPU` (0x55504756) |
-| +4 | u32 version (4) |
+| +4 | u32 version (6) |
 | +8 | u64 ring base (linear-memory offset) |
 | +16 | u64 ring capacity |
 | +24 | u64 write position (monotonic bytes; release-stored on publish) |
@@ -68,6 +68,10 @@ means none.
 | 4 | SHADER | id, byte count, WGSL text (padded) |
 | 5 | CLEAR | colour id, colour write mask, colour[4] (f32 bits or integers), depth id, flags (1 colour, 2 depth, 4 stencil), depth (f32), stencil, stencil mask, rect x, y, w, h |
 | 6 | DRAW | `Gpu_Rec_Draw`, then its bindings, then the vertices |
+| 9 | BUFFER_CREATE | id, bytes (version 6) |
+| 10 | BUFFER_DESTROY | id |
+| 11 | BUFFER_WRITE | id, byte offset, bytes, then the bytes |
+| 12 | COMPUTE | `Gpu_Rec_Compute` (shader id, grid x/y/z, binding count), then its bindings |
 | 7 | COPY | source id, destination id, source rect, destination rect, filter |
 | 8 | PRESENT | id, rect, flags (1 flip x, 2 flip y) |
 
@@ -179,6 +183,57 @@ The CPU's work per vertex goes away: no attribute fetch, no format
 decoding and no per-record vertex map. In an SSBU fight, `fetch_attribute`
 and its vertex window refills were about a third of the CPU worker before.
 `voland-cli --no-vertex-pull` keeps the version-4 form.
+
+### Compute and storage buffers (version 6)
+
+Compute dispatches run on the GPU (`raster3d_compute`,
+`compute_on_gpu`). SSBU's compute programs skin its characters: what they
+write is read back as vertex streams (269 of 276 MB in a fight).
+
+- **Translation.** The program becomes a WGSL compute shader (`@compute
+  fn cs`, one invocation per thread, the block as the workgroup;
+  `core/gpu/wgsl.c`). Global memory (LDG/STG) is a few windows, looked
+  up by address at run time: window k is bound read-write at
+  `WGSL_CS_WINDOW_BINDING_BASE + k`, and its {base, size} is in the data at
+  `WGSL_CS_WINDOWS + 4 k`. A miss reads 0 and writes nothing, as the
+  interpreter does for unmapped memory. BAR.SYNC ends a phase: each
+  invocation runs to the barrier or its end, the workgroup meets at
+  `workgroupBarrier` in uniform control flow, and a `workgroupUniformLoad`
+  count of the waiting invocations decides whether another phase runs.
+  Shared memory (LDS/STS) is `var<workgroup>`. Textures, warp votes and
+  shuffles stay on the CPU path.
+- **Windows.** NVN puts each storage buffer's {address, size} at
+  c[0][0x310 + 16 k]. They are read from guest memory: the program's copy
+  of c[0] ends where its reads end, which is often before a size. A size
+  of 0 means up to 1 MiB of the buffer's mapping.
+- **Mirrors.** Each window is bound as a GPU buffer mirroring that guest
+  memory (`core/gpu/gpu_mirror.{h,c}`), bound once even when several
+  windows lie in it. Pages are 4 KiB:
+  - CPU-owned pages are hashed at most once per submission, and changed
+    ones are uploaded (BUFFER_WRITE).
+  - Pages a dispatch writes become GPU-owned. The first two dispatches of
+    a program run on the CPU and record which windows it writes.
+  - A GPU-owned page whose guest copy changes was rewritten by the guest,
+    and becomes CPU-owned again.
+- **Draws.** A pulled vertex stream in GPU-owned pages is read from the
+  mirror: its descriptor has `WGSL_VSI_RESIDENT` and the byte offset in
+  the mirror, and the draw binds the mirror (BUFFER binding) at
+  `WGSL_VS_RESIDENT_BINDING`, where the vertex program reads it as `R`.
+  Every pulled vertex program declares `R`; the executor binds an empty
+  buffer when the draw names none.
+- **Executor.** A BUFFER_WRITE to a buffer the unsubmitted commands use
+  flushes them first, as texture writes do. A COMPUTE record ends the open
+  render pass, and its pipeline has an explicit layout: the data with a
+  dynamic offset, then one storage entry per window.
+- **Checks.**
+  - `tests/wgsl_compute_test` writes vectors, both synthetic (global
+    memory, wide accesses, shared memory across a barrier) and, locally,
+    dispatches captured from a title (`VOLAND_COMPUTE_CAPTURE`).
+  - `tools/compute-vectors.mjs` runs the vectors on WebGPU and compares
+    every window word with the interpreter's result.
+  - `tools/vertex-pull-vectors.mjs` decodes every case from D and from R.
+  - `raster3d_test` profiles a program, runs it on the GPU and pulls a
+    draw from its mirror.
 
 ## Verification
 

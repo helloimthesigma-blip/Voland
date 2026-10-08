@@ -27,8 +27,17 @@ import { type CacheContents, type PipelineSpec, type ShaderCacheStore, specKey, 
 import {
   BIND_DATA,
   BIND_FILTERED,
+  BIND_BUFFER,
+  VS_RESIDENT_BINDING,
   BIND_SAMPLER,
   BIND_TEXTURE,
+  BUFFER_WRITE_BYTES,
+  COMPUTE_BYTES,
+  parseCompute,
+  REC_BUFFER_CREATE,
+  REC_BUFFER_DESTROY,
+  REC_BUFFER_WRITE,
+  REC_COMPUTE,
   BINDING_BYTES,
   BLEND_FACTORS,
   BLEND_OPS,
@@ -120,6 +129,8 @@ interface CachedPipeline {
 
 export interface ExecutorStats {
   draws: number;
+  /** Compute dispatches (stream version 6). */
+  dispatches: number;
   passes: number;
   submits: number;
   pipelines: number;
@@ -239,7 +250,7 @@ function f32Bits(v: number): number {
 }
 
 export class GpuExecutor {
-  readonly stats: ExecutorStats = { draws: 0, passes: 0, submits: 0, pipelines: 0, prewarmed: 0, presents: 0, errors: 0, shadows: 0, copies: 0 };
+  readonly stats: ExecutorStats = { draws: 0, dispatches: 0, passes: 0, submits: 0, pipelines: 0, prewarmed: 0, presents: 0, errors: 0, shadows: 0, copies: 0 };
   private readonly textures = new Map<number, Tex>();
   private readonly shaders = new Map<number, GPUShaderModule>();
   /* Per-session shader ids -> WGSL content hash; modules shared by hash. */
@@ -257,6 +268,12 @@ export class GpuExecutor {
   /** Textures the unsubmitted commands read or write: a texture write must
    * flush them first (writes run on the queue, before the pending encoder). */
   private readonly touched = new Set<GPUTexture>();
+  /** Storage buffers mirroring guest memory (BUFFER_CREATE), and those the
+   * unsubmitted commands use: a BUFFER_WRITE to one flushes first. */
+  private readonly buffers = new Map<number, GPUBuffer>();
+  private readonly touchedBuffers = new Set<GPUBuffer>();
+  private pendingBufferDestroy: GPUBuffer[] = [];
+  private readonly computePipelines = new Map<string, { pipeline: GPUComputePipeline; layout: GPUBindGroupLayout }>();
   private readonly vertexStaging = new Uint8Array(VERTEX_BUFFER_BYTES);
   private readonly dataStaging = new Uint8Array(DATA_BUFFER_BYTES);
   private readonly linearSampler: GPUSampler;
@@ -298,6 +315,10 @@ export class GpuExecutor {
       case REC_DRAW: this.draw(parseDraw(view), view, payload); break;
       case REC_COPY: this.copy(parseCopy(view)); break;
       case REC_PRESENT: this.present(parsePresent(view)); break;
+      case REC_BUFFER_CREATE: this.bufferCreate(view.getUint32(0, true), view.getUint32(4, true)); break;
+      case REC_BUFFER_DESTROY: this.bufferDestroy(view.getUint32(0, true)); break;
+      case REC_BUFFER_WRITE: this.bufferWrite(view, payload); break;
+      case REC_COMPUTE: this.compute(view, payload); break;
       default: this.warnOnce(`record ${type}`, `unknown GPU record type ${type}`); break;
     }
   }
@@ -322,8 +343,11 @@ export class GpuExecutor {
     this.vertexUsed = 0;
     this.dataUsed = 0;
     this.touched.clear();
+    this.touchedBuffers.clear();
     for (const t of this.pendingDestroy) t.destroy();
     this.pendingDestroy = [];
+    for (const b of this.pendingBufferDestroy) b.destroy();
+    this.pendingBufferDestroy = [];
   }
 
   private idOf(o: object): number {
@@ -435,6 +459,109 @@ export class GpuExecutor {
       ? Math.min(c.levels, full) : 1;
     this.textures.set(c.id, this.makeTex(format, width, height, Math.max(1, c.layers), (c.usage & USAGE_RENDER) !== 0,
       fallback, levels));
+  }
+
+  /* ---- storage buffers and compute (stream version 6) ---- */
+
+  private empty: GPUBuffer | null = null;
+  /** A pulled draw with no mirror bound reads this from R (never, in fact). */
+  private emptyStorage(): GPUBuffer {
+    this.empty ??= this.device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE });
+    return this.empty;
+  }
+
+  private bufferCreate(id: number, bytes: number): void {
+    const old = this.buffers.get(id);
+    if (old) this.pendingBufferDestroy.push(old);
+    this.buffers.set(id, this.device.createBuffer({
+      size: Math.max(16, Math.ceil(bytes / 4) * 4),
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+    }));
+  }
+
+  private bufferDestroy(id: number): void {
+    const b = this.buffers.get(id);
+    if (!b) return;
+    this.buffers.delete(id);
+    this.pendingBufferDestroy.push(b); /* pending commands may still use it */
+  }
+
+  private bufferWrite(v: DataView, payload: Uint8Array): void {
+    const b = this.buffers.get(v.getUint32(0, true));
+    if (!b) return;
+    const offset = v.getUint32(4, true), bytes = v.getUint32(8, true);
+    if (offset + bytes > b.size) {
+      this.warnOnce(`buffer write ${b.size}`, `buffer write past the end (${offset}+${bytes} of ${b.size})`);
+      return;
+    }
+    if (this.touchedBuffers.has(b)) this.flush(); /* earlier commands use the old contents */
+    this.device.queue.writeBuffer(b, offset, payload, BUFFER_WRITE_BYTES, bytes);
+  }
+
+  private compute(v: DataView, payload: Uint8Array): void {
+    const c = parseCompute(v);
+    const module = this.shaders.get(c.shaderId);
+    if (!module) {
+      this.warnOnce(`shader ${c.shaderId}`, `dispatch with unknown shader ${c.shaderId}`);
+      return;
+    }
+    let at = COMPUTE_BYTES;
+    let data: Uint8Array | null = null;
+    const windows: { binding: number; buffer: GPUBuffer }[] = [];
+    for (let i = 0; i < c.bindingCount; i++) {
+      const kind = v.getUint32(at, true);
+      const binding = v.getUint32(at + 4, true);
+      const bytes = v.getUint32(at + 8, true);
+      const id = v.getUint32(at + 12, true);
+      at += BINDING_BYTES;
+      if (kind === BIND_DATA) {
+        data = payload.subarray(at, at + bytes);
+        at += bytes;
+      } else if (kind === BIND_BUFFER) {
+        const buffer = this.buffers.get(id);
+        if (!buffer) {
+          this.warnOnce(`buffer ${id}`, `dispatch binds unknown buffer ${id}`);
+          return;
+        }
+        windows.push({ binding, buffer });
+      }
+    }
+    const key = `cs:${c.shaderId}:${windows.map((w) => w.binding).join(",")}`;
+    let cached = this.computePipelines.get(key);
+    if (!cached) {
+      const layout = this.device.createBindGroupLayout({
+        entries: [
+          { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage", hasDynamicOffset: true } },
+          ...windows.map((w) => ({ binding: w.binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } })),
+        ],
+      });
+      const pipeline = this.device.createComputePipeline({
+        layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
+        compute: { module, entryPoint: "cs" },
+      });
+      cached = { pipeline, layout };
+      this.computePipelines.set(key, cached);
+      this.stats.pipelines++;
+    }
+    if (Math.ceil(this.dataUsed / DATA_ALIGN) * DATA_ALIGN + Math.max(data?.byteLength ?? 0, DATA_WINDOW_BYTES) > DATA_BUFFER_BYTES) {
+      this.flush();
+    }
+    const dataOffset = this.stageData(data ?? new Uint8Array(16), DATA_WINDOW_BYTES);
+    this.endPass();
+    const group = this.device.createBindGroup({
+      layout: cached.layout,
+      entries: [
+        { binding: 0, resource: { buffer: this.dataBuffer, offset: 0, size: DATA_WINDOW_BYTES } },
+        ...windows.map((w) => ({ binding: w.binding, resource: { buffer: w.buffer } })),
+      ],
+    });
+    const pass = this.ensureEncoder().beginComputePass();
+    pass.setPipeline(cached.pipeline);
+    pass.setBindGroup(0, group, [dataOffset]);
+    pass.dispatchWorkgroups(c.grid[0], c.grid[1], c.grid[2]);
+    pass.end();
+    for (const w of windows) this.touchedBuffers.add(w.buffer);
+    this.stats.dispatches++;
   }
 
   private textureDestroy(id: number): void {
@@ -688,6 +815,8 @@ export class GpuExecutor {
       });
       if (filtered) entries.push({ binding: 1 + MAX_TEXTURES + i, visibility: dataVisibility, sampler: { type: "filtering" } });
     });
+    /* A pulled vertex stage's second source (stream version 6). */
+    if (spec.vs?.pull) entries.push({ binding: VS_RESIDENT_BINDING, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } });
     const layout = this.device.createBindGroupLayout({ entries });
     /* Transformed vertices (position, 1/w, varyings) or, for a GPU vertex
      * stage, the ids and input vectors - every one a vec4<u32>. */
@@ -813,6 +942,7 @@ export class GpuExecutor {
     const textureIds: number[] = [];
     const filtered: boolean[] = [];
     const samplerStates = new Map<number, number>();
+    let resident: GPUBuffer | undefined;
     for (let i = 0; i < d.bindingCount; i++) {
       const kind = v.getUint32(at, true);
       const binding = v.getUint32(at + 4, true);
@@ -827,8 +957,14 @@ export class GpuExecutor {
         filtered.push((bytes & BIND_FILTERED) !== 0);
       } else if (kind === BIND_SAMPLER) {
         samplerStates.set(binding, texture);
+      } else if (kind === BIND_BUFFER) {
+        resident = this.buffers.get(texture);
+        if (!resident) this.warnOnce(`buffer ${texture}`, `draw binds unknown buffer ${texture}`);
       }
     }
+    const pulled = d.vsShaderId !== 0 && (d.flags & DRAW_VERTEX_PULL) !== 0;
+    const second = pulled ? resident ?? this.emptyStorage() : null;
+    if (resident) this.touchedBuffers.add(resident);
     const stride = d.vsShaderId ? 16 * (d.vertexInputCount + 1) : VERTEX_HEADER_BYTES + 16 * d.varyingCount;
     const vertices = payload.subarray(at, at + stride * d.vertexCount);
     const indexStart = at + stride * d.vertexCount;
@@ -871,7 +1007,7 @@ export class GpuExecutor {
     if (!this.scissor(pass, d.scissor)) return;
     const samplers = [...samplerStates].map(([binding, state]) => ({ binding, resource: this.sampler(state) }));
     const key = [this.idOf(layout), this.set, ...textures.map((t) => this.idOf(t.sampleView)),
-      ...samplers.map((e) => `${e.binding}:${this.idOf(e.resource)}`)].join(",");
+      ...samplers.map((e) => `${e.binding}:${this.idOf(e.resource)}`), second ? `r${this.idOf(second)}` : ""].join(",");
     let group = this.bindGroups.get(key);
     if (!group) {
       if (this.bindGroups.size >= BIND_GROUP_CACHE_LIMIT) this.bindGroups.clear();
@@ -881,6 +1017,7 @@ export class GpuExecutor {
           { binding: 0, resource: { buffer: this.dataBuffer, offset: 0, size: DATA_WINDOW_BYTES } },
           ...textures.map((t, i) => ({ binding: 1 + i, resource: t.sampleView })),
           ...samplers,
+          ...(second ? [{ binding: VS_RESIDENT_BINDING, resource: { buffer: second } }] : []),
         ],
       });
       this.bindGroups.set(key, group);

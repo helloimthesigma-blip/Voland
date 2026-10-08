@@ -62,6 +62,7 @@ set(SWITCH_CORE_SOURCES
   gpu/compute.c
   gpu/raster3d.c
   gpu/gpu_stream.c
+  gpu/gpu_mirror.c
   gpu/gpu_thread.c
   gpu/wgsl.c
   hle/fs/ramfs.c

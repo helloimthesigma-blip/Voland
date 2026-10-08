@@ -85,6 +85,9 @@ typedef struct Gpu_Memory {
    * WebGPU renderer matches presented buffers (CPU addresses) to the
    * render targets (GPU addresses) that hold them. */
   bool (*translate)(void *user, uint64_t gpu_va, uint64_t *guest_va);
+  /* Bytes from `gpu_va` that stay inside its mapping (0: unmapped); may
+   * be NULL. Sizes the storage buffers a compute dispatch leaves unsized. */
+  uint64_t (*extent)(void *user, uint64_t gpu_va);
 } Gpu_Memory;
 
 typedef struct Gpu_Channel {

@@ -62,6 +62,13 @@
 #define SM_ATTR_VERTEX_ID 0x2FCu
 #define SM_ATTR_FRONT_FACING 0x3FCu
 
+/* The top 13 bits that tell the load/store and barrier forms apart
+ * (raw >> 48, masked): shared memory beside local, BAR.SYNC beside DEPBAR. */
+#define SM_LDST_SPACE_MASK 0xfff8u
+#define SM_LDS_OPCODE 0xef48u
+#define SM_STS_OPCODE 0xef58u
+#define SM_BAR_OPCODE 0xf0a8u
+
 typedef enum Sm_Stage {
   SM_STAGE_VERTEX = 1,
   SM_STAGE_TESS_CONTROL = 2,

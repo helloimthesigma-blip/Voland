@@ -90,6 +90,7 @@
 #define WGSL_VSI_STRIDE_MASK 0xfffu
 #define WGSL_VSI_ACTIVE 0x40000000u    /* else the input reads (0, 0, 0, 1) */
 #define WGSL_VSI_INSTANCED 0x80000000u /* one element (the draw's instance) is copied */
+#define WGSL_VSI_RESIDENT 0x20000000u  /* the stream is read from R (a GPU mirror), at word 0's byte offset */
 #define WGSL_DRAW_VS_INSTANCE (WGSL_DRAW_VS_INPUTS + WGSL_VSI_WORDS * WGSL_VSI_MAX)
 /* Global memory a vertex program reads (wgsl_find_globals): per buffer k,
  * words WGSL_DRAW_GLOBALS + 4 k hold its base address (low, high), its size
@@ -98,6 +99,22 @@
 #define WGSL_GLOBAL_WORDS 4u
 #define WGSL_DRAW_GLOBALS (WGSL_DRAW_VS_INSTANCE + 2u)
 #define WGSL_DRAW_CONSTANT_WORDS (WGSL_DRAW_GLOBALS + WGSL_GLOBAL_WORDS * WGSL_MAX_GLOBALS)
+/* Compute programs (desc->stage SM_STAGE_COMPUTE): global memory is a few
+ * windows of GPU virtual memory, window k bound at
+ * WGSL_CS_WINDOW_BINDING_BASE + k as a read-write array<u32>. Words
+ * WGSL_CS_WINDOWS + 4 k hold its base address (low, high) and size in
+ * bytes; an LDG/STG address inside no window reads 0 / writes nothing (the
+ * interpreter's unmapped memory). The constant-buffer table is
+ * WGSL_DRAW_CBUF_TABLE's. */
+#define WGSL_CS_MAX_WINDOWS 6u /* with the data buffer, WebGPU's 8 storage buffers per stage minus one */
+#define WGSL_CS_WINDOW_WORDS 4u
+#define WGSL_CS_WINDOWS WGSL_DRAW_VS_INPUTS
+#define WGSL_CS_WINDOW_BINDING_BASE (WGSL_SAMPLER_BINDING_BASE + WGSL_MAX_TEXTURES)
+/* A pulled vertex program's second source: a GPU mirror holding vertex
+ * streams a compute dispatch wrote (WGSL_VSI_RESIDENT inputs read it). */
+#define WGSL_VS_RESIDENT_BINDING (WGSL_CS_WINDOW_BINDING_BASE + WGSL_CS_MAX_WINDOWS)
+#define WGSL_CS_MAX_INVOCATIONS 256u   /* WebGPU's default maxComputeInvocationsPerWorkgroup */
+#define WGSL_CS_MAX_SHARED_BYTES 16384u /* its default maxComputeWorkgroupStorageSize */
 #define WGSL_VERTEX_ID_LOCATION 0u /* vertex input: vec4<u32>(vertex id, instance id, 0, 0) */
 #define WGSL_MAX_VARYINGS 14u /* + 1/w, within WebGPU's 16 inter-stage vectors */
 #define WGSL_DRAW_LOWER_LEFT 1u /* position y counts from the bottom */
@@ -166,6 +183,11 @@ typedef struct Wgsl_Program_Desc {
   uint32_t input_count;
   uint16_t output_word[WGSL_MAX_VARYINGS][4];
   uint64_t perspective_mask;
+  /* Compute programs: the block (workgroup) size, the block's shared
+   * memory, and how many global-memory windows are bound. */
+  uint16_t block[3];
+  uint32_t shared_bytes;
+  uint32_t window_count;
 } Wgsl_Program_Desc;
 
 /* The storage buffers a vertex program's LDGs read: each LDG's 64-bit

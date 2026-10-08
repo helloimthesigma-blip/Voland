@@ -177,6 +177,7 @@ static void build_programs(void) {
 
 static uint32_t g_regs[GPU_3D_REGISTER_WORDS];
 static uint32_t g_vs_offset = VS_OFFSET; /* base_state's vertex program */
+static uint64_t g_vertices = VERTICES;   /* base_state's vertex stream */
 static Raster3d_Bindings g_bindings;
 
 static void base_state(uint64_t rt, bool block_linear, uint32_t ps_offset) {
@@ -213,8 +214,8 @@ static void base_state(uint64_t rt, bool block_linear, uint32_t ps_offset) {
   g_regs[0x458] = (0x01u << 21) | (7u << 27);
   g_regs[0x459] = (16u << 7) | (0x01u << 21) | (7u << 27);
   g_regs[0x700] = 32u | (1u << 12);
-  g_regs[0x701] = (uint32_t)(VERTICES >> 32);
-  g_regs[0x702] = (uint32_t)VERTICES;
+  g_regs[0x701] = (uint32_t)(g_vertices >> 32);
+  g_regs[0x702] = (uint32_t)g_vertices;
 }
 
 static void vertex(uint32_t i, float x, float y, float r, float g, float b, float a) {
@@ -240,7 +241,7 @@ static bool rgba_is(const uint8_t *p, uint8_t r, uint8_t g, uint8_t b, uint8_t a
          abs(p[3] - a) <= tolerance;
 }
 
-static const Gpu_Memory k_mem = {NULL, mem_read, mem_write, NULL, NULL, NULL};
+static const Gpu_Memory k_mem = {NULL, mem_read, mem_write, NULL, NULL, NULL, NULL};
 
 static void clear_to(Raster3d *r, float red, float green, float blue, float alpha) {
   memcpy(&g_regs[0x360], &red, 4);
@@ -578,6 +579,10 @@ typedef struct Seen_Draw {
   uint32_t index_count;
   bool vertex_shader;
   uint32_t data_bytes;          /* the data binding (constants, constant buffers, pulled streams) */
+  /* Stream version 6: compute and the buffers mirroring guest memory. */
+  bool compute_shader;
+  uint32_t computes, buffer_creates, buffer_writes;
+  uint32_t resident_binding;    /* the last draw's BUFFER binding (its buffer id), 0: none */
 } Seen_Draw;
 #define SEEN_DATA_BYTES (256u * 1024u)
 static uint8_t g_seen_data[SEEN_DATA_BYTES];
@@ -592,7 +597,13 @@ static void stream_drain(Seen_Draw *seen) {
       const size_t n = sizeof(k_entry) - 1u;
       for (size_t i = 0; i + n <= length && !seen->vertex_shader; i++)
         seen->vertex_shader = memcmp(text + i, k_entry, n) == 0;
+      static const char k_compute[] = "@compute @workgroup_size";
+      for (size_t i = 0; i + sizeof(k_compute) - 1u <= length && !seen->compute_shader; i++)
+        seen->compute_shader = memcmp(text + i, k_compute, sizeof(k_compute) - 1u) == 0;
     }
+    if (rec.type == GPU_REC_COMPUTE) seen->computes++;
+    if (rec.type == GPU_REC_BUFFER_CREATE) seen->buffer_creates++;
+    if (rec.type == GPU_REC_BUFFER_WRITE) seen->buffer_writes++;
     if (rec.type == GPU_REC_DRAW) {
       memcpy(&seen->last, rec.payload, sizeof(Gpu_Rec_Draw));
       seen->count++;
@@ -600,6 +611,13 @@ static void stream_drain(Seen_Draw *seen) {
       memcpy(&data, rec.payload + sizeof(Gpu_Rec_Draw), sizeof(data));
       seen->data_bytes = data.bytes < SEEN_DATA_BYTES ? data.bytes : SEEN_DATA_BYTES;
       memcpy(g_seen_data, rec.payload + sizeof(Gpu_Rec_Draw) + sizeof(data), seen->data_bytes);
+      seen->resident_binding = 0;
+      const uint8_t *b = rec.payload + sizeof(Gpu_Rec_Draw) + sizeof(data) + data.bytes;
+      for (uint32_t i = 1; i < seen->last.binding_count; i++, b += sizeof(Gpu_Rec_Binding)) {
+        Gpu_Rec_Binding other;
+        memcpy(&other, b, sizeof(other));
+        if (other.kind == GPU_BIND_BUFFER) seen->resident_binding = other.texture_id;
+      }
       /* Bindings: the data binding's bytes follow it; vertices come last. */
       const uint32_t vertex_bytes = seen->last.vs_shader_id ? 16u * (1u + seen->last.vertex_input_count) : 0u;
       const uint32_t index_bytes = seen->last.index_count * 4u;
@@ -868,6 +886,94 @@ static void test_compute(Raster3d *r) {
   CHECK(r->stats.compute_faults == 0, "no compute faults");
 }
 
+/* GPU mode: a program's first dispatches run here (they learn which
+ * storage buffer it writes); then it runs on the GPU - mirrors of its
+ * buffers, a COMPUTE record - and a pulled draw whose vertices it wrote
+ * reads them from the mirror (the guest copy is stale). */
+#define GPU_CS_OUT (GPU_BASE + 0x42000u)
+#define CS_SSBO_DESC 0x310u
+static uint64_t LDG_E32(uint32_t d, uint32_t a) {
+  return (0xeed0ull << 48) | ((uint64_t)LDST_32 << 48) | (1ull << 45) | GUARD | ((uint64_t)a << 8) | d;
+}
+static uint64_t STG_E32(uint32_t d, uint32_t a) {
+  return (0xeed8ull << 48) | ((uint64_t)LDST_32 << 48) | (1ull << 45) | GUARD | ((uint64_t)a << 8) | d;
+}
+
+static void test_gpu_compute(Raster3d *r) {
+  static Gpu_Stream stream;
+  Seen_Draw seen;
+  memset(&seen, 0, sizeof(seen));
+  gpu_stream_init(&stream, g_stream_header, (uint8_t *)g_stream_ring, GPU_RING_BYTES, stream_wait, &seen);
+  raster3d_set_gpu(r, &stream);
+  /* out[tid] = in[tid]: the vertices (in) copied to GPU_CS_OUT. */
+  uint8_t no_sph[SM_SPH_BYTES];
+  memset(no_sph, 0, sizeof(no_sph));
+  const uint64_t code[] = {S2R(0, SR_TID_X), SHL_I(2, 0, 2), IADD_C_CC(4, 2, CS_SSBO_DESC), IADD_C_X(5, CS_SSBO_DESC + 4u),
+                           IADD_C_CC(6, 2, CS_SSBO_DESC + 16u), IADD_C_X(7, CS_SSBO_DESC + 20u),
+                           LDG_E32(8, 4), STG_E32(8, 6), EXIT()};
+  write_program(COMPUTE_CODE, no_sph, code, sizeof(code) / sizeof(code[0]));
+  const uint32_t desc_in[3] = {(uint32_t)VERTICES, (uint32_t)(VERTICES >> 32), 0x100u};
+  const uint32_t desc_out[3] = {(uint32_t)GPU_CS_OUT, (uint32_t)(GPU_CS_OUT >> 32), 0x100u};
+  memcpy(g_gpu + (CBUF - GPU_BASE) + CS_SSBO_DESC, desc_in, sizeof(desc_in));
+  memcpy(g_gpu + (CBUF - GPU_BASE) + CS_SSBO_DESC + 16u, desc_out, sizeof(desc_out));
+  uint32_t qmd[COMPUTE_QMD_WORDS];
+  memset(qmd, 0, sizeof(qmd));
+  qmd_set(qmd, 256, 32, COMPUTE_CODE + SM_SPH_BYTES);
+  qmd_set(qmd, 384, 32, 1);
+  qmd_set(qmd, 416, 16, 1);
+  qmd_set(qmd, 432, 16, 1);
+  qmd_set(qmd, 592, 16, 64);
+  qmd_set(qmd, 608, 16, 1);
+  qmd_set(qmd, 624, 16, 1);
+  qmd_set(qmd, 640 + 0, 1, 1); /* constant buffer 0 */
+  qmd_set(qmd, 928, 32, (uint32_t)CBUF);
+  qmd_set(qmd, 975, 17, 0x400u);
+  Compute_Launch launch;
+  CHECK(compute_qmd_parse(qmd, &launch), "QMD parses");
+  static uint32_t cregs[COMPUTE_REGISTER_WORDS];
+  cregs[COMPUTE_METHOD_PROGRAM_REGION] = (uint32_t)(PROGRAM_REGION >> 32);
+  cregs[COMPUTE_METHOD_PROGRAM_REGION + 1u] = (uint32_t)PROGRAM_REGION;
+  /* Texture handles elsewhere: the program's copy of c[0] ends where its
+   * reads do, before the second descriptor's size - read from memory. */
+  cregs[COMPUTE_METHOD_BINDLESS_TEXTURE] = 1;
+  base_state(RT, false, PS_OFFSET);
+  vertex(0, -1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(1, 1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(2, -1.0f, 1.0f, 1, 0, 0, 1);
+  const uint64_t before = r->gpu_stats.gpu_dispatches;
+  for (uint32_t i = 0; i < 3u; i++) {
+    raster3d_begin_submission(r);
+    raster3d_compute(r, &launch, cregs, &k_mem);
+  }
+  gpu_stream_publish(&stream);
+  stream_drain(&seen);
+  CHECK(r->gpu_stats.gpu_dispatches - before == 1u, "two dispatches profile on the CPU, the third runs on the GPU (%llu)",
+        (unsigned long long)(r->gpu_stats.gpu_dispatches - before));
+  CHECK(seen.compute_shader && seen.computes == 1u, "a compute shader and one COMPUTE record (%u)", seen.computes);
+  CHECK(seen.buffer_creates == 2u && seen.buffer_writes >= 2u, "mirrors of both buffers, uploaded (%u created, %u writes)",
+        seen.buffer_creates, seen.buffer_writes);
+  /* The copy the CPU runs made is in guest memory; the GPU's is in the mirror. */
+  CHECK(!memcmp(g_gpu + (GPU_CS_OUT - GPU_BASE), g_gpu + (VERTICES - GPU_BASE), 3u * 32u), "the CPU runs copied");
+  /* A pulled draw from the written buffer binds its mirror. */
+  r->cpu_vertices = false;
+  r->no_vertex_pull = false;
+  base_state(RT, false, PS_OFFSET);
+  g_regs[0x701] = (uint32_t)(GPU_CS_OUT >> 32);
+  g_regs[0x702] = (uint32_t)GPU_CS_OUT;
+  const uint64_t resident_before = r->gpu_stats.resident_streams;
+  raster3d_begin_submission(r);
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  gpu_stream_publish(&stream);
+  stream_drain(&seen);
+  CHECK(r->gpu_stats.resident_streams > resident_before && seen.resident_binding != 0u,
+        "the pulled stream reads the mirror (binding buffer %u)", seen.resident_binding);
+  uint32_t vsi[WGSL_VSI_WORDS];
+  memcpy(vsi, g_seen_data + 4u * WGSL_DRAW_VS_INPUTS, sizeof(vsi));
+  CHECK((vsi[1] & WGSL_VSI_RESIDENT) && vsi[0] == 0u, "input 0 is resident at the mirror's start (0x%x, %u)", vsi[1], vsi[0]);
+  raster3d_set_gpu(r, NULL);
+}
+
 int main(void) {
   const size_t bytes = raster3d_storage_bytes();
   uint8_t *storage = (uint8_t *)malloc(bytes + 64u);
@@ -888,6 +994,7 @@ int main(void) {
   test_worker_count_invariance(&r);
   test_gpu_vertex_stage(&r);
   test_compute(&r);
+  test_gpu_compute(&r);
   CHECK(r.stats.shader_faults == 0, "no shader faults");
   raster3d_shutdown(&r);
   free(storage);

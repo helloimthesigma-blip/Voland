@@ -26,6 +26,12 @@ enum {
   GPU_REC_DRAW,               /* Gpu_Rec_Draw + bindings + vertices */
   GPU_REC_COPY,               /* Gpu_Rec_Copy */
   GPU_REC_PRESENT,            /* Gpu_Rec_Present */
+  /* Version 6: storage buffers that mirror guest GPU memory, and compute
+   * dispatches on them (core/gpu/gpu_mirror.h). */
+  GPU_REC_BUFFER_CREATE,      /* u32 id, u32 bytes (a multiple of 4) */
+  GPU_REC_BUFFER_DESTROY,     /* u32 id */
+  GPU_REC_BUFFER_WRITE,       /* u32 id, u32 offset, u32 bytes, then the bytes (multiples of 4) */
+  GPU_REC_COMPUTE,            /* Gpu_Rec_Compute + bindings */
 };
 
 /* Texture formats (the WebGPU format each maps to, in gpu-records.ts). */
@@ -171,6 +177,7 @@ typedef struct Gpu_Rec_Draw {
 #define GPU_BIND_DATA 1u    /* read-only storage buffer: Gpu_Rec_Binding, then `bytes` of data (a multiple of 8) */
 #define GPU_BIND_TEXTURE 2u /* texture_2d_array (gpu/wgsl.h); `bytes` = GPU_BIND_FILTERED when a sampler filters it */
 #define GPU_BIND_SAMPLER 3u /* filtering sampler; `texture_id` = GPU_SAMPLER_* state */
+#define GPU_BIND_BUFFER 4u  /* read-write storage buffer: `texture_id` = a BUFFER_CREATE id, whole (version 6) */
 #define GPU_BIND_FILTERED 1u
 /* Sampler state: bit 0 magnification linear (else nearest), then 2 bits per
  * axis u, v, w: 0 repeat, 1 mirror-repeat, 2 clamp-to-edge; bit 7
@@ -192,6 +199,16 @@ typedef struct Gpu_Rec_Binding {
  * ones clockwise: the producer has culled already (cullMode none), the
  * winding only feeds @builtin(front_facing). */
 #define GPU_VERTEX_HEADER_WORDS 4u
+
+/* A compute dispatch: shader_id is a SHADER record holding a compute
+ * program (gpu/wgsl.h, @compute fn cs); one DATA binding (binding 0, its
+ * bytes inline as a draw's), then BUFFER bindings for its global-memory
+ * windows. Ordered with draws as the stream orders them. */
+typedef struct Gpu_Rec_Compute {
+  uint32_t shader_id;
+  uint32_t grid[3];
+  uint32_t binding_count;
+} Gpu_Rec_Compute;
 
 typedef struct Gpu_Rec_Copy {
   uint32_t src_id, dst_id;

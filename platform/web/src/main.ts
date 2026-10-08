@@ -312,6 +312,10 @@ async function boot(): Promise<BootResult | null> {
           dumpThreads: (backtrace: boolean) =>
             cpuWorker.postMessage({ type: "dump-threads", backtrace } satisfies MainToCPUMessage),
         };
+        /* ?gpucompute=0: compute dispatches stay on the CPU. */
+        if (new URLSearchParams(location.search).get("gpucompute") === "0") {
+          cpuWorker.postMessage({ type: "set-gpu-compute", on: false } satisfies MainToCPUMessage);
+        }
         /* ?rworkers=N: the renderer's threads (tuning). */
         const rworkers = new URLSearchParams(location.search).get("rworkers");
         if (rworkers !== null && /^[0-9]+$/.test(rworkers)) {

@@ -75,6 +75,7 @@
 #include "common/input_region.h"
 #include "common/layout.h"
 #include "emulator.h"
+#include "gpu/gpu_mirror.h"
 #include "hle/kernel/parallel.h"
 #ifdef __APPLE__
 #include <libproc.h>
@@ -1031,6 +1032,90 @@ static void gpu_stream_wait(void *user, volatile int32_t *word, int32_t expected
   gpu_stream_drain();
 }
 
+/* VOLAND_COMPUTE_CAPTURE=DIR (with VOLAND_COMPUTE_CAPTURE_PROGRAM=HEX, the
+ * program address's low 24 bits, and VOLAND_COMPUTE_CAPTURE_SKIP=N): the
+ * first few matching dispatches' program, constant buffers and storage
+ * buffers before and after, as DIR/capture-<n>.bin - real inputs for
+ * tests/wgsl_compute_test. Windows are c[0][0x310 + 16 k]'s {base, size}
+ * descriptors (NVN's); a size of 0 captures CAPTURE_UNSIZED bytes. */
+#define CAPTURE_MAX 3u
+#define CAPTURE_WINDOWS 6u
+#define CAPTURE_SSBO_DESC 0x310u
+#define CAPTURE_UNSIZED (1u << 20)
+#define CAPTURE_CODE_BYTES 0x8000u
+typedef struct Capture_State {
+  const char *dir;
+  uint32_t program;
+  uint32_t skip;
+  uint32_t seen, written;
+  FILE *f;
+} Capture_State;
+static Capture_State g_capture;
+
+static void capture_windows(const Compute_Launch *launch, const Gpu_Memory *mem, FILE *f) {
+  static uint8_t buf[CAPTURE_UNSIZED > 0x400000u ? CAPTURE_UNSIZED : 0x400000u];
+  uint32_t count = 0;
+  uint64_t base[CAPTURE_WINDOWS];
+  uint32_t size[CAPTURE_WINDOWS];
+  for (uint32_t k = 0; k < CAPTURE_WINDOWS && (launch->cbuf_valid & 1u); k++) {
+    const uint32_t at = CAPTURE_SSBO_DESC + 16u * k;
+    if (at + 12u > launch->cbuf_size[0]) break;
+    uint32_t d[3]; /* from guest memory: the program's copy of c[0] may end before the sizes */
+    if (!mem->read(mem->user, launch->cbuf_address[0] + at, d, sizeof(d))) break;
+    if (!d[0] && !d[1]) break;
+    base[count] = (uint64_t)d[0] | (uint64_t)d[1] << 32;
+    size[count] = d[2] && d[2] <= sizeof(buf) ? d[2] : CAPTURE_UNSIZED;
+    count++;
+  }
+  fwrite(&count, 4, 1, f);
+  for (uint32_t k = 0; k < count; k++) {
+    memset(buf, 0, size[k]);
+    (void)mem->read(mem->user, base[k], buf, size[k]);
+    fwrite(&base[k], 8, 1, f);
+    fwrite(&size[k], 4, 1, f);
+    fwrite(buf, 1, size[k], f);
+  }
+}
+
+static void compute_capture(void *user, const Compute_Launch *launch, uint64_t address, const Sm_Env *env,
+                            const Gpu_Memory *mem, bool after) {
+  Capture_State *c = (Capture_State *)user;
+  if ((address & 0xffffffu) != c->program) return;
+  if (!after) {
+    if (c->written >= CAPTURE_MAX || c->seen++ < c->skip) return;
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/capture-%u.bin", c->dir, c->written);
+    c->f = fopen(path, "wb");
+    if (!c->f) return;
+    fwrite("VCC1", 1, 4, c->f);
+    const uint32_t head[8] = {launch->block[0], launch->block[1], launch->block[2], launch->grid[0],
+                              launch->grid[1], launch->grid[2], launch->shared_bytes, CAPTURE_CODE_BYTES};
+    fwrite(head, sizeof(head), 1, c->f);
+    static uint8_t code[CAPTURE_CODE_BYTES];
+    memset(code, 0, sizeof(code));
+    (void)mem->read(mem->user, address, code, sizeof(code));
+    fwrite(code, 1, sizeof(code), c->f);
+    uint32_t slots = 0;
+    for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++) slots += env->cbuf[s] ? 1u : 0u;
+    fwrite(&slots, 4, 1, c->f);
+    for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++) {
+      if (!env->cbuf[s]) continue;
+      fwrite(&s, 4, 1, c->f);
+      fwrite(&env->cbuf_size[s], 4, 1, c->f);
+      fwrite(env->cbuf[s], 1, env->cbuf_size[s], c->f);
+    }
+    capture_windows(launch, mem, c->f);
+    return;
+  }
+  if (!c->f) return;
+  capture_windows(launch, mem, c->f); /* the interpreter's result */
+  fclose(c->f);
+  c->f = NULL;
+  fprintf(stderr, "voland-cli: captured compute dispatch %u (%ux%ux%u blocks of %u)\n", c->written, launch->grid[0],
+          launch->grid[1], launch->grid[2], launch->block[0] * launch->block[1] * launch->block[2]);
+  c->written++;
+}
+
 static int run(int argc, char **argv) {
   if (argc < 1) return EXIT_USAGE;
   const char *path = argv[0];
@@ -1048,7 +1133,7 @@ static int run(int argc, char **argv) {
   uint32_t restore_save_count = 0;
   /* --free-running-from N; --measure-from N --measure-seconds S */
   uint64_t free_from = 0, measure_from = 0, measure_seconds = 0;
-  bool gpu_async = false;
+  bool gpu_async = false, no_gpu_compute = false;
   static uint64_t measure_cycles[SCHEDULER_MAX_THREADS];
   bool poll_coalescing = true;
   bool test_card = false, svc_stats = false, swkbd_cancel = false, jit_fallbacks = false;
@@ -1119,6 +1204,8 @@ static int run(int argc, char **argv) {
       no_vertex_pull = true;
     } else if (!strcmp(argv[i], "--gpu-async")) {
       gpu_async = true;
+    } else if (!strcmp(argv[i], "--no-gpu-compute")) {
+      no_gpu_compute = true;
     } else if (!strcmp(argv[i], "--dump-shaders") && has_value) {
       g_dump_shaders_dir = argv[++i];
     } else if (!strcmp(argv[i], "--dump-wgsl") && has_value) {
@@ -1215,6 +1302,14 @@ static int run(int argc, char **argv) {
     fprintf(stderr, "voland-cli: %u host core(s) for guest threads\n", cores);
   }
 
+  emu.renderer.no_gpu_compute = no_gpu_compute;
+  if (getenv("VOLAND_COMPUTE_CAPTURE")) {
+    g_capture.dir = getenv("VOLAND_COMPUTE_CAPTURE");
+    g_capture.program = getenv("VOLAND_COMPUTE_CAPTURE_PROGRAM") ? (uint32_t)strtoul(getenv("VOLAND_COMPUTE_CAPTURE_PROGRAM"), NULL, 16) : 0u;
+    g_capture.skip = getenv("VOLAND_COMPUTE_CAPTURE_SKIP") ? (uint32_t)strtoul(getenv("VOLAND_COMPUTE_CAPTURE_SKIP"), NULL, 0) : 0u;
+    emu.renderer.compute_capture = compute_capture;
+    emu.renderer.compute_capture_user = &g_capture;
+  }
   if (gpu_async) fprintf(stderr, "voland-cli: asynchronous GPU %s\n", emulator_set_gpu_async(&emu, true) ? "on" : "unavailable");
   setup_call_trace(&emu);
   Emulator_Status status = EMULATOR_RUNNING;
@@ -1466,6 +1561,12 @@ static int run(int argc, char **argv) {
     fprintf(stderr, "voland-cli: GPU compute output read by draws: %llu vertex streams (%llu MB), %llu constant buffers\n",
             (unsigned long long)gs->compute_fed_streams, (unsigned long long)(gs->compute_fed_stream_bytes >> 20),
             (unsigned long long)gs->compute_fed_cbufs);
+    const Gpu_Mirror_Stats *ms = gpu_mirror_stats();
+    fprintf(stderr, "voland-cli: GPU compute: %llu dispatches on the GPU, %llu resident streams; mirrors %llu created, "
+                    "pages %llu hashed, %llu uploaded, %llu taken, %llu returned\n",
+            (unsigned long long)gs->gpu_dispatches, (unsigned long long)gs->resident_streams,
+            (unsigned long long)ms->created, (unsigned long long)ms->pages_hashed, (unsigned long long)ms->pages_uploaded,
+            (unsigned long long)ms->pages_taken, (unsigned long long)ms->pages_returned);
   }
   if (g_watch_count) {
     fprintf(stderr, "voland-cli: %llu time shared memory reads; the last ones (offset size bytes @ pc):\n",
@@ -1750,6 +1851,7 @@ static void usage(void) {
           "             --dump-shaders DIR  --dump-wgsl DIR (each decoded program)\n"
           "             --no-vertex-pull (GPU vertex stages take CPU-decoded inputs)\n"
           "             --gpu-async (GPU work on its own thread, beside the guest; not deterministic)\n"
+          "             --no-gpu-compute (compute dispatches stay on the CPU)\n"
           "             --gpu-stats-from SLICE (GPU counters from that slice on)\n"
           "  checking:  --test-card  --expect-output TEXT  --expect-frame-hash HEX\n"
           "             --svc-stats  --measure-from SLICE [--measure-seconds S]\n"

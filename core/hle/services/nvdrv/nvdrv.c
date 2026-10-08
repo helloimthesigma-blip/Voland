@@ -533,6 +533,11 @@ static bool gpu_write(void *user, uint64_t gpu_va, const void *src, uint64_t siz
   return gpu_access(user, gpu_va, (void *)(uintptr_t)src, size, true);
 }
 
+static uint64_t gpu_extent(void *user, uint64_t gpu_va) {
+  uint64_t guest_va = 0, contiguous = 0;
+  return nvdrv_gpu_translate((const Nvdrv_State *)user, gpu_va, &guest_va, &contiguous) ? contiguous : 0u;
+}
+
 static bool gpu_translate(void *user, uint64_t gpu_va, uint64_t *guest_va) {
   uint64_t contiguous = 0;
   return nvdrv_gpu_translate((const Nvdrv_State *)user, gpu_va, guest_va, &contiguous);
@@ -595,7 +600,7 @@ static void gpfifo_run(void *user, const void *payload, uint32_t bytes) {
   uint64_t entries[GPFIFO_MAX_ENTRIES];
   memcpy(entries, (const uint8_t *)payload + sizeof(call), (size_t)call.count * 8u);
   Nvdrv_State *s = call.s;
-  const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate};
+  const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate, gpu_extent};
   t_submit_syncpoint = call.syncpoint;
   t_submit_fence = call.fence;
   t_submit_promised = call.promised;
@@ -683,7 +688,7 @@ static uint32_t gpu_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint8_t *d) {
 static void mm_written(void *user, uint32_t handle, uint64_t offset, uint64_t bytes) {
   Nvdrv_State *s = (Nvdrv_State *)user;
   if (!s->renderer) return;
-  const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate};
+  const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate, gpu_extent};
   for (uint32_t i = 0; i < s->mapping_end; i++) {
     const Gpu_Mapping *m = &s->mappings[i];
     if (!m->in_use || m->nvmap_handle != handle) continue;

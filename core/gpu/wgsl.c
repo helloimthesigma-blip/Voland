@@ -78,6 +78,8 @@ typedef struct Tr {
   bool uniform_flow;
   bool guarded;       /* emitting a predicated instruction */
   bool vertex;        /* a vertex program (desc->stage == SM_STAGE_VERTEX) */
+  bool compute;       /* a compute program (desc->stage == SM_STAGE_COMPUTE) */
+  bool uses_shared;   /* compute: LDS/STS */
   uint32_t cbt;       /* the draw-constant word of this stage's constant-buffer table */
   Wgsl_Globals globals; /* a vertex program's storage buffers (LDG) */
   bool uses_globals;
@@ -87,6 +89,7 @@ typedef struct Tr {
 
 static bool is_texture_op(uint16_t op);
 static void emit_ldg(Tr *t, const Sm_Insn *in, uint32_t pc);
+static void emit_gmem(Tr *t, const Sm_Insn *in);
 
 static void out_add(Out *o, const char *fmt, ...) {
   if (o->overflow) return;
@@ -1091,8 +1094,19 @@ static void emit_ldc(Tr *t, const Sm_Insn *in) {
   }
 }
 
+static void emit_shared(Tr *t, const Sm_Insn *in);
+
 static void emit_local(Tr *t, const Sm_Insn *in) {
   const uint64_t w = in->raw;
+  const uint32_t top = (uint32_t)(w >> 48) & SM_LDST_SPACE_MASK;
+  if (top == SM_LDS_OPCODE || top == SM_STS_OPCODE) {
+    if (!t->compute) {
+      fail(t, "shared memory outside a compute program");
+      return;
+    }
+    emit_shared(t, in);
+    return;
+  }
   const uint32_t size = BITS(w, 48, 3), n = access_bytes(size);
   const int32_t off = (int32_t)(BITS(w, 20, 24) << 8) >> 8;
   const uint32_t dr = REG_D(w);
@@ -1122,6 +1136,84 @@ static void emit_local(Tr *t, const Sm_Insn *in) {
   } else {
     for (uint32_t i = 0; i < n / 4u; i++)
       EMIT("lm[((la >> 2u) + %uu) & %uu] = %s; ", i, LOCAL_WORDS - 1u, dr == SM_RZ ? "0u" : reg(t, dr + i).s);
+  }
+  EMIT("} ");
+}
+
+/* LDS/STS: the block's shared memory, `sh` (desc->shared_bytes): out of
+ * range reads 0 and writes nothing, as the interpreter. Words only - a
+ * sub-word store would race with its neighbours' lanes. */
+static void emit_shared(Tr *t, const Sm_Insn *in) {
+  const uint64_t w = in->raw;
+  const uint32_t size = BITS(w, 48, 3), n = access_bytes(size);
+  const int32_t off = (int32_t)(BITS(w, 20, 24) << 8) >> 8;
+  const uint32_t dr = REG_D(w), bytes = t->d->shared_bytes & ~3u;
+  if (!bytes) {
+    fail(t, "shared memory with none allocated");
+    return;
+  }
+  t->uses_shared = true;
+  EMIT("let sa = %s + 0x%xu; let sok = sa + %uu <= %uu && sa + %uu >= sa && (sa & 3u) == 0u; ", reg(t, REG_A(w)).s,
+       (uint32_t)off, n < 4u ? 4u : n, bytes, n < 4u ? 4u : n);
+  if (in->op == SM_OP_LDL) {
+    if (n < 4u) {
+      fail(t, "sub-word LDS");
+      return;
+    }
+    for (uint32_t i = 0; i < n / 4u; i++) {
+      if (dr == SM_RZ || ((dr + i) & 0xffu) == SM_RZ) continue;
+      EMIT("%s = select(0u, sh[min((sa >> 2u) + %uu, %uu)], sok); ", reg_dst(t, dr + i).s, i, bytes / 4u - 1u);
+    }
+    return;
+  }
+  if (n < 4u) {
+    fail(t, "sub-word STS");
+    return;
+  }
+  EMIT("if (sok) { ");
+  for (uint32_t i = 0; i < n / 4u; i++)
+    EMIT("sh[min((sa >> 2u) + %uu, %uu)] = %s; ", i, bytes / 4u - 1u, dr == SM_RZ ? "0u" : reg(t, dr + i).s);
+  EMIT("} ");
+}
+
+/* LDG/STG in a compute program: the 64-bit address (32-bit without .E)
+ * plus the offset, looked up in the bound windows (gfind); a miss reads 0
+ * and writes nothing. Words only: Maxwell needs natural alignment, and
+ * sub-word stores would race with neighbouring lanes. */
+static void emit_gmem(Tr *t, const Sm_Insn *in) {
+  const uint64_t w = in->raw;
+  const uint32_t size = BITS(w, 48, 3), n = access_bytes(size);
+  const bool wide = BIT(w, 45) != 0;
+  const int32_t off = (int32_t)(BITS(w, 20, 24) << 8) >> 8;
+  const uint32_t ra = REG_A(w), dr = REG_D(w);
+  const bool load = in->op == SM_OP_LDG;
+  if (n < 4u && !load) {
+    fail(t, "sub-word STG");
+    return;
+  }
+  t->uses_globals = true;
+  EMIT("{ let a0 = %s; let ga = a0 + 0x%xu; ", ra == SM_RZ ? "0u" : reg(t, ra).s, (uint32_t)off);
+  if (wide && ra != SM_RZ)
+    EMIT("let gh = %s %s; ", reg(t, (ra + 1u) & 0xffu).s, off >= 0 ? "+ select(0u, 1u, ga < a0)" : "- select(0u, 1u, ga > a0)");
+  else
+    EMIT("let gh = %s; ", off >= 0 ? "select(0u, 1u, ga < a0)" : "0u - select(0u, 1u, ga > a0)");
+  EMIT("let gw = gfind(ga, gh, %uu); ", n < 4u ? 4u : n);
+  if (load) {
+    if (n < 4u) {
+      if (dr != SM_RZ) {
+        const Ex d = reg_dst(t, dr);
+        EMIT("%s = (gld(vec2<u32>(gw.x, gw.y & ~3u)) >> ((gw.y & 3u) * 8u)) & 0x%xu; ", d.s, n == 1u ? 0xffu : 0xffffu);
+        sign_extend_small(t, size, &d);
+      }
+    } else {
+      for (uint32_t i = 0; i < n / 4u; i++) {
+        if (dr == SM_RZ || ((dr + i) & 0xffu) == SM_RZ) continue;
+        EMIT("%s = gld(vec2<u32>(gw.x, gw.y + %uu)); ", reg_dst(t, dr + i).s, 4u * i);
+      }
+    }
+  } else {
+    for (uint32_t i = 0; i < n / 4u; i++)
+      EMIT("gst(vec2<u32>(gw.x, gw.y + %uu), %s); ", 4u * i, dr == SM_RZ || ((dr + i) & 0xffu) == SM_RZ ? "0u" : reg(t, dr + i).s);
   }
   EMIT("} ");
 }
@@ -1572,6 +1664,26 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
   case SM_OP_S2R:
   case SM_OP_CS2R: {
     const char *v;
+    if (t->compute) {
+      switch (BITS(w, 20, 8)) {
+      case 0x00: v = "(lidx & 31u)"; break;
+      case 0x20: v = "(lid.x | (lid.y << 16u) | (lid.z << 26u))"; break;
+      case 0x21: v = "lid.x"; break;
+      case 0x22: v = "lid.y"; break;
+      case 0x23: v = "lid.z"; break;
+      case 0x25: v = "wid.x"; break;
+      case 0x26: v = "wid.y"; break;
+      case 0x27: v = "wid.z"; break;
+      case 0x38: v = "(1u << (lidx & 31u))"; break;
+      case 0x39: v = "((1u << (lidx & 31u)) - 1u)"; break;
+      case 0x3a: v = "((2u << (lidx & 31u)) - 1u)"; break;
+      case 0x3b: v = "(~((2u << (lidx & 31u)) - 1u))"; break;
+      case 0x3c: v = "(~((1u << (lidx & 31u)) - 1u))"; break;
+      default: v = "0u"; break;
+      }
+      EMIT("%s = %s; ", reg_dst(t, REG_D(w)).s, v);
+      return;
+    }
     switch (BITS(w, 20, 8)) {
     case 0x00: v = "ql"; break;
     case 0x12: v = "0x3f800000u"; break;
@@ -1616,10 +1728,13 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
     if (t->vertex) emit_ast(t, in);
     else fail(t, "AST in a pixel program");
     return;
-  case SM_OP_LDG: emit_ldg(t, in, pc); return;
+  case SM_OP_LDG: if (t->compute) emit_gmem(t, in); else emit_ldg(t, in, pc); return;
   case SM_OP_LD:
   case SM_OP_ST:
-  case SM_OP_STG: fail(t, "global memory (%s)", sm_op_name((Sm_Op)in->op)); return;
+  case SM_OP_STG:
+    if (t->compute) emit_gmem(t, in);
+    else fail(t, "global memory (%s)", sm_op_name((Sm_Op)in->op));
+    return;
   default:
     /* NOP, SCHED, BARRIER and unknown words: nothing (as the interpreter). */
     return;
@@ -1639,6 +1754,11 @@ static bool is_control(uint16_t op) {
 }
 
 static uint32_t norm_pc(uint32_t pc) { return pc % 4u == 0 ? pc + 1u : pc; }
+
+/* BAR.SYNC (not DEPBAR, which shares SM_OP_BARRIER and does nothing here). */
+static bool is_bar_sync(const Sm_Insn *in) {
+  return in->op == SM_OP_BARRIER && ((uint32_t)(in->raw >> 48) & SM_LDST_SPACE_MASK) == SM_BAR_OPCODE;
+}
 
 /* Marks reachable words and basic-block leaders. Flow-stack targets
  * (SSY/PBK/PCNT) and return addresses are reached through SYNC/BRK/CONT/
@@ -1665,7 +1785,7 @@ static void find_blocks(Tr *t) {
         break;
       default: break;
       }
-      if (is_control(in->op) && next < p->word_count) {
+      if ((is_control(in->op) || (t->compute && is_bar_sync(in))) && next < p->word_count) {
         t->leader[next] = true;
         if (!t->reached[next] && top < SM_MAX_WORDS) work[top++] = next;
       }
@@ -1792,6 +1912,14 @@ static void emit_block(Tr *t, uint32_t start) {
       else emit_control(t, in);
       break;
     }
+    if (t->compute && is_bar_sync(in)) {
+      /* The phase ends here; the workgroup meets at the barrier outside the
+       * dispatch loop (uniform control flow), then resumes at `next`. */
+      const uint32_t next = norm_pc(in->next);
+      if ((in->pred & 7u) != SM_PT || (in->pred & 8u)) fail(t, "predicated BAR");
+      EMIT("pc = %uu; bar = true; ", next >= p->word_count ? PC_FAULT : next);
+      break;
+    }
     if (in->op == SM_OP_SSY || in->op == SM_OP_PBK || in->op == SM_OP_PCNT) {
       emit_flow_push(t, in);
     } else if (in->op != SM_OP_SCHED && in->op != SM_OP_NOP && in->op != SM_OP_BARRIER && in->op != SM_OP_INVALID) {
@@ -1874,11 +2002,15 @@ static void emit_io(Out *o, const Wgsl_Program_Desc *d, bool depth) {
  * divided by w - and the outputs into the pixel program's varyings. */
 /* Vertex pulling: the attribute formats of raster3d's fetch_attribute,
  * decoded from the copied stream bytes (WGSL_DRAW_VS_INPUTS). */
+_Static_assert(WGSL_VSI_RESIDENT == 0x20000000u, "k_vertex_pull tests the resident flag as 0x20000000u");
 static const char k_vertex_pull[] =
-    "fn vword(b: u32) -> u32 {\n"
-    "  let s = (b & 3u) * 8u; let lo = D[b >> 2u];\n"
+    "fn vword(b: u32, r: bool) -> u32 {\n"
+    "  let s = (b & 3u) * 8u; let i = b >> 2u;\n"
+    "  var lo = 0u; var hi = 0u;\n"
+    "  if (r) { if (i < arrayLength(&R)) { lo = R[i]; } if (i + 1u < arrayLength(&R)) { hi = R[i + 1u]; } }\n"
+    "  else { lo = D[i]; hi = D[i + 1u]; }\n"
     "  if (s == 0u) { return lo; }\n"
-    "  return (lo >> s) | (D[(b >> 2u) + 1u] << (32u - s));\n"
+    "  return (lo >> s) | (hi << (32u - s));\n"
     "}\n"
     "fn vconv(v: u32, n: u32, ty: u32) -> u32 {\n"
     "  let mx = select((1u << n) - 1u, 0xffffffffu, n >= 32u);\n"
@@ -1925,10 +2057,11 @@ static const char k_vertex_pull[] =
     "  }\n"
     "  let elem = select(vid - D[at + 3u], 0u, (st & 0x80000000u) != 0u);\n"
     "  let b = D[at] + elem * (st & 0xfffu) + ((a >> 7u) & 0x3fffu);\n"
+    "  let res = (st & 0x20000000u) != 0u;\n" /* WGSL_VSI_RESIDENT */
     "  var bit = 0u;\n"
     "  for (var c = 0u; c < cnt; c = c + 1u) {\n"
     "    let n = bits[c];\n"
-    "    let w = vword(b + (bit >> 3u)) >> (bit & 7u);\n"
+    "    let w = vword(b + (bit >> 3u), res) >> (bit & 7u);\n"
     "    o[c] = vconv(select(w & ((1u << n) - 1u), w, n >= 32u), n, ty);\n"
     "    bit = bit + n;\n"
     "  }\n"
@@ -2061,6 +2194,7 @@ const char *wgsl_vertex_pull_source(void) { return k_vertex_pull; }
 
 static void emit_vertex_io(Out *o, const Wgsl_Program_Desc *d) {
   if (d->vertex_pull) {
+    out_add(o, "@group(0) @binding(%u) var<storage, read> R: array<u32>;\n", WGSL_VS_RESIDENT_BINDING);
     out_add(o, "%s", k_vertex_pull);
     out_add(o, "struct VIn {\n  @builtin(vertex_index) vi: u32,\n}\n");
   } else {
@@ -2149,6 +2283,38 @@ static void emit_outputs(Tr *t, Out *o) {
   out_add(o, "  return fo;\n");
 }
 
+/* A compute program's declarations and entry point: the global-memory
+ * windows and their lookup, shared memory, the barrier bookkeeping. */
+static void emit_compute_head(const Tr *t, Out *o) {
+  const Wgsl_Program_Desc *d = t->d;
+  for (uint32_t k = 0; k < d->window_count; k++)
+    out_add(o, "@group(0) @binding(%u) var<storage, read_write> G%u: array<u32>;\n", WGSL_CS_WINDOW_BINDING_BASE + k, k);
+  if (t->uses_globals) {
+    /* (window, byte offset) of an n-byte access at hi:lo, or window ~0. */
+    out_add(o, "fn gfind(lo: u32, hi: u32, n: u32) -> vec2<u32> {\n");
+    for (uint32_t k = 0; k < d->window_count; k++) {
+      const uint32_t b = WGSL_CS_WINDOWS + WGSL_CS_WINDOW_WORDS * k;
+      out_add(o, "  { let rel = lo - D[%uu]; let rh = hi - D[%uu] - select(0u, 1u, lo < D[%uu]);\n"
+                 "    if (rh == 0u && rel <= D[%uu] && D[%uu] - rel >= n) { return vec2<u32>(%uu, rel); } }\n",
+              b, b + 1u, b, b + 2u, b + 2u, k);
+    }
+    out_add(o, "  return vec2<u32>(0xffffffffu, 0u);\n}\n");
+    out_add(o, "fn gld(a: vec2<u32>) -> u32 {\n  let i = a.y >> 2u;\n  switch (a.x) {\n");
+    for (uint32_t k = 0; k < d->window_count; k++)
+      out_add(o, "    case %uu: { if (i < arrayLength(&G%u)) { return G%u[i]; } }\n", k, k, k);
+    out_add(o, "    default: {}\n  }\n  return 0u;\n}\n");
+    out_add(o, "fn gst(a: vec2<u32>, v: u32) {\n  let i = a.y >> 2u;\n  switch (a.x) {\n");
+    for (uint32_t k = 0; k < d->window_count; k++)
+      out_add(o, "    case %uu: { if (i < arrayLength(&G%u)) { G%u[i] = v; } }\n", k, k, k);
+    out_add(o, "    default: {}\n  }\n}\n");
+  }
+  if (t->uses_shared) out_add(o, "var<workgroup> sh: array<u32, %u>;\n", d->shared_bytes / 4u);
+  out_add(o, "var<workgroup> cs_wait: atomic<u32>;\nvar<workgroup> cs_count: u32;\n");
+  out_add(o, "@compute @workgroup_size(%u, %u, %u)\nfn cs(@builtin(local_invocation_id) lid: vec3<u32>, "
+             "@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lidx: u32) {\n",
+          d->block[0], d->block[1], d->block[2]);
+}
+
 Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *desc, char *buffer, size_t capacity) {
   Wgsl_Result res;
   memset(&res, 0, sizeof(res));
@@ -2161,12 +2327,31 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   t->d = desc;
   t->ok = true;
   t->vertex = desc->stage == SM_STAGE_VERTEX;
+  t->compute = desc->stage == SM_STAGE_COMPUTE;
   t->cbt = t->vertex ? WGSL_DRAW_VS_CBUF_TABLE : WGSL_DRAW_CBUF_TABLE;
   memset(t->globals.buffer_of, 0xff, sizeof(t->globals.buffer_of));
   if (t->vertex && wgsl_reads_globals(program) && !wgsl_find_globals(program, &t->globals))
     memset(t->globals.buffer_of, 0xff, sizeof(t->globals.buffer_of)); /* its LDGs stay untranslated */
-  if (program->header.stage != (t->vertex ? SM_STAGE_VERTEX : SM_STAGE_PIXEL))
-    fail(t, t->vertex ? "not a vertex program" : "not a pixel program");
+  const uint8_t want_stage = t->compute ? SM_STAGE_COMPUTE : t->vertex ? SM_STAGE_VERTEX : SM_STAGE_PIXEL;
+  if (program->header.stage != want_stage)
+    fail(t, t->compute ? "not a compute program" : t->vertex ? "not a vertex program" : "not a pixel program");
+  /* A compute program: lanes are workgroup invocations - no quads, no
+   * attributes, no textures yet; warp votes and shuffles have no WGSL
+   * equivalent without subgroups. */
+  if (t->compute) {
+    if (!desc->block[0] || !desc->block[1] || !desc->block[2] ||
+        (uint32_t)desc->block[0] * desc->block[1] * desc->block[2] > WGSL_CS_MAX_INVOCATIONS)
+      fail(t, "workgroup %ux%ux%u", desc->block[0], desc->block[1], desc->block[2]);
+    if (desc->window_count > WGSL_CS_MAX_WINDOWS) fail(t, "%u windows", desc->window_count);
+    if (desc->shared_bytes > WGSL_CS_MAX_SHARED_BYTES) fail(t, "%u bytes of shared memory", desc->shared_bytes);
+    for (uint32_t pc = 0; pc < program->word_count && t->ok; pc++) {
+      const uint16_t op = program->insns[pc].op;
+      if (op == SM_OP_KIL || op == SM_OP_IPA || op == SM_OP_SHFL || op == SM_OP_FSWZADD || op == SM_OP_VOTE ||
+          op == SM_OP_ALD || op == SM_OP_AST || op == SM_OP_OUT || op == SM_OP_LD || op == SM_OP_ST ||
+          is_texture_op(op))
+        fail(t, "%s in a compute program", sm_op_name((Sm_Op)op));
+    }
+  }
   if (t->vertex && desc->input_count + 1u > (desc->vertex_pull ? WGSL_VSI_MAX : 16u))
     fail(t, "%u vertex inputs", desc->input_count);
   /* A vertex stage has no quads (derivatives, discard) or pixel inputs;
@@ -2193,7 +2378,7 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   t->body.buf = buffer + half;
   t->body.cap = capacity - half;
   find_blocks(t);
-  t->straight = true;
+  t->straight = !t->compute; /* compute: the barrier phases need the dispatch loop */
   for (uint32_t pc = 0; pc < program->word_count; pc++)
     if (t->reached[pc] && is_flow(program->insns[pc].op)) t->straight = false;
   t->straight_live = true;
@@ -2204,7 +2389,7 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   /* Outputs reference registers too: emit them into a scratch tail first
    * by running them against the header buffer later; they only add to
    * reg_used, so collect that before writing declarations. */
-  if (!t->vertex) {
+  if (!t->vertex && !t->compute) {
     char scratch[2048];
     Out probe = {scratch, sizeof(scratch), 0, false};
     emit_outputs(t, &probe);
@@ -2217,13 +2402,15 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   }
   for (size_t i = 0; i < sizeof(k_prelude) / sizeof(k_prelude[0]); i++)
     out_add(&head, k_prelude[i], t->cbt, t->cbt, t->cbt);
-  if (!t->vertex) out_add(&head, "%s", k_quad);
-  if (t->uses_globals) out_add(&head, "%s", k_gword);
+  if (!t->vertex && !t->compute) out_add(&head, "%s", k_quad);
+  if (t->uses_globals && !t->compute) out_add(&head, "%s", k_gword);
   for (uint32_t i = 0; i < desc->texture_count && i < WGSL_MAX_TEXTURES; i++)
     if ((t->textures_used >> i) & 1u)
       emit_texture_helpers(&head, i, desc->sample_type[i],
                            ((desc->hw_sample_mask >> i) & 1u) && desc->sample_type[i] == WGSL_SAMPLE_FLOAT);
-  if (t->vertex) {
+  if (t->compute) {
+    emit_compute_head(t, &head);
+  } else if (t->vertex) {
     emit_vertex_io(&head, desc);
     if (desc->vertex_pull)
       out_add(&head, "@vertex fn vs(vin: VIn) -> VOut {\n  let vid = vin.vi; let iid = D[%uu];\n", WGSL_DRAW_VS_INSTANCE);
@@ -2265,7 +2452,9 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
     out_add(&head, "  var fsk: array<u32, %u>; var fst: array<u32, %u>; var fsd = 0u;\n", FLOW_DEPTH, FLOW_DEPTH);
     out_add(&head, "  var cst: array<u32, %u>; var csd = 0u;\n", SM_STACK_DEPTH);
     out_add(&head, "  var pc = %uu; var steps = 0u;\n", norm_pc(1u));
-    if (t->vertex) out_add(&head, "  loop {\n    if (pc >= %uu) { break; }\n", PC_FAULT);
+    if (t->compute)
+      out_add(&head, "  var bar = false;\n  loop {\n  bar = false; steps = 0u;\n  loop {\n    if (pc >= %uu || bar) { break; }\n", PC_FAULT);
+    else if (t->vertex) out_add(&head, "  loop {\n    if (pc >= %uu) { break; }\n", PC_FAULT);
     else out_add(&head, "  loop {\n    if (pc >= %uu) { if (pc != %uu) { discard; } break; }\n", PC_FAULT, PC_DONE);
     out_add(&head, "    steps = steps + 1u; if (steps > %uu) { pc = %uu; continue; }\n", MAX_BLOCK_STEPS, PC_FAULT);
     out_add(&head, "    switch (pc) {\n");
@@ -2281,8 +2470,17 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   head.cap = capacity;
   if (t->straight) out_add(&head, "%s  }\n", t->straight_live ? "    break;\n" : "");
   else out_add(&head, "    default: { pc = %uu; }\n    }\n  }\n", PC_FAULT);
-  if (t->vertex) emit_vertex_epilogue(&head, desc);
-  else emit_outputs(t, &head);
+  if (t->compute) {
+    /* Every invocation is at a barrier or done: the workgroup meets (in
+     * uniform control flow), and another phase runs while any is waiting. */
+    out_add(&head, "  if (bar) { atomicAdd(&cs_wait, 1u); }\n  workgroupBarrier();\n"
+                   "  if (lidx == 0u) { cs_count = atomicExchange(&cs_wait, 0u); }\n"
+                   "  if (workgroupUniformLoad(&cs_count) == 0u) { break; }\n  }\n");
+  } else if (t->vertex) {
+    emit_vertex_epilogue(&head, desc);
+  } else {
+    emit_outputs(t, &head);
+  }
   out_add(&head, "}\n");
   if (head.overflow) {
     res.ok = false;

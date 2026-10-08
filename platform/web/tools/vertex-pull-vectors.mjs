@@ -4,7 +4,9 @@
  * (a data buffer of attribute descriptors and element bytes, and per case
  * the descriptor, the vertex id, the expected four words and a float
  * tolerance in ULPs) and DIR/vertex_pull.wgsl (the decoder); this runs the
- * decoder in a compute shader on WebGPU and compares.
+ * decoder in a compute shader on WebGPU and compares - twice: reading the
+ * data buffer, then with every descriptor marked resident (WGSL_VSI_RESIDENT)
+ * reading the same words from the second source R (a GPU mirror).
  *
  *   build/native-noop/tests/wgsl_test DIR && node tools/vertex-pull-vectors.mjs DIR
  *   (WGSL_VECTORS_GPU=metal runs on the host GPU instead of SwiftShader)
@@ -31,13 +33,16 @@ const browser = await chromium.launch({
 try {
   const page = await browser.newPage();
   await page.goto("file:///"); /* a secure context: WebGPU */
-  const got = await page.evaluate(async ({ decoder, words, cases }) => {
+  let total = 0;
+  for (const resident of [false, true]) {
+  const got = await page.evaluate(async ({ decoder, words, cases, resident }) => {
     const adapter = await navigator.gpu.requestAdapter();
     if (!adapter) throw new Error("no WebGPU adapter");
     const device = await adapter.requestDevice();
     const code = `@group(0) @binding(0) var<storage, read> D: array<u32>;
 @group(0) @binding(1) var<storage, read> C: array<vec2<u32>>;
 @group(0) @binding(2) var<storage, read_write> O: array<vec4<u32>>;
+@group(0) @binding(3) var<storage, read> R: array<u32>;
 ${decoder}
 @compute @workgroup_size(1) fn main(@builtin(global_invocation_id) g: vec3<u32>) {
   O[g.x] = vfetch(C[g.x].x, C[g.x].y);
@@ -52,7 +57,11 @@ ${decoder}
       b.unmap();
       return b;
     };
-    const d = buffer(new Uint32Array(words), GPUBufferUsage.STORAGE);
+    /* Resident: the descriptors point at R (the same words). */
+    const dWords = new Uint32Array(words);
+    if (resident) cases.forEach((k) => { dWords[k[0] + 1] = (dWords[k[0] + 1] | 0x20000000) >>> 0; });
+    const d = buffer(dWords, GPUBufferUsage.STORAGE);
+    const rBuf = buffer(new Uint32Array(words), GPUBufferUsage.STORAGE);
     const c = buffer(new Uint32Array(cases.flatMap((k) => [k[0], k[1]])), GPUBufferUsage.STORAGE);
     const outBytes = 16 * cases.length;
     const o = device.createBuffer({ size: outBytes, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC });
@@ -61,7 +70,7 @@ ${decoder}
     const group = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [{ binding: 0, resource: { buffer: d } }, { binding: 1, resource: { buffer: c } },
-                { binding: 2, resource: { buffer: o } }],
+                { binding: 2, resource: { buffer: o } }, { binding: 3, resource: { buffer: rBuf } }],
     });
     const encoder = device.createCommandEncoder();
     const pass = encoder.beginComputePass();
@@ -73,7 +82,7 @@ ${decoder}
     device.queue.submit([encoder.finish()]);
     await read.mapAsync(GPUMapMode.READ);
     return Array.from(new Uint32Array(read.getMappedRange().slice(0)));
-  }, { decoder, words: vectors.words, cases: vectors.cases });
+  }, { decoder, words: vectors.words, cases: vectors.cases, resident });
 
   const f32 = new Float32Array(1);
   const u32 = new Uint32Array(f32.buffer);
@@ -101,8 +110,11 @@ ${decoder}
       }
     }
   });
-  console.log(`${vectors.cases.length - failures}/${vectors.cases.length} vertex-pull cases match raster3d's decoder`);
-  process.exitCode = failures ? 1 : 0;
+  console.log(`${vectors.cases.length - failures}/${vectors.cases.length} vertex-pull cases match raster3d's decoder` +
+              (resident ? " (resident: from R)" : ""));
+  total += failures;
+  }
+  process.exitCode = total ? 1 : 0;
 } finally {
   await browser.close();
 }

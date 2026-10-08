@@ -265,6 +265,8 @@ let freeRunning = false;
 let gpuAsync = true;
 /** The renderer's threads (set-render-workers; ?rworkers=N): 0 = as many as it starts with. */
 let renderWorkers = 0;
+/** Compute dispatches on the GPU (set-gpu-compute; ?gpucompute=0 turns it off). */
+let gpuCompute = true;
 
 function applyGpuAsync(target: SwitchCoreExports): void {
   const on = target._emulator_set_gpu_async_ffi(gpuAsync ? 1 : 0) === 1;
@@ -818,6 +820,7 @@ function loadGame(file: File): CPUToMainMessage {
   loadingCore._emulator_set_frame_skip_ffi(frameSkip);
   loadingCore._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
   applyGpuAsync(loadingCore);
+  loadingCore._emulator_set_gpu_compute_ffi(gpuCompute ? 1 : 0);
   applyHostCores(loadingCore);
   if (renderWorkers > 0) log("info", `renderer workers: ${loadingCore._emulator_set_render_workers_ffi(renderWorkers)}`);
   loadingCore._emulator_set_poll_coalescing_ffi(pollCoalescing ? 1 : 0);
@@ -1020,6 +1023,13 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     requestedHostCores = msg.cores < 0 ? null : msg.cores; /* negative: back to the default */
     /* Takes effect between slices; a running game switches at once. */
     if (core) applyHostCores(core);
+    return;
+  }
+
+  if (msg.type === "set-gpu-compute") {
+    gpuCompute = msg.on;
+    core?._emulator_set_gpu_compute_ffi(gpuCompute ? 1 : 0);
+    log("info", `compute on the GPU ${gpuCompute ? "on" : "off"}`);
     return;
   }
 

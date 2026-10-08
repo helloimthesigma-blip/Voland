@@ -23,6 +23,10 @@ add_executable(wgsl_test wgsl_test.c)
 target_link_libraries(wgsl_test PRIVATE switch_core)
 add_test(NAME wgsl_test COMMAND wgsl_test)
 
+add_executable(wgsl_compute_test wgsl_compute_test.c)
+target_link_libraries(wgsl_compute_test PRIVATE switch_core)
+add_test(NAME wgsl_compute_test COMMAND wgsl_compute_test)
+
 add_executable(workers_test workers_test.c)
 target_link_libraries(workers_test PRIVATE switch_core)
 add_test(NAME workers_test COMMAND workers_test)

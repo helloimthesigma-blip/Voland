@@ -168,6 +168,9 @@ typedef struct Raster3d_Gpu_Stats {
   uint64_t bulk_triangles; /* pulled list triangles that skipped the assembler */
   /* Draw inputs a compute dispatch wrote (diagnostics: where compute output goes) */
   uint64_t compute_fed_streams, compute_fed_stream_bytes, compute_fed_cbufs;
+  /* Compute dispatches sent to the GPU (stream version 6), and pulled
+   * streams read from GPU-written mirror pages. */
+  uint64_t gpu_dispatches, resident_streams;
 } Raster3d_Gpu_Stats;
 
 typedef struct Raster3d_Stats {
@@ -210,6 +213,11 @@ typedef struct Raster3d {
   Raster3d_Stats stats;
   bool trace_draws;          /* log every draw's state and result (diagnostics) */
   bool trace_compute; /* log the first dispatches (voland-cli: VOLAND_COMPUTE_TRACE) */
+  /* Diagnostics (voland-cli VOLAND_COMPUTE_CAPTURE): called before and
+   * after a dispatch runs, to record its inputs and outputs. */
+  void (*compute_capture)(void *user, const Compute_Launch *launch, uint64_t program_address,
+                          const struct Sm_Env *env, const struct Gpu_Memory *mem, bool after);
+  void *compute_capture_user;
   bool skip_draws;           /* frame skip: draws and clears are not rasterised */
   /* Diagnostics: called with every newly decoded texture (may be NULL). */
   void (*on_texture_decoded)(void *user, const Tex_Image *image, uint64_t address);
@@ -238,6 +246,7 @@ typedef struct Raster3d {
    * before GPU vertex stages; diagnostics and comparison). */
   bool cpu_vertices;
   bool no_vertex_pull; /* GPU vertex stages take decoded inputs (the CPU fetches them) */
+  bool no_gpu_compute; /* compute dispatches stay on the CPU (stream version 6 off; diagnostics) */
 } Raster3d;
 
 /* Bytes of backing storage raster3d_init needs (one allocation). */

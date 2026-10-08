@@ -13,10 +13,6 @@
 
 #define BITS(w, at, n) ((uint32_t)(((w) >> (at)) & ((1ull << (n)) - 1ull)))
 #define BIT(w, at) ((uint32_t)(((w) >> (at)) & 1ull))
-#define SM_LDST_SPACE_MASK 0xfff8u
-#define SM_LDS_OPCODE 0xef48u
-#define SM_STS_OPCODE 0xef58u
-#define SM_BAR_OPCODE 0xf0a8u
 
 #define REG_D(w) BITS(w, 0, 8)
 #define REG_A(w) BITS(w, 8, 8)

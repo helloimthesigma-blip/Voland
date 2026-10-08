@@ -5,7 +5,7 @@
  */
 
 export const GPU_STREAM_MAGIC = 0x55504756;
-export const GPU_STREAM_VERSION = 5;
+export const GPU_STREAM_VERSION = 6;
 export const GPU_STREAM_HEADER_BYTES = 56;
 export const GPU_STREAM_RECORD_HEADER_BYTES = 8;
 export const OFF_MAGIC = 0;
@@ -27,6 +27,11 @@ export const REC_CLEAR = 5;
 export const REC_DRAW = 6;
 export const REC_COPY = 7;
 export const REC_PRESENT = 8;
+/* Version 6: storage buffers mirroring guest GPU memory, compute dispatches. */
+export const REC_BUFFER_CREATE = 9;
+export const REC_BUFFER_DESTROY = 10;
+export const REC_BUFFER_WRITE = 11;
+export const REC_COMPUTE = 12;
 
 /* GPU_FMT_* by index. */
 export const FORMATS: readonly (GPUTextureFormat | null)[] = [
@@ -80,6 +85,10 @@ export const CLEAR_STENCIL = 4;
 export const BIND_DATA = 1;
 export const BIND_TEXTURE = 2;
 export const BIND_SAMPLER = 3;
+export const BIND_BUFFER = 4; /* read-write storage buffer: texture_id = a BUFFER_CREATE id (version 6) */
+/* core/gpu/wgsl.h WGSL_VS_RESIDENT_BINDING: a pulled vertex program's
+ * second source R, a GPU mirror (or an empty buffer when none is bound). */
+export const VS_RESIDENT_BINDING = 39;
 export const BIND_FILTERED = 1;
 export const SAMPLER_LINEAR = 1;
 export const SAMPLER_MIN_LINEAR = 1 << 7;
@@ -109,6 +118,22 @@ export const FRONT_CCW = 0;
 export const BINDING_BYTES = 16;
 export const COPY_BYTES = 44;
 export const PRESENT_BYTES = 24;
+export const COMPUTE_BYTES = 20; /* shader id, grid x/y/z, binding count */
+export const BUFFER_WRITE_BYTES = 12;
+
+export interface Compute {
+  readonly shaderId: number;
+  readonly grid: readonly [number, number, number];
+  readonly bindingCount: number;
+}
+
+export function parseCompute(v: DataView): Compute {
+  return {
+    shaderId: v.getUint32(0, true),
+    grid: [v.getUint32(4, true), v.getUint32(8, true), v.getUint32(12, true)],
+    bindingCount: v.getUint32(16, true),
+  };
+}
 
 export interface TextureCreate {
   readonly id: number;

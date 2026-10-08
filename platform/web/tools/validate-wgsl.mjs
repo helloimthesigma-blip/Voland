@@ -44,6 +44,20 @@ const results = await page.evaluate(async (mods) => {
     for (const msg of info.messages) {
       if (msg.type === "error") errors.push(`${msg.lineNum}:${msg.linePos} ${msg.message}`);
     }
+    /* A compute program: one compute pipeline. */
+    if (m.code.includes("@compute")) {
+      if (errors.length === 0) {
+        try {
+          device.createComputePipeline({ layout: "auto", compute: { module, entryPoint: "cs" } });
+        } catch (e) {
+          errors.push(String(e));
+        }
+      }
+      const scopedCs = await device.popErrorScope();
+      if (scopedCs) errors.push(scopedCs.message.split("\n").slice(0, 6).join(" | "));
+      out.push({ name: m.name, errors });
+      continue;
+    }
     /* A GPU vertex stage (no fragment entry): every VIn location is a
      * vec4<u32> input; the pipeline is built without a fragment stage. */
     const vertexOnly = !m.code.includes("@fragment");
