@@ -291,10 +291,14 @@ static void dump_wgsl(void *user, const Sm_Program *program) {
   fclose(f);
 }
 
+/* The shader dump directory: VOLAND_DUMP_SHADERS, or a job's dump_shaders. */
+static const char *g_dump_shaders_dir;
+
 /* Both decode hooks (shader and WGSL dumps) can be on at once. */
 static void program_decoded(void *user, const Sm_Program *program) {
   (void)user;
-  if (getenv("VOLAND_DUMP_SHADERS")) dump_program(getenv("VOLAND_DUMP_SHADERS"), program);
+  if (!g_dump_shaders_dir) g_dump_shaders_dir = getenv("VOLAND_DUMP_SHADERS");
+  if (g_dump_shaders_dir) dump_program((void *)(uintptr_t)g_dump_shaders_dir, program);
   if (getenv("VOLAND_DUMP_WGSL")) dump_wgsl(getenv("VOLAND_DUMP_WGSL"), program);
 }
 
@@ -1240,7 +1244,7 @@ static int run(int argc, char **argv) {
       if (job.frame_path[0]) frame_path = job.frame_path;
       if (job.dump_shaders[0]) {
         /* Every program the job uses, decoded again so each is dumped. */
-        setenv("VOLAND_DUMP_SHADERS", job.dump_shaders, 1);
+        g_dump_shaders_dir = job.dump_shaders;
         emu.renderer.on_program_decoded = program_decoded;
         for (uint32_t i = 0; i < RASTER_PROGRAMS; i++) emu.renderer.programs[i].valid = false;
       }

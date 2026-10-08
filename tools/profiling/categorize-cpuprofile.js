@@ -1,8 +1,12 @@
-// categorize-cpuprofile.js FILE.cpuprofile: buckets CPU-worker self time (tools/profiling/README.md).
+// categorize-cpuprofile.js FILE.cpuprofile [LAST_SECONDS]: buckets CPU-worker self time
+// (tools/profiling/README.md), optionally only over the profile's last LAST_SECONDS.
 const p=JSON.parse(require("fs").readFileSync(process.argv[2]));
+const lastUs=process.argv[3]?Number(process.argv[3])*1e6:Infinity;
 const byId=new Map(p.nodes.map(n=>[n.id,n]));
 const self=new Map(); let total=0;
-for(let i=0;i<p.samples.length;i++){const n=byId.get(p.samples[i]); const cf=n.callFrame; const k=cf.functionName+"|"+(cf.url.startsWith("wasm://")?"jit":cf.url.includes("switch_core")?"core":cf.url); const d=p.timeDeltas[i]||0; self.set(k,(self.get(k)||0)+d); total+=d;}
+const endUs=p.timeDeltas.reduce((a,b)=>a+b,0); let t=0;
+const isCore=url=>url.includes("switch_core")||/voland-cli\.(js|wasm)/.test(url);
+for(let i=0;i<p.samples.length;i++){const d=p.timeDeltas[i]||0; t+=d; if(endUs-t>lastUs) continue; const n=byId.get(p.samples[i]); const cf=n.callFrame; const k=cf.functionName+"|"+(cf.url.startsWith("wasm://")&&!/^\$?[a-z_]{3,}/i.test(cf.functionName.replace(/^wasm-function\[\d+\]$/,""))?"jit":cf.url.startsWith("wasm://")||isCore(cf.url)?"core":cf.url); self.set(k,(self.get(k)||0)+d); total+=d;}
 const cat=(name,src)=>{
   if(src==="jit") return "JIT-compiled guest code";
   if(src!=="core") return name.startsWith("(")?"idle/program/GC: "+name:"JS (worker glue)";
@@ -22,3 +26,4 @@ for(const [c,v] of order){ if(c.startsWith("other core")||c.startsWith("idle")) 
 let other=0, idle=0; const otherList=[];
 for(const [c,v] of order){ if(c.startsWith("other core")){other+=v; otherList.push([c.slice(12),v]);} if(c.startsWith("idle")) {idle+=v; console.log((100*v/total).toFixed(1).padStart(5)+"%  "+c);} }
 console.log((100*other/total).toFixed(1).padStart(5)+"%  other core: "+otherList.sort((a,b)=>b[1]-a[1]).slice(0,14).map(([n,v])=>n+" "+(100*v/total).toFixed(1)).join(", "));
+if(process.env.TOP){ console.log("top functions:"); [...self.entries()].sort((a,b)=>b[1]-a[1]).slice(0,Number(process.env.TOP)).forEach(([k,v])=>console.log((100*v/total).toFixed(2).padStart(6)+"%  "+k)); }
