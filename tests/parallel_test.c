@@ -316,6 +316,42 @@ static void test_host_calls(void) {
   printf("[parallel_test] host calls from a core run on the driver\n");
 }
 
+/* scheduler_gpu_begin releases the kernel lock (another thread's SVC
+ * gets in while GPU work runs) and scheduler_gpu_end takes it back with
+ * `current` restored. */
+static bool g_helper_entered;
+static void *kernel_helper(void *arg) {
+  Scheduler *sched = (Scheduler *)arg;
+  scheduler_kernel_enter(sched, NULL);
+  g_helper_entered = true;
+  scheduler_kernel_exit(sched);
+  return NULL;
+}
+
+static void test_gpu_lock(void) {
+  guest_boot(&g_run, TEST_BACKEND, k_guest_threads, sizeof(k_guest_threads));
+  CHECK(emulator_set_host_cores(&g_run.emu, 2) == 2);
+  Scheduler *sched = &g_run.emu.scheduler;
+  const CPU_State *main_state = sched->threads[0].thread.cpu_state;
+  scheduler_kernel_enter(sched, main_state);
+  const int32_t current = sched->current;
+  CHECK(current == 0);
+  Kernel_Suspend suspended;
+  scheduler_gpu_begin(sched, &suspended);
+  g_helper_entered = false;
+  pthread_t helper;
+  CHECK(pthread_create(&helper, NULL, kernel_helper, sched) == 0);
+  CHECK(pthread_join(helper, NULL) == 0); /* hangs if the kernel lock were still held */
+  CHECK(g_helper_entered);
+  scheduler_gpu_end(sched, &suspended);
+  CHECK(sched->current == current);
+  scheduler_gpu_lock(sched); /* free again */
+  scheduler_gpu_unlock(sched);
+  scheduler_kernel_exit(sched);
+  guest_shutdown(&g_run);
+  printf("[parallel_test] GPU work releases the kernel lock\n");
+}
+
 int main(void) {
   if (!parallel_supported()) {
     printf("[parallel_test] no host threads in this build; skipped\n");
@@ -329,6 +365,7 @@ int main(void) {
   test_free_running();
   test_pacing();
   test_host_calls();
+  test_gpu_lock();
   printf("[parallel_test] passed\n");
   return 0;
 }

@@ -2512,6 +2512,12 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - **GPU stream publishing:** a closed record publishes once 1/8 of the ring is unpublished. Before, the producer published only when the 4 MiB ring was full, so the GPU worker idled while it filled and the producer stalled while it drained (1740 stalls in 43 s; 7 after).
   - Together: 3.4 → 4.8 fps in the fight, 804 → 1127 slices/s. Compute on the CPU (24%) and vertex fetch and assembly (~40%) are what remain.
   - **Parallel mode:** every SVC, and so all of this GPU work, runs under the kernel lock. With 3 cores in an SSBU match the cores waited on it 45–73% of the time.
+  - **GPU work outside the kernel lock** (docs/PARALLEL.md "GPU work"): a GPFIFO submission takes a GPU lock and releases the kernel lock while the commands run. nvmap and address-space ioctls, the multimedia engines and VI's composite take the GPU lock. Lock order is kernel then GPU, always.
+  - **Compute blocks on the renderer's workers:** a dispatch's blocks are shared out, each worker with its own lane groups and shared memory (blocks of up to 256 threads). Programs that sample textures stay serial. `raster3d_test` runs 8 blocks on 1 and 4 workers.
+  - **GPU vertex stage, by vertex ids:** the assembler hands triangle ids straight to the record. Each distinct vertex fetches only the inputs the translated program reads, with no vertex cache or `Vertex` copies. 32-bit float attributes are copied as they are.
+  - **WGSL: I2I with abs/neg** (sign-and-magnitude, exact against the interpreter's 64-bit arithmetic). 68 SSBU vertex programs failed to translate for that alone and shaded on the CPU. A `wgsl_test` vector covers it.
+  - **GPU ring 16 MiB** (was 4): a fight frame streams ~24 MB, and the producer stalled whenever the GPU worker paused.
+  - Fight: 3.4 → 7.1 fps across these changes, 804 → 1693 slices/s (serial, pacing off). What remains: CPU attribute fetch (~31%) and stream volume (168 MiB/s).
 
 ### Changelog v3.73 → v3.74 (summary)
 

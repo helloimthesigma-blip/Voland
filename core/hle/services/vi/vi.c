@@ -9,6 +9,7 @@
 #include "gpu/framebuffer.h"
 #include "gpu/gpu_records.h"
 #include "gpu/raster3d.h"
+#include "hle/kernel/scheduler.h"
 #include "hle/services/service_util.h"
 
 /* IGraphicBufferProducer transaction codes. */
@@ -267,7 +268,17 @@ static void convert_row(uint8_t *row, uint32_t width, uint32_t format) {
 #define VI_TRANSFORM_FLIP_H 1u /* NATIVE_WINDOW_TRANSFORM_FLIP_H */
 #define VI_TRANSFORM_FLIP_V 2u
 
+static void composite_locked(Vi_State *s, HLE_Context *c, const Vi_Slot *slot);
+
+/* The renderer's present and surfaces under the GPU lock (scheduler.h):
+ * a GPFIFO submission on another core may be drawing. */
 static void composite(Vi_State *s, HLE_Context *c, const Vi_Slot *slot) {
+  scheduler_gpu_lock(c->scheduler);
+  composite_locked(s, c, slot);
+  scheduler_gpu_unlock(c->scheduler);
+}
+
+static void composite_locked(Vi_State *s, HLE_Context *c, const Vi_Slot *slot) {
   if (slot->skipped) {
     s->frames_skipped++; /* the screen keeps the last rendered frame */
     return;
@@ -447,8 +458,10 @@ static void frame_skip_on_queue(Vi_State *s, HLE_Context *c, Vi_Slot *slot) {
     }
   }
   s->frames_queued++;
+  scheduler_gpu_lock(c->scheduler);
   if (renderer) raster3d_end_frame(renderer);
   if (renderer) renderer->skip_draws = s->frame_skip && (s->frames_queued % (s->frame_skip + 1u)) != 0u;
+  scheduler_gpu_unlock(c->scheduler);
 }
 
 static int32_t transact(Vi_State *s, HLE_Context *c, Vi_Layer *layer, uint32_t code, Parcel_Reader *r,

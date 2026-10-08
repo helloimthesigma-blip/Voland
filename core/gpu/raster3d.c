@@ -1469,6 +1469,10 @@ static void fetch_attribute(Draw_Context *ctx, uint32_t attrib, uint32_t vertex,
   uint8_t raw[16];
   memset(raw, 0, sizeof(raw));
   if (!stream_read(ctx, stream, address, raw, layout.bytes)) return;
+  if (type == NUM_FLOAT && layout.bits[0] == 32u && !((a >> 31) & 1u)) { /* 32-bit floats: the bytes as they are */
+    memcpy(out, raw, (size_t)layout.count * 4u);
+    return;
+  }
   uint32_t bit = 0;
   for (uint32_t c = 0; c < layout.count; c++) {
     const uint32_t n = layout.bits[c];
@@ -2693,7 +2697,14 @@ typedef struct Assembler {
   uint32_t prev[3];
 } Assembler;
 
+static void gpu_vs_triangle_ids(Raster_State *rs, const uint32_t ids[3], uint32_t provoking);
+
 static void emit_triangle(Raster_State *rs, Vertex_Cache *cache, uint32_t i0, uint32_t i1, uint32_t i2, uint32_t prov) {
+  if (gpu_raw_vertices()) { /* the GPU vertex stage needs only the ids */
+    const uint32_t ids[3] = {i0, i1, i2};
+    gpu_vs_triangle_ids(rs, ids, prov);
+    return;
+  }
   bool ok = true;
   const Vertex *a = vertex_get(rs->ctx, cache, i0, &ok);
   Vertex va = *a;
@@ -3208,16 +3219,27 @@ static bool vs_topology(uint32_t topology) {
 /* The vertex program on the GPU when it translates for this draw's pixel
  * program: its outputs feed the pixel program's locations exactly as
  * gpu_put_vertex would (perspective-divided where interpolated so). */
+/* Draws that kept CPU vertices for points/lines or an overflowing constant
+ * window: each reason is logged on its first draw (diagnostics). */
+static uint64_t g_vs_cpu_topology, g_vs_cpu_window;
+
 static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_t topology) {
   Gpu_Draw *g = &g_gpu_draw;
-  if (ctx->r->cpu_vertices || !vs_topology(topology)) return;
+  if (ctx->r->cpu_vertices) return;
+  if (!vs_topology(topology)) {
+    if (!g_vs_cpu_topology++) log_warn("[gpu] vertices on the CPU: topology %u", topology);
+    return;
+  }
   /* Both stages' constant buffers must fit the GPU's data window. */
   uint64_t words = WGSL_DRAW_CONSTANT_WORDS + 2u;
   for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++) {
     if (ctx->env[0].cbuf[s]) words += ctx->env[0].cbuf_size[s] / 4u;
     if (ctx->env[1].cbuf[s]) words += ctx->env[1].cbuf_size[s] / 4u;
   }
-  if (words > GPU_DATA_WINDOW_WORDS) return;
+  if (words > GPU_DATA_WINDOW_WORDS) {
+    if (!g_vs_cpu_window++) log_warn("[gpu] vertices on the CPU: constant buffers of %llu words", (unsigned long long)words);
+    return;
+  }
   Wgsl_Program_Desc *d = &g->vs_desc;
   wgsl_default_desc(ctx->vs, d);
   d->varying_count = g->locations;
@@ -3335,7 +3357,7 @@ static uint32_t gpu_shader_for(Raster3d *r, const Sm_Program *program, const Wgs
     const Wgsl_Result res = wgsl_translate(program, desc, r->gpu_wgsl, GPU_WGSL_BYTES);
     if (!res.ok) {
       if (desc->stage == SM_STAGE_VERTEX)
-        log_debug("[gpu] vertex program %llx stays on the CPU: %s", (unsigned long long)program->address, res.reason);
+        log_warn("[gpu] vertex program %llx stays on the CPU: %s", (unsigned long long)program->address, res.reason);
       else
         log_warn("[gpu] pixel program %llx not translated: %s", (unsigned long long)program->address, res.reason);
       entry->id = GPU_SHADER_FAILED;
@@ -3646,49 +3668,48 @@ static void gpu_put_vertex(Raster_State *rs, const Screen_Vertex *v, const Verte
 
 /* GPU mode's raster_triangle: culls, then queues the triangle in NDC with
  * front faces counter-clockwise (y up). */
-/* One vertex for a GPU vertex stage: ids, then the input vectors. */
-static void gpu_put_raw(Raster_State *rs, const Vertex *v) {
+/* One vertex for a GPU vertex stage: ids, then the input vectors the
+ * translated program reads, fetched straight into the record. */
+static void gpu_put_raw(Raster_State *rs, uint32_t id) {
   Gpu_Draw *g = &g_gpu_draw;
   uint32_t *p = (uint32_t *)(void *)(rs->ctx->r->gpu_vertices + g->vertex_bytes);
-  memcpy(&p[0], &v->pos[0], 4);
-  memcpy(&p[1], &v->pos[1], 4);
+  p[0] = id;
+  p[1] = rs->ctx->instance;
   p[2] = p[3] = 0;
-  for (uint32_t i = 0; i < g->input_count; i++) memcpy(p + 4u + 4u * i, v->varying + 4u * g->input_vector[i], 16);
+  for (uint32_t i = 0; i < g->input_count; i++) fetch_attribute(rs->ctx, g->input_vector[i], id, p + 4u + 4u * i);
   g->vertex_bytes += g->stride;
   g->vertices++;
 }
 
-/* The record's slot for vertex `v` (by its guest vertex id): appended the
- * first time the draw uses it. */
-static uint32_t gpu_vertex_slot(Raster_State *rs, const Vertex *v) {
+/* The record's slot for guest vertex `id`: appended the first time the
+ * draw uses it. */
+static uint32_t gpu_vertex_slot(Raster_State *rs, uint32_t id) {
   Gpu_Draw *g = &g_gpu_draw;
-  const uint32_t id = RAW_VERTEX_ID(v);
   for (uint32_t i = (id * 2654435761u) & (GPU_VERTEX_MAP - 1u);; i = (i + 1u) & (GPU_VERTEX_MAP - 1u)) {
     if (g_vertex_map_stamp[i] != g_vertex_map_now) {
       g_vertex_map_stamp[i] = g_vertex_map_now;
       g_vertex_map_key[i] = id;
       g_vertex_map_slot[i] = g->vertices;
-      gpu_put_raw(rs, v);
+      gpu_put_raw(rs, id);
       return g_vertex_map_slot[i];
     }
     if (g_vertex_map_key[i] == id) return g_vertex_map_slot[i];
   }
 }
 
-/* A triangle for the GPU vertex stage: untransformed, provoking vertex
- * first (WebGPU's flat interpolation takes the first; the rotation keeps
- * the winding). The draw is prepared from the first triangle shaded on
- * the CPU once - the pixel program's texture probe reads its varyings. */
-static void gpu_vs_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
+/* A triangle for the GPU vertex stage, by guest vertex ids: untransformed,
+ * provoking vertex (ids[provoking]) first - WebGPU's flat interpolation
+ * takes the first; the rotation keeps the winding. The draw is prepared
+ * from the first triangle shaded on the CPU once - the pixel program's
+ * texture probe reads its varyings. */
+static void gpu_vs_triangle_ids(Raster_State *rs, const uint32_t ids[3], uint32_t provoking) {
   Gpu_Draw *g = &g_gpu_draw;
   if (!g->active || g->dead) return;
   if (!g->prepared) {
     g->prepared = true;
     static Vertex shaded[3];
     Vertex *outs[3] = {&shaded[0], &shaded[1], &shaded[2]};
-    const uint32_t idx[3] = {RAW_VERTEX_ID(a), RAW_VERTEX_ID(b), RAW_VERTEX_ID(c)};
-    const uint32_t pi = provoking == b ? 1u : (provoking == c ? 2u : 0u);
-    bool ok = shade_vertices(rs->ctx, idx, 3u, outs);
+    bool ok = shade_vertices(rs->ctx, ids, 3u, outs);
     Screen_Vertex sv[3];
     bool front = true;
     if (ok) {
@@ -3697,20 +3718,20 @@ static void gpu_vs_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
       const bool clockwise = area > 0;
       front = rs->front_ccw ? !clockwise : clockwise;
     }
-    if (!ok || !gpu_prepare(rs, &sv[pi], &shaded[pi], front)) {
+    if (!ok || !gpu_prepare(rs, &sv[provoking], &shaded[provoking], front)) {
       g->dead = true;
       rs->ctx->r->gpu_stats.untranslated_draws++;
       return;
     }
   }
   if (g->vertex_bytes + 3u * g->stride > GPU_VERTEX_BYTES || g->index_count + 3u > GPU_MAX_INDICES) gpu_emit_draw(rs);
-  const Vertex *first = provoking == b ? b : (provoking == c ? c : a);
-  const Vertex *second = first == a ? b : (first == b ? c : a);
-  const Vertex *third = first == a ? c : (first == b ? a : b);
-  g_gpu_indices[g->index_count++] = gpu_vertex_slot(rs, first);
-  g_gpu_indices[g->index_count++] = gpu_vertex_slot(rs, second);
-  g_gpu_indices[g->index_count++] = gpu_vertex_slot(rs, third);
+  for (uint32_t k = 0; k < 3u; k++) g_gpu_indices[g->index_count++] = gpu_vertex_slot(rs, ids[(provoking + k) % 3u]);
   rs->ctx->r->gpu_stats.triangles++;
+}
+
+static void gpu_vs_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
+  const uint32_t ids[3] = {RAW_VERTEX_ID(a), RAW_VERTEX_ID(b), RAW_VERTEX_ID(c)};
+  gpu_vs_triangle_ids(rs, ids, provoking == b ? 1u : (provoking == c ? 2u : 0u));
 }
 
 static void gpu_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
@@ -3991,7 +4012,7 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     for (uint32_t done = 0; done < draw->count;) {
       const uint32_t n = draw->count - done < INDEX_BATCH ? draw->count - done : INDEX_BATCH;
       for (uint32_t i = 0; i < n; i++) chunk[i] = draw->first + done + i;
-      vertex_prefetch(ctx, &cache, chunk, n);
+      if (!gpu_raw_vertices()) vertex_prefetch(ctx, &cache, chunk, n);
       for (uint32_t i = 0; i < n; i++) assemble(&rs, &cache, &as, chunk[i]);
       done += n;
     }
@@ -4013,7 +4034,7 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
         chunk[i] = (restart && index == restart_value) ? RESTART : index + base_vertex;
         if (chunk[i] != RESTART) vertices[vertex_count++] = chunk[i];
       }
-      vertex_prefetch(ctx, &cache, vertices, vertex_count);
+      if (!gpu_raw_vertices()) vertex_prefetch(ctx, &cache, vertices, vertex_count);
       for (uint32_t i = 0; i < n; i++) {
         if (chunk[i] == RESTART) assemble_end(&rs, &cache, &as);
         else assemble(&rs, &cache, &as, chunk[i]);
@@ -4127,9 +4148,11 @@ typedef struct Compute_Writes {
   uint32_t count;
 } Compute_Writes;
 static Compute_Writes g_compute_writes;
+/* A compute worker's own list while it runs blocks (compute_parallel). */
+static _Thread_local Compute_Writes *t_compute_writes;
 
 static void compute_note_write(uint64_t va, uint64_t end) {
-  Compute_Writes *w = &g_compute_writes;
+  Compute_Writes *w = t_compute_writes ? t_compute_writes : &g_compute_writes;
   for (uint32_t i = 0; i < w->count; i++) {
     if (va <= w->hi[i] + COMPUTE_WRITE_MERGE_GAP && end + COMPUTE_WRITE_MERGE_GAP >= w->lo[i]) {
       if (va < w->lo[i]) w->lo[i] = va;
@@ -4152,6 +4175,112 @@ static bool compute_global_write(void *user, uint64_t va, const void *src, uint3
   const bool ok = env_global_write(user, va, src, size);
   compute_note_write(va, va + size);
   return ok;
+}
+
+/* ---- compute blocks on the renderer's workers ---------------------- */
+
+/* Blocks (CTAs) are independent, so a dispatch's blocks are shared out
+ * among the renderer's workers, each with its own groups and shared
+ * memory. GPU memory access is thread-safe below the workers' lock (nvdrv
+ * translation and the vmm only read their tables). Programs that sample
+ * textures stay serial: the texture cache is not. */
+#define COMPUTE_WORKER_GROUPS 8u /* blocks of up to 256 threads */
+typedef struct Compute_Worker {
+  Sm_Thread groups[COMPUTE_WORKER_GROUPS];
+  Sm_Group_State states[COMPUTE_WORKER_GROUPS];
+  uint8_t shared[COMPUTE_MAX_SHARED_BYTES];
+  Sm_Env env;
+  Compute_Writes writes;
+  bool faulted;
+  bool used;
+} Compute_Worker;
+static Compute_Worker g_compute_workers[WORKERS_MAX];
+
+typedef struct Compute_Job {
+  const Sm_Program *program;
+  const Compute_Launch *launch;
+  const Sm_Env *env;
+  Workers *workers;
+  uint32_t threads, group_count, blocks;
+  uint32_t next_block; /* workers_take */
+} Compute_Job;
+
+static bool compute_read_unlocked(void *user, uint64_t va, void *out, uint32_t size) {
+  const Draw_Context *ctx = ((const Tex_Resolver *)user)->ctx;
+  return ctx->mem->read(ctx->mem->user, va, out, size);
+}
+
+static bool compute_write_unlocked(void *user, uint64_t va, const void *src, uint32_t size) {
+  const Draw_Context *ctx = ((const Tex_Resolver *)user)->ctx;
+  const bool ok = ctx->mem->write(ctx->mem->user, va, src, size);
+  compute_note_write(va, va + size);
+  return ok;
+}
+
+static bool program_samples_textures(const Sm_Program *program) {
+  for (uint32_t i = 0; i < program->word_count; i++) {
+    const uint32_t op = program->insns[i].op;
+    if (op >= SM_OP_TEX && op <= SM_OP_TXD) return true;
+  }
+  return false;
+}
+
+/* Runs block `b` of the dispatch on `groups`; false on a fault. */
+static bool compute_block(const Compute_Job *job, const Sm_Env *env, uint32_t b, Sm_Thread *groups,
+                          Sm_Group_State *states) {
+  const Compute_Launch *launch = job->launch;
+  const uint32_t bx = b % launch->grid[0], by = (b / launch->grid[0]) % launch->grid[1],
+                 bz = b / (launch->grid[0] * launch->grid[1]);
+  memset(env->shared, 0, env->shared_bytes);
+  bool running[COMPUTE_GROUPS];
+  for (uint32_t g = 0; g < job->group_count; g++) {
+    Sm_Thread *t = &groups[g];
+    const uint32_t first = g * SM_LANES, lanes = job->threads - first < SM_LANES ? job->threads - first : SM_LANES;
+    sm_thread_reset(t, lanes);
+    for (uint32_t l = 0; l < lanes; l++) {
+      const uint32_t id = first + l;
+      t->tid[0][l] = id % launch->block[0];
+      t->tid[1][l] = (id / launch->block[0]) % launch->block[1];
+      t->tid[2][l] = id / (launch->block[0] * launch->block[1]);
+    }
+    t->ctaid[0] = bx;
+    t->ctaid[1] = by;
+    t->ctaid[2] = bz;
+    sm_group_begin(&states[g], t);
+    running[g] = true;
+  }
+  /* Every group to the next barrier (or its end), then again. */
+  for (bool any = true; any;) {
+    any = false;
+    for (uint32_t g = 0; g < job->group_count; g++) {
+      if (!running[g]) continue;
+      const Sm_Group_Status status = sm_group_run(job->program, env, &groups[g], &states[g]);
+      if (status == SM_GROUP_FAULT) return false;
+      running[g] = status == SM_GROUP_BARRIER;
+      any = any || running[g];
+    }
+  }
+  return true;
+}
+
+static void compute_task(void *user, uint32_t index, uint32_t count) {
+  (void)count;
+  Compute_Job *job = (Compute_Job *)user;
+  Compute_Worker *w = &g_compute_workers[index];
+  w->env = *job->env;
+  w->env.shared = w->shared;
+  w->env.global_read = compute_read_unlocked;
+  w->env.global_write = compute_write_unlocked;
+  w->writes.count = 0;
+  w->faulted = false;
+  w->used = true;
+  t_compute_writes = &w->writes;
+  for (;;) {
+    const uint32_t b = workers_take(job->workers, &job->next_block);
+    if (b >= job->blocks) break;
+    if (!compute_block(job, &w->env, b, w->groups, w->states)) w->faulted = true;
+  }
+  t_compute_writes = NULL;
 }
 
 void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t *cregs, const Gpu_Memory *mem) {
@@ -4197,41 +4326,22 @@ void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t 
     for (uint32_t i = 0; i < RASTER_SURFACES; i++) surface_write_back(r, &r->surfaces[i], mem);
   const uint32_t threads = launch->block[0] * launch->block[1] * launch->block[2];
   const uint32_t group_count = (threads + SM_LANES - 1u) / SM_LANES;
+  const uint32_t blocks = launch->grid[0] * launch->grid[1] * launch->grid[2];
+  Compute_Job job = {program, launch, env, &r->workers, threads, group_count, blocks, 0};
   bool faulted = false;
-  for (uint32_t bz = 0; bz < launch->grid[2] && !faulted; bz++)
-    for (uint32_t by = 0; by < launch->grid[1] && !faulted; by++)
-      for (uint32_t bx = 0; bx < launch->grid[0] && !faulted; bx++) {
-        memset(shared, 0, env->shared_bytes);
-        bool running[COMPUTE_GROUPS];
-        for (uint32_t g = 0; g < group_count; g++) {
-          Sm_Thread *t = &groups[g];
-          const uint32_t first = g * SM_LANES, lanes = threads - first < SM_LANES ? threads - first : SM_LANES;
-          sm_thread_reset(t, lanes);
-          for (uint32_t l = 0; l < lanes; l++) {
-            const uint32_t id = first + l;
-            t->tid[0][l] = id % launch->block[0];
-            t->tid[1][l] = (id / launch->block[0]) % launch->block[1];
-            t->tid[2][l] = id / (launch->block[0] * launch->block[1]);
-          }
-          t->ctaid[0] = bx;
-          t->ctaid[1] = by;
-          t->ctaid[2] = bz;
-          sm_group_begin(&states[g], t);
-          running[g] = true;
-        }
-        /* Every group to the next barrier (or its end), then again. */
-        for (bool any = true; any && !faulted;) {
-          any = false;
-          for (uint32_t g = 0; g < group_count; g++) {
-            if (!running[g]) continue;
-            const Sm_Group_Status status = sm_group_run(program, env, &groups[g], &states[g]);
-            if (status == SM_GROUP_FAULT) faulted = true;
-            running[g] = status == SM_GROUP_BARRIER;
-            any = any || running[g];
-          }
-        }
-        r->stats.compute_threads += threads;
-      }
+  if (r->workers.count > 1u && blocks > 1u && group_count <= COMPUTE_WORKER_GROUPS && !program_samples_textures(program)) {
+    for (uint32_t i = 0; i < WORKERS_MAX; i++) g_compute_workers[i].used = false;
+    workers_run(&r->workers, blocks < r->workers.count ? blocks : r->workers.count, compute_task, &job);
+    for (uint32_t i = 0; i < WORKERS_MAX; i++) {
+      const Compute_Worker *w = &g_compute_workers[i];
+      if (!w->used) continue;
+      faulted = faulted || w->faulted;
+      for (uint32_t k = 0; k < w->writes.count; k++) compute_note_write(w->writes.lo[k], w->writes.hi[k]);
+    }
+  } else {
+    for (uint32_t b = 0; b < blocks && !faulted; b++) faulted = !compute_block(&job, env, b, groups, states);
+  }
+  r->stats.compute_threads += (uint64_t)threads * blocks;
   r->stats.compute_dispatches++;
   if (faulted) r->stats.compute_faults++;
   for (uint32_t i = 0; i < g_compute_writes.count; i++)

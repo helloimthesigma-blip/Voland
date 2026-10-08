@@ -188,6 +188,22 @@ uint64_t scheduler_ns_to_ticks(uint64_t ns);
 void scheduler_kernel_enter(Scheduler *sched, const CPU_State *state);
 void scheduler_kernel_exit(Scheduler *sched);
 
+/* GPU work and the kernel lock (docs/PARALLEL.md "GPU work"). One GPU lock
+ * serialises everything that touches the GPU command processor and the
+ * renderer. It is always taken with the kernel lock held, never the other
+ * way round. scheduler_gpu_begin also releases the kernel lock (for a
+ * GPFIFO submission: other cores' SVCs go on meanwhile) and
+ * scheduler_gpu_end takes it back after releasing the GPU lock. No-ops in
+ * serial mode. */
+typedef struct Kernel_Suspend {
+  int32_t current;        /* the SVC's thread */
+  int32_t saved_current;  /* what its kernel_exit restores */
+} Kernel_Suspend;
+void scheduler_gpu_lock(Scheduler *sched);
+void scheduler_gpu_unlock(Scheduler *sched);
+void scheduler_gpu_begin(Scheduler *sched, Kernel_Suspend *saved);
+void scheduler_gpu_end(Scheduler *sched, const Kernel_Suspend *saved);
+
 /* Building blocks of scheduler_tick, shared with the parallel scheduler
  * (parallel.c). All require the kernel lock in parallel mode. */
 void scheduler_expire_timeouts(Scheduler *sched);

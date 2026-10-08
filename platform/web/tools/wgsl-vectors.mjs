@@ -5,6 +5,7 @@
  * the four output registers with the interpreter's.
  *
  *   build/native-noop/tests/wgsl_test DIR && node tools/wgsl-vectors.mjs DIR
+ *   (WGSL_VECTORS_GPU=metal runs on the host GPU instead of SwiftShader)
  */
 import { chromium } from "@playwright/test";
 import { readdirSync, readFileSync } from "node:fs";
@@ -37,7 +38,10 @@ const vectors = readdirSync(dir)
   });
 
 const browser = await chromium.launch({
-  args: ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"],
+  /* WGSL_VECTORS_GPU=metal: the host GPU (SwiftShader loses its device on some machines). */
+  args: process.env.WGSL_VECTORS_GPU === "metal"
+    ? ["--enable-unsafe-webgpu", "--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"]
+    : ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"],
 });
 const page = await browser.newPage();
 await page.goto("file:///");

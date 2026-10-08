@@ -115,6 +115,34 @@ driver before the slice opens, when no core is running.
   - In serial mode a thread making an SVC is never `on_core` elsewhere,
     so this never blocks there.
 
+### GPU work
+
+A GPFIFO submission (nvdrv SUBMIT_GPFIFO / KICKOFF_PB) runs the GPU command
+processor: draw recording, vertex fetch and compute programs on the CPU. In
+an SSBU match that is most of a frame, and under the kernel lock it kept
+the other cores waiting 45–73% of the time. So it runs outside it.
+
+- **The GPU lock** (`scheduler_gpu_lock`/`unlock`, `Parallel.gpu`)
+  serialises everything that reads or changes what command processing
+  uses: the command processor and renderer, nvmap handles, GPU mappings
+  (nvmap and address-space ioctls), the multimedia engines (they write
+  into the renderer's textures), and VI's composite and frame end.
+- **Order:** the GPU lock is only ever taken with the kernel lock held,
+  never the other way round. `scheduler_gpu_begin` takes the GPU lock and
+  then releases the kernel lock. `scheduler_gpu_end` releases the GPU lock
+  and only then takes the kernel lock back. So a holder of the kernel lock
+  waiting for the GPU lock never waits on a thread that wants the kernel lock.
+- **`current`:** `gpu_begin` gives `sched->current` back to its value outside
+  the SVC, and `gpu_end` restores the SVC's thread.
+- **While the submission runs:**
+  - Other cores' ioctls may reuse nvdrv's shared ioctl buffer. The request's
+    bytes are saved in a thread-local buffer and put back before the reply.
+  - In-stream syncpoint increments are queued and applied once the kernel
+    lock is back, before the submission's own fence completes.
+- **Serial mode:** all of these are no-ops.
+- **Test:** `parallel_test` checks that another thread's SVC gets in
+  between `gpu_begin` and `gpu_end`, and that `current` comes back.
+
 ### Guest synchronization words
 
 The kernel lock serializes HLE, not guest code. A mutex word, condvar key

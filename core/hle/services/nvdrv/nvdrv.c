@@ -6,6 +6,7 @@
 
 #include "common/log.h"
 #include "hle/hle.h"
+#include "hle/kernel/scheduler.h"
 #include "video/host1x.h"
 
 #include <string.h>
@@ -544,10 +545,27 @@ static bool gpu_translate(void *user, uint64_t gpu_va, uint64_t *guest_va) {
   return nvdrv_gpu_translate((const Nvdrv_State *)user, gpu_va, guest_va, &contiguous);
 }
 
+/* In-stream syncpoint increments of the GPFIFO being processed: applied
+ * once the submission has the kernel lock back (scheduler_gpu_begin lets
+ * other cores' SVCs at the syncpoints meanwhile). One submission runs at
+ * a time (the GPU lock). */
+#define DEFERRED_INCREMENTS 256u
+static uint32_t g_deferred_increment[DEFERRED_INCREMENTS];
+static uint32_t g_deferred_increments;
+static bool g_deferring_increments;
+
+static void syncpoint_increment_now(Nvdrv_State *s, uint32_t id) {
+  syncpoint_complete(&s->syncpoints, id, syncpoint_increment_max(&s->syncpoints, id));
+}
+
 static void gpu_syncpoint_increment(void *user, uint32_t id) {
   Nvdrv_State *s = (Nvdrv_State *)user;
   if (id == 0 || id >= SYNCPOINT_COUNT) return;
-  syncpoint_complete(&s->syncpoints, id, syncpoint_increment_max(&s->syncpoints, id));
+  if (g_deferring_increments && g_deferred_increments < DEFERRED_INCREMENTS) {
+    g_deferred_increment[g_deferred_increments++] = id;
+    return;
+  }
+  syncpoint_increment_now(s, id);
 }
 
 static Gpu_Channel *channel_of(Nvdrv_State *s, Nv_Fd *f) {
@@ -570,7 +588,7 @@ static Gpu_Channel *channel_of(Nvdrv_State *s, Nv_Fd *f) {
 #define GPFIFO_HEADER_BYTES 24u
 #define GPFIFO_MAX_ENTRIES ((NVDRV_IOCTL_MAX_BYTES - GPFIFO_HEADER_BYTES) / 8u)
 
-static void run_gpfifo(Nvdrv_State *s, Nv_Fd *f, const uint8_t *d) {
+static void run_gpfifo(Nvdrv_State *s, Nv_Fd *f, uint8_t *d) {
   Gpu_Channel *channel = channel_of(s, f);
   if (!channel || !s->hle) return;
   uint32_t count = rd32(d + 8);
@@ -578,7 +596,27 @@ static void run_gpfifo(Nvdrv_State *s, Nv_Fd *f, const uint8_t *d) {
   uint64_t entries[GPFIFO_MAX_ENTRIES];
   memcpy(entries, d + GPFIFO_HEADER_BYTES, (size_t)count * 8u);
   const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate};
+  /* The commands run outside the kernel lock (scheduler.h scheduler_gpu_*).
+   * Other cores' ioctls may reuse the shared ioctl buffer meanwhile: the
+   * request's bytes are put back afterwards for the reply - from a buffer
+   * of this host thread's own, since another core's submission may run
+   * between the GPU lock's release and the kernel lock's return. */
+  static _Thread_local uint8_t saved_request[NVDRV_IOCTL_MAX_BYTES];
+  const uint32_t request_bytes = GPFIFO_HEADER_BYTES + count * 8u;
+  memcpy(saved_request, d, request_bytes);
+  Scheduler *sched = s->hle->scheduler;
+  Kernel_Suspend suspended;
+  scheduler_gpu_begin(sched, &suspended);
+  g_deferring_increments = true;
+  g_deferred_increments = 0;
   gpu_channel_submit(channel, &memory, entries, count);
+  g_deferring_increments = false;
+  const uint32_t increments = g_deferred_increments;
+  static _Thread_local uint32_t ids[DEFERRED_INCREMENTS];
+  memcpy(ids, g_deferred_increment, increments * sizeof(ids[0]));
+  scheduler_gpu_end(sched, &suspended);
+  memcpy(d, saved_request, request_bytes);
+  for (uint32_t i = 0; i < increments; i++) syncpoint_increment_now(s, ids[i]);
 }
 
 static uint32_t gpu_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint8_t *d) {
@@ -711,9 +749,24 @@ static const Device_Path k_devices[] = {
     {"/dev/nvhost-nvjpg", NV_DEVICE_NVJPG},
 };
 
+static uint32_t dispatch_device_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t request, uint8_t *data);
+
 static uint32_t dispatch_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t request, uint8_t *data) {
-  const uint32_t type = NV_IOC_TYPE(request), nr = NV_IOC_NR(request), size = NV_IOC_SIZE(request);
   s->ioctl_count++;
+  /* What GPU command processing reads (nvmap handles, GPU mappings) and
+   * the multimedia engines' writes into the renderer's textures change
+   * only under the GPU lock (scheduler.h). */
+  const bool gpu_state = f->device == NV_DEVICE_NVMAP || f->device == NV_DEVICE_AS_GPU || f->device == NV_DEVICE_NVDEC ||
+                         f->device == NV_DEVICE_VIC || f->device == NV_DEVICE_NVJPG;
+  Scheduler *sched = s->hle ? s->hle->scheduler : NULL;
+  if (gpu_state) scheduler_gpu_lock(sched);
+  const uint32_t result = dispatch_device_ioctl(s, f, request, data);
+  if (gpu_state) scheduler_gpu_unlock(sched);
+  return result;
+}
+
+static uint32_t dispatch_device_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t request, uint8_t *data) {
+  const uint32_t type = NV_IOC_TYPE(request), nr = NV_IOC_NR(request), size = NV_IOC_SIZE(request);
   switch (f->device) {
   case NV_DEVICE_NVMAP:
     return type == NV_TYPE_NVMAP ? nvmap_ioctl(s, nr, data) : NV_NOT_IMPLEMENTED;

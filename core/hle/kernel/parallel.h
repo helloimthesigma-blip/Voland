@@ -68,6 +68,11 @@ void parallel_set_device_hook(Parallel *p, void (*devices)(void *ctx), void *ctx
 /* scheduler_kernel_enter/exit in parallel mode. */
 void parallel_kernel_enter(Parallel *p, const CPU_State *state);
 void parallel_kernel_exit(Parallel *p);
+/* GPU work (scheduler.h scheduler_gpu_*). */
+void parallel_gpu_lock(Parallel *p);
+void parallel_gpu_unlock(Parallel *p);
+void parallel_gpu_begin(Parallel *p, Kernel_Suspend *saved);
+void parallel_gpu_end(Parallel *p, const Kernel_Suspend *saved);
 
 /* Runs fn(ctx) on the driver thread and returns when it is done: for host
  * hooks that only work there (the web CPU worker's JS objects). From the

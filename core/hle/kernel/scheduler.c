@@ -308,6 +308,22 @@ void scheduler_kernel_exit(Scheduler *sched) {
   if (sched && sched->parallel) parallel_kernel_exit(sched->parallel);
 }
 
+void scheduler_gpu_lock(Scheduler *sched) {
+  if (sched && sched->parallel) parallel_gpu_lock(sched->parallel);
+}
+
+void scheduler_gpu_unlock(Scheduler *sched) {
+  if (sched && sched->parallel) parallel_gpu_unlock(sched->parallel);
+}
+
+void scheduler_gpu_begin(Scheduler *sched, Kernel_Suspend *saved) {
+  if (sched && sched->parallel) parallel_gpu_begin(sched->parallel, saved);
+}
+
+void scheduler_gpu_end(Scheduler *sched, const Kernel_Suspend *saved) {
+  if (sched && sched->parallel) parallel_gpu_end(sched->parallel, saved);
+}
+
 Scheduler_Status scheduler_tick(Scheduler *sched, const CPU_Backend *backend, uint64_t budget,
                                 CPU_ExitReason *reason) {
   if (sched->process_crashed) return SCHEDULER_CRASHED;

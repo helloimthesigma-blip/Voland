@@ -657,6 +657,8 @@ static void test_gpu_vertex_stage(Raster3d *r) {
 #define COMPUTE_OUT (GPU_BASE + 0x8000u)
 #define COMPUTE_THREADS 64u
 #define SR_TID_X 0x21u
+#define SR_CTAID_X 0x25u
+#define COMPUTE_BLOCKS 8u
 #define LDST_32 4u /* 32-bit access */
 
 static uint64_t S2R(uint32_t d, uint32_t sr) { return (0xf0c8ull << 48) | GUARD | ((uint64_t)sr << 20) | (RZ << 8) | d; }
@@ -684,15 +686,17 @@ static void test_compute(Raster3d *r) {
       BAR_SYNC(),
       MOV32I(4, (COMPUTE_THREADS - 1u) * 4u), IADD_R(3, 1, 4, true), /* r3 = (63 - tid) * 4 */
       SHARED(0xef48, 5, 3),                        /* r5 = shared[63 - tid] */
-      MOV32I(6, (uint32_t)COMPUTE_OUT), IADD_R(7, 1, 6, false),
-      STG(5, 7),                                   /* out[tid] = r5 */
+      S2R(8, SR_CTAID_X), IADD_R(5, 5, 8, false),  /* + the block number */
+      SHL_I(9, 8, 8),                              /* r9 = block * 64 threads * 4 */
+      MOV32I(6, (uint32_t)COMPUTE_OUT), IADD_R(7, 1, 6, false), IADD_R(7, 7, 9, false),
+      STG(5, 7),                                   /* out[block * 64 + tid] = r5 */
       EXIT()};
   /* write_program puts a header first: the code starts SM_SPH_BYTES in. */
   write_program(COMPUTE_CODE, no_sph, code, sizeof(code) / sizeof(code[0]));
   uint32_t qmd[COMPUTE_QMD_WORDS];
   memset(qmd, 0, sizeof(qmd));
   qmd_set(qmd, 256, 32, COMPUTE_CODE + SM_SPH_BYTES); /* PROGRAM_OFFSET */
-  qmd_set(qmd, 384, 32, 2);                           /* CTA_RASTER_WIDTH: two blocks */
+  qmd_set(qmd, 384, 32, COMPUTE_BLOCKS);              /* CTA_RASTER_WIDTH */
   qmd_set(qmd, 416, 16, 1);
   qmd_set(qmd, 432, 16, 1);
   qmd_set(qmd, 544, 18, COMPUTE_THREADS * 4u);        /* SHARED_MEMORY_SIZE */
@@ -704,7 +708,7 @@ static void test_compute(Raster3d *r) {
   qmd_set(qmd, 975 + 3 * 64, 17, 0x100u);
   Compute_Launch launch;
   CHECK(compute_qmd_parse(qmd, &launch), "QMD parses");
-  CHECK(launch.program_offset == COMPUTE_CODE + SM_SPH_BYTES && launch.grid[0] == 2u && launch.grid[1] == 1u &&
+  CHECK(launch.program_offset == COMPUTE_CODE + SM_SPH_BYTES && launch.grid[0] == COMPUTE_BLOCKS && launch.grid[1] == 1u &&
             launch.block[0] == COMPUTE_THREADS && launch.shared_bytes == COMPUTE_THREADS * 4u,
         "QMD fields");
   CHECK(launch.cbuf_valid == 1u << 3 && launch.cbuf_address[3] == CBUF && launch.cbuf_size[3] == 0x100u,
@@ -712,20 +716,28 @@ static void test_compute(Raster3d *r) {
   static uint32_t cregs[COMPUTE_REGISTER_WORDS];
   cregs[COMPUTE_METHOD_PROGRAM_REGION] = (uint32_t)(PROGRAM_REGION >> 32);
   cregs[COMPUTE_METHOD_PROGRAM_REGION + 1u] = (uint32_t)PROGRAM_REGION;
-  memset(g_gpu + (COMPUTE_OUT - GPU_BASE), 0xee, COMPUTE_THREADS * 4u);
-  const uint64_t before = r->stats.compute_threads;
-  raster3d_compute(r, &launch, cregs, &k_mem);
-  CHECK(r->stats.compute_threads - before == 2u * COMPUTE_THREADS, "every thread of both blocks ran");
-  uint32_t wrong = 0;
-  for (uint32_t i = 0; i < COMPUTE_THREADS; i++) {
-    uint32_t v;
-    memcpy(&v, g_gpu + (COMPUTE_OUT - GPU_BASE) + 4u * i, 4);
-    if (v != COMPUTE_THREADS - 1u - i) {
-      if (wrong < 4u) fprintf(stderr, "  out[%u] = %08x\n", i, v);
-      wrong++;
+  /* Serially and on four workers (blocks shared out): the same output. */
+  const uint32_t worker_counts[2] = {1u, 4u};
+  for (uint32_t pass = 0; pass < 2u; pass++) {
+    raster3d_set_workers(r, worker_counts[pass]);
+    memset(g_gpu + (COMPUTE_OUT - GPU_BASE), 0xee, COMPUTE_BLOCKS * COMPUTE_THREADS * 4u);
+    const uint64_t before = r->stats.compute_threads;
+    raster3d_compute(r, &launch, cregs, &k_mem);
+    CHECK(r->stats.compute_threads - before == COMPUTE_BLOCKS * COMPUTE_THREADS, "every thread of every block ran");
+    uint32_t wrong = 0;
+    for (uint32_t b = 0; b < COMPUTE_BLOCKS; b++) {
+      for (uint32_t i = 0; i < COMPUTE_THREADS; i++) {
+        uint32_t v;
+        memcpy(&v, g_gpu + (COMPUTE_OUT - GPU_BASE) + 4u * (b * COMPUTE_THREADS + i), 4);
+        if (v != COMPUTE_THREADS - 1u - i + b) {
+          if (wrong < 4u) fprintf(stderr, "  %u workers: out[%u][%u] = %08x\n", worker_counts[pass], b, i, v);
+          wrong++;
+        }
+      }
     }
+    CHECK(wrong == 0, "out[block][tid] = shared[63 - tid] (other lane group, before the barrier) + block, %u workers (%u wrong)",
+          worker_counts[pass], wrong);
   }
-  CHECK(wrong == 0, "out[tid] = shared[63 - tid] written by the other lane group before the barrier (%u wrong)", wrong);
   CHECK(r->stats.compute_faults == 0, "no compute faults");
 }
 

@@ -51,6 +51,13 @@ static uint64_t LOP_R(uint32_t d, uint32_t a, uint32_t b, uint32_t op) { return 
 static uint64_t XMAD_R(uint32_t d, uint32_t a, uint32_t b, uint32_t c) { return op_top(0x5b00) | GUARD | rc(c) | rb(b) | ra(a) | rd(d); }
 static uint64_t I2F_R(uint32_t d, uint32_t b) { return op_top(0x5cb8) | GUARD | (1ull << 13) | (2ull << 10) | (2ull << 8) | rb(b) | rd(d); }
 static uint64_t F2I_R(uint32_t d, uint32_t b) { return op_top(0x5cb0) | GUARD | (3ull << 39) | (1ull << 12) | (2ull << 10) | (2ull << 8) | rb(b) | rd(d); }
+/* I2I (register): sizes are log2 bytes; sel picks the byte/half. */
+static uint64_t I2I_R(uint32_t d, uint32_t b, uint32_t ssize, bool ss, uint32_t dsize, bool ds, uint32_t sel, bool ab,
+                      bool ng, bool sat) {
+  return op_top(0x5ce0) | GUARD | ((uint64_t)sat << 50) | ((uint64_t)ab << 49) | ((uint64_t)ng << 45) |
+         ((uint64_t)sel << 41) | ((uint64_t)ss << 13) | ((uint64_t)ds << 12) | ((uint64_t)ssize << 10) |
+         ((uint64_t)dsize << 8) | rb(b) | rd(d);
+}
 static uint64_t MUFU(uint32_t d, uint32_t a, uint32_t fn) { return op_top(0x5080) | GUARD | ((uint64_t)fn << 20) | ra(a) | rd(d); }
 static uint64_t ISETP_C(uint32_t pd, uint32_t a, uint32_t slot, uint32_t off, uint32_t cond) {
   return op_top(0x4b60) | GUARD | ((uint64_t)cond << 49) | (PT << 39) | cbuf(slot, off) | ra(a) | ((uint64_t)pd << 3) | PT;
@@ -348,6 +355,21 @@ static void vector_iadd3(void) {
   finish(&b, "iadd3", false);
 }
 
+static void vector_i2i_abs_neg(void) {
+  Builder b;
+  begin(&b);
+  emit(&b, MOV32I(4, 0x80000000u));
+  emit(&b, MOV32I(5, 0x12345678u));
+  emit(&b, MOV32I(6, 0xfffffff0u));
+  emit(&b, MOV32I(7, 0x0000ff80u));
+  emit(&b, I2I_R(0, 4, 2, true, 2, true, 0, true, false, true));   /* |INT_MIN| saturated: 0x7fffffff */
+  emit(&b, I2I_R(1, 6, 2, true, 2, true, 0, false, true, false));  /* -(-16) */
+  emit(&b, I2I_R(2, 5, 2, false, 2, false, 0, false, true, false)); /* -0x12345678 as U32, wrapping */
+  emit(&b, I2I_R(3, 7, 0, false, 1, true, 1, false, true, true));  /* -(byte 1 = 255) as S16: sign-extended */
+  emit(&b, EXIT());
+  finish(&b, "i2i_abs_neg", false);
+}
+
 static void vector_branches(void) {
   /* r0 = sum of 1..4 through a BRA loop; r1 via SSY/SYNC around a skipped
    * block; r2 from a PBK/BRK loop. */
@@ -590,6 +612,7 @@ int main(int argc, char **argv) {
   vector_float();
   vector_integer();
   vector_iadd3();
+  vector_i2i_abs_neg();
   vector_branches();
   vector_select_texture();
   vector_texture_half();

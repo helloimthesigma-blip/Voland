@@ -403,19 +403,20 @@ static const char *const k_prelude[] = {
     "  if (ng) { f = -f; }\n"
     "  return f;\n"
     "}\n"
-    "fn i2i(v: u32, ssize: u32, sel: u32, ss: bool, dsize: u32, ds: bool, st: bool) -> u32 {\n"
-    "  let x = isrc(v, ssize, sel, ss); var r = x;\n"
+    /* I2I in sign and magnitude (the interpreter works in 64 bits, so
+     * |INT_MIN| and a negated large unsigned value do not wrap). */
+    "fn i2i(v: u32, ssize: u32, sel: u32, ss: bool, ab: bool, ng: bool, dsize: u32, ds: bool, st: bool) -> u32 {\n"
+    "  let x = isrc(v, ssize, sel, ss);\n"
+    "  var neg = ss && i32(x) < 0; var mag = select(x, 0u - x, neg);\n"
+    "  if (ab) { neg = false; }\n"
+    "  if (ng && mag != 0u) { neg = !neg; }\n"
     "  let bits = 8u << min(dsize, 2u);\n"
     "  if (st) {\n"
-    "    if (bits >= 32u) {\n"
-    "      if (ds && !ss && x > 0x7fffffffu) { r = 0x7fffffffu; }\n"
-    "      if (!ds && ss && i32(x) < 0) { r = 0u; }\n"
-    "    } else {\n"
-    "      let hi = select((1u << bits) - 1u, (1u << (bits - 1u)) - 1u, ds);\n"
-    "      if (ss) { let lo = select(0, -i32(1u << (bits - 1u)), ds); r = u32(clamp(i32(x), lo, i32(hi))); }\n"
-    "      else { r = min(x, hi); }\n"
-    "    }\n"
+    "    let half = 1u << (bits - 1u);\n"
+    "    if (ds) { if (neg) { mag = min(mag, half); } else { mag = min(mag, half - 1u); } }\n"
+    "    else { if (neg) { mag = 0u; neg = false; } else if (bits < 32u) { mag = min(mag, (1u << bits) - 1u); } }\n"
     "  }\n"
+    "  let r = select(mag, 0u - mag, neg);\n"
     "  if (bits >= 32u) { return r; }\n"
     "  let mask = (1u << bits) - 1u; var o = r & mask;\n"
     "  if (ds && (o & (1u << (bits - 1u))) != 0u) { o = o | ~mask; }\n"
@@ -1335,13 +1336,9 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
     return;
   }
   case SM_OP_I2I: {
-    if (BIT(w, 49) || BIT(w, 45)) {
-      fail(t, "I2I with abs/neg");
-      return;
-    }
-    EMIT("%s = i2i(%s, %uu, %uu, %s, %uu, %s, %s); ", reg_dst(t, REG_D(w)).s, op_b(t, in).s, BITS(w, 10, 2),
-         BITS(w, 41, 2), BIT(w, 13) ? "true" : "false", BITS(w, 8, 2), BIT(w, 12) ? "true" : "false",
-         BIT(w, 50) ? "true" : "false");
+    EMIT("%s = i2i(%s, %uu, %uu, %s, %s, %s, %uu, %s, %s); ", reg_dst(t, REG_D(w)).s, op_b(t, in).s, BITS(w, 10, 2),
+         BITS(w, 41, 2), BIT(w, 13) ? "true" : "false", BIT(w, 49) ? "true" : "false", BIT(w, 45) ? "true" : "false",
+         BITS(w, 8, 2), BIT(w, 12) ? "true" : "false", BIT(w, 50) ? "true" : "false");
     return;
   }
   case SM_OP_IADD:

@@ -291,15 +291,18 @@ static void dump_wgsl(void *user, const Sm_Program *program) {
   fclose(f);
 }
 
-/* The shader dump directory: VOLAND_DUMP_SHADERS, or a job's dump_shaders. */
+/* The shader dump directory: VOLAND_DUMP_SHADERS, --dump-shaders, or a
+ * job's dump_shaders; the WGSL one: VOLAND_DUMP_WGSL or --dump-wgsl. */
 static const char *g_dump_shaders_dir;
+static const char *g_dump_wgsl_dir;
 
 /* Both decode hooks (shader and WGSL dumps) can be on at once. */
 static void program_decoded(void *user, const Sm_Program *program) {
   (void)user;
   if (!g_dump_shaders_dir) g_dump_shaders_dir = getenv("VOLAND_DUMP_SHADERS");
   if (g_dump_shaders_dir) dump_program((void *)(uintptr_t)g_dump_shaders_dir, program);
-  if (getenv("VOLAND_DUMP_WGSL")) dump_wgsl(getenv("VOLAND_DUMP_WGSL"), program);
+  if (!g_dump_wgsl_dir) g_dump_wgsl_dir = getenv("VOLAND_DUMP_WGSL");
+  if (g_dump_wgsl_dir) dump_wgsl((void *)(uintptr_t)g_dump_wgsl_dir, program);
 }
 
 /* VOLAND_DUMP_TEXTURES=DIR: every decoded RGBA8 texture as DIR/<address>-WxH.ppm
@@ -1086,6 +1089,10 @@ static int run(int argc, char **argv) {
       audio_path = argv[++i];
     } else if (!strcmp(argv[i], "--font") && has_value) {
       font_path = argv[++i];
+    } else if (!strcmp(argv[i], "--dump-shaders") && has_value) {
+      g_dump_shaders_dir = argv[++i];
+    } else if (!strcmp(argv[i], "--dump-wgsl") && has_value) {
+      g_dump_wgsl_dir = argv[++i];
     } else if (!strcmp(argv[i], "--frame-skip") && has_value) {
       frame_skip = (uint32_t)strtoul(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--free-running-from") && has_value) {
@@ -1187,7 +1194,7 @@ static int run(int argc, char **argv) {
     if (!wav) fprintf(stderr, "voland-cli: cannot write %s\n", audio_path);
     else write_wav_header(wav, 0);
   }
-  if (getenv("VOLAND_DUMP_SHADERS") || getenv("VOLAND_DUMP_WGSL")) {
+  if (g_dump_shaders_dir || g_dump_wgsl_dir || getenv("VOLAND_DUMP_SHADERS") || getenv("VOLAND_DUMP_WGSL")) {
     emu.renderer.on_program_decoded = program_decoded;
     emu.renderer.on_program_user = NULL;
   }
@@ -1655,6 +1662,7 @@ static void usage(void) {
           "  output:    --dump-frame FILE.ppm [--dump-frames-every N]  --dump-audio FILE\n"
           "             --gpu-stream FILE (GPU records; /dev/null renders nothing)\n"
           "             --snapshot-at SLICE --snapshot-dir DIR  --frame-skip N\n"
+          "             --dump-shaders DIR  --dump-wgsl DIR (each decoded program)\n"
           "  checking:  --test-card  --expect-output TEXT  --expect-frame-hash HEX\n"
           "             --svc-stats  --measure-from SLICE [--measure-seconds S]\n"
           "             --savestate-check N:M (save at N, run to M, restore, re-run: same frame?)\n"

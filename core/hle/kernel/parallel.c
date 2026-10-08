@@ -65,6 +65,16 @@ void parallel_kernel_enter(Parallel *p, const CPU_State *state) {
   (void)state;
 }
 void parallel_kernel_exit(Parallel *p) { (void)p; }
+void parallel_gpu_lock(Parallel *p) { (void)p; }
+void parallel_gpu_unlock(Parallel *p) { (void)p; }
+void parallel_gpu_begin(Parallel *p, Kernel_Suspend *saved) {
+  (void)p;
+  (void)saved;
+}
+void parallel_gpu_end(Parallel *p, const Kernel_Suspend *saved) {
+  (void)p;
+  (void)saved;
+}
 void parallel_on_driver(void (*fn)(void *ctx), void *ctx) { fn(ctx); }
 void parallel_set_report_hook(Parallel *p, void (*hook)(void)) {
   (void)p;
@@ -124,6 +134,7 @@ struct Parallel {
   const CPU_Backend *backend;
 
   pthread_mutex_t kernel;   /* the kernel lock: scheduler, HLE, and the fields below */
+  pthread_mutex_t gpu;      /* the GPU lock (scheduler_gpu_*): taken after `kernel`, never before */
   pthread_cond_t core_cv;   /* to cores: a slice opened, a run ended, a thread may have woken, quit */
   uint64_t slice;           /* generation; a new value opens a slice */
   uint64_t budget;          /* cycles per core in this slice */
@@ -389,6 +400,7 @@ Parallel *parallel_create(Scheduler *sched, const CPU_Backend *backend, uint32_t
   p->sched = sched;
   p->backend = backend;
   pthread_mutex_init(&p->kernel, NULL);
+  pthread_mutex_init(&p->gpu, NULL);
   pthread_cond_init(&p->core_cv, NULL);
   pthread_mutex_init(&p->channel, NULL);
   pthread_cond_init(&p->channel_cv, NULL);
@@ -427,6 +439,7 @@ void parallel_destroy(Parallel *p) {
   pthread_mutex_destroy(&p->channel);
   pthread_cond_destroy(&p->core_cv);
   pthread_mutex_destroy(&p->kernel);
+  pthread_mutex_destroy(&p->gpu);
   free(p);
 }
 
@@ -644,6 +657,26 @@ void parallel_kernel_exit(Parallel *p) {
    * waiting cores re-check. */
   pthread_cond_broadcast(&p->core_cv);
   pthread_mutex_unlock(&p->kernel);
+}
+
+void parallel_gpu_lock(Parallel *p) { pthread_mutex_lock(&p->gpu); }
+void parallel_gpu_unlock(Parallel *p) { pthread_mutex_unlock(&p->gpu); }
+
+void parallel_gpu_begin(Parallel *p, Kernel_Suspend *saved) {
+  pthread_mutex_lock(&p->gpu);
+  saved->current = p->sched->current;
+  saved->saved_current = p->saved_current;
+  p->sched->current = p->saved_current;
+  pthread_cond_broadcast(&p->core_cv);
+  pthread_mutex_unlock(&p->kernel);
+}
+
+void parallel_gpu_end(Parallel *p, const Kernel_Suspend *saved) {
+  pthread_mutex_unlock(&p->gpu);
+  if (t_core && t_core->parallel == p) lock_kernel(p, &t_core->time.svc_lock_ns);
+  else pthread_mutex_lock(&p->kernel);
+  p->saved_current = saved->saved_current;
+  p->sched->current = saved->current;
 }
 
 void parallel_on_driver(void (*fn)(void *ctx), void *ctx) {

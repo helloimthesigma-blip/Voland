@@ -65,10 +65,11 @@
 #define LAYOUT_AUDIO_RING_SIZE \
   (LAYOUT_AUDIO_RING_HEADER_BYTES + LAYOUT_AUDIO_RING_CAPACITY_FRAMES * LAYOUT_AUDIO_RING_CHANNELS * sizeof(float))
 
-/* GPU command ring and GPU->CPU completion ring (§13). Sized generously
- * as a placeholder; the real command format lands in docs/GPU_COMMAND_STREAM.md
- * (Phase 4). */
-#define LAYOUT_GPU_RING_SIZE ((uint64_t)4 * 1024 * 1024)
+/* GPU command ring and GPU->CPU completion ring (§13). An SSBU fight frame
+ * streams ~24 MB of records (docs/GPU_COMMAND_STREAM.md): 16 MiB lets the
+ * producer run ahead through the GPU worker's slower moments (pipeline
+ * builds, large uploads) instead of stalling. */
+#define LAYOUT_GPU_RING_SIZE ((uint64_t)16 * 1024 * 1024)
 #define LAYOUT_GPU_COMPLETION_RING_SIZE ((uint64_t)64 * 1024)
 
 /* Input region: 8 controller slots, seqlock + buttons + axes + flags,
