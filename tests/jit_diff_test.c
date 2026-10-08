@@ -221,7 +221,7 @@ static uint32_t ftype(void) { return pick(8) == 0 ? 3u : pick(2); } /* single/do
 static uint32_t fp_vreg(void) { return pick(4) ? 16u + pick(12) : vreg(); }
 static uint32_t gen_simd_inline(void) {
   const uint32_t q = pick(4) ? 1u : 0u, u = pick(2);
-  switch (pick(9)) {
+  switch (pick(11)) {
   case 0: /* copy: DUP/INS/SMOV/UMOV general, INS element, scalar DUP */
     if (pick(4) == 0) return 0x5E000400u | ((1u + pick(31)) << 16) | (fp_vreg() << 5) | vreg();
     static const uint32_t moves[4] = {1, 3, 5, 7}; /* DUP, INS, SMOV, UMOV (general) */
@@ -248,6 +248,11 @@ static uint32_t gen_simd_inline(void) {
            (vreg() << 5) | vreg();
   case 5: /* SSHLL/USHLL(2) */
     return 0x0F00A400u | (q << 30) | (u << 29) | ((1u + pick(15)) << 19) | (pick(8) << 16) | (vreg() << 5) | vreg();
+  case 9: /* FMUL (by element, scalar), single and double */
+    if (pick(2)) return 0x5F809000u | ((pick(4) & 1u) << 21) | (pick(2) << 11) | (fp_vreg() << 16) | (fp_vreg() << 5) | vreg();
+    return 0x5FC09000u | (pick(2) << 11) | (fp_vreg() << 16) | (fp_vreg() << 5) | vreg();
+  case 8: /* FADDP (vector), single and double */
+    return 0x2E20D400u | (q << 30) | (pick(3) == 0 && q ? 1u << 22 : 0) | (fp_vreg() << 16) | (fp_vreg() << 5) | vreg();
   case 7: /* TBL/TBX, one to four table registers (wrapping past V31) */
     return 0x0E000000u | (q << 30) | (vreg() << 16) | (pick(4) << 13) | (pick(2) << 12) | (vreg() << 5) | vreg();
   case 6: /* SCVTF/UCVTF (fixed point) */

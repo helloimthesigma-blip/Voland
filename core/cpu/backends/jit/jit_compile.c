@@ -2207,14 +2207,18 @@ static void fp_else_exact(Ctx *c, const Sync *sync) {
 static uint32_t fp_result_local(bool dbl) { return dbl ? L_FD : L_FS; }
 
 /* FMUL, FDIV, FADD, FSUB, FNMUL, and FSQRT (two = false). */
-static void emit_fp_arith(Ctx *c, bool dbl, uint32_t opcode, bool two, uint32_t n, uint32_t m, uint32_t d) {
+/* Scalar FP arithmetic; `m_lane`: the element of V[m] (by-element forms). */
+static void emit_fp_arith_lane(Ctx *c, bool dbl, uint32_t opcode, bool two, uint32_t n, uint32_t m, uint32_t m_lane,
+                               uint32_t d) {
   static const uint8_t ops64[4] = {WASM_OP_F64_MUL, WASM_OP_F64_DIV, WASM_OP_F64_ADD, WASM_OP_F64_SUB};
   static const uint8_t ops32[4] = {WASM_OP_F32_MUL, WASM_OP_F32_DIV, WASM_OP_F32_ADD, WASM_OP_F32_SUB};
   const uint32_t r = fp_result_local(dbl), a = dbl ? L_FD2 : L_FS2, b = dbl ? L_FD3 : L_FS3;
   load_fp(c, n, dbl);
   ltee(c, a);
   if (two) {
-    load_fp(c, m, dbl);
+    lget(c, L_STATE);
+    mem(c, dbl ? WASM_OP_F64_LOAD : WASM_OP_F32_LOAD, dbl ? ALIGN_8 : ALIGN_4,
+        OFF_V(m) + m_lane * (dbl ? sizeof(uint64_t) : sizeof(uint32_t)));
     ltee(c, b);
     const uint32_t k = opcode == 8u ? 0u : opcode;
     op(c, dbl ? ops64[k] : ops32[k]);
@@ -2247,6 +2251,10 @@ static void emit_fp_arith(Ctx *c, bool dbl, uint32_t opcode, bool two, uint32_t 
   store_fp_local(c, d, dbl, r);
   Sync none = {0};
   fp_else_exact(c, &none);
+}
+
+static void emit_fp_arith(Ctx *c, bool dbl, uint32_t opcode, bool two, uint32_t n, uint32_t m, uint32_t d) {
+  emit_fp_arith_lane(c, dbl, opcode, two, n, m, 0, d);
 }
 
 /* Single-precision FMADD/FMSUB/FNMADD/FNMSUB: addend + n*m in f64 (the
@@ -2844,6 +2852,37 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
   fp_else_exact(c, &none);
 }
 
+static void pairwise_lanes(uint8_t lanes[SIMD_LANE_BYTES], uint32_t esize, uint32_t count, bool odd);
+
+/* FADDP (vector): the pairs of n, then of m, added - the even and odd
+ * elements shuffled apart and summed under VFP_ADD's rules. */
+static void emit_vector_fp_pairwise_add(Ctx *c, bool dbl, bool q, uint32_t n, uint32_t m, uint32_t d) {
+  const uint32_t esize = dbl ? 8u : 4u, count = (q ? SIMD_LANE_BYTES : SIMD_LANE_BYTES / 2u) / esize;
+  uint8_t even[SIMD_LANE_BYTES], odd[SIMD_LANE_BYTES];
+  pairwise_lanes(even, esize, count, false);
+  pairwise_lanes(odd, esize, count, true);
+  load_v(c, n);
+  lset(c, L_VA);
+  load_v(c, m);
+  lset(c, L_VB);
+  lget(c, L_VA);
+  lget(c, L_VB);
+  v128_shuffle(c, even);
+  lget(c, L_VA);
+  lget(c, L_VB);
+  v128_shuffle(c, odd);
+  simd(c, dbl ? WASM_SIMD_F64X2_ADD : WASM_SIMD_F32X4_ADD);
+  lset(c, L_VR);
+  emit_lane_finite(c, L_VR, dbl);
+  emit_all_lanes(c, q);
+  emit_fp_env_ok(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  store_v(c, d, L_VR, q);
+  Sync none = {0};
+  fp_else_exact(c, &none);
+}
+
 typedef enum Fp_Compare { FCMP_EQ, FCMP_GE, FCMP_GT, FCMP_LE, FCMP_LT } Fp_Compare;
 static void emit_vector_fp_compare(Ctx *c, Fp_Compare cmp, bool dbl, bool q, bool with_zero, bool absolute,
                                    uint32_t n, uint32_t m, uint32_t d);
@@ -2851,6 +2890,15 @@ static void emit_vector_fp_compare(Ctx *c, Fp_Compare cmp, bool dbl, bool q, boo
 /* Advanced SIMD FP with a fast path; false: not one of these forms. */
 static bool c_vector_fp_fast(Ctx *c, uint32_t insn) {
   if (bit(insn, 31)) return false;
+  if (bits(insn, 31, 30) == 1u && bits(insn, 29, 24) == 0x1F && !bit(insn, 10) && bit(insn, 23) &&
+      bits(insn, 15, 12) == 0x9) { /* FMUL (by element, scalar): Vd = Vn * Vm[index] under FMUL's rules */
+    const bool dbl = bit(insn, 22);
+    if (dbl && bit(insn, 21)) return false; /* L must be 0 for doubles */
+    const uint32_t index = dbl ? bit(insn, 11) : ((bit(insn, 11) << 1) | bit(insn, 21));
+    const uint32_t rm = bits(insn, 20, 16); /* M (bit 20) is part of Rm for single and double */
+    emit_fp_arith_lane(c, dbl, 0, true, bits(insn, 9, 5), rm, index, bits(insn, 4, 0));
+    return true;
+  }
   const bool q = bit(insn, 30), u = bit(insn, 29);
   const uint32_t rn = bits(insn, 9, 5), rd = bits(insn, 4, 0);
   if (bits(insn, 28, 24) == 0x0E && bit(insn, 21) && bit(insn, 10) && (bits(insn, 15, 11) >> 3) == 3u) {
@@ -2862,6 +2910,9 @@ static bool c_vector_fp_fast(Ctx *c, uint32_t insn) {
     case 0x04: case 0x14: case 0x1C: case 0x15: case 0x1D: /* FCMEQ, FCMGE, FCMGT, FACGE, FACGT */
       emit_vector_fp_compare(c, key == 0x04 ? FCMP_EQ : (key & 8u) ? FCMP_GT : FCMP_GE, dbl, q, false,
                              key == 0x15 || key == 0x1D, rn, bits(insn, 20, 16), rd);
+      return true;
+    case 0x12: /* FADDP (vector) */
+      emit_vector_fp_pairwise_add(c, dbl, q, rn, bits(insn, 20, 16), rd);
       return true;
     default:
       break;
