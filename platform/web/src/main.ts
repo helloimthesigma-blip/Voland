@@ -149,6 +149,7 @@ interface BootResult {
   readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard:  () => Promise<SdImportOutcome>;
   readonly setFrameSkip: (frames: number) => void;
+  readonly setHostCores: (cores: number) => void;
   readonly setPaused:    (paused: boolean) => void;
   readonly respondText:  (text: string, accepted: boolean) => void;
 }
@@ -429,6 +430,11 @@ async function boot(): Promise<BootResult | null> {
     cpuWorker.postMessage({ type: "set-frame-skip", frames } satisfies MainToCPUMessage);
   }
 
+  /** -1: the default host cores; 0: the serial scheduler (ThreadsSetting). */
+  function setHostCores(cores: number): void {
+    cpuWorker.postMessage({ type: "set-host-cores", cores } satisfies MainToCPUMessage);
+  }
+
   function setPaused(paused: boolean): void {
     cpuWorker.postMessage((paused ? { type: "pause" } : { type: "resume" }) satisfies MainToCPUMessage);
   }
@@ -450,6 +456,7 @@ async function boot(): Promise<BootResult | null> {
     clearSdCard,
     setPaused,
     setFrameSkip,
+    setHostCores,
     respondText,
   };
 }

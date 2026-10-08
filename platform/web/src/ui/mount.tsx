@@ -17,6 +17,7 @@ export interface MountOptions {
   readonly clearSdCard:  () => Promise<SdImportOutcome>;
   readonly setPaused:    (paused: boolean) => void;
   readonly setFrameSkip: (frames: number) => void;
+  readonly setHostCores: (cores: number) => void;
   readonly respondText:  (text: string, accepted: boolean) => void;
 }
 
@@ -61,7 +62,7 @@ export function mountShell(options: MountOptions): void {
   const root = document.getElementById("app-root");
   if (!root) throw new Error("mountShell: #app-root missing from index.html");
 
-  render(() => <App adapterLabel={options.adapterLabel} cpuBackend={options.cpuBackend} guestRamMiB={options.guestRamMiB} loadGame={options.loadGame} addToSdCard={options.addToSdCard} clearSdCard={options.clearSdCard} setPaused={options.setPaused} setFrameSkip={options.setFrameSkip} respondText={options.respondText} />, root);
+  render(() => <App adapterLabel={options.adapterLabel} cpuBackend={options.cpuBackend} guestRamMiB={options.guestRamMiB} loadGame={options.loadGame} addToSdCard={options.addToSdCard} clearSdCard={options.clearSdCard} setPaused={options.setPaused} setFrameSkip={options.setFrameSkip} setHostCores={options.setHostCores} respondText={options.respondText} />, root);
 
   attachCanvasToScreen();
 

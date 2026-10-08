@@ -998,7 +998,7 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   }
 
   if (msg.type === "set-host-cores") {
-    requestedHostCores = msg.cores;
+    requestedHostCores = msg.cores < 0 ? null : msg.cores; /* negative: back to the default */
     /* Takes effect between slices; a running game switches at once. */
     if (core) applyHostCores(core);
     return;

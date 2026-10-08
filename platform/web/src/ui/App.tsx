@@ -15,6 +15,7 @@ import ControlsLegend from "./ControlsLegend";
 import TextInputDialog from "./TextInputDialog";
 import LoadPanel from "./LoadPanel";
 import FrameSkipSetting from "./FrameSkipSetting";
+import ThreadsSetting from "./ThreadsSetting";
 
 interface AppProps {
   readonly adapterLabel: string;
@@ -25,6 +26,7 @@ interface AppProps {
   readonly clearSdCard:  () => Promise<SdImportOutcome>;
   readonly setPaused:    (paused: boolean) => void;
   readonly setFrameSkip: (frames: number) => void;
+  readonly setHostCores: (cores: number) => void;
   readonly respondText:  (text: string, accepted: boolean) => void;
 }
 
@@ -62,6 +64,7 @@ function App(props: AppProps) {
           <LoadPanel loadGame={props.loadGame} addToSdCard={props.addToSdCard} clearSdCard={props.clearSdCard} setPaused={props.setPaused} gpuAdapter={props.adapterLabel} />
           <SavesPanel />
           <FrameSkipSetting setFrameSkip={props.setFrameSkip} />
+          <ThreadsSetting setHostCores={props.setHostCores} />
           <ControlsLegend />
           <TextInputDialog respond={props.respondText} />
           <dl class="voland-facts">
