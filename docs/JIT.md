@@ -186,6 +186,25 @@ retires it.
     range, so neither saturation nor IOC can occur.
   - **FP compares:** FCMEQ/FCMGE/FCMGT/FACGE/FACGT and the compares with
     zero, when no active lane is a NaN and FPCR is 0.
+  - **Exactness instead of a set IXC.** In SSBU, 94% of SIMD&FP direct calls
+    ran with FPSR.IXC clear, so the fast paths above refused nearly
+    everything. The scalar arithmetic (FADD, FSUB, FMUL, FNMUL, FDIV,
+    FSQRT) and the integer↔FP conversions now decide natively whether
+    their result needed rounding (`L_EXACT`):
+    - singles are widened to f64, where the sum (checked by TwoSum),
+      product, quotient check and square check are exact;
+    - double sums use Knuth's TwoSum, and products, quotients and roots
+      use Dekker's split product, inside 2^±480;
+    - an integer converts exactly when its significant bits fit the
+      fraction (clz + ctz);
+    - a truncation is exact when trunc(x) == x.
+
+    An exact result leaves the flags alone. An inexact one sets IXC in the
+    fast arm, exactly as softfloat would, since the result guards already
+    exclude overflow and underflow. Only "not known" (Dekker out of range)
+    still needs IXC set beforehand. Seeded mutations were each caught in
+    100k streams: no IXC set, a sum or a truncation's exactness wrong, the
+    Dekker error ignored, an integer always exact.
   - **Tests:** `jit_diff_test` generates these forms on registers holding
     ordinary floats; seeded mutations of each were caught. One mutation
     is not caught in 20000 streams: signed instead of unsigned truncation

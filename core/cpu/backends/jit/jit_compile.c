@@ -77,22 +77,27 @@ enum {
   L_HINSN = 60,  /* the handlers' instruction word */
   L_RESUME = 61, /* $helper: the region block to resume in */
   L_PASS = 62,   /* store-exclusive: did the monitor pass */
-  L_LAST_I32 = 62,
-  L_FS = 63,     /* FP fast paths: f32 */
-  L_FS2 = 64,
-  L_FS3 = 65,
-  L_LAST_F32 = 65,
-  L_FD = 66,     /* ...f64 */
-  L_FD2 = 67,
-  L_FD3 = 68,
-  L_LAST_F64 = 68,
-  L_VA = 69,     /* vector FP fast paths: v128 */
-  L_VB = 70,
-  L_VD = 71,
-  L_VR = 72,
-  L_VR2 = 73,
-  L_VT = 74,
-  L_LAST_V128 = 74,
+  L_EXACT = 63,  /* FP fast paths: FP_EXACT, FP_INEXACT or FP_UNKNOWN (fp_note_inexact) */
+  L_LAST_I32 = 63,
+  L_FS = 64,     /* FP fast paths: f32 */
+  L_FS2 = 65,
+  L_FS3 = 66,
+  L_LAST_F32 = 66,
+  L_FD = 67,     /* ...f64 */
+  L_FD2 = 68,
+  L_FD3 = 69,
+  L_FD4 = 70,    /* ...exactness checks' scratch */
+  L_FD5 = 71,
+  L_FD6 = 72,
+  L_FD7 = 73,
+  L_LAST_F64 = 73,
+  L_VA = 74,     /* vector FP fast paths: v128 */
+  L_VB = 75,
+  L_VD = 76,
+  L_VR = 77,
+  L_VR2 = 78,
+  L_VT = 79,
+  L_LAST_V128 = 79,
 };
 #define I64_LOCALS (L_LAST_I64 - L_STATE)
 #define I32_LOCALS (L_LAST_I32 - L_LAST_I64)
@@ -2116,6 +2121,241 @@ static void emit_fp_env_ok(Ctx *c) {
   op(c, WASM_OP_I32_AND);
 }
 
+/* L_EXACT: whether the native result needed rounding. */
+#define FP_UNKNOWN 0u /* not established: the fast path needs FPSR.IXC already set */
+#define FP_EXACT 1u   /* no rounding: the flags stay as they are */
+#define FP_INEXACT 2u /* rounded: the exact path would set IXC - fp_note_inexact does */
+
+/* i32: FPCR == 0 and (FPSR.IXC set, or L_EXACT known). With IXC clear an
+ * exact result leaves the flags alone and an inexact one sets IXC in the
+ * fast arm (fp_note_inexact): neither needs softfloat. */
+static void emit_fp_env_ok_exact(Ctx *c) {
+  emit_fpcr_default(c);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
+  i32c(c, FPSR_IXC_BIT);
+  op(c, WASM_OP_I32_SHR_U);
+  lget(c, L_EXACT);
+  op(c, WASM_OP_I32_OR); /* bit 0: IXC, or FP_EXACT; FP_INEXACT is bit 1 */
+  lget(c, L_EXACT);
+  i32c(c, 1);
+  op(c, WASM_OP_I32_SHR_U);
+  op(c, WASM_OP_I32_OR);
+  op(c, WASM_OP_I32_AND);
+}
+
+/* In a fast arm guarded by emit_fp_env_ok_exact: IXC |= (L_EXACT == FP_INEXACT). */
+static void fp_note_inexact(Ctx *c) {
+  lget(c, L_STATE);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
+  lget(c, L_EXACT);
+  i32c(c, FP_INEXACT);
+  op(c, WASM_OP_I32_EQ);
+  i32c(c, FPSR_IXC_BIT);
+  op(c, WASM_OP_I32_SHL);
+  op(c, WASM_OP_I32_OR);
+  mem(c, WASM_OP_I32_STORE, ALIGN_4, OFF_FPSR);
+}
+
+/* L_EXACT = the i32 exactness bit on the stack ? FP_EXACT : FP_INEXACT. */
+static void set_exactness(Ctx *c) {
+  lset(c, L_EXACT);
+  i32c(c, FP_INEXACT);
+  lget(c, L_EXACT);
+  op(c, WASM_OP_I32_SUB);
+  lset(c, L_EXACT);
+}
+
+/* ---- exactness: whether a native result needed rounding ------------
+ * Error-free transformations in f64 (no FMA in wasm): Knuth's TwoSum for
+ * sums, Dekker's split product for products. Each pushes an i32, 1 when
+ * the operation was exact; 0 means inexact or not known, which keeps the
+ * IXC requirement. */
+
+/* The f64 TwoSum error of s = a + b is zero (all finite). */
+static void emit_sum_exact64(Ctx *c, uint32_t a, uint32_t b, bool neg_b, uint32_t s) {
+  lget(c, s);
+  lget(c, a);
+  op(c, WASM_OP_F64_SUB);
+  lset(c, L_FD4); /* bb = s - a */
+  lget(c, a);
+  lget(c, s);
+  lget(c, L_FD4);
+  op(c, WASM_OP_F64_SUB);
+  op(c, WASM_OP_F64_SUB); /* a - (s - bb) */
+  lget(c, b);
+  if (neg_b) op(c, WASM_OP_F64_NEG);
+  lget(c, L_FD4);
+  op(c, WASM_OP_F64_SUB); /* b - bb */
+  op(c, WASM_OP_F64_ADD);
+  f64c(c, 0);
+  op(c, WASM_OP_F64_EQ);
+}
+
+/* Dekker's split: 2^27 + 1, and the magnitudes it is exact for - no
+ * overflow in the split, no underflow in the partial products. */
+#define DEKKER_SPLITTER 0x41A0000002000000ull /* 134217729.0 */
+#define DEKKER_LOW 0x21F0000000000000ull      /* 2^-480 */
+#define DEKKER_HIGH 0x5DF0000000000000ull     /* 2^480 */
+
+static void emit_dekker_high(Ctx *c, uint32_t x, uint32_t hi) {
+  lget(c, x);
+  f64c(c, DEKKER_SPLITTER);
+  op(c, WASM_OP_F64_MUL);
+  lset(c, L_FD6);
+  lget(c, L_FD6);
+  lget(c, L_FD6);
+  lget(c, x);
+  op(c, WASM_OP_F64_SUB);
+  op(c, WASM_OP_F64_SUB);
+  lset(c, hi);
+}
+
+static void emit_in_dekker_range(Ctx *c, uint32_t x) {
+  lget(c, x);
+  op(c, WASM_OP_F64_ABS);
+  f64c(c, DEKKER_LOW);
+  op(c, WASM_OP_F64_GT);
+  lget(c, x);
+  op(c, WASM_OP_F64_ABS);
+  f64c(c, DEKKER_HIGH);
+  op(c, WASM_OP_F64_LT);
+  op(c, WASM_OP_I32_AND);
+}
+
+/* i32: x * y is exactly the f64 `p` - meaningful only when both are in
+ * Dekker's range (emit_product_range). */
+static void emit_product_exact64(Ctx *c, uint32_t x, uint32_t y, uint32_t p) {
+  emit_dekker_high(c, x, L_FD4);
+  emit_dekker_high(c, y, L_FD5);
+  lget(c, L_FD4);
+  lget(c, L_FD5);
+  op(c, WASM_OP_F64_MUL);
+  lget(c, p);
+  op(c, WASM_OP_F64_SUB); /* xh*yh - p */
+  lget(c, L_FD4);
+  lget(c, y);
+  lget(c, L_FD5);
+  op(c, WASM_OP_F64_SUB);
+  op(c, WASM_OP_F64_MUL);
+  op(c, WASM_OP_F64_ADD); /* + xh*yl */
+  lget(c, x);
+  lget(c, L_FD4);
+  op(c, WASM_OP_F64_SUB);
+  lget(c, L_FD5);
+  op(c, WASM_OP_F64_MUL);
+  op(c, WASM_OP_F64_ADD); /* + xl*yh */
+  lget(c, x);
+  lget(c, L_FD4);
+  op(c, WASM_OP_F64_SUB);
+  lget(c, y);
+  lget(c, L_FD5);
+  op(c, WASM_OP_F64_SUB);
+  op(c, WASM_OP_F64_MUL);
+  op(c, WASM_OP_F64_ADD); /* + xl*yl */
+  f64c(c, 0);
+  op(c, WASM_OP_F64_EQ);
+}
+
+static void emit_product_range(Ctx *c, uint32_t x, uint32_t y) {
+  emit_in_dekker_range(c, x);
+  emit_in_dekker_range(c, y);
+  op(c, WASM_OP_I32_AND);
+}
+
+static void emit_is_zero(Ctx *c, uint32_t local, bool dbl);
+
+/* L_EXACT for FMUL/FDIV/FADD/FSUB/FNMUL/FSQRT (emit_fp_arith_lane): a, b
+ * the operands, r the rounded result, all of the format. */
+static void emit_arith_exact(Ctx *c, bool dbl, uint32_t opcode, bool two, uint32_t a, uint32_t b, uint32_t r) {
+  if (!dbl) {
+    /* Singles widen exactly; sums, products and the checks below are
+     * then exact in f64 (or caught by TwoSum). */
+    lget(c, a);
+    op(c, WASM_OP_F64_PROMOTE_F32);
+    lset(c, L_FD2);
+    if (two) {
+      lget(c, b);
+      op(c, WASM_OP_F64_PROMOTE_F32);
+      lset(c, L_FD3);
+    }
+    lget(c, r);
+    op(c, WASM_OP_F64_PROMOTE_F32);
+    lset(c, L_FD); /* the rounded result, widened */
+    if (two && (opcode == 2u || opcode == 3u)) {
+      lget(c, L_FD2);
+      lget(c, L_FD3);
+      op(c, opcode == 2u ? WASM_OP_F64_ADD : WASM_OP_F64_SUB);
+      lset(c, L_FD5); /* the f64 sum */
+      emit_sum_exact64(c, L_FD2, L_FD3, opcode == 3u, L_FD5);
+      lget(c, L_FD);
+      lget(c, L_FD5);
+      op(c, WASM_OP_F64_EQ);
+      op(c, WASM_OP_I32_AND);
+    } else if (two && opcode == 1u) { /* r * b == a */
+      lget(c, L_FD);
+      lget(c, L_FD3);
+      op(c, WASM_OP_F64_MUL);
+      lget(c, L_FD2);
+      op(c, WASM_OP_F64_EQ);
+    } else if (two) { /* FMUL, FNMUL: r == +-(a * b) */
+      lget(c, L_FD2);
+      lget(c, L_FD3);
+      op(c, WASM_OP_F64_MUL);
+      if (opcode == 8u) op(c, WASM_OP_F64_NEG);
+      lget(c, L_FD);
+      op(c, WASM_OP_F64_EQ);
+    } else { /* r * r == a */
+      lget(c, L_FD);
+      lget(c, L_FD);
+      op(c, WASM_OP_F64_MUL);
+      lget(c, L_FD2);
+      op(c, WASM_OP_F64_EQ);
+    }
+    set_exactness(c);
+    return;
+  }
+  /* Doubles: a, b and r stay as they are (the fast arm stores r). */
+  if (two && (opcode == 2u || opcode == 3u)) {
+    emit_sum_exact64(c, a, b, opcode == 3u, r);
+    set_exactness(c);
+  } else {
+    /* FMUL: a*b == r; FNMUL: a*b == -r; FDIV: r*b == a; FSQRT: r*r == a. */
+    const bool product_is_r = two && opcode != 1u;
+    const uint32_t x = product_is_r ? a : r, y = two ? b : r;
+    if (product_is_r) {
+      lget(c, r);
+      if (opcode == 8u) op(c, WASM_OP_F64_NEG);
+    } else {
+      lget(c, x);
+      lget(c, y);
+      op(c, WASM_OP_F64_MUL);
+    }
+    lset(c, L_FD7);
+    emit_product_exact64(c, x, y, L_FD7);
+    if (!product_is_r) {
+      lget(c, L_FD7);
+      lget(c, a);
+      op(c, WASM_OP_F64_EQ);
+      op(c, WASM_OP_I32_AND);
+    }
+    set_exactness(c);
+    /* Out of Dekker's range: not known. A zero result (the guard admits
+     * one only from a zero operand) is exact. */
+    lget(c, L_EXACT);
+    i32c(c, FP_UNKNOWN);
+    emit_product_range(c, x, y);
+    op(c, WASM_OP_SELECT);
+    lset(c, L_EXACT);
+    i32c(c, FP_EXACT);
+    lget(c, L_EXACT);
+    emit_is_zero(c, r, true);
+    op(c, WASM_OP_SELECT);
+    lset(c, L_EXACT);
+  }
+}
+
 /* The scalar in V[n] as f32/f64 on the stack. */
 static void load_fp(Ctx *c, uint32_t n, bool dbl) {
   lget(c, L_STATE);
@@ -2245,10 +2485,12 @@ static void emit_fp_arith_lane(Ctx *c, bool dbl, uint32_t opcode, bool two, uint
     }
     op(c, WASM_OP_I32_OR);
   }
-  emit_fp_env_ok(c);
+  emit_arith_exact(c, dbl, opcode, two, a, b, r);
+  emit_fp_env_ok_exact(c);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   store_fp_local(c, d, dbl, r);
+  fp_note_inexact(c);
   Sync none = {0};
   fp_else_exact(c, &none);
 }
@@ -2396,11 +2638,41 @@ static void emit_int_to_fp(Ctx *c, bool sf, bool is_unsigned, bool dbl, uint32_t
   lset(c, r);
   if (dbl && !sf) { /* a 32-bit integer always fits a double exactly */
     emit_fpcr_default(c);
+    i32c(c, FP_EXACT);
+    lset(c, L_EXACT);
   } else {
-    emit_fp_env_ok(c);
+    /* Exact when the integer's significant bits (highest set to lowest
+     * set) fit the fraction: clz + ctz >= 64 - precision (0: 128). */
+    get_x(c, rn);
+    if (!sf) {
+      op(c, WASM_OP_I32_WRAP_I64);
+      op(c, is_unsigned ? WASM_OP_I64_EXTEND_I32_U : WASM_OP_I64_EXTEND_I32_S);
+    }
+    lset(c, L_T0);
+    if (!is_unsigned) { /* the magnitude (INT64_MIN stays 2^63 as unsigned) */
+      i64c(c, 0);
+      lget(c, L_T0);
+      op(c, WASM_OP_I64_SUB);
+      lget(c, L_T0);
+      lget(c, L_T0);
+      i64c(c, 0);
+      op(c, WASM_OP_I64_LT_S);
+      op(c, WASM_OP_SELECT);
+      lset(c, L_T0);
+    }
+    lget(c, L_T0);
+    op(c, WASM_OP_I64_CLZ);
+    lget(c, L_T0);
+    op(c, WASM_OP_I64_CTZ);
+    op(c, WASM_OP_I64_ADD);
+    i64c(c, 64u - (dbl ? F64_FRACTION_BITS + 1u : F32_FRACTION_BITS + 1u));
+    op(c, WASM_OP_I64_GE_S);
+    set_exactness(c);
+    emit_fp_env_ok_exact(c);
   }
   fp_fast_arm(c);
   store_fp_local(c, rd, dbl, r);
+  fp_note_inexact(c);
   Sync sync = {0};
   sync_x(&sync, rn);
   sync_x(&sync, rd);
@@ -2438,10 +2710,16 @@ static void emit_fp_to_int(Ctx *c, bool sf, bool is_unsigned, bool dbl, uint32_t
     op(c, dbl ? WASM_OP_F64_MUL : WASM_OP_F32_MUL);
   }
   lset(c, a);
+  lget(c, a); /* exact: no fraction to drop */
+  op(c, dbl ? WASM_OP_F64_TRUNC : WASM_OP_F32_TRUNC);
+  lget(c, a);
+  op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
+  set_exactness(c);
   emit_truncation_in_range(c, a, dbl, sf, is_unsigned);
-  emit_fp_env_ok(c);
+  emit_fp_env_ok_exact(c);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
+  fp_note_inexact(c);
   lget(c, a);
   if (sf) {
     static const uint8_t trunc64[2][2] = {{WASM_OP_I64_TRUNC_F32_S, WASM_OP_I64_TRUNC_F32_U},
