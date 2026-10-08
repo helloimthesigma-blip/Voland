@@ -37,6 +37,7 @@ static int g_failures;
 #define PS_OFFSET 0x800u
 #define PS_TEX_OFFSET 0x1000u
 #define PS_DERIV_OFFSET 0x1800u
+#define VS_TEX_OFFSET 0x3000u /* a vertex program that samples a texture */
 #define VERTICES (GPU_BASE + 0x4000u)
 #define CBUF (GPU_BASE + 0x6000u)
 #define TIC_POOL (GPU_BASE + 0x7000u)
@@ -129,6 +130,10 @@ static void build_programs(void) {
   vs_sph[0x36] = 0x0f; /* outputs: generic 0 xyzw */
   const uint64_t vs[] = {ALD(0, 0x80, 4), AST(0, 0x70, 4), ALD(4, 0x90, 4), AST(4, 0x80, 4), EXIT()};
   write_program(VS_OFFSET, vs_sph, vs, 5);
+  /* VS: position = attr0, generic0 = texture(attr1.xy) - a vertex texture fetch. */
+  const uint64_t vst[] = {ALD(0, 0x80, 4), ALD(4, 0x90, 4), TEXS_RGBA(8, 10, 4, 5), AST(0, 0x70, 4), AST(8, 0x80, 4),
+                          EXIT()};
+  write_program(VS_TEX_OFFSET, vs_sph, vst, 6);
   /* PS: colour = generic0 (screen-linear). */
   uint8_t ps_sph[SM_SPH_BYTES];
   memset(ps_sph, 0, sizeof(ps_sph));
@@ -153,6 +158,7 @@ static void build_programs(void) {
 /* ---- register state ----------------------------------------------- */
 
 static uint32_t g_regs[GPU_3D_REGISTER_WORDS];
+static uint32_t g_vs_offset = VS_OFFSET; /* base_state's vertex program */
 static Raster3d_Bindings g_bindings;
 
 static void base_state(uint64_t rt, bool block_linear, uint32_t ps_offset) {
@@ -180,7 +186,7 @@ static void base_state(uint64_t rt, bool block_linear, uint32_t ps_offset) {
   g_regs[0x582] = (uint32_t)(PROGRAM_REGION >> 32);
   g_regs[0x583] = (uint32_t)PROGRAM_REGION;
   g_regs[0x800 + 16u * 1u] = 1u | (1u << 4); /* vertex B */
-  g_regs[0x801 + 16u * 1u] = VS_OFFSET;
+  g_regs[0x801 + 16u * 1u] = g_vs_offset;
   g_regs[0x804 + 16u * 1u] = 0;
   g_regs[0x800 + 16u * 5u] = 1u | (5u << 4); /* pixel */
   g_regs[0x801 + 16u * 5u] = ps_offset;
@@ -311,6 +317,8 @@ static void texture_state(void) {
   put32(CBUF, 0x00000000u); /* handle 0: TIC 0, TSC 0 */
   g_bindings.address[4][0] = CBUF;
   g_bindings.size[4][0] = 0x100;
+  g_bindings.address[0][0] = CBUF; /* the vertex stage's texture handles too */
+  g_bindings.size[0][0] = 0x100;
 }
 
 static void test_texture(Raster3d *r) {
@@ -710,6 +718,17 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   CHECK(textured.count == 1 && textured.last.binding_count >= 2u, "textured: %u draws, %u bindings (data + texture)",
         textured.count, textured.last.binding_count);
   CHECK(r->stats.shader_faults == threads_before, "no faults");
+
+  /* A vertex program that samples a texture runs on the GPU too: it shares
+   * the draw's texture binding (the pixel program samples the same one). */
+  g_gpu_textured = true;
+  g_vs_offset = VS_TEX_OFFSET;
+  const Seen_Draw vs_tex = gpu_draw_once(r, FRONT_CW_REG);
+  g_vs_offset = VS_OFFSET;
+  g_gpu_textured = false;
+  CHECK(vs_tex.count == 1 && vs_tex.last.vs_shader_id != 0 && vs_tex.last.binding_count >= 2u,
+        "texturing vertex program on the GPU: %u draws, vs %u, %u bindings", vs_tex.count, vs_tex.last.vs_shader_id,
+        vs_tex.last.binding_count);
 }
 
 /* ---- compute: a block of two lane groups meeting at BAR.SYNC --------- */

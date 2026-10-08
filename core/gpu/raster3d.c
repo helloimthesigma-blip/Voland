@@ -3123,6 +3123,7 @@ typedef struct Gpu_Probe {
   uint32_t count;
   uint32_t pc[GPU_MAX_PROBE_TEXTURES];
   uint32_t handle[GPU_MAX_PROBE_TEXTURES];
+  bool vertex[GPU_MAX_PROBE_TEXTURES]; /* the GPU vertex stage's instruction (else the pixel program's) */
 } Gpu_Probe;
 
 static void gpu_probe_texture(void *user, const Sm_Tex_Request *requests, Sm_Mask lanes, uint32_t (*out)[4]) {
@@ -3135,6 +3136,7 @@ static void gpu_probe_texture(void *user, const Sm_Tex_Request *requests, Sm_Mas
     if (!seen && p->count < GPU_MAX_PROBE_TEXTURES) {
       p->pc[p->count] = q->pc;
       p->handle[p->count] = q->handle;
+      p->vertex[p->count] = false;
       p->count++;
     }
     (void)out;
@@ -3335,8 +3337,13 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
     if (!g_vs_cpu_window++) log_warn("[gpu] vertices on the CPU: constant buffers of %llu words", (unsigned long long)words);
     return;
   }
+  if (ctx->vs->uses_bindless_textures) return; /* its handles need a shaded probe: the CPU path */
   Wgsl_Program_Desc *d = &g->vs_desc;
   wgsl_default_desc(ctx->vs, d);
+  /* Texture bindings come with the pixel program's (gpu_prepare_textures). */
+  memset(d->binding_of, WGSL_NO_BINDING, sizeof(d->binding_of));
+  d->texture_count = 0;
+  d->hw_sample_mask = 0;
   d->varying_count = g->locations;
   d->flat_mask = g->flat_mask;
   d->perspective_mask = 0;
@@ -3520,15 +3527,13 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
 
 /* Without TEX.B every texture instruction's handle is a word of the
  * texture constant buffer at an index the instruction names: the probe
- * needs no shading, and covers instructions on every path. */
-static bool gpu_static_probe(const Draw_Context *ctx, Gpu_Probe *probe) {
-  const Sm_Program *ps = ctx->ps;
-  if (ps->uses_bindless_textures) return false;
-  const Sm_Env *env = &ctx->env[1];
+ * needs no shading, and covers instructions on every path. Appends the
+ * program's texture instructions to `probe`; false with TEX.B. */
+static bool gpu_static_probe_append(const Sm_Program *program, const Sm_Env *env, bool vertex, Gpu_Probe *probe) {
+  if (program->uses_bindless_textures) return false;
   const uint32_t slot = env->texture_cbuf_slot;
-  probe->count = 0;
-  for (uint32_t pc = 0; pc < ps->word_count && probe->count < GPU_MAX_PROBE_TEXTURES; pc++) {
-    const Sm_Insn *in = &ps->insns[pc];
+  for (uint32_t pc = 0; pc < program->word_count && probe->count < GPU_MAX_PROBE_TEXTURES; pc++) {
+    const Sm_Insn *in = &program->insns[pc];
     if (in->op < SM_OP_TEX || in->op > SM_OP_TXD) continue;
     const uint32_t offset = (uint32_t)((in->raw >> 36) & 0x1fffu) * 4u;
     uint32_t handle = 0;
@@ -3536,17 +3541,40 @@ static bool gpu_static_probe(const Draw_Context *ctx, Gpu_Probe *probe) {
       memcpy(&handle, env->cbuf[slot] + offset, sizeof(handle));
     probe->pc[probe->count] = pc;
     probe->handle[probe->count] = handle;
+    probe->vertex[probe->count] = vertex;
     probe->count++;
   }
   return true;
 }
 
+static bool gpu_static_probe(const Draw_Context *ctx, Gpu_Probe *probe) {
+  probe->count = 0;
+  return gpu_static_probe_append(ctx->ps, &ctx->env[1], false, probe);
+}
+
+/* Whether the GPU vertex stage's program samples textures (its handles
+ * join the draw's bindings; gpu_choose_vertex_stage keeps TEX.B on the CPU). */
+static bool vs_samples_textures(const Sm_Program *vs) {
+  for (uint32_t pc = 0; pc < vs->word_count; pc++)
+    if (vs->insns[pc].op >= SM_OP_TEX && vs->insns[pc].op <= SM_OP_TXD) return true;
+  return false;
+}
+
 /* The draw's textures, shader, constants and constant buffers from the
  * texture instructions' handles (probe). */
-static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *probe) {
+static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe) {
   Draw_Context *ctx = rs->ctx;
   Raster3d *r = ctx->r;
   Gpu_Draw *g = &g_gpu_draw;
+  /* A GPU vertex stage's textures share the bindings (one table per draw). */
+  static Gpu_Probe combined;
+  combined = *pixel_probe;
+  const bool vs_textures = g->vs_mode && vs_samples_textures(ctx->vs);
+  if (vs_textures) {
+    memset(g->vs_desc.binding_of, WGSL_NO_BINDING, sizeof(g->vs_desc.binding_of));
+    (void)gpu_static_probe_append(ctx->vs, &ctx->env[0], true, &combined);
+  }
+  const Gpu_Probe *probe = &combined;
   /* One binding per distinct handle. */
   Wgsl_Program_Desc *desc = &g->desc;
   memset(desc->binding_of, WGSL_NO_BINDING, sizeof(desc->binding_of));
@@ -3629,9 +3657,17 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *probe) {
       for (uint32_t c = 0; c < 4; c++) p[WGSL_TEXP_BORDER + c] = u32f(s.border[c]);
       desc->texture_count++;
     }
-    desc->binding_of[probe->pc[i]] = (uint8_t)b;
+    if (probe->vertex[i]) g->vs_desc.binding_of[probe->pc[i]] = (uint8_t)b;
+    else desc->binding_of[probe->pc[i]] = (uint8_t)b;
   }
   g->texture_count = desc->texture_count;
+  if (vs_textures) { /* the vertex program again, with the draw's bindings */
+    g->vs_desc.texture_count = desc->texture_count;
+    memcpy(g->vs_desc.sample_type, desc->sample_type, sizeof(desc->sample_type));
+    g->vs_desc.hw_sample_mask = desc->hw_sample_mask;
+    g->vs_shader_id = gpu_shader_for(r, ctx->vs, &g->vs_desc);
+    if (g->vs_shader_id == GPU_SHADER_FAILED) return false;
+  }
   /* Targets. */
   desc->target_count = rs->target_count;
   desc->target_int_mask = desc->target_sint_mask = 0;

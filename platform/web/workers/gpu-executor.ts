@@ -683,10 +683,10 @@ export class GpuExecutor {
     spec.textures.forEach((kind, i) => {
       const filtered = kind === "F";
       entries.push({
-        binding: 1 + i, visibility: GPUShaderStage.FRAGMENT,
+        binding: 1 + i, visibility: dataVisibility, /* a GPU vertex stage may sample them too */
         texture: { sampleType: filtered ? "float" : kind as GPUTextureSampleType, viewDimension: "2d-array" },
       });
-      if (filtered) entries.push({ binding: 1 + MAX_TEXTURES + i, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } });
+      if (filtered) entries.push({ binding: 1 + MAX_TEXTURES + i, visibility: dataVisibility, sampler: { type: "filtering" } });
     });
     const layout = this.device.createBindGroupLayout({ entries });
     /* Transformed vertices (position, 1/w, varyings) or, for a GPU vertex

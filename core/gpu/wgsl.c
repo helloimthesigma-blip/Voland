@@ -766,6 +766,7 @@ typedef enum Lod_Mode { LOD_ZERO, LOD_EXPLICIT, LOD_AUTO, LOD_BIAS } Lod_Mode;
 
 static Ex lod_expr(Tr *t, uint32_t b, Lod_Mode mode, Ex value, Ex c, Ex layer) {
   if (mode == LOD_EXPLICIT) return ex("F(%s)", value.s);
+  if (t->vertex) return mode == LOD_BIAS ? ex("F(%s)", value.s) : ex("0.0"); /* no derivatives: level 0 */
   if (mode == LOD_ZERO || !t->uniform_flow || t->guarded) return ex("0.0");
   if (mode == LOD_BIAS) return ex("(t%u_lod(%s, %s) + F(%s))", b, c.s, layer.s, value.s);
   return ex("t%u_lod(%s, %s)", b, c.s, layer.s);
@@ -2042,11 +2043,13 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
     fail(t, t->vertex ? "not a vertex program" : "not a pixel program");
   if (t->vertex && desc->input_count + 1u > (desc->vertex_pull ? WGSL_VSI_MAX : 16u))
     fail(t, "%u vertex inputs", desc->input_count);
-  /* A vertex stage has no quads (derivatives, discard) and, for now, no
-   * textures or pixel inputs: such programs stay on the CPU path. */
+  /* A vertex stage has no quads (derivatives, discard) or pixel inputs;
+   * its texture reads take level 0 (TEX.B and TMML stay on the CPU path:
+   * a bindless handle needs a shaded probe, and TMML derivatives). */
   for (uint32_t pc = 0; t->vertex && pc < program->word_count && t->ok; pc++) {
     const uint16_t op = program->insns[pc].op;
-    if (op == SM_OP_KIL || op == SM_OP_IPA || op == SM_OP_SHFL || op == SM_OP_FSWZADD || is_texture_op(op))
+    if (op == SM_OP_KIL || op == SM_OP_IPA || op == SM_OP_SHFL || op == SM_OP_FSWZADD || op == SM_OP_TEX_B ||
+        op == SM_OP_TMML)
       fail(t, "%s in a vertex program", sm_op_name((Sm_Op)op));
   }
   if (desc->varying_count > WGSL_MAX_VARYINGS) fail(t, "%u varyings", desc->varying_count);

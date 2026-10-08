@@ -24,7 +24,10 @@ const failed = readdirSync(dir).filter((f) => f.endsWith(".fail"));
 const modules = files.map((f) => ({ name: f, code: readFileSync(join(dir, f), "utf8") }));
 
 const browser = await chromium.launch({
-  args: ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"],
+  /* WGSL_VECTORS_GPU=metal: the host GPU (SwiftShader loses its device on some machines). */
+  args: process.env.WGSL_VECTORS_GPU === "metal"
+    ? ["--enable-unsafe-webgpu", "--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"]
+    : ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"],
 });
 const page = await browser.newPage();
 await page.goto("file:///");
