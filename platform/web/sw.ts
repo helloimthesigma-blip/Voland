@@ -35,7 +35,7 @@ const SHELL_URL = `${SCOPE_PATH}index.html`;
 const CROSS_ORIGIN_ISOLATION_HEADERS: ReadonlyArray<readonly [string, string]> = [
   ["Cross-Origin-Opener-Policy", "same-origin"],
   ["Cross-Origin-Embedder-Policy", "require-corp"],
-  ["Content-Security-Policy", "frame-ancestors 'none'"],
+  ["Content-Security-Policy", "frame-ancestors 'self'"],
 ];
 
 function addCrossOriginIsolationHeaders(response: Response): Response {

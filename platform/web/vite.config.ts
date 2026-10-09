@@ -28,7 +28,7 @@ const alias = {
 const crossOriginIsolationHeaders = {
   "Cross-Origin-Opener-Policy":   "same-origin",
   "Cross-Origin-Embedder-Policy": "require-corp",
-  "Content-Security-Policy":     "frame-ancestors 'none'",
+  "Content-Security-Policy":     "frame-ancestors 'self'",
 };
 
 /* The URL path the app is served under. "/" for local use; a GitHub Pages

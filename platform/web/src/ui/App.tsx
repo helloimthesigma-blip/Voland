@@ -8,7 +8,7 @@
  * controls - and the event log. The header carries the status and the
  * backend/GPU/RAM facts.
  */
-import { For, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import type { GameLoadOutcome, SdImportOutcome, SystemFilesApi } from "@bindings/load";
 import type { LogEntry } from "../log";
 import { getLogHistory, getStatus, subscribeLogs, subscribeStatus } from "../log";
@@ -18,6 +18,7 @@ import TextInputDialog from "./TextInputDialog";
 import LoadPanel from "./LoadPanel";
 import FrameSkipSetting from "./FrameSkipSetting";
 import ThreadsSetting from "./ThreadsSetting";
+import { inLauncherFrame, openInBlankTab } from "../blank-launch";
 
 interface AppProps {
   readonly adapterLabel: string;
@@ -50,6 +51,7 @@ function App(props: AppProps) {
   });
 
   const [tools, setTools] = createSignal<HTMLElement>();
+  const [blankNote, setBlankNote] = createSignal<string | null>(null);
 
   return (
     <div class="voland-shell">
@@ -80,6 +82,16 @@ function App(props: AppProps) {
             <h4>Settings</h4>
             <FrameSkipSetting setFrameSkip={props.setFrameSkip} />
             <ThreadsSetting setHostCores={props.setHostCores} />
+            <Show when={!inLauncherFrame()}>
+              <div class="voland-setting">
+                <button type="button" class="voland-load-button voland-load-secondary" data-testid="open-blank"
+                        onClick={() => { if (!openInBlankTab()) setBlankNote("The browser blocked the new tab; allow pop-ups for this site."); }}>
+                  Open in about:blank
+                </button>
+                <small>Moves Voland into a blank tab (this one closes its copy).</small>
+              </div>
+              <Show when={blankNote()}>{(note) => <p class="voland-load-note">{note()}</p>}</Show>
+            </Show>
           </section>
           <div class="voland-tools" ref={setTools} />
           <section class="voland-panel">
