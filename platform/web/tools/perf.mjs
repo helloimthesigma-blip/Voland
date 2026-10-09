@@ -95,6 +95,9 @@ import { chromium } from "@playwright/test";
 let WEB_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /* Virtual ticks per second (the Switch's 19.2 MHz counter). */
 const TICKS_PER_SECOND = 19_200_000;
+/* Screenshots wait for a composited frame; a title compiling a level's
+ * shaders can hold one off for well over Playwright's default 30 s. */
+const SHOT_TIMEOUT_MS = 180_000;
 const HARDWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"];
 const SOFTWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"];
 
@@ -517,7 +520,7 @@ async function main() {
       if (opts.shotsEvery && progress(s) >= (opts.nextShot ?? opts.shotsEvery)) {
         opts.nextShot = (Math.floor(progress(s) / opts.shotsEvery) + 1) * opts.shotsEvery;
         const box = await page.getByTestId("screen").boundingBox();
-        if (box) await page.screenshot({ clip: box, path: `${opts.shotsDir}/w${progress(s)}.png` });
+        if (box) await page.screenshot({ clip: box, path: `${opts.shotsDir}/w${progress(s)}.png`, timeout: SHOT_TIMEOUT_MS });
       }
       if (opts.mash && Date.now() - opts.mash.last >= opts.mash.every) {
         opts.mash.last = Date.now();
@@ -546,7 +549,7 @@ async function main() {
           await page.keyboard.up(arg);
         } else if (cmd === "shot") {
           const box = await page.getByTestId("screen").boundingBox();
-          if (box) await page.screenshot({ clip: box, path: arg });
+          if (box) await page.screenshot({ clip: box, path: arg, timeout: SHOT_TIMEOUT_MS });
         } else if (cmd === "sleep") {
           await sleep(Number(arg));
         } else if (cmd === "threads") {
@@ -605,7 +608,7 @@ async function main() {
     const end = await sample();
     if (opts.shot) {
       const box = await page.getByTestId("screen").boundingBox();
-      if (box) await page.screenshot({ clip: box, path: opts.shot });
+      if (box) await page.screenshot({ clip: box, path: opts.shot, timeout: SHOT_TIMEOUT_MS });
     }
     const d = (k) => end.perf[k] - warm.perf[k];
     const wallMs = end.at - warm.at;

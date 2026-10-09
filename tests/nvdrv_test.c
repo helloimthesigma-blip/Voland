@@ -299,6 +299,31 @@ int main(void) {
   nvdrv_poll_completions(&g_emu.nvdrv, &g_emu.hle);
   CHECK(event->signaled);
 
+  /* EVENT_WAIT (NVN's fence wait): reached -> the value; not reached ->
+   * "try again" with {syncpoint << 16 | a registered event slot}, and that
+   * slot's event is signalled on completion. No registered slot: 0. */
+  memset(d, 0, sizeof(d));
+  wr32(d, syncpoint); wr32(d + 4, 2); wr32(d + 8, 0xFFFFFFFFu);
+  CHECK(ioctl(ctrl, IOWR(0x00u, 0x1Du, 16), d) == 0 && rd32(d + 12) == 2);
+  memset(d, 0, sizeof(d));
+  wr32(d, syncpoint); wr32(d + 4, 3); wr32(d + 8, 0xFFFFFFFFu);
+  CHECK(ioctl(ctrl, IOWR(0x00u, 0x1Du, 16), d) == NV_TIMEOUT && rd32(d + 12) == 0);
+  const uint32_t slot5 = 5;
+  memset(d, 0, sizeof(d));
+  wr32(d, slot5);
+  CHECK(ioctl(ctrl, IOWR(0x00u, 0x1Fu, 4), d) == 0); /* EVENT_REGISTER */
+  const uint32_t query5[2] = {ctrl, 0x10000000u | slot5};
+  q = call(4, query5, sizeof(query5), NULL);
+  Kernel_Event *event5 = (Kernel_Event *)handle_table_get(&g_emu.process.handles, q.copy_handles[0],
+                                                          KERNEL_OBJECT_EVENT_READABLE);
+  CHECK(event5 != NULL && !event5->signaled);
+  memset(d, 0, sizeof(d));
+  wr32(d, syncpoint); wr32(d + 4, 3); wr32(d + 8, 0xFFFFFFFFu);
+  CHECK(ioctl(ctrl, IOWR(0x00u, 0x1Du, 16), d) == NV_TIMEOUT && rd32(d + 12) == ((syncpoint << 16) | slot5));
+  CHECK(completion_ring_push(syncpoint, 3));
+  nvdrv_poll_completions(&g_emu.nvdrv, &g_emu.hle);
+  CHECK(event5->signaled);
+
   /* nvmap free: first leaves the FROM_ID reference, second frees. */
   memset(d, 0, sizeof(d));
   wr32(d, handle);

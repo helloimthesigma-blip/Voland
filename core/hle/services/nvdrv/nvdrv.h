@@ -128,7 +128,8 @@ typedef struct Gpu_Mapping {
 typedef struct Nv_Event_Slot {
   Kernel_Event *event;  /* from QueryEvent; NULL until queried */
   uint32_t readable_handle;
-  bool waiting;         /* EVENT_WAIT_ASYNC registered */
+  bool registered;      /* EVENT_REGISTER: EVENT_WAIT may pick it */
+  bool waiting;         /* EVENT_WAIT(_ASYNC) armed it on a syncpoint threshold */
   uint32_t syncpoint;
   uint32_t threshold;
 } Nv_Event_Slot;

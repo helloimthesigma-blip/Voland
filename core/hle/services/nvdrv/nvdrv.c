@@ -185,6 +185,8 @@ static uint32_t nvmap_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
 /* /dev/nvhost-ctrl                                                    */
 /* ------------------------------------------------------------------ */
 
+#define NV_EVENT_SYNCPOINT_SHIFT 16u /* EVENT_WAIT's returned value: {syncpoint id, event slot} */
+
 static uint32_t ctrl_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
   Syncpoints *sp = &s->syncpoints;
   switch (nr) {
@@ -206,10 +208,29 @@ static uint32_t ctrl_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
     return syncpoint_reached(sp, id, rd32(d + 4)) ? NV_SUCCESS : NV_TIMEOUT;
   }
   case 0x1D: { /* EVENT_WAIT {id, threshold, timeout, value inout} */
-    const uint32_t id = rd32(d);
+    const uint32_t id = rd32(d), threshold = rd32(d + 4), timeout = rd32(d + 8);
     if (id >= SYNCPOINT_COUNT) return NV_BAD_VALUE;
-    wr32(d + 12, syncpoint_min(sp, id));
-    return syncpoint_reached(sp, id, rd32(d + 4)) ? NV_SUCCESS : NV_TIMEOUT;
+    if (syncpoint_reached(sp, id, threshold)) {
+      wr32(d + 12, syncpoint_min(sp, id));
+      return NV_SUCCESS;
+    }
+    if (!timeout) return NV_TIMEOUT;
+    /* Not there yet: a free registered event is armed on the threshold and
+     * "try again" returns it as {syncpoint id << 16 | event slot} - NVN
+     * waits on that slot's event (QueryEvent) and indexes its 64-entry
+     * event table with the low half. 0: no event (NVN polls). */
+    uint32_t slot = NVDRV_MAX_EVENTS;
+    for (uint32_t i = 0; i < NVDRV_MAX_EVENTS && slot == NVDRV_MAX_EVENTS; i++)
+      if (s->events[i].registered && !s->events[i].waiting) slot = i;
+    if (slot == NVDRV_MAX_EVENTS) {
+      wr32(d + 12, 0);
+      return NV_TIMEOUT;
+    }
+    s->events[slot].waiting = true;
+    s->events[slot].syncpoint = id;
+    s->events[slot].threshold = threshold;
+    wr32(d + 12, (id << NV_EVENT_SYNCPOINT_SHIFT) | slot);
+    return NV_TIMEOUT;
   }
   case 0x1E: { /* EVENT_WAIT_ASYNC {id, threshold, timeout, event_id} */
     const uint32_t id = rd32(d), threshold = rd32(d + 4), event_id = rd32(d + 12);
@@ -225,6 +246,7 @@ static uint32_t ctrl_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
   case 0x1C: case 0x1F: case 0x20: /* SYNCPT_CLEAR_EVENT_WAIT, EVENT_REGISTER, EVENT_UNREGISTER {event_id} */
     if (rd32(d) >= NVDRV_MAX_EVENTS) return NV_BAD_VALUE;
     if (nr != 0x1F) s->events[rd32(d)].waiting = false;
+    if (nr != 0x1C) s->events[rd32(d)].registered = nr == 0x1F;
     return NV_SUCCESS;
   case 0x1B: /* GET_CONFIG: no configuration keys exist here */
     return NV_NOT_SUPPORTED;
