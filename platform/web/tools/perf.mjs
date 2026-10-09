@@ -8,7 +8,7 @@
  *                       [--url-params "a=1&b=2"] [--browser-arg ARG]...
  *                       [--press SLICE:KEY:SLICES]... [--shot FILE.png] [--shots-every SLICES DIR]
  *                       [--phases NAME:SLICE,NAME:SLICE,...,end:SLICE] [--json FILE]
- *                       [--restore-saves BACKUP.tar] [--user-data-dir DIR]
+ *                       [--restore-saves BACKUP.tar] [--user-data-dir DIR] [--system-file FILE]...
  *
  * - Builds the app (vite build; the core must already be staged by
  *   `cmake --build --preset web`) and serves it with `vite preview` on a
@@ -131,6 +131,7 @@ function parseArgs(argv) {
     else if (a === "--shots-every") { opts.shotsEvery = Number(next()); opts.shotsDir = next(); }
     else if (a === "--drive") opts.drive = next();
     else if (a === "--restore-saves") opts.restoreSaves = next();
+    else if (a === "--system-file") (opts.systemFiles ??= []).push(next());
     else if (a === "--json") opts.json = next();
     else if (a === "--web-dir") WEB_DIR = resolve(next()); /* another checkout's platform/web */
     else if (a === "--phases") {
@@ -379,6 +380,12 @@ async function main() {
       const note = page.getByTestId("saves-note");
       await note.waitFor({ timeout: 30_000 });
       console.log(`restore saves: ${await note.textContent()}`);
+    }
+    for (const file of opts.systemFiles ?? []) { /* "System files": the user's own console dumps */
+      await page.getByTestId("system-input").setInputFiles(file);
+      const note = page.getByTestId("system-result");
+      await note.filter({ hasNotText: /Adding|Scanning/ }).waitFor({ timeout: 60_000 });
+      console.log(`system file: ${await note.textContent()}`);
     }
     await page.getByTestId("load-input").setInputFiles(opts.game);
     await page.getByTestId("load-success").waitFor({ timeout: 600_000 });

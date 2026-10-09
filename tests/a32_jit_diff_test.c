@@ -157,10 +157,12 @@ static uint32_t gen_vfp(void) {
   case 0: /* VLDR / VSTR through r8-r11 */
     return (cond() << 28) | 0x0D000A00u | (pick(2) << 23) | (dbit << 22) | (pick(2) << 20) | ((8u + pick(4)) << 16) |
            (vd << 12) | (dbl << 8) | pick(32);
-  case 1: case 2: { /* VMUL / VADD / VSUB / VMLA */
-    static const uint32_t forms[4] = {0x0E200A00u, 0x0E300A00u, 0x0E300A40u, 0x0E000A00u};
-    return (cond() << 28) | forms[pick(4)] | (vd << 12) | (dbit << 22) | ((dbl ? n : n >> 1) << 16) | (dbl << 8) |
-           (dbl ? m : m >> 1) | ((dbl ? 0 : n & 1u) << 7) | ((dbl ? 0 : m & 1u) << 5);
+  case 1: case 2: { /* VMUL / VADD / VSUB / VMLA / VNMUL / VDIV, VSQRT / VABS / VNEG / VMOV */
+    static const uint32_t forms[10] = {0x0E200A00u, 0x0E300A00u, 0x0E300A40u, 0x0E000A00u, 0x0E200A40u,
+                                       0x0E800A00u, 0x0EB10AC0u, 0x0EB00AC0u, 0x0EB10A40u, 0x0EB00A40u};
+    const uint32_t f = forms[pick(10)], unary = (f & 0x00B00000u) == 0x00B00000u;
+    return (cond() << 28) | f | (vd << 12) | (dbit << 22) | (unary ? 0 : ((dbl ? n : n >> 1) << 16)) | (dbl << 8) |
+           (dbl ? m : m >> 1) | (unary ? 0 : ((dbl ? 0 : n & 1u) << 7)) | ((dbl ? 0 : m & 1u) << 5);
   }
   case 3: /* VMOV core <-> single */
     return (cond() << 28) | 0x0E000A10u | (pick(2) << 20) | ((d >> 1) << 16) | (dst() << 12) | ((d & 1u) << 7);
@@ -205,6 +207,8 @@ typedef struct Snapshot {
   uint64_t fpsr, fpcr;
 } Snapshot;
 
+static uint32_t g_fpcr, g_fpsr;
+
 static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint32_t *r, uint32_t nzcv) {
   for (uint8_t i = 0; i < A32_REGS; i++) cpu->set_reg(s, i, r[i]);
   cpu->set_sp(s, r[13]);
@@ -213,13 +217,20 @@ static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint32_t *r, u
   for (uint8_t i = 0; i < 16u; i++) { /* ordinary floats and doubles */
     float f[2] = {(float)(int32_t)(r[i % 8] & 0xFFF) / 3.0f, (float)(int32_t)((r[(i + 3) % 8] >> 4) & 0x3FF) - 300.0f};
     double dv = (double)(int32_t)(r[(i + 5) % 8] & 0xFFFF) / 7.0;
+    switch ((r[(i + 1) % 8] >> 20) & 7u) { /* some exact values, zeros, tiny, NaN */
+    case 0: f[0] = (float)(r[i % 8] & 0xFF); f[1] = 0.0f; dv = (double)(r[i % 8] & 0xFF); break;
+    case 1: f[0] = -0.0f; dv = 1e-310; break;
+    case 2: f[1] = 1e-39f; break;
+    case 3: f[0] = __builtin_nanf(""); break;
+    default: break;
+    }
     CPU_Vector_Register v;
     memcpy(&v.lo, f, sizeof(f));
     memcpy(&v.hi, &dv, sizeof(dv));
     cpu->set_vector_reg(s, i, v);
   }
-  cpu->set_sys_reg(s, CPU_SYSREG_FPCR, 0);
-  cpu->set_sys_reg(s, CPU_SYSREG_FPSR, 0);
+  cpu->set_sys_reg(s, CPU_SYSREG_FPCR, g_fpcr);
+  cpu->set_sys_reg(s, CPU_SYSREG_FPSR, g_fpsr);
 }
 
 static Snapshot snapshot(const CPU_Backend *cpu, CPU_State *s, CPU_ExitReason exit, uint64_t cycles) {
@@ -258,6 +269,8 @@ static void run_case(uint32_t iteration) {
   r[14] = (uint32_t)(CODE_GVA + 4u * pick(length + 1u)) | (pick(40) == 0 ? 1u : 0u);
   if (pick(4) == 0) r[7] = (uint32_t)(CODE_GVA + 4u * pick(length + 1u));
   const uint32_t nzcv = (uint32_t)pick(16) << 28;
+  g_fpcr = pick(4) ? 0u : (pick(2) << 24) | (pick(2) << 25) | (pick(4) << 22); /* FZ, DN, rounding */
+  g_fpsr = pick(2) ? 0u : 0x10u;                                                /* IXC sticky or clear */
   for (uint32_t i = 0; i < DATA_BYTES; i++) g_data_init[i] = (uint8_t)rnd();
   /* POP {pc} often finds a return address into the stream on the stack. */
   for (uint32_t k = 0; k < 64u; k++) {

@@ -13,6 +13,8 @@
  * may write the PC and are not inlined end the block (END_HELPER).
  */
 
+#include "cpu/backends/a32/a32_internal.h"
+
 #define A32_COND_AL 0xEu
 #define A32_COND_NV 0xFu
 #define A32_REG_SP 13u
@@ -685,6 +687,231 @@ static Outcome a32_media(Ctx *c, uint32_t insn) {
   return OUTCOME_HELPER;
 }
 
+/* ---- VFP loads, stores and moves, inline --------------------------------------- */
+
+/* Where the A32 view of the vector registers lives in the state: Dd is
+ * half d&1 of V[d>>1], Ss half s&1 of D(s>>1). */
+static uint64_t a32_off_d(uint32_t d) { return OFF_V(d >> 1) + (uint64_t)(d & 1u) * V_HIGH_HALF; }
+static uint64_t a32_off_s(uint32_t s) { return a32_off_d(s >> 1) + (uint64_t)(s & 1u) * 4u; }
+#define A32_OFF_FPSCR_NZCV ((uint64_t)offsetof(A32_State, fpscr_nzcv))
+
+/* VLDR / VSTR (single and double), any base but the PC-relative store. */
+static bool a32_vfp_load_store(Ctx *c, uint32_t insn) {
+  const bool pre = bit(insn, 24), up = bit(insn, 23), w = bit(insn, 21), load = bit(insn, 20), dbl = bit(insn, 8);
+  if (!pre || w) return false; /* VLDM / VSTM, VPUSH / VPOP: the interpreter */
+  const uint32_t rn = bits(insn, 19, 16), imm = bits(insn, 7, 0) * 4u, size = dbl ? 8u : 4u;
+  const uint64_t off = dbl ? a32_off_d((bit(insn, 22) << 4) | bits(insn, 15, 12))
+                           : a32_off_s((bits(insn, 15, 12) << 1) | bit(insn, 22));
+  if (rn == A32_REG_PC) {
+    const uint64_t base = ((c->pc + A32_PC_AHEAD) & MASK32) & ~(uint64_t)A32_WORD_ALIGN_MASK;
+    i64c(c, (up ? base + imm : base - imm) & MASK32);
+  } else {
+    get_x(c, rn);
+    i64c(c, imm);
+    op(c, up ? WASM_OP_I64_ADD : WASM_OP_I64_SUB);
+    mask32(c);
+  }
+  lset(c, L_ADDR);
+  if (load) {
+    emit_load_address(c, size);
+    lget(c, L_STATE);
+    lget(c, L_HOST);
+    mem(c, dbl ? WASM_OP_I64_LOAD : WASM_OP_I32_LOAD, ALIGN_1, 0);
+    mem(c, dbl ? WASM_OP_I64_STORE : WASM_OP_I32_STORE, ALIGN_1, off);
+    return true;
+  }
+  open_block(c); /* $done */
+  const uint32_t done = c->depth;
+  open_block(c); /* $slow */
+  emit_walk(c, size, VMM_PERM_W, c->depth);
+  lget(c, L_HOST);
+  lget(c, L_STATE);
+  mem(c, dbl ? WASM_OP_I64_LOAD : WASM_OP_I64_LOAD32_U, ALIGN_1, off);
+  mem(c, dbl ? WASM_OP_I64_STORE : WASM_OP_I64_STORE32, ALIGN_1, 0);
+  br(c, done);
+  end_(c);
+  lget(c, L_STATE);
+  lget(c, L_ADDR);
+  i32c(c, size);
+  lget(c, L_STATE);
+  mem(c, dbl ? WASM_OP_I64_LOAD : WASM_OP_I64_LOAD32_U, ALIGN_1, off);
+  i64c(c, 0);
+  op(c, WASM_OP_CALL);
+  wasm_uleb(c->b, FUNC_STORE);
+  op(c, WASM_OP_I32_EQZ);
+  open_if(c, WASM_BLOCK_VOID);
+  leave_via_interpreter(c);
+  end_(c);
+  end_(c); /* $done */
+  return true;
+}
+
+/* VMOV between a core register and a single, the two-register forms, and
+ * VMRS APSR_nzcv, FPSCR. */
+static bool a32_vfp_transfer(Ctx *c, uint32_t insn) {
+  if ((insn & 0x0FE00F7Fu) == 0x0E000A10u) { /* VMOV Sn <-> Rt */
+    const uint32_t rt = bits(insn, 15, 12), sn = (bits(insn, 19, 16) << 1) | bit(insn, 7);
+    if (rt == A32_REG_PC) return false;
+    if (bit(insn, 20)) {
+      lget(c, L_STATE);
+      mem(c, WASM_OP_I64_LOAD32_U, ALIGN_4, a32_off_s(sn));
+      set_x(c, rt);
+    } else {
+      lget(c, L_STATE);
+      get_x(c, rt);
+      mem(c, WASM_OP_I64_STORE32, ALIGN_4, a32_off_s(sn));
+    }
+    return true;
+  }
+  if ((insn & 0x0FE00ED0u) == 0x0C400A10u) { /* VMOV Dm <-> Rt, Rt2 (bit 8) / two singles */
+    const uint32_t rt = bits(insn, 15, 12), rt2 = bits(insn, 19, 16);
+    if (rt == A32_REG_PC || rt2 == A32_REG_PC || (bit(insn, 20) && rt == rt2)) return false;
+    uint64_t lo, hi;
+    if (bit(insn, 8)) {
+      const uint32_t dm = (bit(insn, 5) << 4) | bits(insn, 3, 0);
+      lo = a32_off_d(dm);
+      hi = lo + 4u;
+    } else {
+      const uint32_t sm = (bits(insn, 3, 0) << 1) | bit(insn, 5);
+      if (sm == 31u) return false;
+      lo = a32_off_s(sm);
+      hi = a32_off_s(sm + 1u);
+    }
+    if (bit(insn, 20)) {
+      lget(c, L_STATE);
+      mem(c, WASM_OP_I64_LOAD32_U, ALIGN_4, lo);
+      set_x(c, rt);
+      lget(c, L_STATE);
+      mem(c, WASM_OP_I64_LOAD32_U, ALIGN_4, hi);
+      set_x(c, rt2);
+    } else {
+      lget(c, L_STATE);
+      get_x(c, rt);
+      mem(c, WASM_OP_I64_STORE32, ALIGN_4, lo);
+      lget(c, L_STATE);
+      get_x(c, rt2);
+      mem(c, WASM_OP_I64_STORE32, ALIGN_4, hi);
+    }
+    return true;
+  }
+  if (insn << 4 == 0xEF1FA100u) { /* VMRS APSR_nzcv, FPSCR (cond in 31:28) */
+    lget(c, L_STATE);
+    mem(c, WASM_OP_I32_LOAD, ALIGN_4, A32_OFF_FPSCR_NZCV);
+    store_flags(c);
+    return true;
+  }
+  return false;
+}
+
+/* ---- VFP arithmetic, native with the A64 fast paths' exactness guards ------ */
+
+static void a32_fp_load(Ctx *c, uint32_t r, bool dbl) {
+  lget(c, L_STATE);
+  mem(c, dbl ? WASM_OP_F64_LOAD : WASM_OP_F32_LOAD, ALIGN_4, dbl ? a32_off_d(r) : a32_off_s(r));
+}
+static void a32_fp_store(Ctx *c, uint32_t r, bool dbl, uint32_t local) {
+  lget(c, L_STATE);
+  lget(c, local);
+  mem(c, dbl ? WASM_OP_F64_STORE : WASM_OP_F32_STORE, ALIGN_4, dbl ? a32_off_d(r) : a32_off_s(r));
+}
+
+/* Register numbers: single Vx:X, double X:Vx. */
+static uint32_t a32_vreg(uint32_t insn, bool dbl, unsigned hi, unsigned lo, unsigned x) {
+  return dbl ? (bit(insn, x) << 4) | bits(insn, hi, lo) : (bits(insn, hi, lo) << 1) | bit(insn, x);
+}
+
+/* The exact (slow) arm: the interpreter, the instruction as AL (inside a
+ * compiled condition the flags in the state may be stale). */
+static void a32_fp_else_exact(Ctx *c) {
+  const uint32_t original = c->insn;
+  c->insn = (c->insn & 0x0FFFFFFFu) | (A32_COND_AL << 28);
+  Sync none = {0, false};
+  fp_else_exact(c, &none);
+  c->insn = original;
+}
+
+/* VMUL, VNMUL, VADD, VSUB, VDIV, VSQRT (F32/F64): the native result when
+ * the FPSCR is the default and the result is exact or IXC is already
+ * set (FPSCR's flags are FPSR's), else the interpreter. VMOV (register),
+ * VABS, VNEG are bit operations. */
+static bool a32_vfp_arith(Ctx *c, uint32_t insn) {
+  if (bit(insn, 4) || bits(insn, 11, 9) != 5u) return false;
+  const bool dbl = bit(insn, 8), op6 = bit(insn, 6);
+  const uint32_t opc1 = bits(insn, 23, 20) & 0xBu, d = a32_vreg(insn, dbl, 15, 12, 22), m = a32_vreg(insn, dbl, 3, 0, 5);
+  const uint32_t n = a32_vreg(insn, dbl, 19, 16, 7);
+  uint32_t opcode;
+  bool two = true;
+  if (opc1 == 0x2u) opcode = op6 ? 8u : 0u;      /* VNMUL / VMUL */
+  else if (opc1 == 0x3u) opcode = op6 ? 3u : 2u; /* VSUB / VADD */
+  else if (opc1 == 0x8u && !op6) opcode = 1u;    /* VDIV */
+  else if (opc1 == 0xBu && bit(insn, 6)) {       /* the "other" group, opc2 in 19:16 */
+    const uint32_t opc2 = bits(insn, 19, 16), op7 = bit(insn, 7);
+    if (opc2 == 0u || (opc2 == 1u && !op7)) { /* VMOV / VABS (0), VNEG (1, op7 0) */
+      if (dbl) {
+        lget(c, L_STATE);
+        lget(c, L_STATE);
+        mem(c, WASM_OP_I64_LOAD, ALIGN_4, a32_off_d(m));
+        if (opc2 == 0u && op7) { i64c(c, 0x7FFFFFFFFFFFFFFFull); op(c, WASM_OP_I64_AND); }
+        if (opc2 == 1u) { i64c(c, 0x8000000000000000ull); op(c, WASM_OP_I64_XOR); }
+        mem(c, WASM_OP_I64_STORE, ALIGN_4, a32_off_d(d));
+      } else {
+        lget(c, L_STATE);
+        lget(c, L_STATE);
+        mem(c, WASM_OP_I32_LOAD, ALIGN_4, a32_off_s(m));
+        if (opc2 == 0u && op7) { i32c(c, 0x7FFFFFFFu); op(c, WASM_OP_I32_AND); }
+        if (opc2 == 1u) { i32c(c, 0x80000000u); op(c, WASM_OP_I32_XOR); }
+        mem(c, WASM_OP_I32_STORE, ALIGN_4, a32_off_s(d));
+      }
+      return true;
+    }
+    if (opc2 != 1u || !op7) return false; /* VSQRT only */
+    two = false;
+    opcode = 0u;
+  } else {
+    return false;
+  }
+  static const uint8_t ops64[4] = {WASM_OP_F64_MUL, WASM_OP_F64_DIV, WASM_OP_F64_ADD, WASM_OP_F64_SUB};
+  static const uint8_t ops32[4] = {WASM_OP_F32_MUL, WASM_OP_F32_DIV, WASM_OP_F32_ADD, WASM_OP_F32_SUB};
+  const uint32_t r = fp_result_local(dbl), a = dbl ? L_FD2 : L_FS2, b = dbl ? L_FD3 : L_FS3;
+  a32_fp_load(c, two ? n : m, dbl);
+  ltee(c, a);
+  if (two) {
+    a32_fp_load(c, m, dbl);
+    ltee(c, b);
+    const uint32_t k = opcode == 8u ? 0u : opcode;
+    op(c, dbl ? ops64[k] : ops32[k]);
+    if (opcode == 8u) op(c, dbl ? WASM_OP_F64_NEG : WASM_OP_F32_NEG);
+  } else {
+    op(c, dbl ? WASM_OP_F64_SQRT : WASM_OP_F32_SQRT);
+  }
+  lset(c, r);
+  if (two && (opcode == 2u || opcode == 3u)) {
+    emit_result_finite(c, r, dbl);
+  } else {
+    emit_result_normal(c, r, dbl);
+    emit_is_zero(c, r, dbl);
+    if (!two) {
+    } else if (opcode == 1u) {
+      emit_is_zero(c, a, dbl);
+      op(c, WASM_OP_I32_AND);
+    } else {
+      emit_is_zero(c, a, dbl);
+      emit_is_zero(c, b, dbl);
+      op(c, WASM_OP_I32_OR);
+      op(c, WASM_OP_I32_AND);
+    }
+    op(c, WASM_OP_I32_OR);
+  }
+  emit_arith_exact(c, dbl, opcode, two, a, b, r);
+  emit_fp_env_ok_exact(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  a32_fp_store(c, d, dbl, r);
+  fp_note_inexact(c);
+  a32_fp_else_exact(c);
+  return true;
+}
+
 /* ---- VFP and Advanced SIMD: direct interpreter calls ------------------------ */
 
 /* The VFP/NEON instruction runs in the A32 interpreter without retiring
@@ -792,9 +1019,17 @@ static Outcome a32_body(Ctx *c, uint32_t insn) {
     return a32_load_store_word(c, insn);
   case 2: return a32_load_store_word(c, insn);
   case 4: return a32_block_transfer(c, insn);
-  case 7: if (bits(insn, 27, 24) == 0xFu) return OUTCOME_END_HELPER; /* SVC */
+  case 7:
+    if (bits(insn, 27, 24) == 0xFu) return OUTCOME_END_HELPER; /* SVC */
+    if (bits(insn, 11, 9) == 5u && bit(insn, 4) && a32_vfp_transfer(c, insn)) return OUTCOME_NEXT;
+    if (bits(insn, 27, 24) == 0xEu && !bit(insn, 4) && a32_vfp_arith(c, insn)) return OUTCOME_NEXT;
     return a32_direct(c, insn); /* VFP data processing and transfers */
-  default: return a32_direct(c, insn); /* VFP loads/stores */
+  default:
+    if (bits(insn, 11, 9) == 5u) {
+      if (bits(insn, 27, 25) == 6u && bits(insn, 24, 21) == 2u && a32_vfp_transfer(c, insn)) return OUTCOME_NEXT;
+      if (a32_vfp_load_store(c, insn)) return OUTCOME_NEXT;
+    }
+    return a32_direct(c, insn); /* VFP loads/stores */
   }
 }
 

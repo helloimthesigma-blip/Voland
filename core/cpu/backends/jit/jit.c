@@ -600,6 +600,8 @@ uint32_t jit_helper_simd(Jit_State *state, uint32_t insn) {
   Jit_Stats *const st = thread_stats();
   if (state->isa == JIT_ISA_A32) {
     st->direct_simd++;
+    if (state->interp.fpcr != 0) st->simd_fpcr_nonzero++;
+    st->last_fpcr = state->interp.fpcr;
     if (g_fallback_profile) profile_fallback(insn);
     return a32_execute((A32_State *)state, insn) == INTERP_CONTINUE ? 0u : 1u;
   }

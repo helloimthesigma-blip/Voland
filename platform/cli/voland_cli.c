@@ -1763,6 +1763,8 @@ static int run(int argc, char **argv) {
             (unsigned long long)j->evictions, (unsigned long long)(j->module_bytes / 1024u),
             (unsigned long long)j->block_entries, (unsigned long long)j->interpreted_blocks,
             (unsigned long long)j->generations, (unsigned long long)j->revalidations, (unsigned long long)j->stale);
+    fprintf(stderr, "voland-cli: jit time: codegen %.2f s, synchronous installs %.2f s (%llu)\n", (double)j->codegen_ns / 1e9,
+            (double)j->sync_install_ns / 1e9, (unsigned long long)j->sync_installs);
     fprintf(stderr,
             "voland-cli: jit %llu direct SIMD&FP calls; interpreter fallbacks: %llu SIMD&FP, %llu SIMD&FP memory, "
             "%llu exclusive/acquire-release, %llu other memory, %llu system, %llu other\n",

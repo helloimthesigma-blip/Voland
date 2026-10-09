@@ -66,6 +66,7 @@
 #define AM_APPLET_SWKBD 0x11u
 #define AM_APPLET_CONTROLLER 0x0Cu
 #define AM_APPLET_PLAYER_SELECT 0x10u
+#define AM_APPLET_MII_EDIT 0x12u
 
 typedef struct Am_Storage {
   bool in_use;

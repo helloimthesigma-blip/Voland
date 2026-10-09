@@ -543,6 +543,9 @@ static uint32_t utf8_to_utf16(const char *in, uint16_t *out, uint32_t max_units)
 #define SWKBD_INITIAL_SIZE 0x3C4u
 #define SWKBD_ARG_MIN_BYTES 0x3C8u
 
+#define AM_MII_EDIT_OUTPUT_BYTES 0x20u
+#define AM_MII_EDIT_CANCEL 1u
+
 static void start_swkbd(Am_State *s, HLE_Context *c, Am_Applet *applet, uint32_t slot) {
   Am_Text_Request *t = &s->text_request;
   memset(t, 0, sizeof(*t));
@@ -675,6 +678,22 @@ static HLE_ServiceResult cmd_applet_start(HLE_Context *c, Service_Object *self, 
     memset(out, 0, sizeof(out));
     memcpy(out + 8, s->player_select_uid, 16);
     (void)applet_push_out(s, c, applet, out, sizeof(out));
+    break;
+  }
+  case AM_APPLET_MII_EDIT: {
+    /* MiiEdit (create/edit a Mii): there is no editor here, so it is
+     * cancelled - output {u32 result (1 = cancel), s32 index -1, ...}. The
+     * input's mode word (in[1]) is logged. */
+    uint32_t mode = 0;
+    if (applet->in_count >= 2u) (void)storage_read(c, &s->storages[applet->in[1]], 0, &mode, sizeof(mode));
+    uint8_t out[AM_MII_EDIT_OUTPUT_BYTES];
+    memset(out, 0, sizeof(out));
+    const uint32_t cancel = AM_MII_EDIT_CANCEL;
+    const int32_t index = -1;
+    memcpy(out, &cancel, sizeof(cancel));
+    memcpy(out + 4, &index, sizeof(index));
+    (void)applet_push_out(s, c, applet, out, sizeof(out));
+    log_info("[am] MiiEdit (mode %u): cancelled (no editor)", mode);
     break;
   }
   default:
