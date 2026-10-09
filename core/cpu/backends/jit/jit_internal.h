@@ -155,6 +155,10 @@ typedef struct Jit_Code_Source {
   const uint32_t *(*page_code)(void *context, uint64_t page);
   /* 8 bytes at `address` if readable. */
   bool (*peek64)(void *context, uint64_t address, uint64_t *value);
+  /* General register `index` (0-30) of the state the region is compiled
+   * for - at its entry pc: what the entry block's values are this time
+   * (predictions only, always guarded). NULL: none. */
+  bool (*entry_reg)(void *context, uint32_t index, uint64_t *value);
   void *context;
 } Jit_Code_Source;
 

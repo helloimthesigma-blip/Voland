@@ -805,8 +805,14 @@ static uint32_t recip_sqrt_estimate(uint32_t a) {
     a = (a >> 1) << 1;
     a = (a + 1u) * 2u;
   }
-  uint64_t b = 512;
-  while ((uint64_t)a * (b + 1u) * (b + 1u) < ((uint64_t)1 << 28)) b++;
+  /* The smallest b >= 512 with a * (b + 1)^2 >= 2^28 (the pseudocode
+   * counts up to it, up to ~500 steps): from the square root, then
+   * corrected to the exact bound. */
+  const uint64_t limit = (uint64_t)1 << 28;
+  uint64_t b = (uint64_t)__builtin_sqrt((double)limit / (double)a);
+  if (b < 512u) b = 512u;
+  while (b > 512u && (uint64_t)a * b * b >= limit) b--;
+  while ((uint64_t)a * (b + 1u) * (b + 1u) < limit) b++;
   return (uint32_t)((b + 1u) / 2u);
 }
 

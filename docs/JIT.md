@@ -545,11 +545,16 @@ without a fast path.
   - VLDR/VSTR, VLDM/VSTM (VPUSH/VPOP), VLD1/VST1 of one to four D registers (one walk; a page crossing goes to the interpreter), VMOV (core registers, immediate), VMRS APSR_nzcv;
   - Advanced SIMD on wasm SIMD128 (Qn is V[n]): F32 VADD/VSUB/VMUL/VMLA/VMLS, vector and by scalar; VAND/VBIC/VORR/VORN/VEOR/VBSL/VBIT/VBIF; integer VADD/VSUB and VMUL.I16/I32; VEXT; VDUP (scalar and core); VMOV/VMVN/VORR/VBIC (immediate); VMOV to and from scalars; VLD1/VST1 of one lane and VLD1 to all lanes. Advanced SIMD floats always use the standard FPSCR value (flush to zero, default NaN), so the fast arm needs every input normal or zero, every result normal or an exact zero, and IXC already set;
   - VFP arithmetic with the A64 fast paths' exactness guards: VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT, VMLA/VMLS/VNMLA/VNMLS, VFMA/VFMS/VFNMA/VFNMS (single), VCMP/VCMPE, VCVT between F32 and F64 and to and from 32-bit integers. The exact arm is the interpreter.
+- **Calls are spanned as on A64.** A BL into a small ARM callee (one that returns within 16 instructions through BX LR, POP {..., PC}, LDR PC, [SP], #4 or MOV PC, LR without calling anything), or into a PLT stub (ADD ip, pc; ADD ip, ip; LDR pc, [ip, #off]!), runs inside the region. Every indirect exit then checks the region's return sites first.
+  - A PLT stub's target is the GOT slot's current contents, read at compile time.
+  - BX/BLX (register) targets are predicted from the region's entry state: the registers as they are when the region is compiled, carried through the entry block's immediate-offset LDRs and register MOVs (a vtable call: `ldr r1, [r0, #12]; blx r1`).
+  - Each prediction is a guarded branch; a miss leaves as before.
+  - On MK8DX in a race, these cut region entries from 702 M to 440 M over 950,000 slices, and browser fps while driving rose from 16.1 to 16.6.
 - A loaded or computed PC with bit 0 set (Thumb) goes to the interpreter before anything is committed.
 - VFP and Advanced SIMD instructions are direct calls to the A32 interpreter, synchronizing only the general registers they name. Inside a compiled condition they are passed with the condition rewritten to AL.
 - Everything else goes to the interpreter one instruction at a time. Instructions that may write the PC end the block.
 
-**Tested by** `tests/a32_jit_diff_test.c` (`a32_jit_diff_test_node`), which runs random A32 streams through both backends with the same budgets. The streams use every inlined form plus VFP/NEON, conditions, PUSH/POP and BX LR returns, and loops. Registers, PC, NZCV, D registers, FPSCR, exit, fault, cycles and memory are compared. A planted carry bug fails it within 31 streams.
+**Tested by** `tests/a32_jit_diff_test.c` (`a32_jit_diff_test_node`), which runs random A32 streams through both backends with the same budgets. The streams use every inlined form plus VFP/NEON, conditions, PUSH/POP and BX LR returns, and loops. A third of them also get small callees (each return form), a PLT stub and a vtable that BLs and `LDR r12, [r9, #off]; BLX r12` call. Planting a wrong jump at a return site or at a predicted target fails it within about 20 streams. Registers, PC, NZCV, D registers, FPSCR, exit, fault, cycles and memory are compared. A planted carry bug fails it within 31 streams.
 
 Measured on MK8DX with voland-cli under Node, no rendering:
 - **First 20,000 slices:** 29.2 s on the A32 interpreter, 10.7 s on the JIT (first cut, before the media and VFP direct paths). Virtual time and SVC counts are identical.

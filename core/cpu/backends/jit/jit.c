@@ -90,6 +90,12 @@ static bool ranges_hash(const Interp_State *s, const Jit_Code_Range *ranges, uin
 static const uint32_t *source_page_code(void *context, uint64_t page) {
   return block_code((const Interp_State *)context, page);
 }
+static bool source_entry_reg(void *context, uint32_t index, uint64_t *value) {
+  const Interp_State *s = (const Interp_State *)context;
+  if (index > CPU_REG_X30) return false;
+  *value = s->regs.x[index];
+  return true;
+}
 static bool source_peek64(void *context, uint64_t address, uint64_t *value) {
   const Interp_State *s = (const Interp_State *)context;
   if (vmm_access_crosses_page(address, sizeof(uint64_t))) return false;
@@ -788,7 +794,7 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
   const bool async = async_compile_possible();
   Jit_Entry *slot = victim(t, pc);
   if (async && slot->pc == pc && slot->pending) return; /* already on its way */
-  const Jit_Code_Source source = {source_page_code, source_peek64, (void *)(uintptr_t)s};
+  const Jit_Code_Source source = {source_page_code, source_peek64, source_entry_reg, (void *)(uintptr_t)s};
   Jit_Link link;
   link.cache_address = (uint64_t)(uintptr_t)t->cache;
   /* The shared code generation, not this thread's view of it: another

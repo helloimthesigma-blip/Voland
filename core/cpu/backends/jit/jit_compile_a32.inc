@@ -152,11 +152,102 @@ static void a32_check_arm_target(Ctx *c) {
   end_(c);
 }
 
-static void a32_leave_for_val(Ctx *c) {
+/* Leaves for the ARM-state target in L_VAL - unless it is a return site
+ * in this region (a BL the region followed into its callee): then the
+ * region goes on there, as the A64 RET does. */
+static bool a32_small_callee(const Ctx *c, uint64_t target);
+static void a32_leave_for_val_predicted(Ctx *c, bool predicted, uint64_t prediction);
+static void a32_leave_for_val(Ctx *c) { a32_leave_for_val_predicted(c, false, 0); }
+
+/* ...and, with a prediction (a PLT stub's GOT entry as it is now), goes on
+ * at the predicted target when the region holds it. */
+static void a32_leave_for_val_predicted(Ctx *c, bool predicted, uint64_t prediction) {
   lget(c, L_VAL);
   i64c(c, ~(uint64_t)A32_WORD_ALIGN_MASK & MASK32);
   op(c, WASM_OP_I64_AND);
+  lset(c, L_NPC);
+  if (predicted && c->discover && a32_small_callee(c, prediction)) (void)add_block(c, prediction);
+  for (uint32_t i = 0; i < c->block_count; i++) {
+    if (!c->blocks[i].return_site && !(predicted && c->blocks[i].pc == prediction)) continue;
+    lget(c, L_NPC);
+    i64c(c, c->blocks[i].pc);
+    op(c, WASM_OP_I64_EQ);
+    open_if(c, WASM_BLOCK_VOID);
+    branch_to(c, c->blocks[i].pc);
+    end_(c);
+  }
+  lget(c, L_NPC);
   exit_to_stack(c);
+}
+
+/* A callee the region can follow a BL into: an ARM function that returns
+ * (BX LR, POP {..., PC}, LDR PC, [SP], #4 or MOV PC, LR) within
+ * JIT_SMALL_CALLEE_INSNS instructions without calling anything. */
+#define A32_BX_LR 0xE12FFF1Eu
+#define A32_MOV_PC_LR 0xE1A0F00Eu
+#define A32_LDR_PC_POP 0xE49DF004u
+#define A32_POP_PC_MASK 0xFFFF8000u
+#define A32_POP_PC 0xE8BD8000u     /* LDMIA SP!, {..., PC} */
+#define A32_BLX_REG_MASK 0x0FFFFFF0u
+#define A32_BLX_REG 0x012FFF30u
+/* A PLT stub - ADD ip, pc, #a; ADD ip, ip, #b; LDR pc, [ip, #c]! - ending
+ * at `ldr_pc` (the LDR's address): the GOT slot it jumps through, and
+ * what the slot holds now (the import it calls). */
+#define A32_PLT_ADD_PC 0xE28FC000u  /* ADD ip, pc, #imm (mask 0xFFFFF000) */
+#define A32_PLT_ADD_IP 0xE28CC000u  /* ADD ip, ip, #imm */
+#define A32_PLT_LDR_PC 0xE5BCF000u  /* LDR pc, [ip, #imm]! */
+#define A32_IMM12_MASK 0xFFFu
+static uint32_t a32_modified_imm(uint32_t imm12) {
+  const uint32_t value = imm12 & 0xFFu, rotate = 2u * ((imm12 >> 8) & 0xFu);
+  return rotate ? (value >> rotate) | (value << (32u - rotate)) : value;
+}
+static bool a32_plt_target(const Ctx *c, uint64_t ldr_pc, uint64_t *target) {
+  if (ldr_pc < 2u * INSN_BYTES || (ldr_pc & A32_WORD_ALIGN_MASK)) return false;
+  const uint64_t first = ldr_pc - 2u * INSN_BYTES, page = first & ~(uint64_t)VMM_PAGE_OFFSET_MASK;
+  if ((ldr_pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK) != page) return false;
+  const uint32_t *code = c->source->page_code(c->source->context, page);
+  if (!code) return false;
+  const uint32_t *w = code + (first - page) / INSN_BYTES;
+  if ((w[0] & ~A32_IMM12_MASK) != A32_PLT_ADD_PC || (w[1] & ~A32_IMM12_MASK) != A32_PLT_ADD_IP ||
+      (w[2] & ~A32_IMM12_MASK) != A32_PLT_LDR_PC)
+    return false;
+  const uint64_t slot = (first + A32_PC_AHEAD + a32_modified_imm(w[0] & A32_IMM12_MASK) +
+                         a32_modified_imm(w[1] & A32_IMM12_MASK) + (w[2] & A32_IMM12_MASK)) & MASK32;
+  uint64_t value;
+  if (!c->source->peek64(c->source->context, slot, &value)) return false;
+  *target = value & MASK32;
+  return (*target & A32_WORD_ALIGN_MASK) == 0;
+}
+
+static bool a32_small_callee(const Ctx *c, uint64_t target) {
+  const uint64_t page = target & ~(uint64_t)VMM_PAGE_OFFSET_MASK;
+  const uint32_t *code = c->source->page_code(c->source->context, page);
+  if (!code || (target & A32_WORD_ALIGN_MASK)) return false;
+  uint64_t import;
+  if (a32_plt_target(c, target + 2u * INSN_BYTES, &import)) return true; /* a PLT stub: followed to the import */
+  const uint32_t first = (uint32_t)((target - page) / INSN_BYTES);
+  for (uint32_t i = first; i < first + JIT_SMALL_CALLEE_INSNS && i < VMM_PAGE_SIZE / INSN_BYTES; i++) {
+    const uint32_t insn = code[i];
+    if (insn == A32_BX_LR || insn == A32_MOV_PC_LR || insn == A32_LDR_PC_POP || (insn & A32_POP_PC_MASK) == A32_POP_PC)
+      return true;
+    if (bits(insn, 27, 24) == 0xBu || (insn & A32_BLX_REG_MASK) == A32_BLX_REG) return false; /* BL, BLX */
+  }
+  return false;
+}
+
+/* BL: into the callee in the region when it can be there (back at the
+ * return site through a32_leave_for_val), otherwise leave for it. */
+static void a32_branch_link(Ctx *c, uint64_t target) {
+  const uint64_t back = (c->pc + INSN_BYTES) & MASK32;
+  i64c(c, back);
+  set_x(c, A32_REG_LR);
+  if (!c->link->span_calls || (c->discover && find_block(c, target) < 0 && !a32_small_callee(c, target))) {
+    i64c(c, target);
+    exit_to_stack(c);
+    return;
+  }
+  if (c->discover && add_block(c, target) && add_block(c, back)) c->blocks[find_block(c, back)].return_site = true;
+  branch_to(c, target);
 }
 
 /* ---- data processing ----------------------------------------------------- */
@@ -399,7 +490,9 @@ static void a32_transfer(Ctx *c, bool load, Access access, uint32_t size, uint32
   }
   if (load) {
     if (rt == A32_REG_PC) {
-      a32_leave_for_val(c);
+      uint64_t import = 0;
+      const bool predicted = c->link->span_calls && a32_plt_target(c, c->pc, &import);
+      a32_leave_for_val_predicted(c, predicted, import);
       return;
     }
     lget(c, L_VAL);
@@ -556,16 +649,67 @@ static uint64_t a32_branch_target(Ctx *c, uint32_t insn) {
 }
 
 /* BX / BLX (register): an ARM-state target leaves for it, a Thumb one is
- * the interpreter's. */
+ * the interpreter's. A predicted target (a virtual call through a vtable
+ * as the region's entry state finds it) the region may hold: BLX then
+ * follows a small callee and comes back at the return site. */
 static void a32_branch_register(Ctx *c, uint32_t rm, bool link) {
+  const bool predicted = c->link->span_calls && rm < A32_REG_PC && (c->predicted_mask & (1u << rm)) &&
+                         !(c->predicted_value[rm] & A32_WORD_ALIGN_MASK);
+  const uint64_t prediction = predicted ? c->predicted_value[rm] : 0;
   a32_get(c, rm);
   lset(c, L_VAL);
   a32_check_arm_target(c);
   if (link) {
-    i64c(c, (c->pc + INSN_BYTES) & MASK32);
+    const uint64_t back = (c->pc + INSN_BYTES) & MASK32;
+    i64c(c, back);
     set_x(c, A32_REG_LR);
+    if (predicted && c->discover && a32_small_callee(c, prediction) && add_block(c, prediction) && add_block(c, back))
+      c->blocks[find_block(c, back)].return_site = true;
   }
-  a32_leave_for_val(c);
+  a32_leave_for_val_predicted(c, predicted, prediction);
+}
+
+/* Predictions from the entry state: the registers as they are now, then
+ * what immediate-offset LDRs and MOVs make of them in the entry block. */
+static void a32_seed_predictions(Ctx *c) {
+  if (!c->source->entry_reg) return;
+  for (uint32_t r = 0; r < A32_REG_PC; r++) {
+    uint64_t value;
+    if (!c->source->entry_reg(c->source->context, r, &value)) continue;
+    c->predicted_mask |= 1u << r;
+    c->predicted_value[r] = value & MASK32;
+  }
+}
+
+#define A32_LDR_IMM_MASK 0x0E500000u /* LDR (immediate, word): 010P U0W1 */
+#define A32_LDR_IMM 0x04100000u
+#define A32_MOV_REG_MASK 0x0FEF0FF0u /* MOV{S} Rd, Rm (no shift) */
+#define A32_MOV_REG 0x01A00000u
+/* The prediction an instruction makes (before it is compiled - its base
+ * may be written back): *rd gets *value. */
+static bool a32_predict(const Ctx *c, uint32_t insn, uint32_t *rd, uint64_t *value) {
+  if (!c->link->span_calls || bits(insn, 31, 28) != A32_COND_AL) return false;
+  if ((insn & A32_LDR_IMM_MASK) == A32_LDR_IMM) {
+    const uint32_t rn = bits(insn, 19, 16), rt = bits(insn, 15, 12);
+    if (rt >= A32_REG_PC || rn >= A32_REG_PC || !(c->predicted_mask & (1u << rn))) return false;
+    const uint32_t imm = bits(insn, 11, 0);
+    uint64_t address = c->predicted_value[rn];
+    if (bit(insn, 24)) address = (bit(insn, 23) ? address + imm : address - imm) & MASK32;
+    uint64_t pair;
+    if ((address & A32_WORD_ALIGN_MASK) || !c->source->peek64(c->source->context, address & ~(uint64_t)7u, &pair))
+      return false;
+    *rd = rt;
+    *value = (pair >> (8u * (address & 4u))) & MASK32;
+    return true;
+  }
+  if ((insn & A32_MOV_REG_MASK) == A32_MOV_REG) {
+    const uint32_t rm = bits(insn, 3, 0), d = bits(insn, 15, 12);
+    if (rm >= A32_REG_PC || d >= A32_REG_PC || !(c->predicted_mask & (1u << rm))) return false;
+    *rd = d;
+    *value = c->predicted_value[rm];
+    return true;
+  }
+  return false;
 }
 
 /* ---- media: extends, bit fields, reversal ------------------------------------ */
@@ -2020,7 +2164,20 @@ static Outcome a32_compile_instruction(Ctx *c, uint32_t insn) {
   return a32_compile_instruction_checked(c, insn);
 }
 
+static Outcome a32_compile_instruction_unpredicted(Ctx *c, uint32_t insn);
 static Outcome a32_compile_instruction_checked(Ctx *c, uint32_t insn) {
+  uint32_t rd = 0;
+  uint64_t value = 0;
+  const bool predicts = c->predicted_mask && a32_predict(c, insn, &rd, &value);
+  const Outcome outcome = a32_compile_instruction_unpredicted(c, insn);
+  if (predicts && outcome == OUTCOME_NEXT) {
+    c->predicted_mask |= 1u << rd;
+    c->predicted_value[rd] = value;
+  }
+  return outcome;
+}
+
+static Outcome a32_compile_instruction_unpredicted(Ctx *c, uint32_t insn) {
   const A32_Flag_Snapshot saved = {c->flag_kind, c->flag_sf, c->flag_carry, c->flag_event};
   const uint32_t cond = bits(insn, 31, 28);
   if (cond == A32_COND_NV) { /* Advanced SIMD directly; BLX (immediate) is Thumb */
@@ -2034,23 +2191,14 @@ static Outcome a32_compile_instruction_checked(Ctx *c, uint32_t insn) {
     const uint64_t target = a32_branch_target(c, insn);
     const bool link = bit(insn, 24);
     if (cond == A32_COND_AL) {
-      if (link) {
-        i64c(c, (c->pc + INSN_BYTES) & MASK32);
-        set_x(c, A32_REG_LR);
-        i64c(c, target);
-        exit_to_stack(c);
-      } else {
-        branch_to(c, target);
-      }
+      if (link) a32_branch_link(c, target);
+      else branch_to(c, target);
       return OUTCOME_END;
     }
     emit_condition(c, cond);
     open_if(c, WASM_BLOCK_VOID);
     if (link) {
-      i64c(c, (c->pc + INSN_BYTES) & MASK32);
-      set_x(c, A32_REG_LR);
-      i64c(c, target);
-      exit_to_stack(c);
+      a32_branch_link(c, target);
     } else {
       branch_to(c, target);
     }

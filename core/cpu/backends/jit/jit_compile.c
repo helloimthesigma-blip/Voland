@@ -4489,6 +4489,7 @@ static uint32_t compile_block_code(Ctx *c, uint32_t b) {
   const uint32_t available = (uint32_t)((page + VMM_PAGE_SIZE - start) / INSN_BYTES);
   c->known_mask = 0;
   c->predicted_mask = 0;
+  if (c->a32 && b == 0 && c->link->span_calls) a32_seed_predictions(c);
   const uint32_t count = available < c->max_block_insns ? available : c->max_block_insns;
   c->block_len = c->blocks[b].length;
   c->pc = start;

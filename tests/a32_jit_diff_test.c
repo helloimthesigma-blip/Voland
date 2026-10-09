@@ -323,7 +323,49 @@ typedef struct Snapshot {
   uint64_t fpsr, fpcr;
 } Snapshot;
 
-static uint32_t g_fpcr, g_fpsr;
+/* Small functions after the stream, each returning one way the JIT
+ * follows a BL into (BX LR; PUSH {r4, lr} .. POP {r4, pc}; STR lr, [sp,
+ * #-4]! .. LDR pc, [sp], #4), a PLT stub to one of them, and BLs to them
+ * in place of a few stream instructions: regions then run stub, callee
+ * and return site inline. */
+#define A32_BX_LR_INSN 0xE12FFF1Eu
+#define VTABLE_REG 9u
+static uint32_t g_vtable; /* code word index of a function-pointer table, 0: none */
+static void add_callees(uint32_t *code, uint32_t length) {
+  static const uint32_t prologue[3] = {0, 0xE92D4010u, 0xE52DE004u};
+  static const uint32_t epilogue[3] = {A32_BX_LR_INSN, 0xE8BD8010u, 0xE49DF004u};
+  uint32_t at = length + 1u, entry[4];
+  for (uint32_t f = 0; f < 3u; f++) {
+    entry[f] = at;
+    if (prologue[f]) code[at++] = prologue[f];
+    for (uint32_t k = pick(5); k; k--) code[at++] = gen_dp();
+    code[at++] = epilogue[f];
+  }
+  /* A PLT stub (ADD ip, pc, #0; ADD ip, ip, #0; LDR pc, [ip, #off]!) to
+   * one of them through a GOT slot after it. */
+  entry[3] = at;
+  const uint32_t got = at + 4u;
+  code[at++] = 0xE28FC000u;
+  code[at++] = 0xE28CC000u;
+  code[at] = 0xE5BCF000u | (4u * got - (4u * entry[3] + 8u));
+  at++;
+  code[got] = (uint32_t)CODE_GVA + 4u * entry[pick(3)];
+  /* A vtable of the three, called as LDR r12, [r9, #off]; BLX r12 (the
+   * JIT predicts r12 from the entry state). */
+  g_vtable = got + 1u;
+  for (uint32_t f = 0; f < 3u; f++) code[g_vtable + f] = (uint32_t)CODE_GVA + 4u * entry[f];
+  if (length >= 2u) {
+    const uint32_t here = pick(length - 1u);
+    code[here] = 0xE599C000u | (4u * pick(3));      /* LDR r12, [r9, #4k] */
+    code[here + 1u] = (cond() << 28) | 0x012FFF3Cu; /* BLX r12 */
+  }
+  for (uint32_t n = 1u + pick(3); n; n--) {
+    const uint32_t here = pick(length), f = entry[pick(4)];
+    code[here] = (cond() << 28) | 0x0B000000u | ((uint32_t)((int32_t)f - (int32_t)here - 2) & 0xFFFFFFu);
+  }
+}
+
+static uint32_t g_fpcr, g_fpsr;static uint32_t g_fpcr, g_fpsr;
 
 static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint32_t *r, uint32_t nzcv) {
   for (uint8_t i = 0; i < A32_REGS; i++) cpu->set_reg(s, i, r[i]);
@@ -372,6 +414,8 @@ static void run_case(uint32_t iteration) {
   const uint32_t length = 1u + pick(STREAM_MAX);
   for (uint32_t i = 0; i < length; i++) code[i] = gen((int32_t)i, length);
   if (pick(2)) code[length] = 0xEA000000u | ((uint32_t)(-(int32_t)pick(length + 1u) - 2) & 0xFFFFFFu); /* loop */
+  g_vtable = 0;
+  if (pick(3) == 0) add_callees(code, length);
   CHECK_OK(vmm_write_physical(g_vmm, CODE_PA, code, sizeof(code)));
   g_jit_cpu->clear_cache(g_jit);
 
@@ -383,6 +427,7 @@ static void run_case(uint32_t iteration) {
     if (pick(8) == 0) r[i] = (r[i] | 0xFFFu) - pick(24); /* near a page end: crossing accesses */
   }
   r[12] = pick(64);
+  if (g_vtable && pick(2)) r[VTABLE_REG] = (uint32_t)CODE_GVA + 4u * g_vtable;
   r[13] = (uint32_t)(DATA_GVA + 0x1800u + pick(0x1000u)) & ~7u;
   r[14] = (uint32_t)(CODE_GVA + 4u * pick(length + 1u)) | (pick(40) == 0 ? 1u : 0u);
   if (pick(4) == 0) r[7] = (uint32_t)(CODE_GVA + 4u * pick(length + 1u));
