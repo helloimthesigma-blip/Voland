@@ -14,9 +14,15 @@
  * statistics and timings. The stream is read in chunks, so recordings far
  * larger than one ArrayBuffer (gameplay runs are gigabytes) replay too.
  *
- * --dump-targets P1,P2,... DIR: after those presents, every RGBA8 render
+ * --dump-targets P1,P2,... DIR: after those presents, every RGBA8 and
+ * float (rgba16float, rg11b10ufloat, r16float; clamped to [0, 1]) render
  * target as DIR/p<P>-tex<id>-<w>x<h>.pam (RGBA), to compare with
  * VOLAND_DUMP_SURFACES output from a software run (voland-cli).
+ *
+ * Diagnostics (environment): DRAW_TRACE=P sums the RGBA8 targets after
+ * each draw of present P, or with TRACE_TARGET=id that one target (float
+ * formats too); TRACE_SHAPES=P prints each draw's shader, colour targets
+ * and depth state; NO_SHADOW_COMPARE=1 makes every depth compare pass.
  */
 import { chromium } from "@playwright/test";
 import { readFileSync, statSync, createReadStream, writeFileSync } from "node:fs";
@@ -83,6 +89,9 @@ if (process.env.TRACE_RECORDS) await page.evaluate(() => { globalThis.TRACE_RECO
 if (process.env.TRIVIAL_SHADERS) await page.evaluate(() => { globalThis.TRIVIAL_SHADERS = true; });
 if (process.env.MEASURE) await page.evaluate(() => { globalThis.MEASURE = true; });
 if (process.env.DRAW_TRACE) await page.evaluate((n) => { globalThis.DRAW_TRACE = n; }, Number(process.env.DRAW_TRACE));
+if (process.env.NO_SHADOW_COMPARE) await page.evaluate(() => { globalThis.NO_SHADOW_COMPARE = true; });
+if (process.env.TRACE_SHAPES) await page.evaluate((n) => { globalThis.TRACE_SHAPES = n; }, Number(process.env.TRACE_SHAPES));
+if (process.env.TRACE_TARGET) await page.evaluate((n) => { globalThis.TRACE_TARGET = n; }, Number(process.env.TRACE_TARGET));
 if (process.env.SYNC_DRAWS) await page.evaluate(() => { globalThis.SYNC_DRAWS = true; });
 if (process.env.NO_DEPTH) await page.evaluate(() => { globalThis.NO_DEPTH = true; });
 if (process.env.SKIP_TYPES) await page.evaluate((t) => { globalThis.SKIP_TYPES = t; }, process.env.SKIP_TYPES.split(",").map(Number));
@@ -95,6 +104,10 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
     requiredFeatures: features,
     requiredLimits: { maxColorAttachmentBytesPerSample: a.limits.maxColorAttachmentBytesPerSample }, // as gpu.worker.ts
   });
+  if (globalThis.NO_SHADOW_COMPARE) { /* experiment: every depth compare passes */
+    const create = device.createShaderModule.bind(device);
+    device.createShaderModule = (d) => create({ ...d, code: d.code.replace(/fn tcmp\(([^)]*)\)\s*->\s*bool\s*\{/, (m) => `${m} return true;`) });
+  }
   const errors = [];
   device.addEventListener("uncapturederror", (e) => { if (errors.length < 20) errors.push(e.error.message.split("\n")[0]); });
   const toBase64 = (u8) => {
@@ -214,11 +227,44 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
         const e = (m[shader] ??= { n: 0, ms: 0 }); e.n++; e.ms += performance.now() - m0;
       } else if (!(globalThis.SKIP_TYPES ?? []).includes(type)) ex.execute(type, payload);
       if (globalThis.SYNC_DRAWS && type === 6) { ex.flush(); await device.queue.onSubmittedWorkDone(); }
+      if (globalThis.TRACE_SHAPES && type === 6 && presents + 1 === globalThis.TRACE_SHAPES) {
+        /* Each draw's shader, colour targets and depth target (Gpu_Rec_Draw: targets of 36 bytes at 8, depth at 296). */
+        const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+        const n = dv.getUint32(4, true), ids = [];
+        for (let k = 0; k < n && k < 8; k++) ids.push(dv.getUint32(8 + 36 * k, true));
+        console.log(`shape ${records} shader ${dv.getUint32(0, true)} vs ${dv.getUint32(8 + 36 * 8 + 4 * 13 + 4 * 4 + 4 * 4 + 4 * 4 + 4 * 4, true)} targets ${ids.join(",")} depth ${dv.getUint32(296, true)} test ${dv.getUint32(300, true)} write ${dv.getUint32(304, true)} cmp ${dv.getUint32(308, true)}`);
+      }
       if (globalThis.DRAW_TRACE && type === 6 && presents + 1 === globalThis.DRAW_TRACE) {
-        /* Diagnostics: each RGBA8 target's channel sums after every draw of one present. */
+        /* Diagnostics: each RGBA8 target's channel sums after every draw of one present
+         * (TRACE_TARGET=id: that one target, float formats too, with the draw's targets). */
         ex.flush();
         const sums = [];
-        for (const [id, t] of ex.textures) {
+        const only = globalThis.TRACE_TARGET;
+        if (only) {
+          const t = ex.textures.get(only);
+          const texel = t ? TEXEL_BYTES[t.format] : 0;
+          if (t && texel) {
+            const bytesPerRow = Math.ceil((t.width * texel) / 256) * 256;
+            const buffer = device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+            const enc = device.createCommandEncoder();
+            enc.copyTextureToBuffer({ texture: t.texture }, { buffer, bytesPerRow }, [t.width, t.height]);
+            device.queue.submit([enc.finish()]);
+            await buffer.mapAsync(GPUMapMode.READ);
+            const dv2 = new DataView(buffer.getMappedRange());
+            let sum = 0;
+            for (let y = 0; y < t.height; y += 4)
+              for (let x = 0; x < t.width; x += 4) {
+                const at = y * bytesPerRow + x * texel;
+                if (t.format === "rgba16float") sum += half(dv2.getUint16(at, true)) + half(dv2.getUint16(at + 2, true)) + half(dv2.getUint16(at + 4, true));
+                else if (t.format === "rg11b10ufloat") { const w = dv2.getUint32(at, true); sum += small(w & 2047, 6) + small((w >> 11) & 2047, 6) + small(w >>> 22, 5); }
+                else sum += dv2.getUint8(at) + dv2.getUint8(at + 1) + dv2.getUint8(at + 2);
+              }
+            buffer.destroy();
+            const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+            console.log(`draw ${records} shader ${dv.getUint32(0, true)} target ${only} ${t.format} sum ${sum.toFixed(2)}`);
+          }
+        }
+        for (const [id, t] of only ? [] : ex.textures) {
           if (!t.renderView || !["rgba8unorm", "rgba8unorm-srgb", "bgra8unorm"].includes(t.format)) continue;
           const bytesPerRow = Math.ceil((t.width * 4) / 256) * 256;
           const buffer = device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -232,8 +278,10 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
           buffer.destroy();
           sums.push(`${id}:${t.width}x${t.height}:${sum}`);
         }
-        const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-        console.log(`draw ${records} shader ${dv.getUint32(0, true)} ${sums.join(" ")}`);
+        if (!only) {
+          const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+          console.log(`draw ${records} shader ${dv.getUint32(0, true)} ${sums.join(" ")}`);
+        }
       }
       const e = (byType[type] ??= { n: 0, ms: 0, bytes: 0 });
       e.n++; e.ms += performance.now() - r0; e.bytes += size;

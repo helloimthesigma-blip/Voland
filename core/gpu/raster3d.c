@@ -4051,6 +4051,13 @@ static void gpu_emit_draw(Raster_State *rs) {
   d.depth_test = rs->depth_test ? 1u : 0u;
   d.depth_write = rs->depth_write ? 1u : 0u;
   d.depth_compare = rs->depth_test ? gpu_compare(rs->depth_func) : GPU_CMP_ALWAYS;
+  /* EQUAL against a depth pre-pass, without writing: the GPU's depths for
+   * the two passes can differ in the last bit (another translated vertex
+   * program, or another vertex path), and EQUAL then rejects the whole
+   * surface - MK8DX's race view lost its track and karts. LESS_EQUAL
+   * passes the same nearest surfaces (the pre-pass already kept the
+   * nearest depth) and tolerates the rounding. */
+  if (d.depth_compare == GPU_CMP_EQUAL && !d.depth_write) d.depth_compare = GPU_CMP_LESS_EQUAL;
   d.stencil = rs->stencil ? 1u : 0u;
   if (rs->stencil) {
     Gpu_Rec_Stencil_Face *faces[2] = {&d.stencil_front, &d.stencil_back};
