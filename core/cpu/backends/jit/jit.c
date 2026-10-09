@@ -532,8 +532,10 @@ static bool has_fast_path(uint32_t key) {
 static void profile_fallback_key(uint32_t key);
 static void profile_fallback(uint32_t insn) { profile_fallback_key(fallback_key(insn)); }
 #define A32_FALLBACK_DIRECT 0x80000000u /* a direct VFP/NEON call, not a helper */
+#define A32_FALLBACK_NEON_MASK 0x0FFF0FF0u /* Advanced SIMD: 19:16 hold opcode bits in the two-register forms */
 static void profile_fallback_a32(uint32_t insn, uint32_t direct) {
-  profile_fallback_key((insn & A32_FALLBACK_OPCODE_MASK) | direct | 1u);
+  const uint32_t mask = (insn >> 28) == 0xFu ? A32_FALLBACK_NEON_MASK : A32_FALLBACK_OPCODE_MASK;
+  profile_fallback_key((insn & mask) | direct | 1u);
 }
 
 static void profile_fallback_key(uint32_t key) {
@@ -546,7 +548,47 @@ static void profile_fallback_key(uint32_t key) {
   }
 }
 
+/* Cold profile: the block starts the interpreter ran, and whether a
+ * compiled block existed but did not fit the remaining budget. */
+#define COLD_SLOTS 8192u
+static uint64_t g_cold_pc[COLD_SLOTS], g_cold_count[COLD_SLOTS], g_cold_budget[COLD_SLOTS];
+
+static void profile_cold(uint64_t pc, bool over_budget) {
+  const uint64_t key = pc | 1u; /* never 0 */
+  for (uint32_t i = 0, slot = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 51); i < COLD_SLOTS;
+       i++, slot = (slot + 1u) % COLD_SLOTS) {
+    if (g_cold_pc[slot] == key || g_cold_pc[slot] == 0) {
+      g_cold_pc[slot] = key;
+      g_cold_count[slot]++;
+      if (over_budget) g_cold_budget[slot]++;
+      return;
+    }
+  }
+}
+
+static void print_cold_profile(uint32_t top) {
+  uint64_t total = 0, budget = 0;
+  for (uint32_t i = 0; i < COLD_SLOTS; i++) {
+    total += g_cold_count[i];
+    budget += g_cold_budget[i];
+  }
+  if (!total) return;
+  fprintf(stderr, "  interpreted block starts: %llu (%llu with a compiled block that did not fit the budget)\n",
+          (unsigned long long)total, (unsigned long long)budget);
+  for (uint32_t n = 0; n < top; n++) {
+    uint32_t best = COLD_SLOTS;
+    for (uint32_t i = 0; i < COLD_SLOTS; i++) {
+      if (g_cold_count[i] && (best == COLD_SLOTS || g_cold_count[i] > g_cold_count[best])) best = i;
+    }
+    if (best == COLD_SLOTS) return;
+    fprintf(stderr, "  %12llu  %010llx  (%llu over budget)\n", (unsigned long long)g_cold_count[best],
+            (unsigned long long)(g_cold_pc[best] & ~1ull), (unsigned long long)g_cold_budget[best]);
+    g_cold_count[best] = 0;
+  }
+}
+
 void jit_print_fallback_profile(uint32_t top) {
+  print_cold_profile(top / 2u);
   for (uint32_t n = 0; n < top; n++) {
     uint32_t best = FALLBACK_SLOTS;
     for (uint32_t i = 0; i < FALLBACK_SLOTS; i++) {
@@ -898,6 +940,7 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
       }
     }
     t->stats.interpreted_blocks++;
+    if (g_fallback_profile) profile_cold(pc, e != NULL);
     note_block(t, pc);
     const bool more = j->isa == JIT_ISA_A32 ? a32_run_block((A32_State *)j, cycle_budget, &grace, &exit_reason)
                                             : interp_predecode_run_block(s, cycle_budget, &grace, &exit_reason);

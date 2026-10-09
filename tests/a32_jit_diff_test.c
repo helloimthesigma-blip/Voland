@@ -229,10 +229,61 @@ static uint32_t gen_sync(void) {
   }
 }
 
+/* Advanced SIMD: the inlined data-processing forms, single-lane and
+ * all-lane VLD1/VST1, VMOV to and from scalars, VDUP. */
+static uint32_t neon_regs(uint32_t q) {
+  const uint32_t d = q ? pick(16) * 2u : pick(32), n = q ? pick(16) * 2u : pick(32), m = q ? pick(16) * 2u : pick(32);
+  return ((d >> 4) << 22) | ((d & 15u) << 12) | ((n >> 4) << 7) | ((n & 15u) << 16) | ((m >> 4) << 5) | (m & 15u) |
+         (q << 6);
+}
+static uint32_t gen_neon(void) {
+  const uint32_t q = pick(2);
+  switch (pick(10)) {
+  case 0: case 1: { /* F32: VADD VSUB VMLA VMLS VMUL */
+    static const uint32_t forms[5] = {0xF2000D00u, 0xF2200D00u, 0xF2000D10u, 0xF2200D10u, 0xF3000D10u};
+    return forms[pick(5)] | neon_regs(q);
+  }
+  case 2: /* bitwise */
+    return 0xF2000110u | (pick(2) << 24) | (pick(4) << 20) | neon_regs(q);
+  case 3: /* VADD/VSUB (integer), VMUL.I16/I32 */
+    if (pick(3) == 0) return 0xF2000910u | ((1u + pick(2)) << 20) | neon_regs(q);
+    return 0xF2000800u | (pick(2) << 24) | (pick(4) << 20) | neon_regs(q);
+  case 4: { /* VMLA/VMLS/VMUL.F32 by scalar */
+    static const uint32_t ops[3] = {0x1u, 0x5u, 0x9u};
+    const uint32_t d = q ? pick(16) * 2u : pick(32), n = q ? pick(16) * 2u : pick(32);
+    return 0xF2A00040u | (q << 24) | ((d >> 4) << 22) | ((d & 15u) << 12) | ((n >> 4) << 7) | ((n & 15u) << 16) |
+           (ops[pick(3)] << 8) | (pick(2) << 5) | pick(16);
+  }
+  case 5: /* VEXT, VDUP (scalar) */
+    if (pick(2)) return 0xF2B00000u | ((q ? pick(16) : pick(8)) << 8) | neon_regs(q);
+    {
+      static const uint32_t imm4[3] = {1u, 2u, 4u};
+      const uint32_t k = pick(3), index = pick(8u >> k);
+      return 0xF3B00C00u | ((imm4[k] | (index << (k + 1u))) << 16) | (neon_regs(q) & ~(0xFu << 16) & ~(1u << 7));
+    }
+  case 6: /* VMOV/VMVN/VORR/VBIC (immediate) */
+    return 0xF2800010u | (pick(2) << 24) | (pick(8) << 16) | (pick(16) << 8) | (pick(2) << 5) | pick(16) |
+           (neon_regs(q) & ((1u << 22) | (0xFu << 12) | (1u << 6)));
+  case 7: { /* VLD1/VST1 one lane, VLD1 all lanes, through r8-r11 */
+    const uint32_t rm = pick(3) ? (pick(2) ? 15u : 13u) : pick(8), d = pick(31);
+    const uint32_t base = 0xF4800000u | ((8u + pick(4)) << 16) | ((d >> 4) << 22) | ((d & 15u) << 12) | rm;
+    if (pick(3) == 0) return base | (1u << 21) | (3u << 10) | (pick(3) << 6) | (pick(2) << 5);
+    return base | (pick(2) << 21) | (pick(3) << 10) | (pick(16) << 4);
+  }
+  default: { /* VMOV core <-> scalar, VDUP (core) */
+    const uint32_t d = pick(32);
+    const uint32_t regs = ((d >> 4) << 7) | ((d & 15u) << 16) | (dst() << 12);
+    if (pick(4) == 0) return (cond() << 28) | 0x0E800B10u | (pick(2) << 22) | (pick(2) << 21) | (pick(2) << 5) | regs;
+    return (cond() << 28) | 0x0E000B10u | (pick(2) << 20) | (pick(2) << 23) | (pick(4) << 21) | (pick(4) << 5) | regs;
+  }
+  }
+}
+
 static uint32_t gen(int32_t here, uint32_t length) {
   static int only = -2; /* debugging: A32_GEN=k keeps one generator */
   if (only == -2) only = getenv("A32_GEN") ? atoi(getenv("A32_GEN")) : -1;
-  switch (only >= 0 ? (uint32_t)only : pick(20)) {
+  switch (only >= 0 ? (uint32_t)only : pick(21)) {
+  case 20: return gen_neon();
   case 19: return gen_sync();
   case 16: return gen_media();
   case 17: case 18: return gen_vfp();

@@ -543,6 +543,7 @@ without a fast path.
   - LDREX/STREX, LDAEX/STLEX (byte, halfword, word) and LDA/STL, with the interpreter's per-thread monitor (exact address and size);
   - MRC/MCR of TPIDRURO and TPIDRURW;
   - VLDR/VSTR, VLDM/VSTM (VPUSH/VPOP), VLD1/VST1 of one to four D registers (one walk; a page crossing goes to the interpreter), VMOV (core registers, immediate), VMRS APSR_nzcv;
+  - Advanced SIMD on wasm SIMD128 (Qn is V[n]): F32 VADD/VSUB/VMUL/VMLA/VMLS, vector and by scalar; VAND/VBIC/VORR/VORN/VEOR/VBSL/VBIT/VBIF; integer VADD/VSUB and VMUL.I16/I32; VEXT; VDUP (scalar and core); VMOV/VMVN/VORR/VBIC (immediate); VMOV to and from scalars; VLD1/VST1 of one lane and VLD1 to all lanes. Advanced SIMD floats always use the standard FPSCR value (flush to zero, default NaN), so the fast arm needs every input normal or zero, every result normal or an exact zero, and IXC already set;
   - VFP arithmetic with the A64 fast paths' exactness guards: VADD/VSUB/VMUL/VNMUL/VDIV/VSQRT, VMLA/VMLS/VNMLA/VNMLS, VFMA/VFMS/VFNMA/VFNMS (single), VCMP/VCMPE, VCVT between F32 and F64 and to and from 32-bit integers. The exact arm is the interpreter.
 - A loaded or computed PC with bit 0 set (Thumb) goes to the interpreter before anything is committed.
 - VFP and Advanced SIMD instructions are direct calls to the A32 interpreter, synchronizing only the general registers they name. Inside a compiled condition they are passed with the condition rewritten to AL.
@@ -553,7 +554,7 @@ without a fast path.
 Measured on MK8DX with voland-cli under Node, no rendering:
 - **First 20,000 slices:** 29.2 s on the A32 interpreter, 10.7 s on the JIT (first cut, before the media and VFP direct paths). Virtual time and SVC counts are identical.
 - **60,000 slices, to the title screen:** 11.1 s on the JIT, about 34% of real time including boot.
-- **140,000 slices (title and menus):** the VFP compare/convert/multiply-accumulate, exclusive and TPIDRURO paths cut direct interpreter calls from 20.0 M to 10.5 M and helper calls from 8.0 M to 1.8 M. Wall time went from 358 s to 289 s on a busy machine. VLD1/VST1 and VLDM/VSTM then took direct calls down to 5.6 M.
+- **140,000 slices (title and menus):** the VFP compare/convert/multiply-accumulate, exclusive and TPIDRURO paths cut direct interpreter calls from 20.0 M to 10.5 M and helper calls from 8.0 M to 1.8 M. Wall time went from 358 s to 289 s on a busy machine. VLD1/VST1 and VLDM/VSTM then took direct calls down to 5.6 M, and the Advanced SIMD forms to 1.4 M.
 
 ## Limits and next steps
 

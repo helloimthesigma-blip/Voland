@@ -780,8 +780,9 @@ static void a32_register_run(Ctx *c, bool load, uint32_t size, uint32_t count, u
  * register bytes in the same order whatever the element size; the
  * alignment hint is not checked (as the interpreter). Rm: 15 no
  * writeback, 13 the size, else Rm. */
+static bool a32_neon_load_store_lane(Ctx *c, uint32_t insn);
 static bool a32_neon_load_store(Ctx *c, uint32_t insn) {
-  if (bit(insn, 23)) return false; /* single lanes, all lanes */
+  if (bit(insn, 23)) return a32_neon_load_store_lane(c, insn);
   uint32_t regs;
   switch (bits(insn, 11, 8)) {
   case 7: regs = 1; break;
@@ -836,7 +837,13 @@ static bool a32_vfp_load_store_multiple(Ctx *c, uint32_t insn) {
 
 /* VMOV between a core register and a single, the two-register forms, and
  * VMRS APSR_nzcv, FPSCR. */
+static bool a32_vmov_scalar(Ctx *c, uint32_t insn);
+static bool a32_vdup_core(Ctx *c, uint32_t insn);
 static bool a32_vfp_transfer(Ctx *c, uint32_t insn) {
+  if (bits(insn, 27, 24) == 0xEu && bits(insn, 11, 8) == 0xBu && bits(insn, 3, 0) == 0u) { /* cp11: lanes */
+    if (bit(insn, 23) && !bit(insn, 20)) return !bit(insn, 6) && a32_vdup_core(c, insn);
+    return a32_vmov_scalar(c, insn);
+  }
   if ((insn & 0x0FE00F7Fu) == 0x0E000A10u) { /* VMOV Sn <-> Rt */
     const uint32_t rt = bits(insn, 15, 12), sn = (bits(insn, 19, 16) << 1) | bit(insn, 7);
     if (rt == A32_REG_PC) return false;
@@ -912,7 +919,7 @@ static uint32_t a32_vreg(uint32_t insn, bool dbl, unsigned hi, unsigned lo, unsi
  * compiled condition the flags in the state may be stale). */
 static void a32_fp_else_exact(Ctx *c) {
   const uint32_t original = c->insn;
-  c->insn = (c->insn & 0x0FFFFFFFu) | (A32_COND_AL << 28);
+  if (bits(original, 31, 28) != A32_COND_NV) c->insn = (c->insn & 0x0FFFFFFFu) | (A32_COND_AL << 28);
   Sync none = {0, false};
   fp_else_exact(c, &none);
   c->insn = original;
@@ -1271,6 +1278,391 @@ static bool a32_vfp_arith(Ctx *c, uint32_t insn) {
   return true;
 }
 
+/* ---- Advanced SIMD data processing, inline ---------------------------------- */
+
+/* Qn is V[n]; a D register is one half (a32_off_d). A 64-bit operand
+ * is loaded into both halves (emit_all_lanes ignores the upper one) and
+ * stored from the lower. */
+static void a32_load_vec(Ctx *c, uint32_t r, bool q) {
+  lget(c, L_STATE);
+  if (q) {
+    simd(c, WASM_SIMD_V128_LOAD);
+    wasm_uleb(c->b, ALIGN_8);
+    wasm_uleb(c->b, OFF_V(r >> 1));
+    return;
+  }
+  mem(c, WASM_OP_I64_LOAD, ALIGN_8, a32_off_d(r));
+  simd(c, WASM_SIMD_I64X2_SPLAT);
+}
+static void a32_store_vec(Ctx *c, uint32_t r, uint32_t local, bool q) {
+  lget(c, L_STATE);
+  lget(c, local);
+  if (q) {
+    simd(c, WASM_SIMD_V128_STORE);
+    wasm_uleb(c->b, ALIGN_8);
+    wasm_uleb(c->b, OFF_V(r >> 1));
+    return;
+  }
+  simd(c, WASM_SIMD_I64X2_EXTRACT_LANE);
+  wasm_u8(c->b, 0);
+  mem(c, WASM_OP_I64_STORE, ALIGN_8, a32_off_d(r));
+}
+
+/* Lane mask: a single that flush-to-zero leaves alone (normal or zero). */
+static void a32_lane_normal_or_zero(Ctx *c, uint32_t local) {
+  emit_lane_normal(c, local, false);
+  emit_lane_zero(c, local, false);
+  simd(c, WASM_SIMD_V128_OR);
+}
+
+typedef enum Neon_Fp_Op { NEON_FP_ADD, NEON_FP_SUB, NEON_FP_MUL, NEON_FP_MLA, NEON_FP_MLS } Neon_Fp_Op;
+
+/* F32 lanes of L_VA op L_VB (VMLA/VMLS: Vd +/- the product, two
+ * roundings) under the standard FPSCR value Advanced SIMD always uses -
+ * flush to zero, default NaN, round to nearest: native when IXC is
+ * already set, every input normal or zero and every result normal or an
+ * exact zero (nothing to flush, no flag but IXC). Else the interpreter. */
+static void a32_neon_fp(Ctx *c, Neon_Fp_Op nop, bool q, uint32_t d) {
+  a32_lane_normal_or_zero(c, L_VA);
+  a32_lane_normal_or_zero(c, L_VB);
+  simd(c, WASM_SIMD_V128_AND);
+  lget(c, L_VA);
+  lget(c, L_VB);
+  if (nop == NEON_FP_ADD || nop == NEON_FP_SUB) {
+    simd(c, nop == NEON_FP_ADD ? WASM_SIMD_F32X4_ADD : WASM_SIMD_F32X4_SUB);
+    lset(c, L_VR);
+    a32_lane_normal_or_zero(c, L_VR);
+    simd(c, WASM_SIMD_V128_AND);
+  } else {
+    simd(c, WASM_SIMD_F32X4_MUL);
+    lset(c, L_VT);
+    emit_lane_normal(c, L_VT, false); /* normal, or zero from a zero operand */
+    emit_lane_zero(c, L_VT, false);
+    emit_lane_zero(c, L_VA, false);
+    emit_lane_zero(c, L_VB, false);
+    simd(c, WASM_SIMD_V128_OR);
+    simd(c, WASM_SIMD_V128_AND);
+    simd(c, WASM_SIMD_V128_OR);
+    simd(c, WASM_SIMD_V128_AND);
+    if (nop == NEON_FP_MUL) {
+      lget(c, L_VT);
+      lset(c, L_VR);
+    } else {
+      a32_load_vec(c, d, q);
+      lset(c, L_VD);
+      a32_lane_normal_or_zero(c, L_VD);
+      simd(c, WASM_SIMD_V128_AND);
+      lget(c, L_VD);
+      lget(c, L_VT);
+      simd(c, nop == NEON_FP_MLA ? WASM_SIMD_F32X4_ADD : WASM_SIMD_F32X4_SUB);
+      lset(c, L_VR);
+      a32_lane_normal_or_zero(c, L_VR);
+      simd(c, WASM_SIMD_V128_AND);
+    }
+  }
+  emit_all_lanes(c, q);
+  emit_fp_env_ok(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  a32_store_vec(c, d, L_VR, q);
+  a32_fp_else_exact(c);
+}
+
+/* Register numbers: D:Vd, N:Vn, M:Vm. */
+static uint32_t a32_neon_d(uint32_t insn) { return (bit(insn, 22) << 4) | bits(insn, 15, 12); }
+static uint32_t a32_neon_n(uint32_t insn) { return (bit(insn, 7) << 4) | bits(insn, 19, 16); }
+static uint32_t a32_neon_m(uint32_t insn) { return (bit(insn, 5) << 4) | bits(insn, 3, 0); }
+
+/* Three registers of the same length: bitwise ops, integer VADD/VSUB/
+ * VMUL, F32 VADD/VSUB/VMUL/VMLA/VMLS. */
+static bool a32_neon_three_same(Ctx *c, uint32_t insn) {
+  const uint32_t opc = bits(insn, 11, 8), b = bit(insn, 4), u = bit(insn, 24), size = bits(insn, 21, 20);
+  const bool q = bit(insn, 6);
+  const uint32_t d = a32_neon_d(insn), n = a32_neon_n(insn), m = a32_neon_m(insn);
+  if (q && ((d | n | m) & 1u)) return false;
+  if (opc == 0xDu) {
+    if (bit(insn, 20)) return false; /* half precision */
+    Neon_Fp_Op nop;
+    if (!b && !u) nop = size & 2u ? NEON_FP_SUB : NEON_FP_ADD;
+    else if (b && !u) nop = size & 2u ? NEON_FP_MLS : NEON_FP_MLA;
+    else if (b && u && !(size & 2u)) nop = NEON_FP_MUL;
+    else return false; /* VPADD, VABD */
+    a32_load_vec(c, n, q);
+    lset(c, L_VA);
+    a32_load_vec(c, m, q);
+    lset(c, L_VB);
+    a32_neon_fp(c, nop, q, d);
+    return true;
+  }
+  if (opc == 1u && b) { /* VAND VBIC VORR VORN VEOR VBSL VBIT VBIF */
+    a32_load_vec(c, n, q);
+    lset(c, L_VA);
+    a32_load_vec(c, m, q);
+    lset(c, L_VB);
+    const uint32_t form = (u << 2) | size;
+    if (form >= 5u) {
+      a32_load_vec(c, d, q);
+      lset(c, L_VD);
+    }
+    switch (form) {
+    case 0: lget(c, L_VA); lget(c, L_VB); simd(c, WASM_SIMD_V128_AND); break;
+    case 1: lget(c, L_VA); lget(c, L_VB); simd(c, WASM_SIMD_V128_ANDNOT); break;
+    case 2: lget(c, L_VA); lget(c, L_VB); simd(c, WASM_SIMD_V128_OR); break;
+    case 3: lget(c, L_VA); lget(c, L_VB); simd(c, WASM_SIMD_V128_NOT); simd(c, WASM_SIMD_V128_OR); break;
+    case 4: lget(c, L_VA); lget(c, L_VB); simd(c, WASM_SIMD_V128_XOR); break;
+    case 5: lget(c, L_VA); lget(c, L_VB); lget(c, L_VD); simd(c, WASM_SIMD_V128_BITSELECT); break;
+    case 6: lget(c, L_VA); lget(c, L_VD); lget(c, L_VB); simd(c, WASM_SIMD_V128_BITSELECT); break;
+    default: lget(c, L_VD); lget(c, L_VA); lget(c, L_VB); simd(c, WASM_SIMD_V128_BITSELECT); break;
+    }
+    lset(c, L_VR);
+    a32_store_vec(c, d, L_VR, q);
+    return true;
+  }
+  static const uint32_t adds[4] = {WASM_SIMD_I8X16_ADD, WASM_SIMD_I16X8_ADD, WASM_SIMD_I32X4_ADD, WASM_SIMD_I64X2_ADD};
+  static const uint32_t subs[4] = {WASM_SIMD_I8X16_SUB, WASM_SIMD_I16X8_SUB, WASM_SIMD_I32X4_SUB, WASM_SIMD_I64X2_SUB};
+  uint32_t wasm_op;
+  if (opc == 8u && !b) wasm_op = u ? subs[size] : adds[size]; /* VADD / VSUB (integer) */
+  else if (opc == 9u && b && !u && (size == 1u || size == 2u)) wasm_op = size == 1u ? WASM_SIMD_I16X8_MUL : WASM_SIMD_I32X4_MUL;
+  else return false;
+  a32_load_vec(c, n, q);
+  a32_load_vec(c, m, q);
+  simd(c, wasm_op);
+  lset(c, L_VR);
+  a32_store_vec(c, d, L_VR, q);
+  return true;
+}
+
+/* VMUL/VMLA/VMLS (F32) by scalar: Vm[index] in every lane (Dm is D0-D15). */
+static bool a32_neon_by_scalar(Ctx *c, uint32_t insn) {
+  const uint32_t opc = bits(insn, 11, 8), size = bits(insn, 21, 20);
+  const bool q = bit(insn, 24);
+  const uint32_t d = a32_neon_d(insn), n = a32_neon_n(insn), m = bits(insn, 3, 0), index = bit(insn, 5);
+  if (size != 2u || (q && ((d | n) & 1u))) return false;
+  Neon_Fp_Op nop;
+  switch (opc) {
+  case 0x1: nop = NEON_FP_MLA; break;
+  case 0x5: nop = NEON_FP_MLS; break;
+  case 0x9: nop = NEON_FP_MUL; break;
+  default: return false; /* integer forms */
+  }
+  a32_load_vec(c, n, q);
+  lset(c, L_VA);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, a32_off_d(m) + 4u * index);
+  simd(c, WASM_SIMD_I32X4_SPLAT);
+  lset(c, L_VB);
+  a32_neon_fp(c, nop, q, d);
+  return true;
+}
+
+/* VEXT: bytes imm4.. of Vm:Vn (Vn the low end). */
+static bool a32_neon_vext(Ctx *c, uint32_t insn) {
+  const bool q = bit(insn, 6);
+  const uint32_t imm = bits(insn, 11, 8), d = a32_neon_d(insn), n = a32_neon_n(insn), m = a32_neon_m(insn);
+  if (q ? (d | n | m) & 1u : imm >= 8u) return false;
+  const uint32_t length = q ? SIMD_LANE_BYTES : SIMD_LANE_BYTES / 2u;
+  uint8_t lanes[SIMD_LANE_BYTES] = {0};
+  for (uint32_t i = 0; i < length; i++) {
+    const uint32_t at = i + imm;
+    lanes[i] = (uint8_t)(at < length ? at : SIMD_LANE_BYTES + at - length);
+  }
+  a32_load_vec(c, n, q);
+  a32_load_vec(c, m, q);
+  v128_shuffle(c, lanes);
+  lset(c, L_VR);
+  a32_store_vec(c, d, L_VR, q);
+  return true;
+}
+
+/* VDUP (scalar): Dm[index] in every lane. */
+static bool a32_neon_vdup_scalar(Ctx *c, uint32_t insn) {
+  const bool q = bit(insn, 6);
+  const uint32_t imm4 = bits(insn, 19, 16), d = a32_neon_d(insn), m = a32_neon_m(insn);
+  if (q && (d & 1u)) return false;
+  uint32_t ebytes, index;
+  if (imm4 & 1u) { ebytes = 1u; index = imm4 >> 1; }
+  else if (imm4 & 2u) { ebytes = 2u; index = imm4 >> 2; }
+  else if (imm4 & 4u) { ebytes = 4u; index = imm4 >> 3; }
+  else return false;
+  uint8_t lanes[SIMD_LANE_BYTES];
+  for (uint32_t i = 0; i < SIMD_LANE_BYTES; i++) lanes[i] = (uint8_t)(index * ebytes + i % ebytes);
+  a32_load_vec(c, m, false);
+  a32_load_vec(c, m, false);
+  v128_shuffle(c, lanes);
+  lset(c, L_VR);
+  a32_store_vec(c, d, L_VR, q);
+  return true;
+}
+
+/* AdvSIMDExpandImm's 64-bit pattern; false: UNDEFINED (op 1, cmode 1111). */
+static bool a32_neon_expand_imm(uint32_t op1, uint32_t cmode, uint32_t imm8, uint64_t *out) {
+  const uint64_t i = imm8;
+  uint64_t v;
+  switch (cmode >> 1) {
+  case 0: case 1: case 2: case 3: v = i << (8u * (cmode >> 1)); v |= v << 32; break;
+  case 4: case 5: v = i << (8u * ((cmode >> 1) & 1u)); v |= v << 16; v |= v << 32; break;
+  case 6: v = cmode & 1u ? (i << 16) | 0xFFFFu : (i << 8) | 0xFFu; v |= v << 32; break;
+  default:
+    if (!(cmode & 1u)) {
+      if (!op1) {
+        v = i * 0x0101010101010101ull;
+      } else {
+        v = 0;
+        for (uint32_t k = 0; k < 8u; k++)
+          if ((imm8 >> k) & 1u) v |= 0xFFull << (8u * k);
+      }
+    } else {
+      if (op1) return false;
+      v = a32_vfp_expand_imm(imm8, false);
+      v |= v << 32;
+    }
+    break;
+  }
+  *out = v;
+  return true;
+}
+
+/* VMOV, VMVN, VORR, VBIC (immediate). */
+static bool a32_neon_modified_immediate(Ctx *c, uint32_t insn) {
+  const bool q = bit(insn, 6);
+  const uint32_t d = a32_neon_d(insn), cmode = bits(insn, 11, 8), op1 = bit(insn, 5);
+  const uint32_t imm8 = (bit(insn, 24) << 7) | (bits(insn, 18, 16) << 4) | bits(insn, 3, 0);
+  if (q && (d & 1u)) return false;
+  uint64_t imm;
+  if (!a32_neon_expand_imm(op1, cmode, imm8, &imm)) return false;
+  const bool logical = (cmode & 1u) && cmode < 12u; /* VORR / VBIC */
+  if (!logical) {
+    if (op1 && cmode != 14u) imm = ~imm; /* VMVN */
+    v128_const(c, imm, imm);
+  } else {
+    a32_load_vec(c, d, q);
+    v128_const(c, imm, imm);
+    simd(c, op1 ? WASM_SIMD_V128_ANDNOT : WASM_SIMD_V128_OR);
+  }
+  lset(c, L_VR);
+  a32_store_vec(c, d, L_VR, q);
+  return true;
+}
+
+/* The Advanced SIMD data-processing space (unconditional, 1111 001x). */
+static bool a32_neon_data_processing(Ctx *c, uint32_t insn) {
+  if (!bit(insn, 23)) return a32_neon_three_same(c, insn);
+  if (bit(insn, 4)) {
+    if (bits(insn, 21, 19) == 0u && !bit(insn, 7)) return a32_neon_modified_immediate(c, insn);
+    return false; /* shifts by immediate */
+  }
+  if (bits(insn, 21, 20) != 3u) return bit(insn, 6) ? a32_neon_by_scalar(c, insn) : false;
+  if (!bit(insn, 24)) return a32_neon_vext(c, insn);
+  if (bits(insn, 11, 8) == 0xCu && !bit(insn, 7)) return a32_neon_vdup_scalar(c, insn);
+  return false;
+}
+
+/* VLD1 (one lane, all lanes) / VST1 (one lane): one element of 1-4
+ * bytes at Rn, writeback as VLD1 (multiple). */
+static bool a32_neon_load_store_lane(Ctx *c, uint32_t insn) {
+  const uint32_t size = bits(insn, 11, 10), load = bit(insn, 21), rn = bits(insn, 19, 16), rm = bits(insn, 3, 0);
+  const uint32_t d0 = a32_neon_d(insn);
+  if (bits(insn, 9, 8) != 0u || rn == A32_REG_PC) return false; /* VLD2-4 */
+  uint32_t ebytes, regs = 1;
+  uint64_t lane_offset = 0;
+  if (size == 3u) { /* all lanes */
+    if (!load || bits(insn, 7, 6) == 3u) return false;
+    ebytes = 1u << bits(insn, 7, 6);
+    regs = bit(insn, 5) ? 2u : 1u;
+  } else {
+    ebytes = 1u << size;
+    lane_offset = (uint64_t)(bits(insn, 7, 4) >> (size + 1u)) * ebytes;
+  }
+  if (d0 + regs > 32u) return false;
+  static const uint8_t loads[3] = {WASM_OP_I64_LOAD8_U, WASM_OP_I64_LOAD16_U, WASM_OP_I64_LOAD32_U};
+  static const uint8_t stores[3] = {WASM_OP_I64_STORE8, WASM_OP_I64_STORE16, WASM_OP_I64_STORE32};
+  const uint32_t k = ebytes == 1u ? 0u : ebytes == 2u ? 1u : 2u;
+  get_x(c, rn);
+  lset(c, L_ADDR);
+  open_block(c); /* $go */
+  const uint32_t go = c->depth;
+  open_block(c); /* $slow */
+  emit_walk(c, ebytes, load ? VMM_PERM_R : VMM_PERM_W, c->depth);
+  br(c, go);
+  end_(c);
+  leave_via_interpreter(c);
+  end_(c); /* $go: L_HOST */
+  if (size == 3u) {
+    lget(c, L_HOST);
+    mem(c, loads[k], ALIGN_1, 0);
+    i64c(c, ebytes == 1u ? 0x0101010101010101ull : ebytes == 2u ? 0x0001000100010001ull : 0x0000000100000001ull);
+    op(c, WASM_OP_I64_MUL);
+    lset(c, L_VAL);
+    for (uint32_t r = 0; r < regs; r++) {
+      lget(c, L_STATE);
+      lget(c, L_VAL);
+      mem(c, WASM_OP_I64_STORE, ALIGN_8, a32_off_d(d0 + r));
+    }
+  } else if (load) {
+    lget(c, L_STATE);
+    lget(c, L_HOST);
+    mem(c, loads[k], ALIGN_1, 0);
+    mem(c, stores[k], ALIGN_1, a32_off_d(d0) + lane_offset);
+  } else {
+    lget(c, L_HOST);
+    lget(c, L_STATE);
+    mem(c, loads[k], ALIGN_1, a32_off_d(d0) + lane_offset);
+    mem(c, stores[k], ALIGN_1, 0);
+  }
+  if (rm != A32_REG_PC) {
+    lget(c, L_ADDR);
+    if (rm == A32_REG_SP) i64c(c, ebytes);
+    else get_x(c, rm);
+    op(c, WASM_OP_I64_ADD);
+    mask32(c);
+    set_x(c, rn);
+  }
+  return true;
+}
+
+/* VMOV between a core register and a D register's element (8, 16, 32
+ * bits; to the core register sign- or zero-extended). */
+static bool a32_vmov_scalar(Ctx *c, uint32_t insn) {
+  const uint32_t rt = bits(insn, 15, 12), opc1 = bits(insn, 22, 21), opc2 = bits(insn, 6, 5);
+  const uint32_t reg = (bit(insn, 7) << 4) | bits(insn, 19, 16), to_core = bit(insn, 20);
+  if (rt == A32_REG_PC) return false;
+  uint32_t ebytes, index;
+  if (opc1 & 2u) { ebytes = 1u; index = ((opc1 & 1u) << 2) | opc2; }
+  else if (opc2 & 1u) { ebytes = 2u; index = ((opc1 & 1u) << 1) | (opc2 >> 1); }
+  else if (opc2 == 0u) { ebytes = 4u; index = opc1 & 1u; }
+  else return false;
+  if (to_core && ebytes == 4u && bit(insn, 23)) return false; /* U with 32 bits: UNDEFINED */
+  const uint64_t at = a32_off_d(reg) + (uint64_t)index * ebytes;
+  if (to_core) {
+    static const uint8_t zero_ext[3] = {WASM_OP_I64_LOAD8_U, WASM_OP_I64_LOAD16_U, WASM_OP_I64_LOAD32_U};
+    static const uint8_t sign_ext[2] = {WASM_OP_I64_LOAD8_S, WASM_OP_I64_LOAD16_S};
+    const uint32_t k = ebytes == 1u ? 0u : ebytes == 2u ? 1u : 2u;
+    lget(c, L_STATE);
+    mem(c, (ebytes == 4u || bit(insn, 23)) ? zero_ext[k] : sign_ext[k], ALIGN_1, at);
+    if (ebytes != 4u && !bit(insn, 23)) mask32(c);
+    set_x(c, rt);
+  } else {
+    static const uint8_t stores[3] = {WASM_OP_I64_STORE8, WASM_OP_I64_STORE16, WASM_OP_I64_STORE32};
+    lget(c, L_STATE);
+    get_x(c, rt);
+    mem(c, stores[ebytes == 1u ? 0u : ebytes == 2u ? 1u : 2u], ALIGN_1, at);
+  }
+  return true;
+}
+
+/* VDUP (core register): Rt's low 8, 16 or 32 bits in every lane. */
+static bool a32_vdup_core(Ctx *c, uint32_t insn) {
+  const uint32_t rt = bits(insn, 15, 12), be = (bit(insn, 22) << 1) | bit(insn, 5), d = (bit(insn, 7) << 4) | bits(insn, 19, 16);
+  const bool q = bit(insn, 21);
+  if (rt == A32_REG_PC || be == 3u || (q && (d & 1u))) return false;
+  get_x(c, rt);
+  op(c, WASM_OP_I32_WRAP_I64);
+  simd(c, be == 2u ? WASM_SIMD_I8X16_SPLAT : be == 1u ? WASM_SIMD_I16X8_SPLAT : WASM_SIMD_I32X4_SPLAT);
+  lset(c, L_VR);
+  a32_store_vec(c, d, L_VR, q);
+  return true;
+}
+
 /* ---- VFP and Advanced SIMD: direct interpreter calls ------------------------ */
 
 /* The VFP/NEON instruction runs in the A32 interpreter without retiring
@@ -1536,6 +1928,7 @@ static Outcome a32_compile_instruction_checked(Ctx *c, uint32_t insn) {
   if (cond == A32_COND_NV) { /* Advanced SIMD directly; BLX (immediate) is Thumb */
     if (bits(insn, 27, 25) == 5u) return OUTCOME_END_HELPER;
     if (bits(insn, 27, 24) == 4u && a32_neon_load_store(c, insn)) return OUTCOME_NEXT;
+    if (bits(insn, 27, 25) == 1u && a32_neon_data_processing(c, insn)) return OUTCOME_NEXT;
     return a32_direct(c, insn);
   }
   if (bits(insn, 27, 25) == 5u) { /* B, BL */
