@@ -525,8 +525,18 @@ static bool has_fast_path(uint32_t key) {
   return false;
 }
 
-static void profile_fallback(uint32_t insn) {
-  const uint32_t key = fallback_key(insn);
+/* A32: drops the condition, Rn, Rd/Vd and Rm/Vm (11:4 keep the shift,
+ * the coprocessor and the opcode bits). */
+#define A32_FALLBACK_OPCODE_MASK 0x0FF00FF0u
+
+static void profile_fallback_key(uint32_t key);
+static void profile_fallback(uint32_t insn) { profile_fallback_key(fallback_key(insn)); }
+#define A32_FALLBACK_DIRECT 0x80000000u /* a direct VFP/NEON call, not a helper */
+static void profile_fallback_a32(uint32_t insn, uint32_t direct) {
+  profile_fallback_key((insn & A32_FALLBACK_OPCODE_MASK) | direct | 1u);
+}
+
+static void profile_fallback_key(uint32_t key) {
   for (uint32_t i = 0, slot = (key * 2654435761u) >> 20; i < FALLBACK_SLOTS; i++, slot = (slot + 1u) % FALLBACK_SLOTS) {
     if (g_fallback_key[slot] == key || g_fallback_key[slot] == 0) {
       g_fallback_key[slot] = key;
@@ -574,7 +584,7 @@ static void count_helper(uint32_t insn) {
 uint32_t jit_helper_interpret(Jit_State *state, uint32_t insn) {
   if (state->isa == JIT_ISA_A32) {
     thread_stats()->helper_other++;
-    if (g_fallback_profile) profile_fallback(insn);
+    if (g_fallback_profile) profile_fallback_a32(insn, 0);
     return a32_jit_interpret((A32_State *)state, insn);
   }
   count_helper(insn);
@@ -602,7 +612,7 @@ uint32_t jit_helper_simd(Jit_State *state, uint32_t insn) {
     st->direct_simd++;
     if (state->interp.fpcr != 0) st->simd_fpcr_nonzero++;
     st->last_fpcr = state->interp.fpcr;
-    if (g_fallback_profile) profile_fallback(insn);
+    if (g_fallback_profile) profile_fallback_a32(insn, A32_FALLBACK_DIRECT);
     return a32_execute((A32_State *)state, insn) == INTERP_CONTINUE ? 0u : 1u;
   }
   if (g_fallback_profile) profile_fallback(insn);

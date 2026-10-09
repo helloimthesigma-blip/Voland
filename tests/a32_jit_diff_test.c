@@ -153,7 +153,7 @@ static uint32_t gen_media(void) {
 static uint32_t gen_vfp(void) {
   const uint32_t dbl = pick(2), d = pick(16), n = pick(16), m = pick(16);
   const uint32_t vd = dbl ? d : d >> 1, dbit = dbl ? 0 : d & 1u;
-  switch (pick(7)) {
+  switch (pick(8)) {
   case 0: /* VLDR / VSTR through r8-r11 */
     return (cond() << 28) | 0x0D000A00u | (pick(2) << 23) | (dbit << 22) | (pick(2) << 20) | ((8u + pick(4)) << 16) |
            (vd << 12) | (dbl << 8) | pick(32);
@@ -169,18 +169,60 @@ static uint32_t gen_vfp(void) {
   case 4: /* VCMP then VMRS APSR_nzcv */
     return pick(2) ? (cond() << 28) | 0x0EB40A40u | (vd << 12) | (dbl << 8) | (dbl ? m : m >> 1)
                    : (cond() << 28) | 0x0EF1FA10u;
-  case 5: /* VCVT.S32.F32 / F32.S32 */
-    return (cond() << 28) | (pick(2) ? 0x0EBD0AC0u : 0x0EB80AC0u) | ((d >> 1) << 12) | (m >> 1);
+  case 5: /* VCVT to and from S32/U32 (op 7: signed / towards zero), F32 <-> F64 */
+    switch (pick(3)) {
+    case 0:
+      return (cond() << 28) | (pick(2) ? 0x0EBD0A40u : 0x0EBC0A40u) | (pick(2) << 7) | (dbl << 8) | ((d >> 1) << 12) |
+             ((d & 1u) << 22) | (dbl ? m : m >> 1) | ((dbl ? 0 : m & 1u) << 5);
+    case 1:
+      return (cond() << 28) | 0x0EB80A40u | (pick(2) << 7) | (dbl << 8) | (vd << 12) | (dbit << 22) | (m >> 1) |
+             ((m & 1u) << 5);
+    default: /* sz 1: Sd from Dm; 0: Dd from Sm */
+      return (cond() << 28) | 0x0EB70AC0u | (dbl << 8) | ((dbl ? d >> 1 : d) << 12) | ((dbl ? d & 1u : 0) << 22) |
+             (dbl ? m : m >> 1) | ((dbl ? 0 : m & 1u) << 5);
+    }
+  case 6: /* VMOV (immediate); VCMP/VCMPE with #0.0; the multiply-accumulates and fused forms */
+    switch (pick(3)) {
+    case 0: return (cond() << 28) | 0x0EB00A00u | (dbl << 8) | (vd << 12) | (dbit << 22) | (pick(16) << 16) | pick(16);
+    case 1: return (cond() << 28) | 0x0EB50A40u | (pick(2) << 7) | (dbl << 8) | (vd << 12) | (dbit << 22);
+    default: {
+      static const uint32_t forms[8] = {0x0E000A00u, 0x0E000A40u, 0x0E100A00u, 0x0E100A40u,
+                                        0x0EA00A00u, 0x0EA00A40u, 0x0E900A00u, 0x0E900A40u};
+      return (cond() << 28) | forms[pick(8)] | (vd << 12) | (dbit << 22) | ((dbl ? n : n >> 1) << 16) | (dbl << 8) |
+             (dbl ? m : m >> 1) | ((dbl ? 0 : n & 1u) << 7) | ((dbl ? 0 : m & 1u) << 5);
+    }
+    }
   default: /* NEON: VADD.I32 q, VLD1.32 {d} through r8-r11 */
     if (pick(2)) return 0xF2200840u | ((d & 14u) << 12) | ((n & 14u) << 16) | (m & 14u);
     return 0xF4200780u | (pick(2) << 21) | ((8u + pick(4)) << 16) | (d << 12) | (pick(2) ? 15u : 13u);
   }
 }
 
+/* LDREX/STREX (and the acquire/release forms, LDA/STL) through r8-r11,
+ * TPIDRURO/TPIDRURW. */
+static uint32_t gen_sync(void) {
+  static const uint32_t ordered[3] = {0xF00u, 0xE00u, 0xC00u}; /* exclusive, acquire/release exclusive, plain */
+  const uint32_t size = pick(3) ? 0u : 2u + pick(2), rn = 8u + pick(4), rd = dst();
+  const uint32_t o = ordered[pick(4) ? 0 : 1u + pick(2)];
+  uint32_t rt = pick(8);
+  if (rt == rd) rt = (rt + 1u) & 7u;
+  switch (pick(4)) {
+  case 0: case 1: return (cond() << 28) | 0x0190009Fu | o | (size << 21) | (rn << 16) | (rd << 12);
+  case 2: return (cond() << 28) | 0x01800090u | o | (size << 21) | (rn << 16) | ((o == 0xC00u ? 15u : rd) << 12) | rt;
+  default:
+    switch (pick(3)) {
+    case 0: return (cond() << 28) | 0x0E1D0F70u | (rd << 12);
+    case 1: return (cond() << 28) | 0x0E1D0F50u | (rd << 12);
+    default: return (cond() << 28) | 0x0E0D0F50u | (pick(8) << 12);
+    }
+  }
+}
+
 static uint32_t gen(int32_t here, uint32_t length) {
   static int only = -2; /* debugging: A32_GEN=k keeps one generator */
   if (only == -2) only = getenv("A32_GEN") ? atoi(getenv("A32_GEN")) : -1;
-  switch (only >= 0 ? (uint32_t)only : pick(19)) {
+  switch (only >= 0 ? (uint32_t)only : pick(20)) {
+  case 19: return gen_sync();
   case 16: return gen_media();
   case 17: case 18: return gen_vfp();
   case 0: case 1: case 2: case 3: case 4: return gen_dp();
@@ -229,6 +271,8 @@ static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint32_t *r, u
     memcpy(&v.hi, &dv, sizeof(dv));
     cpu->set_vector_reg(s, i, v);
   }
+  cpu->set_sys_reg(s, CPU_SYSREG_TPIDRRO_EL0, r[3] ^ 0x5A5A0000u);
+  cpu->set_sys_reg(s, CPU_SYSREG_TPIDR_EL0, r[4] ^ 0x0F0F0000u);
   cpu->set_sys_reg(s, CPU_SYSREG_FPCR, g_fpcr);
   cpu->set_sys_reg(s, CPU_SYSREG_FPSR, g_fpsr);
 }

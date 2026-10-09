@@ -830,6 +830,277 @@ static void a32_fp_else_exact(Ctx *c) {
   c->insn = original;
 }
 
+/* VFPExpandImm: the VMOV (immediate) constant's bits. */
+static uint64_t a32_vfp_expand_imm(uint32_t imm8, bool dbl) {
+  const uint64_t a = imm8 >> 7, b = (imm8 >> 6) & 1u, cdefgh = imm8 & 0x3Fu;
+  if (dbl) return (a << 63) | ((b ^ 1u) << 62) | ((b ? 0xFFull : 0u) << 54) | (cdefgh << 48);
+  return (a << 31) | ((b ^ 1u) << 30) | ((b ? 0x1Full : 0u) << 25) | (cdefgh << 19);
+}
+
+/* VCMP/VCMPE (register or #0.0): FPSCR.NZCV from an ordered compare;
+ * NaNs (the only operands that raise IOC) take the exact arm. */
+static void a32_vfp_compare(Ctx *c, bool dbl, uint32_t d, uint32_t m, bool with_zero) {
+  const uint32_t a = dbl ? L_FD : L_FS, b = dbl ? L_FD2 : L_FS2;
+  const uint8_t eq = dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ, lt = dbl ? WASM_OP_F64_LT : WASM_OP_F32_LT;
+  a32_fp_load(c, d, dbl);
+  lset(c, a);
+  if (with_zero) {
+    if (dbl) f64c(c, 0);
+    else f32c(c, 0);
+  } else {
+    a32_fp_load(c, m, dbl);
+  }
+  lset(c, b);
+  lget(c, a);
+  lget(c, a);
+  op(c, eq);
+  lget(c, b);
+  lget(c, b);
+  op(c, eq);
+  op(c, WASM_OP_I32_AND);
+  emit_fpcr_default(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  lget(c, L_STATE);
+  i32c(c, CPU_PSTATE_N);                /* d < m: 1000 */
+  i32c(c, CPU_PSTATE_Z | CPU_PSTATE_C); /* equal: 0110 */
+  i32c(c, CPU_PSTATE_C);                /* d > m: 0010 */
+  lget(c, a);
+  lget(c, b);
+  op(c, eq);
+  op(c, WASM_OP_SELECT);
+  lget(c, a);
+  lget(c, b);
+  op(c, lt);
+  op(c, WASM_OP_SELECT);
+  mem(c, WASM_OP_I32_STORE, ALIGN_4, A32_OFF_FPSCR_NZCV);
+  a32_fp_else_exact(c);
+}
+
+/* VCVT between F32 and F64 (op 0111): widening is exact (NaNs aside);
+ * narrowing rounds once and must stay normal (or be an exact zero). */
+static void a32_vfp_convert_precision(Ctx *c, bool from_dbl, uint32_t d, uint32_t m) {
+  a32_fp_load(c, m, from_dbl);
+  if (!from_dbl) {
+    ltee(c, L_FS2);
+    op(c, WASM_OP_F64_PROMOTE_F32);
+    lset(c, L_FD);
+    lget(c, L_FS2);
+    lget(c, L_FS2);
+    op(c, WASM_OP_F32_EQ); /* not NaN */
+    emit_fpcr_default(c);
+    op(c, WASM_OP_I32_AND);
+    fp_fast_arm(c);
+    a32_fp_store(c, d, true, L_FD);
+    a32_fp_else_exact(c);
+    return;
+  }
+  ltee(c, L_FD2);
+  op(c, WASM_OP_F32_DEMOTE_F64);
+  ltee(c, L_FS);
+  op(c, WASM_OP_F64_PROMOTE_F32);
+  lget(c, L_FD2);
+  op(c, WASM_OP_F64_EQ);
+  set_exactness(c);
+  emit_result_normal(c, L_FS, false);
+  emit_is_zero(c, L_FD2, true);
+  op(c, WASM_OP_I32_OR);
+  emit_fp_env_ok_exact(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  a32_fp_store(c, d, false, L_FS);
+  fp_note_inexact(c);
+  a32_fp_else_exact(c);
+}
+
+/* VCVT from a 32-bit integer in Sm to F32/F64: a double holds every one
+ * exactly; a single when its significant bits fit 24. */
+static void a32_vfp_int_to_fp(Ctx *c, bool dbl, bool is_signed, uint32_t d, uint32_t m) {
+  const uint32_t r = fp_result_local(dbl);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, a32_off_s(m));
+  ltee(c, L_PASS);
+  if (dbl) op(c, is_signed ? WASM_OP_F64_CONVERT_I32_S : WASM_OP_F64_CONVERT_I32_U);
+  else op(c, is_signed ? WASM_OP_F32_CONVERT_I32_S : WASM_OP_F32_CONVERT_I32_U);
+  lset(c, r);
+  if (dbl) {
+    emit_fpcr_default(c);
+  } else {
+    lget(c, L_PASS);
+    op(c, is_signed ? WASM_OP_I64_EXTEND_I32_S : WASM_OP_I64_EXTEND_I32_U);
+    lset(c, L_T0);
+    if (is_signed) { /* the magnitude */
+      i64c(c, 0);
+      lget(c, L_T0);
+      op(c, WASM_OP_I64_SUB);
+      lget(c, L_T0);
+      lget(c, L_T0);
+      i64c(c, 0);
+      op(c, WASM_OP_I64_LT_S);
+      op(c, WASM_OP_SELECT);
+      lset(c, L_T0);
+    }
+    lget(c, L_T0);
+    op(c, WASM_OP_I64_CLZ);
+    lget(c, L_T0);
+    op(c, WASM_OP_I64_CTZ);
+    op(c, WASM_OP_I64_ADD);
+    i64c(c, 64u - (F32_FRACTION_BITS + 1u));
+    op(c, WASM_OP_I64_GE_S);
+    set_exactness(c);
+    emit_fp_env_ok_exact(c);
+  }
+  fp_fast_arm(c);
+  a32_fp_store(c, d, dbl, r);
+  if (!dbl) fp_note_inexact(c);
+  a32_fp_else_exact(c);
+}
+
+/* VCVT from F32/F64 in Vm to a 32-bit integer in Sd, rounding towards
+ * zero (`toward_zero`) or to nearest (FPSCR's mode, default here). Out of
+ * range and NaN take the exact arm (IOC, saturation). */
+static void a32_vfp_fp_to_int(Ctx *c, bool dbl, bool is_signed, bool toward_zero, uint32_t d, uint32_t m) {
+  const uint32_t a = dbl ? L_FD2 : L_FS2, r = fp_result_local(dbl);
+  a32_fp_load(c, m, dbl);
+  ltee(c, a);
+  if (dbl) op(c, toward_zero ? WASM_OP_F64_TRUNC : WASM_OP_F64_NEAREST);
+  else op(c, toward_zero ? WASM_OP_F32_TRUNC : WASM_OP_F32_NEAREST);
+  ltee(c, r);
+  lget(c, a);
+  op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
+  set_exactness(c);
+  emit_truncation_in_range(c, r, dbl, false, !is_signed);
+  emit_fp_env_ok_exact(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  fp_note_inexact(c);
+  lget(c, L_STATE);
+  lget(c, r);
+  if (dbl) op(c, is_signed ? WASM_OP_I32_TRUNC_F64_S : WASM_OP_I32_TRUNC_F64_U);
+  else op(c, is_signed ? WASM_OP_I32_TRUNC_F32_S : WASM_OP_I32_TRUNC_F32_U);
+  mem(c, WASM_OP_I32_STORE, ALIGN_4, a32_off_s(d));
+  a32_fp_else_exact(c);
+}
+
+/* VMLA, VMLS, VNMLA, VNMLS: d = (+/-)d + (+/-)(n*m), two roundings. Native
+ * when IXC is already set (no exactness to track), the product normal
+ * (or an exact zero) and the sum finite (a tiny sum is exact). */
+static void a32_vfp_multiply_accumulate(Ctx *c, bool dbl, bool negate_d, bool negate_product, uint32_t d,
+                                        uint32_t n, uint32_t m) {
+  const uint32_t p = fp_result_local(dbl), a = dbl ? L_FD2 : L_FS2, b = dbl ? L_FD3 : L_FS3;
+  a32_fp_load(c, n, dbl);
+  ltee(c, a);
+  a32_fp_load(c, m, dbl);
+  ltee(c, b);
+  op(c, dbl ? WASM_OP_F64_MUL : WASM_OP_F32_MUL);
+  lset(c, p);
+  emit_result_normal(c, p, dbl);
+  emit_is_zero(c, p, dbl);
+  emit_is_zero(c, a, dbl);
+  emit_is_zero(c, b, dbl);
+  op(c, WASM_OP_I32_OR);
+  op(c, WASM_OP_I32_AND);
+  op(c, WASM_OP_I32_OR);
+  a32_fp_load(c, d, dbl); /* the sum, into the product's operand local */
+  if (negate_d) op(c, dbl ? WASM_OP_F64_NEG : WASM_OP_F32_NEG);
+  lget(c, p);
+  if (negate_product) op(c, dbl ? WASM_OP_F64_NEG : WASM_OP_F32_NEG);
+  op(c, dbl ? WASM_OP_F64_ADD : WASM_OP_F32_ADD);
+  lset(c, a);
+  emit_result_finite(c, a, dbl);
+  op(c, WASM_OP_I32_AND);
+  emit_fp_env_ok(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  a32_fp_store(c, d, dbl, a);
+  a32_fp_else_exact(c);
+}
+
+/* VFMA, VFMS, VFNMA, VFNMS (F32): emit_fp_fused_single's f64 sum, with
+ * A32 registers; o1 negates the addend, o0 != o1 the product. */
+static void a32_vfp_fused_single(Ctx *c, bool o1, bool o0, uint32_t d, uint32_t n, uint32_t m) {
+  a32_fp_load(c, d, false);
+  op(c, WASM_OP_F64_PROMOTE_F32);
+  if (o1) op(c, WASM_OP_F64_NEG);
+  a32_fp_load(c, n, false);
+  op(c, WASM_OP_F64_PROMOTE_F32);
+  if (o0 != o1) op(c, WASM_OP_F64_NEG);
+  a32_fp_load(c, m, false);
+  op(c, WASM_OP_F64_PROMOTE_F32);
+  op(c, WASM_OP_F64_MUL);
+  op(c, WASM_OP_F64_ADD);
+  ltee(c, L_FD);
+  op(c, WASM_OP_F32_DEMOTE_F64);
+  lset(c, L_FS);
+  emit_result_finite(c, L_FS, false);
+  emit_tiny_single_in_double(c, L_FD);
+  op(c, WASM_OP_I32_EQZ);
+  op(c, WASM_OP_I32_AND);
+  lget(c, L_FD); /* not on a midpoint */
+  op(c, WASM_OP_I64_REINTERPRET_F64);
+  i64c(c, (1ull << F32_EXTRA_BITS) - 1u);
+  op(c, WASM_OP_I64_AND);
+  i64c(c, F32_MIDPOINT);
+  op(c, WASM_OP_I64_NE);
+  op(c, WASM_OP_I32_AND);
+  emit_fp_env_ok(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  a32_fp_store(c, d, false, L_FS);
+  a32_fp_else_exact(c);
+}
+
+/* The VFP data-processing forms beyond a32_vfp_arith's: VMOV (immediate),
+ * the multiply-accumulates, VCMP/VCMPE, VCVT. */
+static bool a32_vfp_more(Ctx *c, uint32_t insn) {
+  const bool dbl = bit(insn, 8), op6 = bit(insn, 6), op7 = bit(insn, 7);
+  const uint32_t opc1 = bits(insn, 23, 20) & 0xBu, d = a32_vreg(insn, dbl, 15, 12, 22), m = a32_vreg(insn, dbl, 3, 0, 5);
+  const uint32_t n = a32_vreg(insn, dbl, 19, 16, 7);
+  if (opc1 == 0x0u || opc1 == 0x1u) { /* VMLA / VMLS, VNMLS / VNMLA */
+    a32_vfp_multiply_accumulate(c, dbl, opc1 == 0x1u, op6, d, n, m);
+    return true;
+  }
+  if (opc1 == 0xAu || opc1 == 0x9u) { /* VFMA / VFMS, VFNMS / VFNMA */
+    if (dbl) return false;            /* needs a true fused multiply-add */
+    const bool o1 = opc1 == 0x9u;
+    a32_vfp_fused_single(c, o1, op6 != o1, d, n, m);
+    return true;
+  }
+  if (opc1 != 0xBu) return false;
+  if (!op6) { /* VMOV (immediate) */
+    if (op7 || bit(insn, 5)) return false;
+    const uint64_t value = a32_vfp_expand_imm((bits(insn, 19, 16) << 4) | bits(insn, 3, 0), dbl);
+    lget(c, L_STATE);
+    if (dbl) {
+      i64c(c, value);
+      mem(c, WASM_OP_I64_STORE, ALIGN_4, a32_off_d(d));
+    } else {
+      i32c(c, (uint32_t)value);
+      mem(c, WASM_OP_I32_STORE, ALIGN_4, a32_off_s(d));
+    }
+    return true;
+  }
+  const uint32_t opc2 = bits(insn, 19, 16);
+  const uint32_t sd = a32_vreg(insn, false, 15, 12, 22), sm = a32_vreg(insn, false, 3, 0, 5);
+  switch (opc2) {
+  case 0x4: case 0x5: /* VCMP / VCMPE (E: op7 only changes which NaNs raise IOC) */
+    if (opc2 == 0x5u && bits(insn, 5, 0)) return false;
+    a32_vfp_compare(c, dbl, d, m, opc2 == 0x5u);
+    return true;
+  case 0x7: /* VCVT F64.F32 / F32.F64 */
+    if (!op7) return false;
+    a32_vfp_convert_precision(c, dbl, dbl ? sd : a32_vreg(insn, true, 15, 12, 22), dbl ? m : sm);
+    return true;
+  case 0x8: /* VCVT F32/F64 from S32 (op7) / U32 in Sm */
+    a32_vfp_int_to_fp(c, dbl, op7, d, sm);
+    return true;
+  case 0xC: case 0xD: /* VCVT U32 / S32 (opc2 bit 0) from F32/F64, op7: towards zero */
+    a32_vfp_fp_to_int(c, dbl, opc2 == 0xDu, op7, sd, m);
+    return true;
+  default: return false;
+  }
+}
+
 /* VMUL, VNMUL, VADD, VSUB, VDIV, VSQRT (F32/F64): the native result when
  * the FPSCR is the default and the result is exact or IXC is already
  * set (FPSCR's flags are FPSR's), else the interpreter. VMOV (register),
@@ -844,7 +1115,7 @@ static bool a32_vfp_arith(Ctx *c, uint32_t insn) {
   if (opc1 == 0x2u) opcode = op6 ? 8u : 0u;      /* VNMUL / VMUL */
   else if (opc1 == 0x3u) opcode = op6 ? 3u : 2u; /* VSUB / VADD */
   else if (opc1 == 0x8u && !op6) opcode = 1u;    /* VDIV */
-  else if (opc1 == 0xBu && bit(insn, 6)) {       /* the "other" group, opc2 in 19:16 */
+  else if (opc1 == 0xBu && op6) {               /* the "other" group, opc2 in 19:16 */
     const uint32_t opc2 = bits(insn, 19, 16), op7 = bit(insn, 7);
     if (opc2 == 0u || (opc2 == 1u && !op7)) { /* VMOV / VABS (0), VNEG (1, op7 0) */
       if (dbl) {
@@ -864,11 +1135,11 @@ static bool a32_vfp_arith(Ctx *c, uint32_t insn) {
       }
       return true;
     }
-    if (opc2 != 1u || !op7) return false; /* VSQRT only */
+    if (opc2 != 1u || !op7) return a32_vfp_more(c, insn); /* VSQRT here */
     two = false;
     opcode = 0u;
   } else {
-    return false;
+    return a32_vfp_more(c, insn);
   }
   static const uint8_t ops64[4] = {WASM_OP_F64_MUL, WASM_OP_F64_DIV, WASM_OP_F64_ADD, WASM_OP_F64_SUB};
   static const uint8_t ops32[4] = {WASM_OP_F32_MUL, WASM_OP_F32_DIV, WASM_OP_F32_ADD, WASM_OP_F32_SUB};
@@ -957,6 +1228,90 @@ static Outcome a32_direct(Ctx *c, uint32_t insn) {
   return OUTCOME_NEXT;
 }
 
+/* ---- exclusives, acquire/release, the thread registers ---------------------- */
+
+/* LDREX/STREX/LDAEX/STLEX (byte, halfword, word) and LDA/STL, as the
+ * interpreter's synchronization(): one monitor per thread (this backend
+ * never runs multicore), exact address and size. Doublewords: the
+ * interpreter. */
+static bool a32_synchronization(Ctx *c, uint32_t insn) {
+  static const uint32_t k_size[4] = {4u, 8u, 1u, 2u};
+  const uint32_t size = k_size[bits(insn, 22, 21)], ordered = bits(insn, 9, 8), load = bit(insn, 20);
+  const uint32_t rn = bits(insn, 19, 16), rd = bits(insn, 15, 12), rt = bits(insn, 3, 0);
+  if (!bit(insn, 23) || size == 8u || ordered == 1u || cpu_multicore()) return false;
+  if (rn == A32_REG_PC || rd == A32_REG_PC || (!load && rt == A32_REG_PC)) return false;
+  get_x(c, rn);
+  lset(c, L_ADDR);
+  if (load) {
+    emit_load_address(c, size);
+    emit_host_load(c, ACCESS_LOAD_ZERO, size, 0, L_VAL);
+    if (ordered) { /* arm the monitor */
+      lget(c, L_STATE);
+      i32c(c, 1);
+      mem(c, WASM_OP_I32_STORE8, ALIGN_1, OFF_EXCLUSIVE_VALID);
+      state_store64_local(c, OFF_EXCLUSIVE_ADDRESS, L_ADDR);
+      lget(c, L_STATE);
+      i32c(c, size);
+      mem(c, WASM_OP_I32_STORE, ALIGN_4, OFF_EXCLUSIVE_SIZE);
+    }
+    lget(c, L_VAL);
+    set_x(c, rd);
+    return true;
+  }
+  if (!ordered) { /* STL */
+    emit_store(c, size, rt, false, 0);
+    return true;
+  }
+  /* STREX: stores iff the monitor holds this address and size; Rd = 0 on
+   * success, 1 otherwise; the monitor clears either way. */
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD8_U, ALIGN_1, OFF_EXCLUSIVE_VALID);
+  state_load64(c, OFF_EXCLUSIVE_ADDRESS);
+  lget(c, L_ADDR);
+  op(c, WASM_OP_I64_EQ);
+  op(c, WASM_OP_I32_AND);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_EXCLUSIVE_SIZE);
+  i32c(c, size);
+  op(c, WASM_OP_I32_EQ);
+  op(c, WASM_OP_I32_AND);
+  ltee(c, L_PASS);
+  open_if(c, WASM_BLOCK_VOID);
+  emit_store(c, size, rt, false, 0);
+  end_(c);
+  lget(c, L_STATE);
+  i32c(c, 0);
+  mem(c, WASM_OP_I32_STORE8, ALIGN_1, OFF_EXCLUSIVE_VALID);
+  lget(c, L_PASS);
+  op(c, WASM_OP_I32_EQZ);
+  op(c, WASM_OP_I64_EXTEND_I32_U);
+  set_x(c, rd);
+  return true;
+}
+
+/* MRC/MCR p15 for TPIDRURW (c13, c0, 2) and MRC for TPIDRURO (c13, c0, 3). */
+#define A32_CP15_REG_MASK 0x0FFF0FFFu
+#define A32_MRC_TPIDRURO 0x0E1D0F70u
+#define A32_MRC_TPIDRURW 0x0E1D0F50u
+#define A32_MCR_TPIDRURW 0x0E0D0F50u
+static bool a32_cp15(Ctx *c, uint32_t insn) {
+  const uint32_t rt = bits(insn, 15, 12), key = insn & A32_CP15_REG_MASK;
+  if (rt == A32_REG_PC) return false;
+  if (key == A32_MRC_TPIDRURO || key == A32_MRC_TPIDRURW) {
+    state_load64(c, key == A32_MRC_TPIDRURO ? OFF_TPIDRRO : OFF_TPIDR);
+    mask32(c);
+    set_x(c, rt);
+    return true;
+  }
+  if (key == A32_MCR_TPIDRURW) {
+    lget(c, L_STATE);
+    get_x(c, rt);
+    mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_TPIDR);
+    return true;
+  }
+  return false;
+}
+
 /* ---- the dispatcher ------------------------------------------------------- */
 
 /* May the instruction read or write NZCV (beyond its condition)? Bodies
@@ -992,7 +1347,7 @@ static Outcome a32_body(Ctx *c, uint32_t insn) {
   case 0: {
     if (bit(insn, 7) && bit(insn, 4)) {
       if (bits(insn, 6, 5) == 0) {
-        if (bits(insn, 24, 24)) return OUTCOME_HELPER; /* synchronization */
+        if (bits(insn, 24, 24)) return a32_synchronization(c, insn) ? OUTCOME_NEXT : OUTCOME_HELPER;
         return a32_multiply(c, insn) ? OUTCOME_NEXT : OUTCOME_HELPER;
       }
       return a32_load_store_extra(c, insn) ? OUTCOME_NEXT : (bits(insn, 15, 12) == A32_REG_PC ? OUTCOME_END_HELPER : OUTCOME_HELPER);
@@ -1021,6 +1376,7 @@ static Outcome a32_body(Ctx *c, uint32_t insn) {
   case 4: return a32_block_transfer(c, insn);
   case 7:
     if (bits(insn, 27, 24) == 0xFu) return OUTCOME_END_HELPER; /* SVC */
+    if (bit(insn, 4) && bits(insn, 11, 8) == 0xFu && a32_cp15(c, insn)) return OUTCOME_NEXT;
     if (bits(insn, 11, 9) == 5u && bit(insn, 4) && a32_vfp_transfer(c, insn)) return OUTCOME_NEXT;
     if (bits(insn, 27, 24) == 0xEu && !bit(insn, 4) && a32_vfp_arith(c, insn)) return OUTCOME_NEXT;
     return a32_direct(c, insn); /* VFP data processing and transfers */
