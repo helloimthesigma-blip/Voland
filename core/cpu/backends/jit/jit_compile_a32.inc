@@ -1628,6 +1628,55 @@ static void a32_neon_fp_exact(Ctx *c, uint32_t wasm_op, bool q, uint32_t d) {
   a32_fp_else_exact(c);
 }
 
+/* VRECPS / VRSQRTS (F32) of L_VA and L_VB: 2 - a*b and (3 - a*b) / 2,
+ * AArch32's unfused FPRecipStep / FPRSqrtStep - the product rounded, the
+ * difference rounded, then halved - so single-precision wasm operations
+ * under the standard FPSCR value: native when the inputs are normal or
+ * zero, the product is normal (or zero from a zero operand), each later
+ * result is normal or zero, and IXC is set; else the interpreter. */
+#define A32_F32_HALF 0x3F000000u
+#define A32_F32_TWO 0x40000000u
+#define A32_F32_THREE 0x40400000u
+static void a32_neon_step(Ctx *c, bool rsqrt, bool q, uint32_t d) {
+  a32_lane_normal_or_zero(c, L_VA);
+  a32_lane_normal_or_zero(c, L_VB);
+  simd(c, WASM_SIMD_V128_AND);
+  lget(c, L_VA);
+  lget(c, L_VB);
+  simd(c, WASM_SIMD_F32X4_MUL);
+  lset(c, L_VT);
+  emit_lane_normal(c, L_VT, false); /* normal, or zero from a zero operand */
+  emit_lane_zero(c, L_VT, false);
+  emit_lane_zero(c, L_VA, false);
+  emit_lane_zero(c, L_VB, false);
+  simd(c, WASM_SIMD_V128_OR);
+  simd(c, WASM_SIMD_V128_AND);
+  simd(c, WASM_SIMD_V128_OR);
+  simd(c, WASM_SIMD_V128_AND);
+  f32c(c, rsqrt ? A32_F32_THREE : A32_F32_TWO);
+  simd(c, WASM_SIMD_F32X4_SPLAT);
+  lget(c, L_VT);
+  simd(c, WASM_SIMD_F32X4_SUB);
+  lset(c, L_VR);
+  a32_lane_normal_or_zero(c, L_VR);
+  simd(c, WASM_SIMD_V128_AND);
+  if (rsqrt) {
+    lget(c, L_VR);
+    f32c(c, A32_F32_HALF);
+    simd(c, WASM_SIMD_F32X4_SPLAT);
+    simd(c, WASM_SIMD_F32X4_MUL);
+    lset(c, L_VR);
+    a32_lane_normal_or_zero(c, L_VR);
+    simd(c, WASM_SIMD_V128_AND);
+  }
+  emit_all_lanes(c, q);
+  emit_fp_env_ok(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  a32_store_vec(c, d, L_VR, q);
+  a32_fp_else_exact(c);
+}
+
 /* VPADD.F32 Dd, Dn, Dm: [n0 + n1, m0 + m1], as VADD of [n0, m0] and [n1, m1]. */
 static bool a32_neon_vpadd_f32(Ctx *c, uint32_t n, uint32_t m, uint32_t d) {
   static const uint8_t evens[SIMD_LANE_BYTES] = {0, 1, 2, 3, 16, 17, 18, 19, 0, 1, 2, 3, 16, 17, 18, 19};
@@ -1682,6 +1731,14 @@ static bool a32_neon_three_same(Ctx *c, uint32_t insn) {
     a32_load_vec(c, m, q);
     lset(c, L_VB);
     a32_neon_fp_exact(c, !u ? WASM_SIMD_F32X4_EQ : (size & 2u) ? WASM_SIMD_F32X4_GT : WASM_SIMD_F32X4_GE, q, d);
+    return true;
+  }
+  if (opc == 0xFu && b && !u && !bit(insn, 20)) { /* VRECPS / VRSQRTS (F32) */
+    a32_load_vec(c, n, q);
+    lset(c, L_VA);
+    a32_load_vec(c, m, q);
+    lset(c, L_VB);
+    a32_neon_step(c, (size & 2u) != 0, q, d);
     return true;
   }
   if (opc == 0xFu && !b && !u && !bit(insn, 20)) { /* VMAX / VMIN (F32) */

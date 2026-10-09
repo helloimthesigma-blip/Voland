@@ -263,7 +263,7 @@ static uint32_t gen_neon_more(uint32_t q) {
     static const uint32_t forms[3] = {0xF2000E00u, 0xF3000E00u, 0xF3200E00u};
     return forms[pick(3)] | neon_regs(q);
   }
-  case 2: return (pick(2) ? 0xF2000F00u : 0xF2200F00u) | neon_regs(q); /* VMAX / VMIN */
+  case 2: return (pick(2) ? 0xF2000F00u : 0xF2200F00u) | (pick(2) << 4) | neon_regs(q); /* VMAX VMIN VRECPS VRSQRTS */
   case 3: return 0xF3B90400u | (pick(5) << 7) | neon_dm(q);         /* VCGT VCGE VCEQ VCLE VCLT #0 */
   case 4: return 0xF3BB0600u | (pick(2) << 7) | neon_dm(q);         /* VCVT.F32.S32 / U32 */
   case 5: return 0xF3B20000u | (pick(3) << 18) | ((1u + pick(3)) << 7) | neon_dm(q); /* VTRN VUZP VZIP */
