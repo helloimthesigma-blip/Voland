@@ -1160,6 +1160,75 @@ static void test_software_keyboard(void) {
   CHECK(dom(oe, applet, 101, NULL, 0, NULL, 0).result == AM_RESULT_NO_DATA_IN_CHANNEL);
 }
 
+/* MiiEdit's AppendMii ("Create a Mii") over a domain session: the applet
+ * reports a created Mii at database index 0, and the Mii database then
+ * lists it (SourceFlag_Database) before the six default Miis. */
+static void test_mii_edit_append(void) {
+  const uint32_t oe = service("appletOE");
+  Test_Ipc_Message control;
+  memset(&control, 0, sizeof(control));
+  control.framing = TEST_IPC_CONTROL;
+  control.command_id = IPC_CONTROL_CONVERT_CURRENT_OBJECT_TO_DOMAIN;
+  CHECK(ipc_fixture_send(&g_emu, oe, &control, g_reply) == 0);
+  const uint64_t pid = 0;
+  Test_Ipc_Message pid_msg;
+  memset(&pid_msg, 0, sizeof(pid_msg));
+  pid_msg.send_pid = true;
+  Test_Ipc_Reply r = dom(oe, 1, 0, &pid, sizeof(pid), &pid_msg, 0);
+  const uint32_t proxy = r.object_ids[0];
+  r = dom(oe, proxy, 11, NULL, 0, NULL, 0);
+  const uint32_t creator = r.object_ids[0];
+  const uint32_t create_in[2] = {AM_APPLET_MII_EDIT, 0};
+  r = dom(oe, creator, 0, create_in, sizeof(create_in), NULL, 0);
+  CHECK(r.result == 0 && r.object_count == 1);
+  const uint32_t applet = r.object_ids[0];
+  static uint8_t input[0x100];
+  memset(input, 0, sizeof(input));
+  const uint32_t version = 3, append_mii = 1;
+  memcpy(input, &version, 4);
+  memcpy(input + 4, &append_mii, 4);
+  Test_Ipc_Message push;
+  memset(&push, 0, sizeof(push));
+  push.in_objects[0] = dom_storage(oe, creator, input, sizeof(input));
+  push.in_object_count = 1;
+  CHECK(dom(oe, applet, 100, NULL, 0, &push, 0).result == 0);
+  CHECK(dom(oe, applet, 10, NULL, 0, NULL, 0).result == 0); /* Start */
+  r = dom(oe, applet, 1, NULL, 0, NULL, 4);
+  CHECK(test_le32(r.data) == 1); /* completed */
+  r = dom(oe, applet, 101, NULL, 0, NULL, 0);
+  CHECK(r.result == 0 && r.object_count == 1);
+  r = dom(oe, r.object_ids[0], 0, NULL, 0, NULL, 0);
+  Test_Ipc_Message rd;
+  memset(&rd, 0, sizeof(rd));
+  rd.receives[0] = (Test_Ipc_Buffer){SCRATCH(0xB800), 0x20, 0};
+  rd.receive_count = 1;
+  const uint64_t offset = 0;
+  CHECK(dom(oe, r.object_ids[0], 11, &offset, sizeof(offset), &rd, 0).result == 0);
+  CHECK(rd32(SCRATCH(0xB800)) == 0 && rd32(SCRATCH(0xB804)) == 0); /* success, index 0 */
+
+  const uint32_t mii = service("mii:u");
+  const uint32_t database = object(mii, 0, NULL, 0);
+  const uint32_t database_flag = 1, both = 3;
+  r = call(database, 0, &database_flag, sizeof(database_flag), NULL);
+  CHECK(test_le32(r.data) == 1); /* IsUpdated: once */
+  r = call(database, 0, &database_flag, sizeof(database_flag), NULL);
+  CHECK(test_le32(r.data) == 0);
+  r = call(database, 2, &database_flag, sizeof(database_flag), NULL);
+  CHECK(test_le32(r.data) == 1);
+  r = call(database, 2, &both, sizeof(both), NULL);
+  CHECK(test_le32(r.data) == 7);
+  Test_Ipc_Message list;
+  memset(&list, 0, sizeof(list));
+  list.receives[0] = (Test_Ipc_Buffer){SCRATCH(0xC000), 7u * 0x5Cu, 0};
+  list.receive_count = 1;
+  r = call(database, 3, &both, sizeof(both), &list); /* Get: CharInfoElement {CharInfo, u32 source} */
+  CHECK(test_le32(r.data) == 7);
+  CHECK(rd32(SCRATCH(0xC000) + 0x58) == 0 && rd32(SCRATCH(0xC000) + 0x5C + 0x58) == 1); /* Database, then Default */
+  uint16_t name[6];
+  CHECK_OK(vmm_read_block(g_emu.vmm, SCRATCH(0xC000) + 0x10, name, sizeof(name)));
+  CHECK(name[0] == 'P' && name[5] == 'r');
+}
+
 static void test_audren(void) {
   const uint32_t manager = service("audren:u");
   /* AudioRendererParameter {48000, 240, mix buffers 2, submixes 0, voices 2,
@@ -1403,6 +1472,7 @@ int main(void) {
   test_sdk_startup_services();
   test_sdk_behaviours();
   test_software_keyboard();
+  test_mii_edit_append();
   test_acc();
   emulator_destroy(&g_emu);
   printf("[services_test] passed\n");

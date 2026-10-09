@@ -61,7 +61,16 @@ typedef struct Social_State {
   Service_Interface nfp[SOCIAL_NFP_PORTS];
   Service_Interface nfp_user;
   Kernel_Event *nfp_event;
+  uint32_t user_mii_count; /* Miis "created" through MiiEdit: Voland-generated, not saved yet */
+  bool user_miis_updated;  /* IsUpdated(SourceFlag_Database) reports the change once */
 } Social_State;
+
+/* nn::mii's database holds 100 Miis. */
+#define SOCIAL_USER_MII_CAPACITY 100u
+
+/* MiiEdit's AppendMii: a generated Mii joins the user database. Its index
+ * there, or -1 when the database is full. */
+int32_t social_mii_append(Social_State *state);
 
 void social_init(Social_State *state);
 Error social_register(Social_State *state, SM_Registry *registry);

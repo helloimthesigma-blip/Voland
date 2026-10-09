@@ -11,6 +11,7 @@
 #include "hle/services/set/set.h"
 #include "hle/kernel/handle_table.h"
 #include "hle/kernel/transfer_memory.h"
+#include "hle/services/social/social.h"
 
 #define AM_DISPLAY_VERSION_BYTES 0x10u
 #define AM_PSEUDO_DEVICE_ID_BYTES 0x10u
@@ -544,7 +545,9 @@ static uint32_t utf8_to_utf16(const char *in, uint16_t *out, uint32_t max_units)
 #define SWKBD_ARG_MIN_BYTES 0x3C8u
 
 #define AM_MII_EDIT_OUTPUT_BYTES 0x20u
+#define AM_MII_EDIT_SUCCESS 0u
 #define AM_MII_EDIT_CANCEL 1u
+#define AM_MII_EDIT_MODE_APPEND 1u /* AppendMii: create one and add it to the database */
 
 static void start_swkbd(Am_State *s, HLE_Context *c, Am_Applet *applet, uint32_t slot) {
   Am_Text_Request *t = &s->text_request;
@@ -681,19 +684,28 @@ static HLE_ServiceResult cmd_applet_start(HLE_Context *c, Service_Object *self, 
     break;
   }
   case AM_APPLET_MII_EDIT: {
-    /* MiiEdit (create/edit a Mii): there is no editor here, so it is
-     * cancelled - output {u32 result (1 = cancel), s32 index -1, ...}. The
-     * input's mode word (in[1]) is logged. */
-    uint32_t mode = 0;
-    if (applet->in_count >= 2u) (void)storage_read(c, &s->storages[applet->in[1]], 0, &mode, sizeof(mode));
+    /* MiiEdit: there is no editor. AppendMii ("Create a Mii") adds a
+     * generated Mii to the user database and reports it created (a title
+     * that only asks again on cancel - Mario Kart 8 Deluxe's Mii select -
+     * would relaunch it forever); the other modes are cancelled. Input
+     * {s32 version, u32 mode, ...}; output {u32 result (0 = success,
+     * 1 = cancel), s32 index, reserved}. */
+    uint32_t head[2] = {0, 0};
+    if (applet->in_count >= 1u) (void)storage_read(c, &s->storages[applet->in[0]], 0, head, sizeof(head));
+    const uint32_t mode = head[1];
+    uint32_t result = AM_MII_EDIT_CANCEL;
+    int32_t index = -1;
+    if (mode == AM_MII_EDIT_MODE_APPEND && s->social) {
+      index = social_mii_append(s->social);
+      if (index >= 0) result = AM_MII_EDIT_SUCCESS;
+    }
     uint8_t out[AM_MII_EDIT_OUTPUT_BYTES];
     memset(out, 0, sizeof(out));
-    const uint32_t cancel = AM_MII_EDIT_CANCEL;
-    const int32_t index = -1;
-    memcpy(out, &cancel, sizeof(cancel));
+    memcpy(out, &result, sizeof(result));
     memcpy(out + 4, &index, sizeof(index));
     (void)applet_push_out(s, c, applet, out, sizeof(out));
-    log_info("[am] MiiEdit (mode %u): cancelled (no editor)", mode);
+    log_info("[am] MiiEdit (version %u, mode %u): %s", head[0], mode,
+             result == AM_MII_EDIT_SUCCESS ? "a generated Mii was added" : "cancelled (no editor)");
     break;
   }
   default:
@@ -1018,6 +1030,8 @@ static const Service_Command k_library_applet_accessor_commands[] = {
 };
 
 #define AM_INTERFACE(name, table, state) SERVICE_INTERFACE(name, table, 0, state)
+
+void am_set_social(Am_State *s, struct Social_State *social) { s->social = social; }
 
 void am_init(Am_State *s, uint8_t *storage_pool) {
   memset(s, 0, sizeof(*s));

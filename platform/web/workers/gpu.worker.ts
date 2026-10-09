@@ -249,7 +249,12 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
     return;
   }
   const requiredFeatures = OPTIONAL_FEATURES.filter((f) => adapter.features.has(f));
-  const device = await adapter.requestDevice({ requiredFeatures });
+  // Wider G-buffers than the default 32 bytes per sample: MK8DX binds six
+  // RG11B10 targets (48 bytes). Take what the adapter offers.
+  const requiredLimits: Record<string, number> = {
+    maxColorAttachmentBytesPerSample: adapter.limits.maxColorAttachmentBytesPerSample,
+  };
+  const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
   device.addEventListener("uncapturederror", (e: Event) => {
     log("error", `WebGPU: ${(e as GPUUncapturedErrorEvent).error.message.split("\n")[0] ?? ""}`);
   });

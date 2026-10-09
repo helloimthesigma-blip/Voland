@@ -105,7 +105,10 @@ typedef struct Am_Text_Request {
   bool password;
 } Am_Text_Request;
 
+struct Social_State;
+
 typedef struct Am_State {
+  struct Social_State *social; /* the Mii database MiiEdit adds to (am_set_social) */
   Service_Interface oe;
   Service_Interface ae;
   Service_Interface proxy;
@@ -149,6 +152,8 @@ typedef struct Am_State {
 
 /* `storage_pool`: AM_STORAGE_POOL_BYTES the caller owns (outlives state). */
 void am_init(Am_State *state, uint8_t *storage_pool);
+/* The Mii database MiiEdit's AppendMii adds to (NULL: it cancels). */
+void am_set_social(Am_State *state, struct Social_State *social);
 Error am_register(Am_State *state, SM_Registry *registry);
 
 /* The pending software-keyboard request, or NULL. */

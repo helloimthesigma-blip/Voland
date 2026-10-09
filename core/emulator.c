@@ -332,6 +332,7 @@ static void reset_process_services(Emulator* emulator) {
   network_init(&emulator->network);
   misc_init(&emulator->misc);
   social_init(&emulator->social);
+  am_set_social(&emulator->am, &emulator->social);
   hwopus_init(&emulator->hwopus);
   audout_init(&emulator->audout);
   if (emulator->audren) audren_init(emulator->audren);

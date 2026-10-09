@@ -264,7 +264,9 @@ static const Service_Command k_mii_commands[] = {
 #define MII_GENDER_OFFSET 0x28u
 #define MII_FAVORITE_COLORS 12u
 #define MII_SOURCE_BYTES 4u
+#define MII_SOURCE_DATABASE 0u      /* nn::mii::Source_Database */
 #define MII_SOURCE_DEFAULT 1u       /* nn::mii::Source_Default */
+#define MII_SOURCE_FLAG_DATABASE 1u /* SourceFlag_Database */
 #define MII_SOURCE_FLAG_DEFAULT 2u  /* SourceFlag_Default */
 #define MII_DEFAULT_COUNT 6u
 static const uint8_t k_mii_params[MII_CHAR_INFO_BYTES - MII_PARAMS_OFFSET] = {
@@ -295,17 +297,17 @@ static const uint8_t k_mii_params[MII_CHAR_INFO_BYTES - MII_PARAMS_OFFSET] = {
 /* Voland's Mii number `index`: a version-4-style create id distinct per
  * index, the name "Mii", and the neutral parameters above (gender and
  * favourite colour vary, so a list of them is not six identical faces). */
-static void mii_fill(uint8_t info[MII_CHAR_INFO_BYTES], uint32_t index) {
+static void mii_fill_named(uint8_t info[MII_CHAR_INFO_BYTES], uint32_t index, const char *name) {
   memset(info, 0, MII_CHAR_INFO_BYTES);
   for (uint32_t i = 0; i < MII_CREATE_ID_BYTES; i++) info[i] = (uint8_t)(0x56u + 0x1Du * i + index);
   info[6] = (uint8_t)((info[6] & 0x0Fu) | 0x40u);
   info[8] = (uint8_t)((info[8] & 0x3Fu) | 0x80u);
-  static const char k_name[] = "Mii";
-  for (uint32_t i = 0; k_name[i]; i++) info[MII_NAME_OFFSET + 2u * i] = (uint8_t)k_name[i];
+  for (uint32_t i = 0; name[i]; i++) info[MII_NAME_OFFSET + 2u * i] = (uint8_t)name[i];
   memcpy(info + MII_PARAMS_OFFSET, k_mii_params, sizeof(k_mii_params));
   info[MII_FAVORITE_COLOR_OFFSET] = (uint8_t)(index % MII_FAVORITE_COLORS);
   info[MII_GENDER_OFFSET] = (uint8_t)(index & 1u);
 }
+static void mii_fill(uint8_t info[MII_CHAR_INFO_BYTES], uint32_t index) { mii_fill_named(info, index, "Mii"); }
 
 static HLE_ServiceResult cmd_mii_build(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                        IPC_Response *res) {
@@ -319,37 +321,63 @@ static HLE_ServiceResult cmd_mii_build(HLE_Context *c, Service_Object *self, con
   return HLE_RESULT_SUCCESS;
 }
 
-/* The database holds no user Miis, but the console's default Miis are
- * always there (SourceFlag bit 1): Voland's own six, not Nintendo's. A
- * title that lists them (Mario Kart 8 Deluxe's racers) otherwise reads
- * empty slots, which nn::mii rejects, and later draws from uninitialized
- * resources. */
-static uint32_t mii_count(const IPC_Request *req) {
+/* The user database (SourceFlag bit 0) holds the Miis MiiEdit "created"
+ * (social_mii_append), first; the console's default Miis are always there
+ * (SourceFlag bit 1): Voland's own six, not Nintendo's. A title that
+ * lists them (Mario Kart 8 Deluxe's racers) otherwise reads empty slots,
+ * which nn::mii rejects, and later draws from uninitialized resources. */
+static uint32_t mii_flag(const IPC_Request *req) {
   uint32_t flag = 0;
   (void)ipc_request_read_u32(req, 0, &flag);
   log_debug("[mii] list with source flag 0x%x", flag);
-  return (flag & MII_SOURCE_FLAG_DEFAULT) ? MII_DEFAULT_COUNT : 0u;
+  return flag;
+}
+static uint32_t mii_user_count(const Social_State *s, uint32_t flag) {
+  return (flag & MII_SOURCE_FLAG_DATABASE) ? s->user_mii_count : 0u;
+}
+static uint32_t mii_count(const Social_State *s, uint32_t flag) {
+  return mii_user_count(s, flag) + ((flag & MII_SOURCE_FLAG_DEFAULT) ? MII_DEFAULT_COUNT : 0u);
 }
 
 static HLE_ServiceResult cmd_mii_get_count(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                            IPC_Response *res) {
   (void)c;
-  (void)self;
-  (void)ipc_response_push_u32(res, mii_count(req));
+  (void)ipc_response_push_u32(res, mii_count(state_of(self), mii_flag(req)));
   return HLE_RESULT_SUCCESS;
 }
 
+/* IsUpdated(SourceFlag): the user database changed since the last ask. */
+static HLE_ServiceResult cmd_mii_is_updated(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                            IPC_Response *res) {
+  (void)c;
+  Social_State *s = state_of(self);
+  const bool updated = (mii_flag(req) & MII_SOURCE_FLAG_DATABASE) && s->user_miis_updated;
+  if (updated) s->user_miis_updated = false;
+  (void)ipc_response_push_u32(res, updated ? 1u : 0u);
+  return HLE_RESULT_SUCCESS;
+}
+
+int32_t social_mii_append(Social_State *s) {
+  if (s->user_mii_count >= SOCIAL_USER_MII_CAPACITY) return -1;
+  s->user_miis_updated = true;
+  return (int32_t)s->user_mii_count++;
+}
+
 /* Get (CharInfoElement: CharInfo, then u32 source) and Get1 (CharInfo). */
-static HLE_ServiceResult mii_get(HLE_Context *c, const IPC_Request *req, IPC_Response *res, bool element) {
+static HLE_ServiceResult mii_get(HLE_Context *c, const Social_State *s, const IPC_Request *req, IPC_Response *res,
+                                 bool element) {
   const IPC_Buffer *buf = service_out_buffer(req, 0);
   const uint32_t stride = element ? MII_CHAR_INFO_BYTES + MII_SOURCE_BYTES : MII_CHAR_INFO_BYTES;
-  uint32_t count = mii_count(req);
+  const uint32_t flag = mii_flag(req), users = mii_user_count(s, flag);
+  uint32_t count = mii_count(s, flag);
   if (!buf) count = 0;
   else if (buf->size / stride < count) count = (uint32_t)(buf->size / stride);
   for (uint32_t i = 0; i < count; i++) {
     uint8_t entry[MII_CHAR_INFO_BYTES + MII_SOURCE_BYTES];
-    mii_fill(entry, i);
-    const uint32_t source = MII_SOURCE_DEFAULT;
+    const bool user = i < users;
+    if (user) mii_fill_named(entry, MII_DEFAULT_COUNT + i, "Player"); /* create ids after the defaults' */
+    else mii_fill(entry, i - users);
+    const uint32_t source = user ? MII_SOURCE_DATABASE : MII_SOURCE_DEFAULT;
     memcpy(entry + MII_CHAR_INFO_BYTES, &source, sizeof(source));
     if (!error_is_ok(vmm_write_block(c->vmm, buf->gva + (uint64_t)i * stride, entry, stride)))
       return HLE_RESULT_INVALID_POINTER;
@@ -359,19 +387,17 @@ static HLE_ServiceResult mii_get(HLE_Context *c, const IPC_Request *req, IPC_Res
 }
 
 static HLE_ServiceResult cmd_mii_get(HLE_Context *c, Service_Object *self, const IPC_Request *req, IPC_Response *res) {
-  (void)self;
-  return mii_get(c, req, res, true);
+  return mii_get(c, state_of(self), req, res, true);
 }
 
 static HLE_ServiceResult cmd_mii_get1(HLE_Context *c, Service_Object *self, const IPC_Request *req, IPC_Response *res) {
-  (void)self;
-  return mii_get(c, req, res, false);
+  return mii_get(c, state_of(self), req, res, false);
 }
 
-/* No user Miis, the default ones, nothing changed. Get2/Get3 (store-data
- * forms) list nothing yet. */
+/* The created Miis and the default ones. Get2/Get3 (store-data forms)
+ * list nothing yet. */
 static const Service_Command k_mii_database_commands[] = {
-    {0, service_cmd_out_u8_false, "IsUpdated"},
+    {0, cmd_mii_is_updated, "IsUpdated"},
     {1, service_cmd_out_u8_false, "IsFullDatabase"},
     {2, cmd_mii_get_count, "GetCount"},
     {3, cmd_mii_get, "Get"},

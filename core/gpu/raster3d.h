@@ -68,7 +68,10 @@ struct Gpu_Stream;
 #define RASTER_STREAM_WINDOW 0x1000u
 #define RASTER_PROGRAM_READ_BYTES (SM_SPH_BYTES + SM_MAX_WORDS * 8u)
 /* GPU mode (raster3d_set_gpu): render targets as GPU textures, shaders. */
-#define RASTER_GPU_SURFACES 64u
+/* Render targets live only on the GPU: dropping one loses its pixels.
+ * MK8DX keeps well over 64 (light-probe faces and their mips at 32x32
+ * and below, plus the frame's 1080p targets). */
+#define RASTER_GPU_SURFACES 256u
 #define RASTER_GPU_SHADERS 1024u
 
 typedef struct Raster3d_Bindings {

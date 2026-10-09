@@ -9,6 +9,7 @@
  *                       [--press SLICE:KEY:SLICES]... [--shot FILE.png] [--shots-every SLICES DIR]
  *                       [--phases NAME:SLICE,NAME:SLICE,...,end:SLICE] [--json FILE]
  *                       [--restore-saves BACKUP.tar] [--user-data-dir DIR] [--system-file FILE]...
+ *                       [--log-match REGEX] (also print the page's log lines that match)
  *
  * - Builds the app (vite build; the core must already be staged by
  *   `cmake --build --preset web`) and serves it with `vite preview` on a
@@ -145,6 +146,7 @@ function parseArgs(argv) {
     }
     else if (a === "--browser-arg") opts.browserArgs.push(next());
     else if (a.startsWith("--browser-arg=")) opts.browserArgs.push(a.slice("--browser-arg=".length));
+    else if (a === "--log-match") opts.logMatch = next();
     else if (a === "--press") {
       const [slice, key, hold] = next().split(":");
       if (!key || !Number.isFinite(Number(slice)) || !Number.isFinite(Number(hold))) throw new Error("--press wants SLICE:KEY:SLICES");
@@ -370,6 +372,7 @@ async function main() {
         console.log(`  console: ${m.text()}`);
       /* Parallel guest threads' periodic timing report (docs/PARALLEL.md "Measuring"). */
       if (/\[parallel\] /.test(m.text())) console.log(`  ${m.text().replace(/^\[INFO \] /, "")}`);
+      if (opts.logMatch && new RegExp(opts.logMatch).test(m.text())) console.log(`  log: ${m.text()}`);
     });
     const pageUrl = opts.urlParams ? `${baseUrl}?${opts.urlParams}` : baseUrl;
     await page.goto(pageUrl);
