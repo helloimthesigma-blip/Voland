@@ -929,7 +929,11 @@ export class GpuExecutor {
       if (!format) return null;
       const state: GPUColorTargetState = { format, writeMask: t.writeMask };
       const [colorOp = 0, colorSrc = 0, colorDst = 0, alphaOp = 0, alphaSrc = 0, alphaDst = 0] = t.blend ?? [];
-      if (t.blend && !format.endsWith("int")) {
+      /* 32-bit float targets blend only with float32-blendable; without it
+       * the pipeline would be invalid (and every command buffer using it),
+       * so they take the fragment's output unblended. */
+      const blendable = !format.endsWith("int") && (!format.endsWith("32float") || this.device.features.has("float32-blendable"));
+      if (t.blend && blendable) {
         const minmax = (op: number): boolean => op === 3 || op === 4;
         state.blend = {
           color: {

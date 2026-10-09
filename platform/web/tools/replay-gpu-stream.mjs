@@ -105,7 +105,7 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
   const wanted = new Set(at);
   const targetsAt = new Set(dumpTargets);
   const a = await navigator.gpu.requestAdapter();
-  const features = ["rg11b10ufloat-renderable", "depth32float-stencil8", "float32-filterable"].filter((f) => a.features.has(f));
+  const features = ["rg11b10ufloat-renderable", "depth32float-stencil8", "float32-filterable", "float32-blendable"].filter((f) => a.features.has(f));
   const device = await a.requestDevice({
     requiredFeatures: features,
     requiredLimits: { maxColorAttachmentBytesPerSample: a.limits.maxColorAttachmentBytesPerSample }, // as gpu.worker.ts

@@ -65,7 +65,9 @@ struct VertexOut {
 const POLL_MS = 4;
 /* Until the core turns GPU mode on, the stream header is all zeroes. */
 const STREAM_IDLE_POLL_MS = 50;
-const OPTIONAL_FEATURES: readonly GPUFeatureName[] = ["rg11b10ufloat-renderable", "depth32float-stencil8", "float32-filterable"];
+const OPTIONAL_FEATURES: readonly GPUFeatureName[] = [
+  "rg11b10ufloat-renderable", "depth32float-stencil8", "float32-filterable", "float32-blendable",
+];
 
 type WaitAsync = (a: Int32Array, i: number, v: number) => { async: boolean; value: Promise<string> | string };
 const waitAsync = (Atomics as unknown as { waitAsync?: WaitAsync }).waitAsync;
