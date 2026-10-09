@@ -15,7 +15,7 @@
  * thread could know. The worker reads it piecewise; it is never copied
  * into linear memory whole.
  */
-import type { LoadFailure, RunState } from "./load";
+import type { LoadFailure, RunState, SystemFileOutcome } from "./load";
 import type { MemoryLayout } from "./layout";
 
 export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
@@ -30,6 +30,12 @@ export type MainToCPUMessage =
   /* Empty the SD card (and its stored copy). Answered by sd-files-added
    * with nothing added. */
   | { readonly type: "sd-clear" }
+  /* "System files" (§1.6): store the user's own dump of a system archive
+   * on the SD card, where fsp-srv looks first. `id` names the archive for
+   * a bare RomFS (an NCA says which it is). Answered by system-file-added;
+   * system-files-list by system-files-listed. */
+  | { readonly type: "system-file-add"; readonly file: File; readonly id: string | null }
+  | { readonly type: "system-files-list" }
   /* Game saves (§15, workers/save-store.ts): a tar of every stored save,
    * answered by saves-exported; or a tar to store (and load into the
    * core), answered by saves-imported. */
@@ -127,6 +133,8 @@ export type CPUToMainMessage =
   | { readonly type: "game-loaded"; readonly titleId: string; readonly entryPoint: bigint }
   | { readonly type: "load-failed"; readonly failure: LoadFailure }
   | { readonly type: "sd-files-added"; readonly added: readonly string[]; readonly failed: readonly string[] }
+  | { readonly type: "system-file-added"; readonly outcome: SystemFileOutcome }
+  | { readonly type: "system-files-listed"; readonly ids: readonly string[] }
   | { readonly type: "saves-exported"; readonly tar: ArrayBuffer; readonly count: number }
   | { readonly type: "saves-imported"; readonly imported: number; readonly rejected: number }
   | { readonly type: "saves-listed"; readonly saves: readonly StoredSave[] }

@@ -191,6 +191,21 @@
 }
 
 .voland-load-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+
+.voland-system-files {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #1f1f2b;
+  border-radius: 10px;
+  padding: 12px 16px;
+  background: rgba(255, 255, 255, 0.015);
+}
+.voland-system-files h4 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
+.voland-system-files ul { margin: 8px 0; padding-left: 18px; color: #c8c8d0; }
+.voland-system-files code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #9a9aa8; }
+.voland-system-files select { background: #181824; color: #e6e6ea; border: 1px solid #2c2c3c; border-radius: 6px; }
+.voland-ok { color: #8fd98f; }
+.voland-missing { color: #e0b070; }
 .voland-load-secondary { background: #1f2a1f; border-color: #2f4a2f; }
 .voland-load-secondary:hover:not(:disabled) { background: #263626; }
 

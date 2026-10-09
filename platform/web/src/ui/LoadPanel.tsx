@@ -6,7 +6,8 @@
  * hand-written homebrew (public/demo/hello.nro, from tests/guest/hello.s).
  */
 import { For, Match, Show, Switch, createSignal, onCleanup, onMount } from "solid-js";
-import type { GameLoadOutcome, LoadFailure, SdImportOutcome } from "@bindings/load";
+import { SYSTEM_FILES, systemFileName } from "@bindings/load";
+import type { GameLoadOutcome, LoadFailure, SdImportOutcome, SystemFilesApi } from "@bindings/load";
 import { type GuestConsoleState, getGuestConsole, subscribeGuestConsole } from "../guest-console";
 import { describeLoadFailure } from "./load-failure-copy";
 import GameLibrary from "./GameLibrary";
@@ -20,6 +21,7 @@ interface LoadPanelProps {
   readonly loadGame: (file: File) => Promise<GameLoadOutcome>;
   readonly addToSdCard: (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard: () => Promise<SdImportOutcome>;
+  readonly systemFiles: SystemFilesApi;
   readonly setPaused: (paused: boolean) => void;
   readonly gpuAdapter: string;
 }
@@ -48,6 +50,22 @@ function LoadPanel(props: LoadPanelProps) {
   const [guest, setGuest] = createSignal<GuestConsoleState>(getGuestConsole());
   let input: HTMLInputElement | undefined;
   let sdInput: HTMLInputElement | undefined;
+  let systemInput: HTMLInputElement | undefined;
+  const [systemIds, setSystemIds] = createSignal<readonly string[]>([]);
+  const [systemNote, setSystemNote] = createSignal<string | null>(null);
+  /* Which archive a bare RomFS dump is (an NCA says so itself). */
+  const [systemKind, setSystemKind] = createSignal<string>(SYSTEM_FILES[0]?.id ?? "");
+  const refreshSystemFiles = async (): Promise<void> => { setSystemIds(await props.systemFiles.list()); };
+
+  async function onSystemFileChosen(event: Event & { currentTarget: HTMLInputElement }): Promise<void> {
+    const file = event.currentTarget.files?.[0];
+    event.currentTarget.value = "";
+    if (!file) return;
+    setSystemNote(`Adding ${file.name}…`);
+    const outcome = await props.systemFiles.add(file, systemKind());
+    setSystemNote(outcome.ok ? `Added ${systemFileName(outcome.id)} (${outcome.id}).` : `Not added: ${outcome.message}.`);
+    await refreshSystemFiles();
+  }
   const [sd, setSd] = createSignal<SdImportOutcome | null>(null);
   const [bootHint, setBootHint] = createSignal(false);
   const [games, setGames] = createSignal<readonly LibraryGame[]>([]);
@@ -65,6 +83,7 @@ function LoadPanel(props: LoadPanelProps) {
     const off = subscribeGuestConsole(setGuest);
     onCleanup(off);
     void refreshLibrary();
+    void refreshSystemFiles();
   });
 
   /* The game canvas itself goes fullscreen: it lives in <body>, pinned over
@@ -163,6 +182,14 @@ function LoadPanel(props: LoadPanelProps) {
         data-testid="sd-input"
         onChange={(event) => { void onSdFilesChosen(event); }}
       />
+      <input
+        ref={systemInput}
+        type="file"
+        accept=".nca,.romfs,.bin"
+        class="voland-load-input"
+        data-testid="system-input"
+        onChange={(event) => { void onSystemFileChosen(event); }}
+      />
       <GameLibrary
         games={games()}
         busy={state().kind === "loading"}
@@ -205,6 +232,40 @@ function LoadPanel(props: LoadPanelProps) {
         >
           Empty SD card
         </button>
+      </div>
+      <div class="voland-system-files" data-testid="system-files">
+        <h4>System files</h4>
+        <p class="voland-load-note">
+          Some games need files from your own Switch's system that Voland does not include. Dump them from your
+          console like your games (a decrypted <code>.nca</code>, or a raw RomFS dump).
+        </p>
+        <ul>
+          <For each={SYSTEM_FILES}>
+            {(f) => (
+              <li data-testid={`system-file-${f.id}`}>
+                <strong>{f.name}</strong> <code>{f.id}</code> - {f.neededBy}:{" "}
+                {systemIds().includes(f.id) ? <span class="voland-ok">added</span> : <span class="voland-missing">not added</span>}
+              </li>
+            )}
+          </For>
+        </ul>
+        <div class="voland-load-actions">
+          <button
+            type="button"
+            class="voland-load-button voland-load-secondary"
+            data-testid="system-add"
+            onClick={() => systemInput?.click()}
+          >
+            Add system file…
+          </button>
+          <label class="voland-load-note">
+            A raw RomFS dump is the{" "}
+            <select value={systemKind()} onChange={(e) => setSystemKind(e.currentTarget.value)} data-testid="system-kind">
+              <For each={SYSTEM_FILES}>{(f) => <option value={f.id}>{f.name}</option>}</For>
+            </select>
+          </label>
+        </div>
+        <Show when={systemNote()}>{(note) => <p class="voland-load-note" data-testid="system-result">{note()}</p>}</Show>
       </div>
       <Show when={sd()}>
         {(result) => (

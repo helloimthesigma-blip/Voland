@@ -31,6 +31,17 @@ bool system_data_open(uint64_t data_id, Byte_Source *out);
  * /systemdata, either a pre-decrypted data NCA (.nca: its RomFS section
  * is served) or a bare RomFS image (.romfs). Dumped from the user's own
  * console like their games (§1.6). True (and *out set) when found. */
+/* What a file the user offers as system data is (the shell's "System
+ * files"): a pre-decrypted data NCA (*data_id from its header), a bare
+ * RomFS (the user says which archive), an encrypted NCA, or neither. */
+typedef enum System_Data_Kind {
+  SYSTEM_DATA_UNKNOWN = 0,
+  SYSTEM_DATA_NCA = 1,
+  SYSTEM_DATA_ROMFS = 2,
+  SYSTEM_DATA_ENCRYPTED = 3,
+} System_Data_Kind;
+System_Data_Kind system_data_identify(const Byte_Source *file, uint64_t *data_id);
+
 struct Ramfs_Pool;
 bool system_data_open_user(struct Ramfs_Pool *pool, uint32_t sd_root, uint64_t data_id, Byte_Source *out);
 

@@ -252,7 +252,7 @@ static HLE_ServiceResult cmd_open_data_storage_by_id(HLE_Context *c, Service_Obj
   }
   if (system_data_open(data_id, &s->system_data)) {
     log_warn("[fs] OpenDataStorageByDataId(%016llx): Voland's stand-in (no model data). A title that draws Miis "
-             "needs your console's copy: add %016llx.nca (pre-decrypted) or .romfs to the SD card",
+             "needs your console's copy: add it under \"System files\" (a pre-decrypted %016llx .nca or a RomFS dump)",
              (unsigned long long)data_id, (unsigned long long)data_id);
     (void)ipc_response_push_object(res, &s->storage, FS_STORAGE_SYSTEM_DATA);
     return HLE_RESULT_SUCCESS;

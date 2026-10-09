@@ -13,7 +13,7 @@
 
 import type { CPUToMainMessage, GPUToMainMessage, MainToCPUMessage, MainToGPUMessage } from "@bindings/protocol";
 import { AUDIO_RING_CAPACITY_FRAMES, type MemoryLayout, toByteOffset } from "@bindings/layout";
-import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
+import type { GameLoadOutcome, SdImportOutcome, SystemFileOutcome, SystemFilesApi } from "@bindings/load";
 import type { MainToVideoMessage, VideoToMainMessage } from "@bindings/video";
 import { handleSavesMessage, registerSavesWorker, rememberTitleName } from "./saves";
 import { handleSavestateMessage, registerSavestateWorker } from "./savestates";
@@ -148,6 +148,7 @@ interface BootResult {
   readonly loadGame:     (file: File) => Promise<GameLoadOutcome>;
   readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard:  () => Promise<SdImportOutcome>;
+  readonly systemFiles:  SystemFilesApi;
   readonly setFrameSkip: (frames: number) => void;
   readonly setHostCores: (cores: number) => void;
   readonly setPaused:    (paused: boolean) => void;
@@ -223,6 +224,9 @@ async function boot(): Promise<BootResult | null> {
   let loadingFileName = "";
   /* SD imports queue in order; the worker answers each with one sd-files-added. */
   const pendingSd: ((outcome: SdImportOutcome) => void)[] = [];
+  /* System-file requests, likewise answered in order. */
+  const pendingSystemAdd: ((outcome: SystemFileOutcome) => void)[] = [];
+  const pendingSystemList: ((ids: readonly string[]) => void)[] = [];
 
   let cpuBackend:   string | null = null;
   let adapterLabel: string | null = null;
@@ -275,6 +279,12 @@ async function boot(): Promise<BootResult | null> {
         /* compatibility report (src/compat-report.ts) */
       } else if (handleSavestateMessage(msg)) {
         /* save-state replies (src/savestates.ts) */
+      } else if (msg.type === "system-file-added") {
+        appendLogLine(msg.outcome.ok ? "info" : "warn",
+          msg.outcome.ok ? `system file added: ${msg.outcome.id}` : `system file not added: ${msg.outcome.message}`);
+        pendingSystemAdd.shift()?.(msg.outcome);
+      } else if (msg.type === "system-files-listed") {
+        pendingSystemList.shift()?.(msg.ids);
       } else if (msg.type === "sd-files-added") {
         appendLogLine(msg.failed.length ? "warn" : "info",
           `SD card: added ${msg.added.length} file(s)${msg.failed.length ? `, failed: ${msg.failed.join(", ")}` : ""}`);
@@ -457,6 +467,23 @@ async function boot(): Promise<BootResult | null> {
     cpuWorker.postMessage((paused ? { type: "pause" } : { type: "resume" }) satisfies MainToCPUMessage);
   }
 
+  const systemFiles: SystemFilesApi = {
+    add(file: File, id: string | null): Promise<SystemFileOutcome> {
+      if (cpuSlot !== "ready") return Promise.resolve<SystemFileOutcome>({ ok: false, message: "the emulator is not ready" });
+      return new Promise<SystemFileOutcome>((resolve) => {
+        pendingSystemAdd.push(resolve);
+        cpuWorker.postMessage({ type: "system-file-add", file, id } satisfies MainToCPUMessage);
+      });
+    },
+    list(): Promise<readonly string[]> {
+      if (cpuSlot !== "ready") return Promise.resolve<readonly string[]>([]);
+      return new Promise<readonly string[]>((resolve) => {
+        pendingSystemList.push(resolve);
+        cpuWorker.postMessage({ type: "system-files-list" } satisfies MainToCPUMessage);
+      });
+    },
+  };
+
   function clearSdCard(): Promise<SdImportOutcome> {
     if (cpuSlot !== "ready") return Promise.resolve<SdImportOutcome>({ added: [], failed: [] });
     return new Promise<SdImportOutcome>((resolve) => {
@@ -472,6 +499,7 @@ async function boot(): Promise<BootResult | null> {
     loadGame,
     addToSdCard,
     clearSdCard,
+    systemFiles,
     setPaused,
     setFrameSkip,
     setHostCores,

@@ -116,6 +116,12 @@ static void test_user_system_data(void) {
   uint32_t node = RAMFS_NO_NODE;
   CHECK(ramfs_lookup(&pool, root, "/systemdata/0100000000000802.romfs", &node) == 0);
   CHECK(ramfs_write(&pool, node, 0, image, size) == 0);
+  uint64_t id = 1;
+  const Byte_Source image_source = byte_source_from_memory(image, size);
+  CHECK(system_data_identify(&image_source, &id) == SYSTEM_DATA_ROMFS && id == 0);
+  static const uint8_t junk[0x80] = {1, 2, 3};
+  const Byte_Source junk_source = byte_source_from_memory(junk, sizeof(junk));
+  CHECK(system_data_identify(&junk_source, &id) == SYSTEM_DATA_UNKNOWN);
   CHECK(system_data_open_user(&pool, root, SYSTEM_DATA_MII_MODEL, &src));
   CHECK(src.size == size);
   Arena arena;

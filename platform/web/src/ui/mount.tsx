@@ -4,7 +4,7 @@
  * part that runs inside a black screen - small and fast.
  */
 import { render } from "solid-js/web";
-import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
+import type { GameLoadOutcome, SdImportOutcome, SystemFilesApi } from "@bindings/load";
 import App from "./App";
 import "./shell.css";
 
@@ -15,6 +15,7 @@ export interface MountOptions {
   readonly loadGame:     (file: File) => Promise<GameLoadOutcome>;
   readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard:  () => Promise<SdImportOutcome>;
+  readonly systemFiles:  SystemFilesApi;
   readonly setPaused:    (paused: boolean) => void;
   readonly setFrameSkip: (frames: number) => void;
   readonly setHostCores: (cores: number) => void;
@@ -62,7 +63,7 @@ export function mountShell(options: MountOptions): void {
   const root = document.getElementById("app-root");
   if (!root) throw new Error("mountShell: #app-root missing from index.html");
 
-  render(() => <App adapterLabel={options.adapterLabel} cpuBackend={options.cpuBackend} guestRamMiB={options.guestRamMiB} loadGame={options.loadGame} addToSdCard={options.addToSdCard} clearSdCard={options.clearSdCard} setPaused={options.setPaused} setFrameSkip={options.setFrameSkip} setHostCores={options.setHostCores} respondText={options.respondText} />, root);
+  render(() => <App adapterLabel={options.adapterLabel} cpuBackend={options.cpuBackend} guestRamMiB={options.guestRamMiB} loadGame={options.loadGame} addToSdCard={options.addToSdCard} clearSdCard={options.clearSdCard} systemFiles={options.systemFiles} setPaused={options.setPaused} setFrameSkip={options.setFrameSkip} setHostCores={options.setHostCores} respondText={options.respondText} />, root);
 
   attachCanvasToScreen();
 

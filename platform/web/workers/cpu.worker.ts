@@ -459,6 +459,68 @@ async function addToSdCard(files: readonly File[]): Promise<CPUToMainMessage> {
 }
 
 /* ------------------------------------------------------------------ */
+/* System files (§1.6): the user's own dumps of system archives.       */
+/* ------------------------------------------------------------------ */
+
+const SYSTEM_DATA_DIR = "/systemdata";
+const SYSTEM_KIND_NCA = 1;
+const SYSTEM_KIND_ROMFS = 2;
+const SYSTEM_KIND_ENCRYPTED = 3;
+
+/** Stores a system archive the user dumped from their console where
+ * fsp-srv looks for it first: /systemdata/<id>.nca or .romfs. */
+async function addSystemFile(file: File, chosenId: string | null): Promise<CPUToMainMessage> {
+  const fail = (message: string): CPUToMainMessage => ({ type: "system-file-added", outcome: { ok: false, message } });
+  if (!core || !coreMemory) return fail("the emulator is not ready");
+  let bytes: Uint8Array;
+  try {
+    bytes = new Uint8Array(fileReader.readAsArrayBuffer(file));
+  } catch (e) {
+    return fail(`could not read ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  const data = copyIntoCore(bytes);
+  const out = core._malloc(8);
+  if (data === 0 || out === 0) return fail("not enough memory");
+  let kind = 0;
+  let ncaId = 0n;
+  try {
+    kind = core._emulator_identify_system_data_ffi(BigInt(data), BigInt(bytes.byteLength), BigInt(out));
+    ncaId = new DataView(coreMemory.buffer).getBigUint64(out, true);
+  } finally {
+    core._free(data);
+    core._free(out);
+  }
+  if (kind === SYSTEM_KIND_ENCRYPTED) {
+    return fail(`${file.name} is still encrypted: decrypt it with your own tools first, like your games`);
+  }
+  let id: string;
+  if (kind === SYSTEM_KIND_NCA) id = ncaId.toString(16).padStart(16, "0");
+  else if (kind === SYSTEM_KIND_ROMFS && chosenId) id = chosenId;
+  else if (kind === SYSTEM_KIND_ROMFS) return fail(`${file.name} is a RomFS image: pick which system file it is`);
+  else return fail(`${file.name} is not a decrypted system data NCA or a RomFS image`);
+  const extension = kind === SYSTEM_KIND_NCA ? "nca" : "romfs";
+  const other = kind === SYSTEM_KIND_NCA ? "romfs" : "nca";
+  const path = `${SYSTEM_DATA_DIR}/${id}.${extension}`;
+  if (!writeSdFile(path, bytes)) return fail(`could not store ${file.name} (too large or out of space)`);
+  /* One copy per archive: the NCA would win over a stale RomFS, and v.v. */
+  if (readSdManifest()?.has(`${SYSTEM_DATA_DIR}/${id}.${other}`)) {
+    withCString(`${SYSTEM_DATA_DIR}/${id}.${other}`, (p) => { core?._emulator_sd_write_file_ffi(p, 0n, 0n); });
+    await removeSdFile(`${SYSTEM_DATA_DIR}/${id}.${other}`);
+  }
+  if (!(await persistSdFile(path, bytes))) log("warn", `system file ${path} will not survive a reload (no OPFS)`);
+  return { type: "system-file-added", outcome: { ok: true, id } };
+}
+
+function listSystemFiles(): CPUToMainMessage {
+  const ids = new Set<string>();
+  for (const path of readSdManifest()?.keys() ?? []) {
+    const m = /^\/systemdata\/([0-9a-f]{16})\.(nca|romfs)$/.exec(path);
+    if (m?.[1]) ids.add(m[1]);
+  }
+  return { type: "system-files-listed", ids: [...ids] };
+}
+
+/* ------------------------------------------------------------------ */
 /* Guest writes -> OPFS (§15): every SD_MIRROR_MS, if any filesystem    */
 /* changed, diff the SD manifest and store / remove what changed.      */
 /* ------------------------------------------------------------------ */
@@ -796,8 +858,17 @@ async function loadState(id: string): Promise<CPUToMainMessage> {
 }
 
 async function clearSdCard(): Promise<CPUToMainMessage> {
+  /* System files are not homebrew: they stay (they have their own list). */
+  const kept: [string, Uint8Array][] = [];
+  for (const path of readSdManifest()?.keys() ?? []) {
+    const bytes = path.startsWith(`${SYSTEM_DATA_DIR}/`) ? readSdFile(path) : null;
+    if (bytes && bytes.byteLength > 0) kept.push([path, bytes]);
+  }
   if (core && core._emulator_sd_clear_ffi() !== CoreResult.Ok) log("warn", "SD card: a file is in use; reload to clear it");
   await clearSdFiles();
+  for (const [path, bytes] of kept) {
+    if (writeSdFile(path, bytes)) await persistSdFile(path, bytes);
+  }
   baselineSdMirror();
   return { type: "sd-files-added", added: [], failed: [] };
 }
@@ -926,6 +997,14 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
 
   if (msg.type === "sd-add-files") {
     void addToSdCard(msg.files).then((reply) => self.postMessage(reply));
+    return;
+  }
+  if (msg.type === "system-file-add") {
+    void addSystemFile(msg.file, msg.id).then((reply) => self.postMessage(reply));
+    return;
+  }
+  if (msg.type === "system-files-list") {
+    self.postMessage(listSystemFiles());
     return;
   }
   if (msg.type === "sd-clear") {

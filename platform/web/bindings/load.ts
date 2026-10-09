@@ -106,6 +106,32 @@ export function readCString(buffer: ArrayBufferLike, address: number, maxBytes: 
   return new TextDecoder().decode(bytes);
 }
 
+/** System archives a title may mount (fsp-srv OpenDataStorageByDataId)
+ * that Voland does not ship (§1.6): the user adds their own console's
+ * copy under "System files". `id` is the data id in 16 hex digits. */
+export interface SystemFileInfo {
+  readonly id: string;
+  readonly name: string;
+  readonly neededBy: string;
+}
+export const SYSTEM_FILES: readonly SystemFileInfo[] = [
+  { id: "0100000000000802", name: "Mii model", neededBy: "games that draw Miis (Mario Kart 8 Deluxe, Mii Fighters in Smash)" },
+];
+export function systemFileName(id: string): string {
+  return SYSTEM_FILES.find((f) => f.id === id)?.name ?? `system data ${id}`;
+}
+
+/** What adding a system file did: the archive it was stored as, or why not. */
+export type SystemFileOutcome =
+  | { readonly ok: true; readonly id: string }
+  | { readonly ok: false; readonly message: string };
+
+/** The shell's handle on "System files" (main.ts -> LoadPanel). */
+export interface SystemFilesApi {
+  readonly add: (file: File, id: string | null) => Promise<SystemFileOutcome>;
+  readonly list: () => Promise<readonly string[]>;
+}
+
 /** What an SD-card import did: the SD paths written and the files that
  * could not be (too large, out of space, unreadable). */
 export interface SdImportOutcome {

@@ -2502,7 +2502,10 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - A pre-decrypted data NCA has its RomFS section served; a bare RomFS is served as is.
   - Only then does Voland's stand-in apply.
   - MK8DX needs this: its Mii renderer cannot build its resources from the header-only MiiModel stand-in, and NVN later faults on the uninitialized texture objects (~4.4 s after boot, under the interpreter and the JIT alike).
-  - On the web, "Add to SD card" puts a file at `/<name>`, so a file named `0100000000000802.nca` is found.
+  - **"System files" in the web shell.** The load panel lists the archives games may ask for (`SYSTEM_FILES` in `bindings/load.ts`) and whether each was added.
+    - "Add system file…" asks the core what the file is (`emulator_identify_system_data_ffi`): a data NCA names its own id, a raw RomFS takes the kind picked beside the button, and an encrypted or unknown file is refused.
+    - The file is stored at `/systemdata/<id>.nca|.romfs` and kept in OPFS like the SD card.
+    - "Empty SD card" keeps system files.
 - **A32 JIT (docs/JIT.md "AArch32").** 32-bit titles run on `CPU_BACKEND_A32_JIT`, the ARM64→WASM JIT's runtime with an A32 front end (`jit_compile_a32.inc`) and the A32 interpreter as its cold path and fallback.
   - `CPU_Backend.aarch32` replaces the backend-pointer test in HLE.
   - `A32_State` overlays `Jit_State`, which gains `isa`.

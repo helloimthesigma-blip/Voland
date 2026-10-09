@@ -141,17 +141,12 @@ static Error ramfs_source_read(void *user, uint64_t offset, void *out, uint64_t 
   return OK;
 }
 
-bool system_data_open_user(Ramfs_Pool *pool, uint32_t sd_root, uint64_t data_id, Byte_Source *out) {
-  if (!pool || sd_root == RAMFS_NO_NODE) return false;
-  static const char *const forms[] = {"/%016llx.nca", "/systemdata/%016llx.nca", "/%016llx.romfs", "/systemdata/%016llx.romfs"};
+/* Opens one candidate file as the archive: false if it is absent, empty
+ * (a removed copy) or not usable. */
+static bool open_user_file(Ramfs_Pool *pool, uint32_t sd_root, const char *path, bool is_nca, uint64_t data_id,
+                           Byte_Source *out) {
   uint32_t node = RAMFS_NO_NODE;
-  uint32_t form = 0;
-  char path[USER_DATA_PATH_BYTES];
-  for (; form < sizeof(forms) / sizeof(forms[0]); form++) {
-    snprintf(path, sizeof(path), forms[form], (unsigned long long)data_id);
-    if (ramfs_lookup(pool, sd_root, path, &node) == 0) break;
-  }
-  if (form == sizeof(forms) / sizeof(forms[0])) return false;
+  if (ramfs_lookup(pool, sd_root, path, &node) != 0 || pool->nodes[node].size == 0) return false;
   User_Data *d = NULL;
   for (uint32_t i = 0; i < USER_DATA_SLOTS && !d; i++)
     if (!g_user[i].used || g_user[i].id == data_id) d = &g_user[i];
@@ -160,15 +155,14 @@ bool system_data_open_user(Ramfs_Pool *pool, uint32_t sd_root, uint64_t data_id,
   d->id = data_id;
   d->pool = pool;
   d->node = node;
-  const uint64_t size = pool->nodes[node].size;
   d->file.user = d;
-  d->file.size = size;
+  d->file.size = pool->nodes[node].size;
   d->file.read = ramfs_source_read;
   d->used = true;
-  if (form >= 2u) { /* a bare RomFS */
+  if (!is_nca) {
     *out = d->file;
     log_info("[fs] system data %016llx: the user's RomFS %s (%llu bytes)", (unsigned long long)data_id, path,
-             (unsigned long long)size);
+             (unsigned long long)d->file.size);
     return true;
   }
   int section = -1;
@@ -183,4 +177,37 @@ bool system_data_open_user(Ramfs_Pool *pool, uint32_t sd_root, uint64_t data_id,
   *out = *nca_section_source(&d->nca, (uint32_t)section);
   log_info("[fs] system data %016llx: the user's NCA %s", (unsigned long long)data_id, path);
   return true;
+}
+
+bool system_data_open_user(Ramfs_Pool *pool, uint32_t sd_root, uint64_t data_id, Byte_Source *out) {
+  if (!pool || sd_root == RAMFS_NO_NODE) return false;
+  static const char *const forms[] = {"/systemdata/%016llx.nca", "/systemdata/%016llx.romfs", "/%016llx.nca",
+                                      "/%016llx.romfs"};
+  char path[USER_DATA_PATH_BYTES];
+  for (uint32_t form = 0; form < sizeof(forms) / sizeof(forms[0]); form++) {
+    snprintf(path, sizeof(path), forms[form], (unsigned long long)data_id);
+    if (open_user_file(pool, sd_root, path, (form & 1u) == 0, data_id, out)) return true;
+  }
+  return false;
+}
+
+System_Data_Kind system_data_identify(const Byte_Source *file, uint64_t *data_id) {
+  *data_id = 0;
+  NCA_File nca;
+  const Error err = nca_open(file, &nca);
+  if (err.code == RESULT_ENCRYPTED_INPUT) return SYSTEM_DATA_ENCRYPTED;
+  if (error_is_ok(err)) {
+    if (nca.header.content_type != NCA_CONTENT_DATA && nca.header.content_type != NCA_CONTENT_PUBLIC_DATA)
+      return SYSTEM_DATA_UNKNOWN;
+    if (nca_find_section(&nca, NCA_FS_ROMFS) < 0) return SYSTEM_DATA_UNKNOWN;
+    *data_id = nca.header.program_id;
+    return SYSTEM_DATA_NCA;
+  }
+  uint8_t header[8];
+  if (file->size >= ROMFS_HEADER_SIZE && error_is_ok(byte_source_read(file, 0, header, sizeof(header)))) {
+    uint64_t header_size;
+    memcpy(&header_size, header, sizeof(header_size));
+    if (header_size == ROMFS_HEADER_SIZE) return SYSTEM_DATA_ROMFS;
+  }
+  return SYSTEM_DATA_UNKNOWN;
 }

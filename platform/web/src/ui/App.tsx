@@ -7,7 +7,7 @@
  * decrypted NCA. The game library + settings screens are Phase 6 (§25).
  */
 import { For, createSignal, onCleanup, onMount } from "solid-js";
-import type { GameLoadOutcome, SdImportOutcome } from "@bindings/load";
+import type { GameLoadOutcome, SdImportOutcome, SystemFilesApi } from "@bindings/load";
 import type { LogEntry } from "../log";
 import { getLogHistory, getStatus, subscribeLogs, subscribeStatus } from "../log";
 import SavesPanel from "./SavesPanel";
@@ -24,6 +24,7 @@ interface AppProps {
   readonly loadGame:     (file: File) => Promise<GameLoadOutcome>;
   readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard:  () => Promise<SdImportOutcome>;
+  readonly systemFiles:  SystemFilesApi;
   readonly setPaused:    (paused: boolean) => void;
   readonly setFrameSkip: (frames: number) => void;
   readonly setHostCores: (cores: number) => void;
@@ -61,7 +62,7 @@ function App(props: AppProps) {
           <h2>Ready.</h2>
           <p>Load a game you dumped (a decrypted Program NCA) or a homebrew NRO, or run the built-in demo. Homebrew you add to the SD card appears in a homebrew menu such as hbmenu.</p>
           <div class="voland-screen" data-voland-screen data-testid="screen" />
-          <LoadPanel loadGame={props.loadGame} addToSdCard={props.addToSdCard} clearSdCard={props.clearSdCard} setPaused={props.setPaused} gpuAdapter={props.adapterLabel} />
+          <LoadPanel loadGame={props.loadGame} addToSdCard={props.addToSdCard} clearSdCard={props.clearSdCard} systemFiles={props.systemFiles} setPaused={props.setPaused} gpuAdapter={props.adapterLabel} />
           <SavesPanel />
           <FrameSkipSetting setFrameSkip={props.setFrameSkip} />
           <ThreadsSetting setHostCores={props.setHostCores} />
