@@ -1051,15 +1051,45 @@ static void a32_vfp_int_to_fp(Ctx *c, bool dbl, bool is_signed, uint32_t d, uint
   a32_fp_else_exact(c);
 }
 
-/* VCVT from F32/F64 in Vm to a 32-bit integer in Sd, rounding towards
- * zero (`toward_zero`) or to nearest (FPSCR's mode, default here). Out of
- * range and NaN take the exact arm (IOC, saturation). */
-static void a32_vfp_fp_to_int(Ctx *c, bool dbl, bool is_signed, bool toward_zero, uint32_t d, uint32_t m) {
+typedef enum A32_Rounding { A32_ROUND_ZERO, A32_ROUND_NEAREST, A32_ROUND_PLUS, A32_ROUND_MINUS, A32_ROUND_AWAY } A32_Rounding;
+
+/* The value in `a`, rounded to an integral value (the same format) on
+ * the stack. Ties away: the truncation, one further out when the dropped
+ * fraction is at least a half (exact in either format). */
+static void a32_round_integral(Ctx *c, uint32_t a, bool dbl, A32_Rounding mode) {
+  static const uint8_t ops32[4] = {WASM_OP_F32_TRUNC, WASM_OP_F32_NEAREST, WASM_OP_F32_CEIL, WASM_OP_F32_FLOOR};
+  static const uint8_t ops64[4] = {WASM_OP_F64_TRUNC, WASM_OP_F64_NEAREST, WASM_OP_F64_CEIL, WASM_OP_F64_FLOOR};
+  lget(c, a);
+  if (mode != A32_ROUND_AWAY) {
+    op(c, dbl ? ops64[mode] : ops32[mode]);
+    return;
+  }
+  const uint32_t t = dbl ? L_FD3 : L_FS3;
+  op(c, dbl ? WASM_OP_F64_TRUNC : WASM_OP_F32_TRUNC);
+  ltee(c, t);
+  if (dbl) f64c(c, 0x3FF0000000000000ull);
+  else f32c(c, 0x3F800000u);
+  lget(c, a);
+  op(c, dbl ? WASM_OP_F64_COPYSIGN : WASM_OP_F32_COPYSIGN);
+  op(c, dbl ? WASM_OP_F64_ADD : WASM_OP_F32_ADD);
+  lget(c, t);
+  lget(c, a);
+  lget(c, t);
+  op(c, dbl ? WASM_OP_F64_SUB : WASM_OP_F32_SUB);
+  op(c, dbl ? WASM_OP_F64_ABS : WASM_OP_F32_ABS);
+  if (dbl) f64c(c, 0x3FE0000000000000ull);
+  else f32c(c, 0x3F000000u);
+  op(c, dbl ? WASM_OP_F64_GE : WASM_OP_F32_GE);
+  op(c, WASM_OP_SELECT);
+}
+
+/* VCVT/VCVTA/VCVTN/VCVTP/VCVTM from F32/F64 in Vm to a 32-bit integer in
+ * Sd. Out of range and NaN take the exact arm (IOC, saturation). */
+static void a32_vfp_fp_to_int(Ctx *c, bool dbl, bool is_signed, A32_Rounding mode, uint32_t d, uint32_t m) {
   const uint32_t a = dbl ? L_FD2 : L_FS2, r = fp_result_local(dbl);
   a32_fp_load(c, m, dbl);
-  ltee(c, a);
-  if (dbl) op(c, toward_zero ? WASM_OP_F64_TRUNC : WASM_OP_F64_NEAREST);
-  else op(c, toward_zero ? WASM_OP_F32_TRUNC : WASM_OP_F32_NEAREST);
+  lset(c, a);
+  a32_round_integral(c, a, dbl, mode);
   ltee(c, r);
   lget(c, a);
   op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
@@ -1145,6 +1175,74 @@ static void a32_vfp_fused_single(Ctx *c, bool o1, bool o0, uint32_t d, uint32_t 
   a32_fp_else_exact(c);
 }
 
+/* The ARMv8 VFP forms in the unconditional space: VSEL, VMAXNM/VMINNM,
+ * VRINTA/N/P/M, VCVTA/N/P/M. */
+static bool a32_jit_vfp_v8(Ctx *c, uint32_t insn) {
+  if (bits(insn, 27, 24) != 0xEu || bits(insn, 11, 9) != 5u || bit(insn, 4)) return false;
+  const bool dbl = bit(insn, 8);
+  const uint32_t d = a32_vreg(insn, dbl, 15, 12, 22), n = a32_vreg(insn, dbl, 19, 16, 7), m = a32_vreg(insn, dbl, 3, 0, 5);
+  if (!bit(insn, 23)) { /* VSEL: cc 00 EQ, 01 VS, 10 GE, 11 GT */
+    if (bit(insn, 6)) return false;
+    static const uint32_t conds[4] = {0x0u, 0x6u, 0xAu, 0xCu};
+    lget(c, L_STATE);
+    lget(c, L_STATE);
+    mem(c, dbl ? WASM_OP_I64_LOAD : WASM_OP_I32_LOAD, ALIGN_4, dbl ? a32_off_d(n) : a32_off_s(n));
+    lget(c, L_STATE);
+    mem(c, dbl ? WASM_OP_I64_LOAD : WASM_OP_I32_LOAD, ALIGN_4, dbl ? a32_off_d(m) : a32_off_s(m));
+    emit_condition(c, conds[bits(insn, 21, 20)]);
+    op(c, WASM_OP_SELECT);
+    mem(c, dbl ? WASM_OP_I64_STORE : WASM_OP_I32_STORE, ALIGN_4, dbl ? a32_off_d(d) : a32_off_s(d));
+    return true;
+  }
+  if (bits(insn, 21, 20) == 0u) { /* VMAXNM / VMINNM without NaNs: one operand, unrounded, no flags */
+    const uint32_t a = dbl ? L_FD2 : L_FS2, b = dbl ? L_FD3 : L_FS3, r = fp_result_local(dbl);
+    const bool min = bit(insn, 6);
+    a32_fp_load(c, n, dbl);
+    ltee(c, a);
+    a32_fp_load(c, m, dbl);
+    ltee(c, b);
+    if (dbl) op(c, min ? WASM_OP_F64_MIN : WASM_OP_F64_MAX);
+    else op(c, min ? WASM_OP_F32_MIN : WASM_OP_F32_MAX);
+    lset(c, r);
+    lget(c, a);
+    lget(c, a);
+    op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
+    lget(c, b);
+    lget(c, b);
+    op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
+    op(c, WASM_OP_I32_AND);
+    emit_fpcr_default(c);
+    op(c, WASM_OP_I32_AND);
+    fp_fast_arm(c);
+    a32_fp_store(c, d, dbl, r);
+    a32_fp_else_exact(c);
+    return true;
+  }
+  if (bits(insn, 21, 20) != 3u || !bit(insn, 6) || bit(insn, 19) != 1u) return false;
+  static const A32_Rounding modes[4] = {A32_ROUND_AWAY, A32_ROUND_NEAREST, A32_ROUND_PLUS, A32_ROUND_MINUS};
+  const A32_Rounding mode = modes[bits(insn, 17, 16)];
+  if (bit(insn, 18)) { /* VCVTA/N/P/M: Sd from Vm */
+    a32_vfp_fp_to_int(c, dbl, bit(insn, 7), mode, a32_vreg(insn, false, 15, 12, 22), m);
+    return true;
+  }
+  if (bit(insn, 7)) return false;
+  /* VRINTA/N/P/M: integral, no Inexact; NaNs take the exact arm */
+  const uint32_t a = dbl ? L_FD2 : L_FS2, r = fp_result_local(dbl);
+  a32_fp_load(c, m, dbl);
+  lset(c, a);
+  a32_round_integral(c, a, dbl, mode);
+  lset(c, r);
+  lget(c, a);
+  lget(c, a);
+  op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
+  emit_fpcr_default(c);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  a32_fp_store(c, d, dbl, r);
+  a32_fp_else_exact(c);
+  return true;
+}
+
 /* The VFP data-processing forms beyond a32_vfp_arith's: VMOV (immediate),
  * the multiply-accumulates, VCMP/VCMPE, VCVT. */
 static bool a32_vfp_more(Ctx *c, uint32_t insn) {
@@ -1190,7 +1288,7 @@ static bool a32_vfp_more(Ctx *c, uint32_t insn) {
     a32_vfp_int_to_fp(c, dbl, op7, d, sm);
     return true;
   case 0xC: case 0xD: /* VCVT U32 / S32 (opc2 bit 0) from F32/F64, op7: towards zero */
-    a32_vfp_fp_to_int(c, dbl, opc2 == 0xDu, op7, sd, m);
+    a32_vfp_fp_to_int(c, dbl, opc2 == 0xDu, op7 ? A32_ROUND_ZERO : A32_ROUND_NEAREST, sd, m);
     return true;
   default: return false;
   }
@@ -1929,6 +2027,7 @@ static Outcome a32_compile_instruction_checked(Ctx *c, uint32_t insn) {
     if (bits(insn, 27, 25) == 5u) return OUTCOME_END_HELPER;
     if (bits(insn, 27, 24) == 4u && a32_neon_load_store(c, insn)) return OUTCOME_NEXT;
     if (bits(insn, 27, 25) == 1u && a32_neon_data_processing(c, insn)) return OUTCOME_NEXT;
+    if (a32_jit_vfp_v8(c, insn)) return OUTCOME_NEXT;
     return a32_direct(c, insn);
   }
   if (bits(insn, 27, 25) == 5u) { /* B, BL */

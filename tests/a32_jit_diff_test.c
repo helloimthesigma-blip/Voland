@@ -153,7 +153,7 @@ static uint32_t gen_media(void) {
 static uint32_t gen_vfp(void) {
   const uint32_t dbl = pick(2), d = pick(16), n = pick(16), m = pick(16);
   const uint32_t vd = dbl ? d : d >> 1, dbit = dbl ? 0 : d & 1u;
-  switch (pick(8)) {
+  switch (pick(9)) {
   case 0: /* VLDR / VSTR through r8-r11 */
     return (cond() << 28) | 0x0D000A00u | (pick(2) << 23) | (dbit << 22) | (pick(2) << 20) | ((8u + pick(4)) << 16) |
            (vd << 12) | (dbl << 8) | pick(32);
@@ -181,6 +181,18 @@ static uint32_t gen_vfp(void) {
       return (cond() << 28) | 0x0EB70AC0u | (dbl << 8) | ((dbl ? d >> 1 : d) << 12) | ((dbl ? d & 1u : 0) << 22) |
              (dbl ? m : m >> 1) | ((dbl ? 0 : m & 1u) << 5);
     }
+  case 7: { /* ARMv8, unconditional: VSEL, VMAXNM/VMINNM, VRINTA/N/P/M, VCVTA/N/P/M */
+    const uint32_t regs = (vd << 12) | (dbit << 22) | ((dbl ? n : n >> 1) << 16) | ((dbl ? 0 : n & 1u) << 7) |
+                          (dbl ? m : m >> 1) | ((dbl ? 0 : m & 1u) << 5) | (dbl << 8);
+    switch (pick(4)) {
+    case 0: return 0xFE000A00u | (pick(4) << 20) | regs;
+    case 1: return 0xFE800A00u | (pick(2) << 6) | regs;
+    case 2: return 0xFEB80A40u | (pick(4) << 16) | (regs & ~(0xFu << 16) & ~(1u << 7));
+    default: /* Sd destination */
+      return 0xFEBC0A40u | (pick(4) << 16) | (pick(2) << 7) | (dbl << 8) | ((d >> 1) << 12) | ((d & 1u) << 22) |
+             (dbl ? m : m >> 1) | ((dbl ? 0 : m & 1u) << 5);
+    }
+  }
   case 6: /* VMOV (immediate); VCMP/VCMPE with #0.0; the multiply-accumulates and fused forms */
     switch (pick(3)) {
     case 0: return (cond() << 28) | 0x0EB00A00u | (dbl << 8) | (vd << 12) | (dbit << 22) | (pick(16) << 16) | pick(16);

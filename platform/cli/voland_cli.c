@@ -10,6 +10,7 @@
  *       --jit-dump DIR               jit: write every compiled module to DIR
  *       --jit-fallbacks              jit: print the commonest interpreted opcodes
  *       --jit-hot N                  jit: count region entries, print the hottest N
+ *       --jit-threshold N            jit: interpreted executions before compiling (256)
  *       --max-slices N               stop after N slices (default 10000000)
  *       --test-card                  publish the core's test card before running
  *       --expect-output TEXT         exit 4 unless the guest printed TEXT
@@ -1163,6 +1164,8 @@ static int run(int argc, char **argv) {
     } else if (!strcmp(argv[i], "--jit-hot") && has_value) {
       jit_hot_top = (uint32_t)strtoul(argv[++i], NULL, 0);
       jit_set_hot_profile(true);
+    } else if (!strcmp(argv[i], "--jit-threshold") && has_value) { /* interpreted runs before compiling */
+      jit_set_hot_threshold((uint32_t)strtoul(argv[++i], NULL, 0));
     } else if (!strcmp(argv[i], "--jit-no-calls")) {
       jit_set_span_calls(false);
     } else if (!strcmp(argv[i], "--jit-fallbacks")) {
