@@ -40,7 +40,12 @@ struct Gpu_Stream;
 #define RASTER_SURFACES 12u
 #define RASTER_MAX_SURFACE_BYTES ((size_t)2048 * 1280 * 4)
 #define RASTER_PROGRAMS 160u
-#define RASTER_TEXTURES 256u
+/* Cached texture descriptors. GPU mode keeps only the GPU copy of an
+ * uploaded texture, so this count - not the pool - bounds the working
+ * set: MK8DX's races sample well over 256 a frame (at 256 every texture
+ * was evicted, re-decoded and re-uploaded about once a frame). */
+#define RASTER_TEXTURES 2048u
+#define RASTER_TEXTURE_BUCKETS 4096u /* descriptor-hash index (raster3d.c texture_find) */
 #define RASTER_SURFACE_VIEWS 32u
 /* Decoded textures. A commercial scene's working set reaches ~500MB
  * (Silksong's first room: 29 textures, one a 64MB 4096x4096 atlas) - a
@@ -71,7 +76,7 @@ struct Gpu_Stream;
 /* Render targets live only on the GPU: dropping one loses its pixels.
  * MK8DX keeps well over 64 (light-probe faces and their mips at 32x32
  * and below, plus the frame's 1080p targets). */
-#define RASTER_GPU_SURFACES 256u
+#define RASTER_GPU_SURFACES 2048u
 #define RASTER_GPU_SHADERS 1024u
 
 typedef struct Raster3d_Bindings {
@@ -199,6 +204,9 @@ typedef struct Raster3d {
   Raster3d_Program *programs; /* RASTER_PROGRAMS */
   uint8_t *program_bytes;   /* RASTER_PROGRAM_READ_BYTES */
   Raster3d_Texture textures[RASTER_TEXTURES];
+  uint16_t texture_buckets[RASTER_TEXTURE_BUCKETS]; /* slot + 1 by descriptor hash; 0 empty; may be stale */
+  uint32_t texture_bucket_count;                     /* filled buckets, stale ones included */
+  size_t pool_starts[RASTER_TEXTURES], pool_sizes[RASTER_TEXTURES]; /* pool_allocate's scratch */
   /* Render targets sampled in place: built once per (surface, descriptor)
    * per draw and never rewritten while the draw's workers may read them. */
   Raster3d_Texture surface_views[RASTER_SURFACE_VIEWS];
