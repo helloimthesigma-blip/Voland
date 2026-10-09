@@ -248,8 +248,36 @@ static uint32_t neon_regs(uint32_t q) {
   return ((d >> 4) << 22) | ((d & 15u) << 12) | ((n >> 4) << 7) | ((n & 15u) << 16) | ((m >> 4) << 5) | (m & 15u) |
          (q << 6);
 }
+/* Vd and Vm fields (two-register forms; Q forms even registers). */
+static uint32_t neon_dm(uint32_t q) {
+  const uint32_t d = q ? pick(16) * 2u : pick(32), m = q ? pick(16) * 2u : pick(32);
+  return ((d >> 4) << 22) | ((d & 15u) << 12) | ((m >> 4) << 5) | (m & 15u) | (q << 6);
+}
+
+/* VPADD/VCEQ/VCGE/VCGT/VMAX/VMIN (F32), compares with #0, VCVT.F32.S32/U32,
+ * VTRN/VUZP/VZIP, VTBL. */
+static uint32_t gen_neon_more(uint32_t q) {
+  switch (pick(7)) {
+  case 0: return 0xF3000D00u | (neon_regs(0) & ~(1u << 6)); /* VPADD.F32 (D) */
+  case 1: { /* VCEQ VCGE VCGT (F32) */
+    static const uint32_t forms[3] = {0xF2000E00u, 0xF3000E00u, 0xF3200E00u};
+    return forms[pick(3)] | neon_regs(q);
+  }
+  case 2: return (pick(2) ? 0xF2000F00u : 0xF2200F00u) | neon_regs(q); /* VMAX / VMIN */
+  case 3: return 0xF3B90400u | (pick(5) << 7) | neon_dm(q);         /* VCGT VCGE VCEQ VCLE VCLT #0 */
+  case 4: return 0xF3BB0600u | (pick(2) << 7) | neon_dm(q);         /* VCVT.F32.S32 / U32 */
+  case 5: return 0xF3B20000u | (pick(3) << 18) | ((1u + pick(3)) << 7) | neon_dm(q); /* VTRN VUZP VZIP */
+  default: { /* VTBL (and some VTBX) */
+    const uint32_t len = pick(4), n = pick(32 - len);
+    return 0xF3B00800u | (len << 8) | ((n >> 4) << 7) | ((n & 15u) << 16) | (pick(8) == 0 ? 1u << 6 : 0u) |
+           (neon_dm(0) & ~(1u << 6));
+  }
+  }
+}
+
 static uint32_t gen_neon(void) {
   const uint32_t q = pick(2);
+  if (pick(3) == 0) return gen_neon_more(q);
   switch (pick(10)) {
   case 0: case 1: { /* F32: VADD VSUB VMLA VMLS VMUL */
     static const uint32_t forms[5] = {0xF2000D00u, 0xF2200D00u, 0xF2000D10u, 0xF2200D10u, 0xF3000D10u};

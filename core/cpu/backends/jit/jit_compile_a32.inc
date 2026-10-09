@@ -1610,6 +1610,44 @@ static void a32_neon_fp(Ctx *c, Neon_Fp_Op nop, bool q, uint32_t d) {
   a32_fp_else_exact(c);
 }
 
+/* An F32 operation with no rounding (compare, max, min) of L_VA and L_VB:
+ * native when every input lane is normal or zero - no NaN to raise IOC
+ * or propagate, no denormal for the standard FPSCR to flush. Else the
+ * interpreter. */
+static void a32_neon_fp_exact(Ctx *c, uint32_t wasm_op, bool q, uint32_t d) {
+  a32_lane_normal_or_zero(c, L_VA);
+  a32_lane_normal_or_zero(c, L_VB);
+  simd(c, WASM_SIMD_V128_AND);
+  emit_all_lanes(c, q);
+  fp_fast_arm(c);
+  lget(c, L_VA);
+  lget(c, L_VB);
+  simd(c, wasm_op);
+  lset(c, L_VR);
+  a32_store_vec(c, d, L_VR, q);
+  a32_fp_else_exact(c);
+}
+
+/* VPADD.F32 Dd, Dn, Dm: [n0 + n1, m0 + m1], as VADD of [n0, m0] and [n1, m1]. */
+static bool a32_neon_vpadd_f32(Ctx *c, uint32_t n, uint32_t m, uint32_t d) {
+  static const uint8_t evens[SIMD_LANE_BYTES] = {0, 1, 2, 3, 16, 17, 18, 19, 0, 1, 2, 3, 16, 17, 18, 19};
+  static const uint8_t odds[SIMD_LANE_BYTES] = {4, 5, 6, 7, 20, 21, 22, 23, 4, 5, 6, 7, 20, 21, 22, 23};
+  a32_load_vec(c, n, false);
+  lset(c, L_VT);
+  a32_load_vec(c, m, false);
+  lset(c, L_VR);
+  lget(c, L_VT);
+  lget(c, L_VR);
+  v128_shuffle(c, evens);
+  lset(c, L_VA);
+  lget(c, L_VT);
+  lget(c, L_VR);
+  v128_shuffle(c, odds);
+  lset(c, L_VB);
+  a32_neon_fp(c, NEON_FP_ADD, false, d);
+  return true;
+}
+
 /* Register numbers: D:Vd, N:Vn, M:Vm. */
 static uint32_t a32_neon_d(uint32_t insn) { return (bit(insn, 22) << 4) | bits(insn, 15, 12); }
 static uint32_t a32_neon_n(uint32_t insn) { return (bit(insn, 7) << 4) | bits(insn, 19, 16); }
@@ -1628,12 +1666,30 @@ static bool a32_neon_three_same(Ctx *c, uint32_t insn) {
     if (!b && !u) nop = size & 2u ? NEON_FP_SUB : NEON_FP_ADD;
     else if (b && !u) nop = size & 2u ? NEON_FP_MLS : NEON_FP_MLA;
     else if (b && u && !(size & 2u)) nop = NEON_FP_MUL;
-    else return false; /* VPADD, VABD */
+    else if (!b && u && !(size & 2u)) return !q && a32_neon_vpadd_f32(c, n, m, d);
+    else return false; /* VABD */
     a32_load_vec(c, n, q);
     lset(c, L_VA);
     a32_load_vec(c, m, q);
     lset(c, L_VB);
     a32_neon_fp(c, nop, q, d);
+    return true;
+  }
+  if (opc == 0xEu && !b && !bit(insn, 20)) { /* VCEQ / VCGE / VCGT (F32) */
+    if (!u && (size & 2u)) return false;
+    a32_load_vec(c, n, q);
+    lset(c, L_VA);
+    a32_load_vec(c, m, q);
+    lset(c, L_VB);
+    a32_neon_fp_exact(c, !u ? WASM_SIMD_F32X4_EQ : (size & 2u) ? WASM_SIMD_F32X4_GT : WASM_SIMD_F32X4_GE, q, d);
+    return true;
+  }
+  if (opc == 0xFu && !b && !u && !bit(insn, 20)) { /* VMAX / VMIN (F32) */
+    a32_load_vec(c, n, q);
+    lset(c, L_VA);
+    a32_load_vec(c, m, q);
+    lset(c, L_VB);
+    a32_neon_fp_exact(c, (size & 2u) ? WASM_SIMD_F32X4_MIN : WASM_SIMD_F32X4_MAX, q, d);
     return true;
   }
   if (opc == 1u && b) { /* VAND VBIC VORR VORN VEOR VBSL VBIT VBIF */
@@ -1786,6 +1842,133 @@ static bool a32_neon_modified_immediate(Ctx *c, uint32_t insn) {
   return true;
 }
 
+/* VTRN, VUZP, VZIP: Vd and Vm become the two halves of the transposed,
+ * de-interleaved or interleaved pair (byte shuffles fixed at compile
+ * time). */
+#define A32_NEON_VTRN 1u
+#define A32_NEON_VUZP 2u
+#define A32_NEON_VZIP 3u
+static bool a32_neon_permute(Ctx *c, uint32_t insn, uint32_t kind) {
+  const bool q = bit(insn, 6);
+  const uint32_t size = bits(insn, 19, 18), d = a32_neon_d(insn), m = a32_neon_m(insn);
+  if (size == 3u || d == m || (q && ((d | m) & 1u))) return false;
+  if (!q && size == 2u && kind != A32_NEON_VTRN) return false; /* UNDEFINED */
+  const uint32_t ebytes = 1u << size, lanes = (q ? SIMD_LANE_BYTES : SIMD_LANE_BYTES / 2u) / ebytes, half = lanes / 2u;
+  uint32_t out_d[SIMD_LANE_BYTES], out_m[SIMD_LANE_BYTES]; /* element of (Vd, Vm): Vd's i, or Vm's i as lanes + i */
+  for (uint32_t i = 0; i < half; i++) {
+    switch (kind) {
+    case A32_NEON_VZIP:
+      out_d[2u * i] = i; out_d[2u * i + 1u] = lanes + i;
+      out_m[2u * i] = half + i; out_m[2u * i + 1u] = lanes + half + i;
+      break;
+    case A32_NEON_VUZP:
+      out_d[i] = 2u * i; out_d[half + i] = lanes + 2u * i;
+      out_m[i] = 2u * i + 1u; out_m[half + i] = lanes + 2u * i + 1u;
+      break;
+    default: /* VTRN */
+      out_d[2u * i] = 2u * i; out_d[2u * i + 1u] = lanes + 2u * i;
+      out_m[2u * i] = 2u * i + 1u; out_m[2u * i + 1u] = lanes + 2u * i + 1u;
+      break;
+    }
+  }
+  uint8_t bytes_d[SIMD_LANE_BYTES] = {0}, bytes_m[SIMD_LANE_BYTES] = {0};
+  for (uint32_t e = 0; e < lanes; e++) {
+    for (uint32_t k = 0; k < ebytes; k++) {
+      const uint32_t at = e * ebytes + k;
+      bytes_d[at] = (uint8_t)(out_d[e] < lanes ? out_d[e] * ebytes + k : SIMD_LANE_BYTES + (out_d[e] - lanes) * ebytes + k);
+      bytes_m[at] = (uint8_t)(out_m[e] < lanes ? out_m[e] * ebytes + k : SIMD_LANE_BYTES + (out_m[e] - lanes) * ebytes + k);
+    }
+  }
+  a32_load_vec(c, d, q);
+  lset(c, L_VA);
+  a32_load_vec(c, m, q);
+  lset(c, L_VB);
+  lget(c, L_VA);
+  lget(c, L_VB);
+  v128_shuffle(c, bytes_d);
+  lset(c, L_VR);
+  lget(c, L_VA);
+  lget(c, L_VB);
+  v128_shuffle(c, bytes_m);
+  lset(c, L_VT);
+  a32_store_vec(c, d, L_VR, q);
+  a32_store_vec(c, m, L_VT, q);
+  return true;
+}
+
+/* Two registers, miscellaneous: VTRN/VUZP/VZIP, the F32 compares against
+ * zero, VCVT.F32.S32/U32. */
+static bool a32_neon_two_misc(Ctx *c, uint32_t insn) {
+  const uint32_t a = bits(insn, 17, 16), b = bits(insn, 10, 6), size = bits(insn, 19, 18);
+  const bool q = bit(insn, 6);
+  const uint32_t d = a32_neon_d(insn), m = a32_neon_m(insn);
+  if (a == 2u && (b >> 1) >= A32_NEON_VTRN && (b >> 1) <= A32_NEON_VZIP) return a32_neon_permute(c, insn, b >> 1);
+  if (q && ((d | m) & 1u)) return false;
+  if (a == 1u && (b & 0x10u) && size == 2u && ((b >> 1) & 7u) <= 4u) { /* VCGT VCGE VCEQ VCLE VCLT #0 (F32) */
+    static const uint32_t ops[5] = {WASM_SIMD_F32X4_GT, WASM_SIMD_F32X4_GE, WASM_SIMD_F32X4_EQ, WASM_SIMD_F32X4_GE,
+                                    WASM_SIMD_F32X4_GT};
+    const uint32_t k = (b >> 1) & 7u;
+    const bool swap = k >= 3u; /* VCLE, VCLT: 0 >= x, 0 > x */
+    a32_load_vec(c, m, q);
+    lset(c, swap ? L_VB : L_VA);
+    f32c(c, 0);
+    simd(c, WASM_SIMD_F32X4_SPLAT);
+    lset(c, swap ? L_VA : L_VB);
+    a32_neon_fp_exact(c, ops[k], q, d);
+    return true;
+  }
+  if (a == 3u && (b & 0x1Cu) == 0x18u && size == 2u && !bit(insn, 8)) { /* VCVT.F32.S32 / .U32 */
+    a32_load_vec(c, m, q);
+    lset(c, L_VA);
+    emit_fp_env_ok(c); /* rounding: IXC already set */
+    fp_fast_arm(c);
+    lget(c, L_VA);
+    simd(c, bit(insn, 7) ? WASM_SIMD_F32X4_CONVERT_I32X4_U : WASM_SIMD_F32X4_CONVERT_I32X4_S);
+    lset(c, L_VR);
+    a32_store_vec(c, d, L_VR, q);
+    a32_fp_else_exact(c);
+    return true;
+  }
+  return false;
+}
+
+/* VTBL: Dd's bytes looked up in a table of one to four D registers from
+ * Dn (an index past the table reads 0; i8x16.swizzle's 16-byte reach
+ * covers two registers per lookup). VTBX keeps Dd's byte: not here. */
+static void a32_neon_table_half(Ctx *c, uint32_t first, uint32_t regs) {
+  if (regs == 2u) {
+    lget(c, L_STATE);
+    simd(c, WASM_SIMD_V128_LOAD);
+    wasm_uleb(c->b, ALIGN_1);
+    wasm_uleb(c->b, a32_off_d(first));
+    return;
+  }
+  a32_load_vec(c, first, false);
+  v128_const(c, ~(uint64_t)0, 0);
+  simd(c, WASM_SIMD_V128_AND);
+}
+static bool a32_neon_vtbl(Ctx *c, uint32_t insn) {
+  if (bit(insn, 6)) return false; /* VTBX */
+  const uint32_t len = bits(insn, 9, 8) + 1u, n = a32_neon_n(insn), d = a32_neon_d(insn), m = a32_neon_m(insn);
+  if (n + len > 32u) return false;
+  a32_load_vec(c, m, false);
+  lset(c, L_VB);
+  a32_neon_table_half(c, n, len >= 2u ? 2u : 1u);
+  lget(c, L_VB);
+  simd(c, WASM_SIMD_I8X16_SWIZZLE);
+  if (len > 2u) {
+    a32_neon_table_half(c, n + 2u, len - 2u);
+    lget(c, L_VB);
+    v128_const(c, 0x1010101010101010ull, 0x1010101010101010ull);
+    simd(c, WASM_SIMD_I8X16_SUB); /* indices 16..31 to 0..15; below 16 wrap past 15 and read 0 */
+    simd(c, WASM_SIMD_I8X16_SWIZZLE);
+    simd(c, WASM_SIMD_V128_OR);
+  }
+  lset(c, L_VR);
+  a32_store_vec(c, d, L_VR, false);
+  return true;
+}
+
 /* The Advanced SIMD data-processing space (unconditional, 1111 001x). */
 static bool a32_neon_data_processing(Ctx *c, uint32_t insn) {
   if (!bit(insn, 23)) return a32_neon_three_same(c, insn);
@@ -1795,6 +1978,8 @@ static bool a32_neon_data_processing(Ctx *c, uint32_t insn) {
   }
   if (bits(insn, 21, 20) != 3u) return bit(insn, 6) ? a32_neon_by_scalar(c, insn) : false;
   if (!bit(insn, 24)) return a32_neon_vext(c, insn);
+  if (bits(insn, 11, 8) < 8u) return a32_neon_two_misc(c, insn);
+  if (bits(insn, 11, 10) == 2u) return a32_neon_vtbl(c, insn);
   if (bits(insn, 11, 8) == 0xCu && !bit(insn, 7)) return a32_neon_vdup_scalar(c, insn);
   return false;
 }
