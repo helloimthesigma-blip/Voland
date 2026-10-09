@@ -746,6 +746,94 @@ static bool a32_vfp_load_store(Ctx *c, uint32_t insn) {
   return true;
 }
 
+/* A run of `count` registers of `size` bytes at L_ADDR (one walk; a
+ * crossing or a fault is the interpreter's, which transfers all or
+ * nothing): the state offsets come from `offset_of(first + i)`. */
+static void a32_register_run(Ctx *c, bool load, uint32_t size, uint32_t count, uint32_t first,
+                             uint64_t (*offset_of)(uint32_t)) {
+  open_block(c); /* $go */
+  const uint32_t go = c->depth;
+  open_block(c); /* $slow */
+  emit_walk(c, size * count, load ? VMM_PERM_R : VMM_PERM_W, c->depth);
+  br(c, go);
+  end_(c);
+  leave_via_interpreter(c);
+  end_(c); /* $go: L_HOST */
+  const uint8_t load_op = size == 8u ? WASM_OP_I64_LOAD : WASM_OP_I32_LOAD;
+  const uint8_t store_op = size == 8u ? WASM_OP_I64_STORE : WASM_OP_I32_STORE;
+  for (uint32_t i = 0; i < count; i++) {
+    if (load) {
+      lget(c, L_STATE);
+      lget(c, L_HOST);
+      mem(c, load_op, ALIGN_1, size * i);
+      mem(c, store_op, ALIGN_4, offset_of(first + i));
+    } else {
+      lget(c, L_HOST);
+      lget(c, L_STATE);
+      mem(c, load_op, ALIGN_4, offset_of(first + i));
+      mem(c, store_op, ALIGN_1, size * i);
+    }
+  }
+}
+
+/* VLD1/VST1 (multiple structures, one to four D registers): memory and
+ * register bytes in the same order whatever the element size; the
+ * alignment hint is not checked (as the interpreter). Rm: 15 no
+ * writeback, 13 the size, else Rm. */
+static bool a32_neon_load_store(Ctx *c, uint32_t insn) {
+  if (bit(insn, 23)) return false; /* single lanes, all lanes */
+  uint32_t regs;
+  switch (bits(insn, 11, 8)) {
+  case 7: regs = 1; break;
+  case 0xA: regs = 2; break;
+  case 6: regs = 3; break;
+  case 2: regs = 4; break;
+  default: return false; /* VLD2-4 */
+  }
+  const uint32_t rn = bits(insn, 19, 16), rm = bits(insn, 3, 0), d0 = (bit(insn, 22) << 4) | bits(insn, 15, 12);
+  if (rn == A32_REG_PC || d0 + regs > 32u) return false;
+  get_x(c, rn);
+  lset(c, L_ADDR);
+  a32_register_run(c, bit(insn, 21), 8u, regs, d0, a32_off_d);
+  if (rm != A32_REG_PC) {
+    lget(c, L_ADDR);
+    if (rm == A32_REG_SP) i64c(c, 8u * regs);
+    else get_x(c, rm);
+    op(c, WASM_OP_I64_ADD);
+    mask32(c);
+    set_x(c, rn);
+  }
+  return true;
+}
+
+/* VLDM/VSTM: IA (writeback optional) and DB with writeback - VPUSH and
+ * VPOP. FLDMX/FSTMX (an odd word count of doubles) moves imm8/2
+ * registers and writes back imm8 words. */
+static bool a32_vfp_load_store_multiple(Ctx *c, uint32_t insn) {
+  const bool pre = bit(insn, 24), up = bit(insn, 23), w = bit(insn, 21), dbl = bit(insn, 8);
+  const uint32_t rn = bits(insn, 19, 16), words = bits(insn, 7, 0);
+  if (pre == up || (pre && !w) || rn == A32_REG_PC) return false;
+  const uint32_t regs = dbl ? words / 2u : words;
+  const uint32_t first = dbl ? (bit(insn, 22) << 4) | bits(insn, 15, 12) : (bits(insn, 15, 12) << 1) | bit(insn, 22);
+  if (!regs || first + regs > 32u) return false;
+  get_x(c, rn);
+  if (!up) {
+    i64c(c, 4u * words);
+    op(c, WASM_OP_I64_SUB);
+    mask32(c);
+  }
+  lset(c, L_ADDR);
+  a32_register_run(c, bit(insn, 20), dbl ? 8u : 4u, regs, first, dbl ? a32_off_d : a32_off_s);
+  if (w) {
+    get_x(c, rn);
+    i64c(c, 4u * words);
+    op(c, up ? WASM_OP_I64_ADD : WASM_OP_I64_SUB);
+    mask32(c);
+    set_x(c, rn);
+  }
+  return true;
+}
+
 /* VMOV between a core register and a single, the two-register forms, and
  * VMRS APSR_nzcv, FPSCR. */
 static bool a32_vfp_transfer(Ctx *c, uint32_t insn) {
@@ -1239,7 +1327,7 @@ static bool a32_synchronization(Ctx *c, uint32_t insn) {
   const uint32_t size = k_size[bits(insn, 22, 21)], ordered = bits(insn, 9, 8), load = bit(insn, 20);
   const uint32_t rn = bits(insn, 19, 16), rd = bits(insn, 15, 12), rt = bits(insn, 3, 0);
   if (!bit(insn, 23) || size == 8u || ordered == 1u || cpu_multicore()) return false;
-  if (rn == A32_REG_PC || rd == A32_REG_PC || (!load && rt == A32_REG_PC)) return false;
+  if (rn == A32_REG_PC || ((load || ordered) && rd == A32_REG_PC) || (!load && rt == A32_REG_PC)) return false;
   get_x(c, rn);
   lset(c, L_ADDR);
   if (load) {
@@ -1384,6 +1472,7 @@ static Outcome a32_body(Ctx *c, uint32_t insn) {
     if (bits(insn, 11, 9) == 5u) {
       if (bits(insn, 27, 25) == 6u && bits(insn, 24, 21) == 2u && a32_vfp_transfer(c, insn)) return OUTCOME_NEXT;
       if (a32_vfp_load_store(c, insn)) return OUTCOME_NEXT;
+      if (bits(insn, 27, 25) == 6u && a32_vfp_load_store_multiple(c, insn)) return OUTCOME_NEXT;
     }
     return a32_direct(c, insn); /* VFP loads/stores */
   }
@@ -1446,6 +1535,7 @@ static Outcome a32_compile_instruction_checked(Ctx *c, uint32_t insn) {
   const uint32_t cond = bits(insn, 31, 28);
   if (cond == A32_COND_NV) { /* Advanced SIMD directly; BLX (immediate) is Thumb */
     if (bits(insn, 27, 25) == 5u) return OUTCOME_END_HELPER;
+    if (bits(insn, 27, 24) == 4u && a32_neon_load_store(c, insn)) return OUTCOME_NEXT;
     return a32_direct(c, insn);
   }
   if (bits(insn, 27, 25) == 5u) { /* B, BL */

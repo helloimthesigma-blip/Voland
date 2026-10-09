@@ -2311,12 +2311,14 @@ static void emit_arith_exact(Ctx *c, bool dbl, uint32_t opcode, bool two, uint32
       lget(c, L_FD5);
       op(c, WASM_OP_F64_EQ);
       op(c, WASM_OP_I32_AND);
-    } else if (two && opcode == 1u) { /* r * b == a */
+    } else if (two && opcode == 1u) { /* r * b == a, or a zero result (0 / inf: r * b is NaN) */
       lget(c, L_FD);
       lget(c, L_FD3);
       op(c, WASM_OP_F64_MUL);
       lget(c, L_FD2);
       op(c, WASM_OP_F64_EQ);
+      emit_is_zero(c, L_FD, true);
+      op(c, WASM_OP_I32_OR);
     } else if (two) { /* FMUL, FNMUL: r == +-(a * b) */
       lget(c, L_FD2);
       lget(c, L_FD3);

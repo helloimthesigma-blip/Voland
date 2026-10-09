@@ -194,7 +194,18 @@ static uint32_t gen_vfp(void) {
     }
   default: /* NEON: VADD.I32 q, VLD1.32 {d} through r8-r11 */
     if (pick(2)) return 0xF2200840u | ((d & 14u) << 12) | ((n & 14u) << 16) | (m & 14u);
-    return 0xF4200780u | (pick(2) << 21) | ((8u + pick(4)) << 16) | (d << 12) | (pick(2) ? 15u : 13u);
+    if (pick(2)) {
+      static const uint32_t types[4] = {7u, 0xAu, 6u, 2u};
+      const uint32_t rm = pick(3) ? (pick(2) ? 15u : 13u) : pick(8);
+      return 0xF4000000u | (pick(2) << 21) | (pick(2) << 22) | ((8u + pick(4)) << 16) | (pick(13) << 12) |
+             (types[pick(4)] << 8) | (pick(16) << 4) | rm;
+    }
+    { /* VLDM / VSTM: IA, IA!, DB! (VPUSH / VPOP through sp) */
+      static const uint32_t modes[3] = {0x0C800000u, 0x0CA00000u, 0x0D200000u};
+      const uint32_t rn = pick(3) ? 8u + pick(4) : 13u, count = 1u + pick(8);
+      return (cond() << 28) | modes[pick(3)] | (pick(2) << 20) | (rn << 16) | (dbit << 22) | (vd << 12) | 0xA00u |
+             (dbl << 8) | (dbl ? 2u * count + (pick(8) == 0) : count);
+    }
   }
 }
 
@@ -374,7 +385,9 @@ static void run_case(uint32_t iteration) {
       if (memcmp(&ref.v[i], &jit.v[i], sizeof(ref.v[i])))
         fprintf(stderr, "  q%d %016llx:%016llx / %016llx:%016llx\n", i, (unsigned long long)ref.v[i].hi,
                 (unsigned long long)ref.v[i].lo, (unsigned long long)jit.v[i].hi, (unsigned long long)jit.v[i].lo);
-    if (ref.fpsr != jit.fpsr || ref.fpcr != jit.fpcr) fprintf(stderr, "  fpscr differs\n");
+    if (ref.fpsr != jit.fpsr || ref.fpcr != jit.fpcr)
+      fprintf(stderr, "  fpsr %08llx / %08llx, fpcr %08llx / %08llx\n", (unsigned long long)ref.fpsr,
+              (unsigned long long)jit.fpsr, (unsigned long long)ref.fpcr, (unsigned long long)jit.fpcr);
     if (memcmp(g_data_ref, data_jit, DATA_BYTES) != 0) fprintf(stderr, "  data differs\n");
     exit(1);
   }
