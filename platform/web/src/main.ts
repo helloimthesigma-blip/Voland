@@ -11,6 +11,7 @@
  * needs the CPU and GPU workers to validate the boot path end to end.
  */
 
+import { inLauncherFrame } from "./blank-launch";
 import type { CPUToMainMessage, DebugTargetImage, GPUToMainMessage, MainToCPUMessage, MainToGPUMessage } from "@bindings/protocol";
 import { AUDIO_RING_CAPACITY_FRAMES, type MemoryLayout, toByteOffset } from "@bindings/layout";
 import type { GameLoadOutcome, SdImportOutcome, SystemFileOutcome, SystemFilesApi } from "@bindings/load";
@@ -167,6 +168,17 @@ async function boot(): Promise<BootResult | null> {
     } catch (e) {
       appendLogLine("warn", `Service Worker registration failed: ${(e as Error).message}`);
     }
+  }
+
+  if (!crossOriginIsolated && inLauncherFrame()) {
+    /* Framed by a page that is not cross-origin isolated (another site's
+     * launcher or about:blank tab): isolation comes from the top-level
+     * page, so no reload or header here can give it. Voland's own
+     * launcher does (Settings, "Open in about:blank"; src/blank-launch.ts). */
+    fatal("Voland is inside a frame from a page that cannot run it: emulation needs the whole tab to be " +
+          "cross-origin isolated, and this tab is not. Open Voland directly (" + location.href + ") and use " +
+          "Settings > \"Open in about:blank\" to run it in a blank tab.");
+    return null;
   }
 
   if (!crossOriginIsolated) {
