@@ -42,6 +42,11 @@ typedef struct Jit_State {
    * address in, so a region compiles to the same bytes on every core and
    * the engine shares one compiled module between them (docs/PARALLEL.md). */
   uint64_t thread_cache;
+  /* The one-entry translation caches (jit_compile.c emit_walk), carried
+   * from one compiled region to the next while the page tables are as
+   * they were: valid when tlb_generation is the current vmm generation. */
+  uint64_t tlb_generation;
+  uint64_t tlb_rbase, tlb_rdelta, tlb_wbase, tlb_wdelta;
   uint32_t isa; /* JIT_ISA_*: what the state's code is (an A32 state is cpu/backends/a32's A32_State) */
 } Jit_State;
 

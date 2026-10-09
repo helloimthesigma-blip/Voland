@@ -131,10 +131,24 @@ arithmetic into guest RAM happens beyond what that walk produces.
 
 - In front of the walk sits a one-entry translation cache per
   permission, in locals: an access within the page last translated for
-  the same permission is `host = gva + delta`. Mappings only change in
-  SVCs, which leave compiled code, so this is exact in serial mode. It is
-  compiled out when guest threads run on several host threads, because
-  another core may remap mid-function.
+  the same permission is `host = gva + delta`.
+  - The cache goes from region to region through the state
+    (`Jit_State.tlb_*`). A region's prologue takes it only if the vmm
+    generation, which every mapping or permission change bumps, is the
+    one the cache was filled in; otherwise it starts empty.
+  - Mappings only change in SVCs, which leave compiled code, so this is
+    exact in serial mode.
+  - With guest threads on several host threads, another core may remap
+    while a region runs. The region keeps its translation until it exits
+    (at most one slice's budget), and the next region sees the new
+    generation. Only an access to the very page being remapped can tell,
+    which is a guest race on hardware too. The full walk had the same
+    window between reading the tables and the access.
+  - Before 2026-10-09 the cache was compiled out in multicore mode, so
+    every access did the full walk; and each region started empty, so a
+    tiny region walked on its first access to each page.
+  - `tests/jit_tlb_test.c` remaps a page between two regions, serially
+    and in multicore mode.
 - Page-crossing accesses go to `jit_helper_read`, `jit_helper_store` or
   `jit_helper_write`, which are all-or-nothing, exactly like the
   interpreter's `interp_read`/`interp_write`.

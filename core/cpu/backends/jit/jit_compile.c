@@ -147,6 +147,11 @@ enum {
 #define OFF_BUDGET STATE_OFFSET(cycle_budget)
 #define OFF_SCRATCH STATE_OFFSET(scratch)
 #define OFF_THREAD_CACHE STATE_OFFSET(thread_cache)
+#define OFF_TLB_GENERATION STATE_OFFSET(tlb_generation)
+#define OFF_TLB_RBASE STATE_OFFSET(tlb_rbase)
+#define OFF_TLB_RDELTA STATE_OFFSET(tlb_rdelta)
+#define OFF_TLB_WBASE STATE_OFFSET(tlb_wbase)
+#define OFF_TLB_WDELTA STATE_OFFSET(tlb_wdelta)
 #define OFF_EXCLUSIVE_ADDRESS STATE_OFFSET(interp.exclusive_address)
 #define OFF_EXCLUSIVE_SIZE STATE_OFFSET(interp.exclusive_size)
 #define OFF_EXCLUSIVE_VALUE STATE_OFFSET(interp.exclusive_value)
@@ -230,6 +235,7 @@ typedef struct Ctx {
   uint32_t insn;
   uint32_t max_local;     /* highest local used (this pass) */
   uint32_t declared_local; /* how many to declare (the analysis pass's max_local) */
+  bool uses_tlb;           /* an access went through the translation cache (the analysis pass's) */
   bool a32;               /* the code is A32 (jit_compile_a32.inc) */
 } Ctx;
 
@@ -1624,22 +1630,35 @@ static bool shared_walk(void) {
 
 /* The full walk (below) behind a one-entry translation cache per
  * permission, in locals: an access within the page last translated for
- * the same permission is `host = gva + delta`. Exact in serial mode -
- * mappings only change in SVCs, which leave compiled code, and each call
- * starts with an empty cache - so it is compiled out when guest threads
- * run on several host threads (another core may remap mid-function). */
+ * the same permission is `host = gva + delta`. The cache goes from region
+ * to region through the state (Jit_State.tlb_*) while the vmm generation
+ * - bumped by every mapping or permission change - is the one it was
+ * filled in; each region's prologue checks (emit_tlb_load).
+ *
+ * Serially that is exact: mappings change only in SVCs, which leave
+ * compiled code. With guest threads on several host threads another core
+ * may remap while a region runs; the region keeps its translation until
+ * it exits (as long as a slice's budget at most), the next one sees the
+ * new generation. Only an access to the very page being remapped can
+ * notice - a race in the guest on hardware too - and the full walk had
+ * the same window between its read of the tables and the access.
+ * JIT_NO_TLB=1: no cache. */
 #define TLB_EMPTY ((uint64_t)1 << 63) /* a page base no address matches */
 static bool g_no_tlb_set, g_no_tlb;
-static void emit_walk_full(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow);
-static void emit_walk(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) {
+static bool no_tlb(void) {
   if (!g_no_tlb_set) {
     g_no_tlb = getenv("JIT_NO_TLB") != NULL;
     g_no_tlb_set = true;
   }
-  if (cpu_multicore() || g_no_tlb) {
+  return g_no_tlb;
+}
+static void emit_walk_full(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow);
+static void emit_walk(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) {
+  if (no_tlb()) {
     emit_walk_full(c, size, perm, slow);
     return;
   }
+  c->uses_tlb = true;
   const bool write = perm == VMM_PERM_W;
   const uint32_t base = write ? L_TLB_WBASE : L_TLB_RBASE, delta = write ? L_TLB_WDELTA : L_TLB_RDELTA;
   lget(c, L_ADDR);
@@ -4588,6 +4607,49 @@ static void emit_chain(Ctx *c) {
   end_(c); /* $miss */
 }
 
+/* The translation caches from the state when its generation is current;
+ * else empty, and the state takes the current generation (what this
+ * region fills is valid in it). Regions with no cached access (known
+ * from the analysis pass) skip both ends. */
+static void emit_tlb_load(Ctx *c) {
+  if (c->discover || !c->uses_tlb) {
+    i64c(c, TLB_EMPTY);
+    lset(c, L_TLB_RBASE);
+    i64c(c, TLB_EMPTY);
+    lset(c, L_TLB_WBASE);
+    return;
+  }
+  i64c(c, c->link->generation_address);
+  mem(c, WASM_OP_I64_LOAD, ALIGN_8, 0);
+  lset(c, L_TLB_RDELTA); /* the current generation, for now */
+  state_load64(c, OFF_TLB_GENERATION);
+  lget(c, L_TLB_RDELTA);
+  op(c, WASM_OP_I64_EQ);
+  open_if(c, WASM_BLOCK_VOID);
+  static const struct { uint32_t local; uint64_t offset; } carried[4] = {
+      {L_TLB_RBASE, OFF_TLB_RBASE}, {L_TLB_RDELTA, OFF_TLB_RDELTA}, {L_TLB_WBASE, OFF_TLB_WBASE},
+      {L_TLB_WDELTA, OFF_TLB_WDELTA}};
+  for (uint32_t i = 0; i < 4u; i++) {
+    state_load64(c, carried[i].offset);
+    lset(c, carried[i].local);
+  }
+  else_(c);
+  state_store64_local(c, OFF_TLB_GENERATION, L_TLB_RDELTA);
+  i64c(c, TLB_EMPTY);
+  lset(c, L_TLB_RBASE);
+  i64c(c, TLB_EMPTY);
+  lset(c, L_TLB_WBASE);
+  end_(c);
+}
+
+static void emit_tlb_store(Ctx *c) {
+  if (c->discover || !c->uses_tlb) return;
+  state_store64_local(c, OFF_TLB_RBASE, L_TLB_RBASE);
+  state_store64_local(c, OFF_TLB_RDELTA, L_TLB_RDELTA);
+  state_store64_local(c, OFF_TLB_WBASE, L_TLB_WBASE);
+  state_store64_local(c, OFF_TLB_WDELTA, L_TLB_WDELTA);
+}
+
 static void emit_function(Ctx *c) {
   /* Locals: runs of i64, i32, f32, f64, v128 - only as far as the
    * analysis pass saw locals used (engines zero every declared local on
@@ -4614,10 +4676,7 @@ static void emit_function(Ctx *c) {
   /* Prologue. The caller checked that block 0 fits the budget. */
   state_load64(c, OFF_L1);
   lset(c, L_L1);
-  i64c(c, TLB_EMPTY);
-  lset(c, L_TLB_RBASE);
-  i64c(c, TLB_EMPTY);
-  lset(c, L_TLB_WBASE);
+  emit_tlb_load(c);
   reload(c);
   i64c(c, c->blocks[0].length);
   lset(c, L_CYC);
@@ -4701,6 +4760,7 @@ static void emit_function(Ctx *c) {
   op(c, WASM_OP_I64_ADD);
   ltee(c, L_T0); /* cycles_consumed */
   mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_CYCLES);
+  emit_tlb_store(c);
   emit_chain(c);
   i32c(c, JIT_BLOCK_CONTINUE);
   op(c, WASM_OP_RETURN);
@@ -4857,6 +4917,7 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     c.block_count = analysis.block_count;
     c.uses_helper = analysis.uses_helper;
     c.declared_local = analysis.max_local;
+    c.uses_tlb = analysis.uses_tlb;
     c.all_used = analysis.used | analysis.written;
     c.all_written = analysis.written;
     emit_function(&c);

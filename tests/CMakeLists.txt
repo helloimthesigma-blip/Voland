@@ -175,6 +175,10 @@ target_link_libraries(a32_jit_diff_test PRIVATE switch_core)
 add_test(NAME a32_jit_diff_test COMMAND a32_jit_diff_test 3000)
 
 # AArch32 exclusives on several host threads (docs/PARALLEL.md).
+add_executable(jit_tlb_test jit_tlb_test.c)
+target_link_libraries(jit_tlb_test PRIVATE switch_core)
+add_test(NAME jit_tlb_test COMMAND jit_tlb_test)
+
 add_executable(a32_parallel_test a32_parallel_test.c)
 target_link_libraries(a32_parallel_test PRIVATE switch_core)
 add_test(NAME a32_parallel_test COMMAND a32_parallel_test)

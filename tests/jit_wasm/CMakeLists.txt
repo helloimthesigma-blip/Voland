@@ -46,6 +46,16 @@ set_target_properties(a32_jit_diff_test_wasm PROPERTIES OUTPUT_NAME "a32_jit_dif
 add_test(NAME a32_jit_diff_test_node
   COMMAND ${VOLAND_NODE} $<TARGET_FILE:a32_jit_diff_test_wasm> 20000)
 
+# The translation cache across regions and a remap (serial and multicore).
+add_executable(jit_tlb_test_wasm ../jit_tlb_test.c)
+target_link_libraries(jit_tlb_test_wasm PRIVATE switch_core)
+target_include_directories(jit_tlb_test_wasm PRIVATE ..)
+target_link_options(jit_tlb_test_wasm PRIVATE
+  -sENVIRONMENT=node,worker -sIMPORTED_MEMORY=0 -sMODULARIZE=0 -sEXPORT_ES6=0 -sEXIT_RUNTIME=1
+  -sPTHREAD_POOL_SIZE=0 -sNODERAWFS=1 "-sEXPORTED_FUNCTIONS=['_main']")
+set_target_properties(jit_tlb_test_wasm PROPERTIES OUTPUT_NAME "jit_tlb_test" SUFFIX ".js")
+add_test(NAME jit_tlb_test_node COMMAND ${VOLAND_NODE} $<TARGET_FILE:jit_tlb_test_wasm>)
+
 # A32 exclusives on three host threads, the A32 JIT compiling on each
 # (a pool, so pthread_create needs no event-loop turn on the main thread).
 add_executable(a32_parallel_test_wasm ../a32_parallel_test.c)
