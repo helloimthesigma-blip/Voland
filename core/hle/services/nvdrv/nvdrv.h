@@ -178,6 +178,7 @@ typedef struct Nvdrv_State {
   uint32_t submit_calls[NVDRV_GPU_LATENCY_RING];
   uint32_t submit_head, submit_tail;
   uint64_t stalls_for_latency; /* waits nvdrv_bound_gpu_latency made */
+  uint64_t captured_submissions, captured_bytes, uncaptured_submissions; /* async: commands carried / run in place */
 } Nvdrv_State;
 
 /* Resets the state and initializes `state->interface`. `channels`:

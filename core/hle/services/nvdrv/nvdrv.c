@@ -746,7 +746,16 @@ static uint32_t run_gpfifo(Nvdrv_State *s, Nv_Fd *f, uint8_t *d) {
       const uint64_t *entries = (const uint64_t *)(const void *)(capture + sizeof(call));
       uint32_t words = 0;
       for (uint32_t i = 0; i < count; i++) words += gpu_channel_entry_words(entries[i]);
+      static int no_capture = -1;
+      if (no_capture < 0) no_capture = getenv("VOLAND_NO_CAPTURE") ? 1 : 0; /* measurement only: the old behaviour */
+      if (no_capture) {
+        gpu_thread_call(s->gpu_thread, gpfifo_run, NULL, payload, bytes);
+        note_submission(s, gpu_thread_queued(s->gpu_thread));
+        return fence;
+      }
       if (words <= room && gpu_channel_capture(&memory, entries, count, (uint32_t *)(void *)(capture + bytes), room)) {
+        s->captured_submissions++;
+        s->captured_bytes += (uint64_t)words * 4u;
         call.captured = true;
         memcpy(capture, &call, sizeof(call));
         gpu_thread_call(s->gpu_thread, gpfifo_run, NULL, capture, bytes + words * 4u);
@@ -755,6 +764,7 @@ static uint32_t run_gpfifo(Nvdrv_State *s, Nv_Fd *f, uint8_t *d) {
       }
     }
     /* Too large to carry: run it now, in order, once the thread is idle. */
+    s->uncaptured_submissions++;
     gpu_thread_drain(s->gpu_thread);
     gpfifo_run(NULL, payload, bytes);
     return fence;

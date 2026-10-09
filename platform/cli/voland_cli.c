@@ -1636,6 +1636,10 @@ static int run(int argc, char **argv) {
           k_status[status], (unsigned long long)slices, (unsigned long long)emu.scheduler.ticks,
           (unsigned long long)emu.hle.svc_call_count);
   if (width) fprintf(stderr, "voland-cli: frame %ux%u fnv1a64=%016llx\n", width, height, (unsigned long long)frame_hash);
+  if (emu.nvdrv.captured_submissions || emu.nvdrv.uncaptured_submissions)
+    fprintf(stderr, "voland-cli: async GPU: %llu submissions carried their commands (%llu MB), %llu ran in place, %llu latency waits\n",
+            (unsigned long long)emu.nvdrv.captured_submissions, (unsigned long long)(emu.nvdrv.captured_bytes >> 20),
+            (unsigned long long)emu.nvdrv.uncaptured_submissions, (unsigned long long)emu.nvdrv.stalls_for_latency);
   if (getenv("VOLAND_PEEK")) { /* debugging a stall: a guest word, and the GPU thread's state */
     const uint64_t at = strtoull(getenv("VOLAND_PEEK"), NULL, 0);
     uint32_t word = 0;

@@ -49,7 +49,7 @@ void gpu_thread_unlock(Gpu_Thread *t) { (void)t; }
 
 /* Several frames of submissions (a fight frame queues ~60 KB of GPFIFO
  * entries and display calls). */
-#define QUEUE_BYTES (8u * 1024u * 1024u)
+#define QUEUE_BYTES (32u * 1024u * 1024u)
 #define RECORD_ALIGN 16u
 #define NS_PER_SECOND 1000000000ull
 
