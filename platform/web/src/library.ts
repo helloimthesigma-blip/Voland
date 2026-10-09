@@ -132,9 +132,16 @@ export async function openGameFile(game: LibraryGame): Promise<File | null> {
   }
 }
 
-/** Whether this browser can keep file handles (showOpenFilePicker). */
+/** Whether this browser can keep file handles (showOpenFilePicker). Not in
+ * a frame: browsers block that picker in iframes, so a plain file input
+ * (as the firmware folder uses) is the path that opens there. */
 export function canKeepFiles(): boolean {
-  return typeof window !== "undefined" && "showOpenFilePicker" in window;
+  if (typeof window === "undefined" || !("showOpenFilePicker" in window)) return false;
+  try {
+    return window.self === window.top;
+  } catch {
+    return false; /* cross-origin parent */
+  }
 }
 
 /** Opens the system file picker; the chosen file and its handle, or null. */
