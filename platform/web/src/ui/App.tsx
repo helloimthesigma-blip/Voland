@@ -2,9 +2,11 @@
  * platform/web/src/ui/App.tsx
  *
  * SolidJS shell mounted once the boot sequence reports all workers ready.
- * A minimal landing surface that proves the reactive runtime is alive,
- * keeps the log/status streams flowing into the UI, and (Phase 1) loads a
- * decrypted NCA. The game library + settings screens are Phase 6 (§25).
+ * Left: the screen, the running game's controls under it, then the
+ * library and the load buttons. Right: everything set up once - settings,
+ * SD card and system files (LoadPanel's tools, portalled in), save data,
+ * controls - and the event log. The header carries the status and the
+ * backend/GPU/RAM facts.
  */
 import { For, createSignal, onCleanup, onMount } from "solid-js";
 import type { GameLoadOutcome, SdImportOutcome, SystemFilesApi } from "@bindings/load";
@@ -47,6 +49,8 @@ function App(props: AppProps) {
     onCleanup(() => { offLogs(); offStatus(); });
   });
 
+  const [tools, setTools] = createSignal<HTMLElement>();
+
   return (
     <div class="voland-shell">
       <header class="voland-header">
@@ -54,38 +58,48 @@ function App(props: AppProps) {
           <span class="voland-title">Voland</span>
           <span class="voland-subtitle">Switch emulator in your browser</span>
         </div>
-        <div class="voland-status">{status()}</div>
+        <dl class="voland-facts">
+          <div><dt>CPU</dt><dd>{props.cpuBackend}</dd></div>
+          <div><dt>GPU</dt><dd>{props.adapterLabel}</dd></div>
+          <div><dt>RAM</dt><dd>{props.guestRamMiB} MiB</dd></div>
+          <div><dt>Status</dt><dd class="voland-status">{status()}</dd></div>
+        </dl>
       </header>
 
       <section class="voland-main">
         <div class="voland-hero">
-          <h2>Ready.</h2>
-          <p>Load a game you dumped (a decrypted Program NCA) or a homebrew NRO, or run the built-in demo. Homebrew you add to the SD card appears in a homebrew menu such as hbmenu.</p>
           <div class="voland-screen" data-voland-screen data-testid="screen" />
-          <LoadPanel loadGame={props.loadGame} addToSdCard={props.addToSdCard} clearSdCard={props.clearSdCard} systemFiles={props.systemFiles} setPaused={props.setPaused} gpuAdapter={props.adapterLabel} />
-          <SavesPanel />
-          <FrameSkipSetting setFrameSkip={props.setFrameSkip} />
-          <ThreadsSetting setHostCores={props.setHostCores} />
-          <ControlsLegend />
+          <LoadPanel loadGame={props.loadGame} addToSdCard={props.addToSdCard} clearSdCard={props.clearSdCard}
+                     systemFiles={props.systemFiles} setPaused={props.setPaused} gpuAdapter={props.adapterLabel}
+                     toolsMount={tools} />
           <TextInputDialog respond={props.respondText} />
-          <dl class="voland-facts">
-            <div><dt>CPU backend</dt><dd>{props.cpuBackend}</dd></div>
-            <div><dt>GPU adapter</dt><dd>{props.adapterLabel}</dd></div>
-            <div><dt>Guest RAM</dt><dd>{props.guestRamMiB} MiB</dd></div>
-          </dl>
         </div>
 
-        <aside class="voland-log">
-          <header>event log</header>
-          <div class="voland-log-scroll">
-            <For each={logs()}>
-              {(entry) => (
-                <p class={`log-line log-${entry.level}`}>
-                  {`[${entry.level.toUpperCase().padEnd(5, " ")}] ${entry.message}`}
-                </p>
-              )}
-            </For>
-          </div>
+        <aside class="voland-side">
+          <section class="voland-panel">
+            <h4>Settings</h4>
+            <FrameSkipSetting setFrameSkip={props.setFrameSkip} />
+            <ThreadsSetting setHostCores={props.setHostCores} />
+          </section>
+          <div class="voland-tools" ref={setTools} />
+          <section class="voland-panel">
+            <SavesPanel />
+          </section>
+          <section class="voland-panel">
+            <ControlsLegend />
+          </section>
+          <details class="voland-panel voland-log">
+            <summary>Event log</summary>
+            <div class="voland-log-scroll">
+              <For each={logs()}>
+                {(entry) => (
+                  <p class={`log-line log-${entry.level}`}>
+                    {`[${entry.level.toUpperCase().padEnd(5, " ")}] ${entry.message}`}
+                  </p>
+                )}
+              </For>
+            </div>
+          </details>
         </aside>
       </section>
     </div>

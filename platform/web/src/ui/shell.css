@@ -18,7 +18,9 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 18px 28px;
+  flex-wrap: wrap;
+  gap: 10px 24px;
+  padding: 12px 24px;
   border-bottom: 1px solid #1c1c28;
 }
 
@@ -29,109 +31,128 @@
 }
 
 .voland-title {
-  font-size: 22px;
+  font-size: 20px;
   font-weight: 600;
   letter-spacing: 0.02em;
 }
 
 .voland-subtitle {
-  font-size: 12px;
+  font-size: 11px;
   color: #6b6b78;
   text-transform: uppercase;
   letter-spacing: 0.14em;
 }
 
-.voland-status {
-  font-size: 12px;
-  color: #8d8d99;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-}
-
-.voland-main {
-  flex: 1;
-  display: grid;
-  grid-template-columns: 1fr 380px;
-  min-height: 0;
-}
-
-.voland-hero {
-  /* The page's scroll area: the shell itself is a fixed full-window box. */
-  overflow-y: auto;
-  min-height: 0;
-  padding: 56px 64px;
-  display: flex;
-  flex-direction: column;
-  justify-content: safe center; /* plain center would push the top out of reach when it overflows */
-  gap: 24px;
-}
-
-.voland-hero h2 {
-  margin: 0;
-  font-size: 40px;
-  font-weight: 500;
-  letter-spacing: -0.01em;
-}
-
-.voland-hero p {
-  margin: 0;
-  color: #9a9aa8;
-  max-width: 52ch;
-  font-size: 15px;
-  line-height: 1.55;
-}
-
+/* Backend, GPU, RAM and status: small chips in the header. */
 .voland-facts {
   margin: 0;
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 18px;
-  max-width: 640px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
 }
 
 .voland-facts > div {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
   border: 1px solid #1f1f2b;
-  border-radius: 10px;
-  padding: 14px 16px;
-  background: rgba(255, 255, 255, 0.015);
+  border-radius: 999px;
+  padding: 3px 10px;
+  background: rgba(255, 255, 255, 0.02);
 }
 
 .voland-facts dt {
-  font-size: 11px;
+  font-size: 10px;
   color: #6b6b78;
   text-transform: uppercase;
   letter-spacing: 0.12em;
-  margin-bottom: 6px;
 }
 
 .voland-facts dd {
   margin: 0;
-  font-size: 15px;
+  font-size: 12px;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-  color: #e6e6ea;
+  color: #c9cbd6;
 }
 
-.voland-log {
-  display: flex;
-  flex-direction: column;
-  border-left: 1px solid #1c1c28;
-  background: rgba(0, 0, 0, 0.35);
+.voland-status { color: #8d8d99; }
+
+.voland-main {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 400px;
   min-height: 0;
 }
 
-.voland-log > header {
-  padding: 14px 18px;
+/* Left: the screen, the running game, the library. Scrolls on its own. */
+.voland-hero {
+  overflow-y: auto;
+  min-height: 0;
+  padding: 28px 36px 48px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 18px;
+}
+
+.voland-hero > * { width: 100%; max-width: 960px; }
+
+.voland-hero p {
+  margin: 0;
+  color: #9a9aa8;
+  font-size: 14px;
+  line-height: 1.55;
+}
+
+/* Right: set-up-once panels and the event log. */
+.voland-side {
+  overflow-y: auto;
+  min-height: 0;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  border-left: 1px solid #1c1c28;
+  background: rgba(0, 0, 0, 0.3);
+}
+
+.voland-tools { display: flex; flex-direction: column; gap: 12px; }
+.voland-tools > div { display: contents; } /* the Portal's wrapper */
+
+.voland-panel {
+  border: 1px solid #1f1f2b;
+  border-radius: 10px;
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.015);
+  font-size: 13px;
+}
+
+.voland-panel h4 {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: #8d8d99;
+}
+
+.voland-panel p { margin: 0 0 8px; line-height: 1.5; }
+.voland-panel .voland-setting { margin: 6px 0; }
+.voland-panel .voland-saves, .voland-panel .voland-controls { margin: 0; }
+.voland-panel summary { cursor: pointer; color: #c9cbd6; }
+
+.voland-log > summary {
   font-size: 11px;
   text-transform: uppercase;
-  letter-spacing: 0.18em;
-  color: #6b6b78;
-  border-bottom: 1px solid #1c1c28;
+  letter-spacing: 0.14em;
+  color: #8d8d99;
 }
 
 .voland-log-scroll {
-  flex: 1;
+  max-height: 360px;
   overflow-y: auto;
-  padding: 12px 18px;
-  font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
+  margin-top: 8px;
+  font: 11px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace;
   white-space: pre-wrap;
   word-break: break-word;
 }
@@ -143,12 +164,20 @@
 .voland-log-scroll .log-debug { color: #8d8d99; }
 .voland-log-scroll .log-trace { color: #5a5a66; }
 
+/* Narrow windows: one column, the side panels after the game. */
+@media (max-width: 1000px) {
+  .voland-shell { overflow-y: auto; }
+  .voland-main { display: block; }
+  .voland-hero, .voland-side { overflow: visible; }
+  .voland-hero { padding: 18px 16px; }
+  .voland-side { border-left: 0; border-top: 1px solid #1c1c28; }
+}
+
 .voland-load {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
+  align-items: stretch;
   gap: 14px;
-  max-width: 640px;
 }
 
 .voland-load-input { display: none; }
@@ -191,17 +220,12 @@
 }
 
 .voland-load-actions { display: flex; gap: 10px; flex-wrap: wrap; }
+.voland-panel .voland-load-actions { gap: 8px; }
+.voland-panel .voland-load-button { font-size: 13px; padding: 7px 12px; }
+.voland-load-hint { font-size: 12px; }
 
-.voland-system-files {
-  width: 100%;
-  box-sizing: border-box;
-  border: 1px solid #1f1f2b;
-  border-radius: 10px;
-  padding: 12px 16px;
-  background: rgba(255, 255, 255, 0.015);
-}
-.voland-system-files h4 { margin: 0 0 6px; font-size: 14px; font-weight: 600; }
-.voland-system-files ul { margin: 8px 0; padding-left: 18px; color: #c8c8d0; }
+.voland-system-files ul { margin: 0 0 10px; padding-left: 18px; color: #c8c8d0; line-height: 1.5; }
+.voland-system-files label { display: block; margin-top: 8px; }
 .voland-system-files code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #9a9aa8; }
 .voland-system-files select { background: #181824; color: #e6e6ea; border: 1px solid #2c2c3c; border-radius: 6px; }
 .voland-ok { color: #8fd98f; }
@@ -238,7 +262,6 @@
 
 .voland-screen {
   width: 100%;
-  max-width: 640px;
   aspect-ratio: 16 / 9;
   border-radius: 10px;
   background: #000;

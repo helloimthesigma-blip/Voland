@@ -6,6 +6,7 @@
  * hand-written homebrew (public/demo/hello.nro, from tests/guest/hello.s).
  */
 import { For, Match, Show, Switch, createSignal, onCleanup, onMount } from "solid-js";
+import { Portal } from "solid-js/web";
 import { SYSTEM_FILES, systemFileName } from "@bindings/load";
 import type { GameLoadOutcome, LoadFailure, SdImportOutcome, SystemFilesApi } from "@bindings/load";
 import { type GuestConsoleState, getGuestConsole, subscribeGuestConsole } from "../guest-console";
@@ -24,6 +25,8 @@ interface LoadPanelProps {
   readonly systemFiles: SystemFilesApi;
   readonly setPaused: (paused: boolean) => void;
   readonly gpuAdapter: string;
+  /** Where the SD card and system-file tools go (the sidebar). */
+  readonly toolsMount: () => HTMLElement | undefined;
 }
 
 type LoadState =
@@ -206,104 +209,6 @@ function LoadPanel(props: LoadPanelProps) {
         data-testid="firmware-input"
         onChange={(event) => { void onSystemFilesChosen(event); }}
       />
-      <GameLibrary
-        games={games()}
-        busy={state().kind === "loading"}
-        onLaunch={(game) => { void launch(game); }}
-        onForget={(game) => { void forgetGame(game.id).then(refreshLibrary); }}
-        onDropFiles={(items) => { void addDropped(items); }}
-      />
-      <div class="voland-load-actions">
-        <button
-          type="button"
-          class="voland-load-button"
-          disabled={state().kind === "loading"}
-          data-testid="load-game"
-          onClick={() => { void chooseGame(); }}
-        >
-          Load NCA or homebrew NRO…
-        </button>
-        <button
-          type="button"
-          class="voland-load-button voland-load-secondary"
-          data-testid="run-demo"
-          disabled={state().kind === "loading"}
-          onClick={() => { void runDemo(); }}
-        >
-          Run the demo
-        </button>
-        <button
-          type="button"
-          class="voland-load-button voland-load-secondary"
-          data-testid="sd-add"
-          onClick={() => sdInput?.click()}
-        >
-          Add homebrew to SD card…
-        </button>
-        <button
-          type="button"
-          class="voland-load-button voland-load-secondary"
-          data-testid="sd-clear"
-          onClick={() => { void props.clearSdCard().then(() => setSd({ added: [], failed: [] })); }}
-        >
-          Empty SD card
-        </button>
-      </div>
-      <div class="voland-system-files" data-testid="system-files">
-        <h4>System files</h4>
-        <p class="voland-load-note">
-          Some games need files from your own Switch's system that Voland does not include. Add them from your
-          console's dump, decrypted with your own tools like your games: single <code>.nca</code> files or raw
-          RomFS dumps, or a whole decrypted firmware folder (only what games need is kept).
-        </p>
-        <ul>
-          <For each={SYSTEM_FILES}>
-            {(f) => (
-              <li data-testid={`system-file-${f.id}`}>
-                <strong>{f.name}</strong> <code>{f.id}</code> - {f.neededBy}:{" "}
-                {systemIds().includes(f.id) ? <span class="voland-ok">added</span> : <span class="voland-missing">not added</span>}
-              </li>
-            )}
-          </For>
-        </ul>
-        <div class="voland-load-actions">
-          <button
-            type="button"
-            class="voland-load-button voland-load-secondary"
-            data-testid="system-add"
-            onClick={() => systemInput?.click()}
-          >
-            Add system files…
-          </button>
-          <button
-            type="button"
-            class="voland-load-button voland-load-secondary"
-            data-testid="firmware-add"
-            onClick={() => firmwareInput?.click()}
-          >
-            Choose firmware folder…
-          </button>
-          <label class="voland-load-note">
-            A raw RomFS dump is the{" "}
-            <select value={systemKind()} onChange={(e) => setSystemKind(e.currentTarget.value)} data-testid="system-kind">
-              <For each={SYSTEM_FILES}>{(f) => <option value={f.id}>{f.name}</option>}</For>
-            </select>
-          </label>
-        </div>
-        <Show when={systemNote()}>{(note) => <p class="voland-load-note" data-testid="system-result">{note()}</p>}</Show>
-      </div>
-      <Show when={sd()}>
-        {(result) => (
-          <p class="voland-load-note" data-testid="sd-result">
-            {result().added.length === 0 && result().failed.length === 0
-              ? "SD card emptied."
-              : `SD card: added ${result().added.length} file(s)` +
-                (result().added.length > 0 ? ` (${result().added.join(", ")})` : "") +
-                (result().failed.length > 0 ? `; could not add ${result().failed.join(", ")}` : "") + "."}
-          </p>
-        )}
-      </Show>
-
       <Switch>
         <Match when={(() => { const s = state(); return s.kind === "loading" ? s : null; })()}>
           {(loading) => <p class="voland-load-note">Loading {loading().fileName}…</p>}
@@ -382,6 +287,118 @@ function LoadPanel(props: LoadPanelProps) {
           }}
         </Match>
       </Switch>
+      <GameLibrary
+        games={games()}
+        busy={state().kind === "loading"}
+        onLaunch={(game) => { void launch(game); }}
+        onForget={(game) => { void forgetGame(game.id).then(refreshLibrary); }}
+        onDropFiles={(items) => { void addDropped(items); }}
+      />
+      <div class="voland-load-actions">
+        <button
+          type="button"
+          class="voland-load-button"
+          disabled={state().kind === "loading"}
+          data-testid="load-game"
+          onClick={() => { void chooseGame(); }}
+        >
+          Load NCA or homebrew NRO…
+        </button>
+        <button
+          type="button"
+          class="voland-load-button voland-load-secondary"
+          data-testid="run-demo"
+          disabled={state().kind === "loading"}
+          onClick={() => { void runDemo(); }}
+        >
+          Run the demo
+        </button>
+      </div>
+      <p class="voland-load-note voland-load-hint">
+        A decrypted Program NCA or a homebrew NRO. Games you load once stay in the library above.
+      </p>
+      <Show when={props.toolsMount()}>
+        {(mount) => (
+          <Portal mount={mount()}>
+            <section class="voland-panel" data-testid="sd-card">
+              <h4>SD card</h4>
+              <p class="voland-load-note">Homebrew you add appears in a homebrew menu such as hbmenu.</p>
+              <div class="voland-load-actions">
+                <button
+                  type="button"
+                  class="voland-load-button voland-load-secondary"
+                  data-testid="sd-add"
+                  onClick={() => sdInput?.click()}
+                >
+                  Add homebrew…
+                </button>
+                <button
+                  type="button"
+                  class="voland-load-button voland-load-secondary"
+                  data-testid="sd-clear"
+                  onClick={() => { void props.clearSdCard().then(() => setSd({ added: [], failed: [] })); }}
+                >
+                  Empty SD card
+                </button>
+              </div>
+              <Show when={sd()}>
+                {(result) => (
+                  <p class="voland-load-note" data-testid="sd-result">
+                    {result().added.length === 0 && result().failed.length === 0
+                      ? "SD card emptied."
+                      : `SD card: added ${result().added.length} file(s)` +
+                        (result().added.length > 0 ? ` (${result().added.join(", ")})` : "") +
+                        (result().failed.length > 0 ? `; could not add ${result().failed.join(", ")}` : "") + "."}
+                  </p>
+                )}
+              </Show>
+            </section>
+            <section class="voland-panel voland-system-files" data-testid="system-files">
+              <h4>System files</h4>
+              <p class="voland-load-note">
+                Some games need files from your own Switch's system that Voland does not include. Add them from
+                your console's dump, decrypted with your own tools like your games: single <code>.nca</code> files
+                or raw RomFS dumps, or a whole decrypted firmware folder (only what games need is kept).
+              </p>
+              <ul>
+                <For each={SYSTEM_FILES}>
+                  {(f) => (
+                    <li data-testid={`system-file-${f.id}`}>
+                      <strong>{f.name}</strong> <code>{f.id}</code> - {f.neededBy}:{" "}
+                      {systemIds().includes(f.id) ? <span class="voland-ok">added</span> : <span class="voland-missing">not added</span>}
+                    </li>
+                  )}
+                </For>
+              </ul>
+              <div class="voland-load-actions">
+                <button
+                  type="button"
+                  class="voland-load-button voland-load-secondary"
+                  data-testid="system-add"
+                  onClick={() => systemInput?.click()}
+                >
+                  Add system files…
+                </button>
+                <button
+                  type="button"
+                  class="voland-load-button voland-load-secondary"
+                  data-testid="firmware-add"
+                  onClick={() => firmwareInput?.click()}
+                >
+                  Choose firmware folder…
+                </button>
+              </div>
+              <label class="voland-load-note">
+                A raw RomFS dump is the{" "}
+                <select value={systemKind()} onChange={(e) => setSystemKind(e.currentTarget.value)} data-testid="system-kind">
+                  <For each={SYSTEM_FILES}>{(f) => <option value={f.id}>{f.name}</option>}</For>
+                </select>
+              </label>
+              <Show when={systemNote()}>{(note) => <p class="voland-load-note" data-testid="system-result">{note()}</p>}</Show>
+            </section>
+          </Portal>
+        )}
+      </Show>
     </div>
   );
 }

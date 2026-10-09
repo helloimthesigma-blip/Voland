@@ -19,6 +19,7 @@ export interface SwitchCoreExports {
 
   readonly _layout_get_ffi:      () => bigint; /* Memory_Layout* in linear memory */
   readonly _cpu_backend_id_ffi:  () => number; /* CpuBackendId */
+  readonly _cpu_backend_version_ffi: () => number; /* major << 16 | minor << 8 | patch, -1 unknown */
 
   readonly _cpu_get_reg_ffi: (index: number) => bigint;
   readonly _cpu_set_reg_ffi: (index: number, value: bigint) => void;
@@ -134,3 +135,9 @@ export const enum CpuExitReason {
 export const CPU_REG_X0  = 0;
 export const CPU_REG_X29 = 29;
 export const CPU_REG_X30 = 30;
+
+/* cpu_backend_version_ffi's packed number as "major.minor.patch". */
+export function backendVersionString(packed: number): string {
+  if (packed < 0) return "unknown";
+  return `${(packed >> 16) & 0xff}.${(packed >> 8) & 0xff}.${packed & 0xff}`;
+}

@@ -14,7 +14,7 @@
  */
 
 import type { CpuBackendId, GameFileReadHook, GuestOutputHook, SwitchCoreExports } from "@bindings/core";
-import { CPU_BACKEND_DISPLAY_NAMES } from "@bindings/core";
+import { CPU_BACKEND_DISPLAY_NAMES, backendVersionString } from "@bindings/core";
 import { readMemoryLayout } from "@bindings/layout";
 import { CoreResult, SYSTEM_FILES, formatTitleId, loadFailureFromResult, readCString, runStateAfterSlice } from "@bindings/load";
 import type { CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
@@ -1003,7 +1003,7 @@ async function init(memory: WebAssembly.Memory): Promise<void> {
   const ready: CPUToMainMessage = {
     type: "ready",
     backendName,
-    backendVersion: "1.0.0",
+    backendVersion: backendVersionString(core._cpu_backend_version_ffi()),
   };
   self.postMessage(ready);
 }

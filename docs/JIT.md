@@ -575,6 +575,19 @@ Measured on MK8DX with voland-cli under Node, no rendering:
 - **60,000 slices, to the title screen:** 11.1 s on the JIT, about 34% of real time including boot.
 - **140,000 slices (title and menus):** the VFP compare/convert/multiply-accumulate, exclusive and TPIDRURO paths cut direct interpreter calls from 20.0 M to 10.5 M and helper calls from 8.0 M to 1.8 M. Wall time went from 358 s to 289 s on a busy machine. VLD1/VST1 and VLDM/VSTM then took direct calls down to 5.6 M, and the Advanced SIMD forms to 1.4 M.
 
+## Versions
+
+`JIT_VERSION` (jit.h) is shared by the A64 and A32 backends; the web UI
+shows it next to the backend name.
+
+- **0.1.0** - the A64 front end: regions, chaining, the inline softmmu walk,
+  async compile, differential testing against the interpreter.
+- **0.2.0** - FP/SIMD fast paths with exactness guards, call spanning and
+  predicted PLT branches, multicore (per-thread caches, exclusives as CAS).
+- **0.3.0** (2026-10-09) - the A32 front end (MK8DX): VFP and Advanced
+  SIMD inline, A32 call spanning with PLT and vtable prediction; the
+  translation cache carried across regions and kept in multicore mode.
+
 ## Limits and next steps
 
 - Compiled modules are one function per region; batching several regions

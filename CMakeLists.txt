@@ -107,7 +107,7 @@ if(EMSCRIPTEN)
     -sENVIRONMENT=worker       # only ever instantiated inside cpu.worker.ts
     "-sEXPORTED_FUNCTIONS=['_emulator_create_ffi','_emulator_destroy_ffi',
                             '_emulator_run_ffi','_emulator_step_ffi',
-                            '_layout_get_ffi','_cpu_backend_id_ffi',
+                            '_layout_get_ffi','_cpu_backend_id_ffi','_cpu_backend_version_ffi',
                             '_cpu_get_reg_ffi','_cpu_set_reg_ffi','_cpu_get_pc_ffi',
                             '_emulator_load_program_ffi','_emulator_unload_program_ffi',
                             '_emulator_last_error_message_ffi','_emulator_program_id_ffi',

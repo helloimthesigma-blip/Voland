@@ -1031,7 +1031,7 @@ const CPU_Backend CPU_BACKEND_JIT = {
     .set_undefined_handler = jit_set_undefined_handler,
     .set_breakpoint_handler = jit_set_breakpoint_handler,
     .name = "jit",
-    .version = "0.2.0",
+    .version = JIT_VERSION,
     .supports_jit = true,
     .supports_multicore = true, /* per-host-thread code caches (Jit_Thread) */
 };
@@ -1084,7 +1084,7 @@ const CPU_Backend CPU_BACKEND_A32_JIT = {
     .set_undefined_handler = jit_set_undefined_handler,
     .set_breakpoint_handler = jit_set_breakpoint_handler,
     .name = "a32jit",
-    .version = "0.1.0",
+    .version = JIT_VERSION,
     .supports_jit = true,
     .supports_multicore = true, /* per-host-thread code caches; exclusives as the A32 interpreter's (a CAS) */
     .aarch32 = true,

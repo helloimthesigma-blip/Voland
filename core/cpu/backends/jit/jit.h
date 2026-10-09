@@ -55,6 +55,10 @@ const Jit_Stats *jit_stats(void);
 /* Whether regions follow calls (BL/RET, predicted PLT branches). */
 void jit_set_span_calls(bool enabled);
 
+/* The JIT's version, shared by CPU_BACKEND_JIT (A64) and
+ * CPU_BACKEND_A32_JIT (the UI shows it; docs/JIT.md "Versions"). */
+#define JIT_VERSION "0.3.0"
+
 /* Interpreted executions of a block before it is compiled. */
 void jit_set_hot_threshold(uint32_t executions);
 

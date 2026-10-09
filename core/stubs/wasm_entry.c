@@ -42,6 +42,7 @@ EXPORT uint64_t cpu_get_reg_ffi(uint32_t index);
 EXPORT void cpu_set_reg_ffi(uint32_t index, uint64_t value);
 EXPORT uint64_t cpu_get_pc_ffi(void);
 EXPORT int cpu_backend_id_ffi(void);
+EXPORT int cpu_backend_version_ffi(void);
 EXPORT uint64_t layout_get_ffi(void);
 EXPORT int emulator_load_program_ffi(uint64_t file_size, uint64_t aslr_seed);
 EXPORT void emulator_unload_program_ffi(void);
@@ -260,6 +261,19 @@ EXPORT int cpu_backend_id_ffi(void)
 #else
   return -1;
 #endif
+}
+
+/* The running backend's version ("major.minor.patch") packed as
+ * major << 16 | minor << 8 | patch - a number, like cpu_backend_id_ffi,
+ * rather than a C string across the FFI. -1 before init. */
+EXPORT int cpu_backend_version_ffi(void)
+{
+  if (!g_initialised || !g_emulator.cpu_backend || !g_emulator.cpu_backend->version)
+    return -1;
+  unsigned major = 0, minor = 0, patch = 0;
+  if (sscanf(g_emulator.cpu_backend->version, "%u.%u.%u", &major, &minor, &patch) < 1)
+    return -1;
+  return (int)((major & 0xFFu) << 16 | (minor & 0xFFu) << 8 | (patch & 0xFFu));
 }
 
 /* Returns a linear-memory pointer to the live Memory_Layout struct (§4) as
