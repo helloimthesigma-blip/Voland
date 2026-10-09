@@ -3192,14 +3192,24 @@ static uint32_t gpu_gather_slices(Raster3d *r, const Tex_Header *h, const Raster
   return g->id;
 }
 
+/* A surface found for sampling (or a copy, or a present) is in use too:
+ * the table's least-recently-used eviction must not drop a target that is
+ * drawn once and then only read. MK8DX renders its colour-grading LUT's
+ * slices at the start of a race and gathers them every frame; once they
+ * aged out, the re-created LUT read zeros and the world went black. */
+static Raster3d_Gpu_Surface *gpu_surface_touch(Raster3d *r, Raster3d_Gpu_Surface *s) {
+  s->last_used = ++r->tick;
+  return s;
+}
+
 static Raster3d_Gpu_Surface *gpu_surface_at(Raster3d *r, uint64_t address, uint32_t width) {
   for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
     Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
-    if (s->in_use && s->address == address && (!width || s->width == width)) return s;
+    if (s->in_use && s->address == address && (!width || s->width == width)) return gpu_surface_touch(r, s);
   }
   for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) { /* a GOB-padded target */
     Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
-    if (s->in_use && s->address == address && surface_width_matches(s, width)) return s;
+    if (s->in_use && s->address == address && surface_width_matches(s, width)) return gpu_surface_touch(r, s);
   }
   return NULL;
 }
@@ -4497,6 +4507,7 @@ bool raster3d_gpu_present(Raster3d *r, uint64_t cpu_address, uint32_t width, uin
     if (c->in_use && !c->depth && c->cpu_address == cpu_address && c->width >= width) s = c;
   }
   if (!s) return false;
+  gpu_surface_touch(r, s);
   Gpu_Rec_Present p;
   memset(&p, 0, sizeof(p));
   p.id = s->id;

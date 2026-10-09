@@ -307,6 +307,8 @@ export class GpuExecutor {
   private dataUsed = 0;
   private encoder: GPUCommandEncoder | null = null;
   private pass: GPURenderPassEncoder | null = null;
+  /** Diagnostics: log each draw of the frame after a target dump, up to its present. */
+  private traceFrame = false;
   private passKey = "";
   private passSize: readonly [number, number] = [0, 0];
   private pendingDestroy: GPUTexture[] = [];
@@ -355,6 +357,7 @@ export class GpuExecutor {
    * RGBA8 (float formats clamped to [0, 1]). Not on any per-frame path. */
   async debugTargets(): Promise<DebugTarget[]> {
     this.flush();
+    this.traceFrame = true;
     const out: DebugTarget[] = [];
     for (const [id, t] of this.textures) {
       const texel = DEBUG_TEXEL_BYTES[t.format];
@@ -1029,6 +1032,10 @@ export class GpuExecutor {
         if (!resident) this.warnOnce(`buffer ${texture}`, `draw binds unknown buffer ${texture}`);
       }
     }
+    if (this.traceFrame) {
+      const size = (id: number): string => { const t = this.textures.get(id); return t ? `${id}(${t.format} ${t.width}x${t.height})` : `${id}(-)`; };
+      console.log(`trace draw shader ${d.shaderId} vs ${d.vsShaderId} targets ${d.targets.map((t) => size(t.id)).join(",")} depth ${d.depthId ? size(d.depthId) : 0} test ${d.depthTest} write ${d.depthWrite} cmp ${d.depthCompare} tex ${textureIds.join(",")}`);
+    }
     const pulled = d.vsShaderId !== 0 && (d.flags & DRAW_VERTEX_PULL) !== 0;
     const second = pulled ? resident ?? this.emptyStorage() : null;
     if (resident) this.touchedBuffers.add(resident);
@@ -1104,6 +1111,7 @@ export class GpuExecutor {
   }
 
   private clear(c: Clear): void {
+    if (this.traceFrame) console.log(`trace clear colour ${c.colorId} depth ${c.depthId} flags ${c.flags}`);
     if (c.flags & CLEAR_COLOR) this.clearColor(c);
     if (c.flags & (CLEAR_DEPTH | CLEAR_STENCIL)) this.clearDepth(c);
   }
@@ -1200,6 +1208,7 @@ export class GpuExecutor {
   private copy(c: Copy): void {
     let src = this.textures.get(c.srcId);
     const dst = this.textures.get(c.dstId);
+    if (this.traceFrame) console.log(`trace copy ${c.srcId}(${src?.format ?? "-"}) -> ${c.dstId}(${dst?.format ?? "-"}) ${c.srcRect.join(",")} -> ${c.dstRect.join(",")}`);
     if (!src || !dst || !dst.renderView || isDepthFormat(src.format) || shaderType(dst.format) !== shaderType(src.format)) {
       this.warnOnce(`copy ${src?.format}->${dst?.format}`, `GPU copy ${src?.format ?? "?"} -> ${dst?.format ?? "?"} not supported`);
       return;
@@ -1246,6 +1255,10 @@ export class GpuExecutor {
   private present(p: Present): void {
     const src = this.textures.get(p.id);
     const width = p.rect[2] ?? 0, height = p.rect[3] ?? 0;
+    if (this.traceFrame) {
+      console.log(`trace present ${p.id} ${src ? `${src.format} ${src.width}x${src.height}` : "missing"} rect ${p.rect.join(",")}`);
+      this.traceFrame = false;
+    }
     if (!src || width <= 0 || height <= 0) return;
     this.materialize(p.id);
     const target = this.host.presentTarget(width, height);

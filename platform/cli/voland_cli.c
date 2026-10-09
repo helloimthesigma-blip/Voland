@@ -90,6 +90,7 @@
 #include "cpu/backends/interpreter/interpreter.h"
 #include "cpu/backends/jit/jit.h"
 #include "gpu/framebuffer.h"
+#include "gpu/gpu_records.h"
 #include "gpu/gpu_stream.h"
 #include "gpu/wgsl.h"
 #include "hle/loader/nca_parse.h"
@@ -1024,9 +1025,19 @@ static Gpu_Stream g_gpu_stream;
 static FILE *g_gpu_file;
 static uint64_t g_gpu_records;
 
+/* VOLAND_STREAM_DRAWS_FROM=N: leave the draws before present N out of the
+ * file (everything else is kept), so a late scene's stream stays small.
+ * The replay's early frames are then empty; resources and presents stay. */
+static uint64_t g_gpu_presents, g_gpu_draws_from;
+
 static void gpu_stream_drain(void) {
   Gpu_Stream_Record rec;
   while (gpu_stream_read(g_gpu_header, &rec)) {
+    if (rec.type == GPU_REC_PRESENT) g_gpu_presents++;
+    if (rec.type == GPU_REC_DRAW && g_gpu_presents < g_gpu_draws_from) {
+      gpu_stream_consume(g_gpu_header, &rec);
+      continue;
+    }
     const uint32_t head[2] = {rec.type, rec.payload_bytes};
     fwrite(head, sizeof(head), 1, g_gpu_file);
     fwrite(rec.payload, 1, rec.payload_bytes, g_gpu_file);
@@ -1356,6 +1367,8 @@ static int run(int argc, char **argv) {
     emu.renderer.on_texture_user = getenv("VOLAND_DUMP_TEXTURES");
   }
   if (gpu_stream_path) {
+    const char *draws_from = getenv("VOLAND_STREAM_DRAWS_FROM");
+    if (draws_from) g_gpu_draws_from = strtoull(draws_from, NULL, 0);
     g_gpu_file = fopen(gpu_stream_path, "wb");
     if (!g_gpu_file) {
       fprintf(stderr, "voland-cli: cannot write %s\n", gpu_stream_path);
