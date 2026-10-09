@@ -572,6 +572,18 @@ static void structural(void) {
   CHECK(h == wgsl_desc_hash(&desc, &g_prog));
   desc.target_int_mask = 1u;
   CHECK(h != wgsl_desc_hash(&desc, &g_prog));
+  /* A compute translation declares its windows and workgroup: dispatches
+   * of one program with two and three windows need two shaders (one
+   * translated for three bound with two fails to make a pipeline). */
+  desc.stage = SM_STAGE_COMPUTE;
+  desc.window_count = 2u;
+  const uint64_t two = wgsl_desc_hash(&desc, &g_prog);
+  desc.window_count = 3u;
+  CHECK(two != wgsl_desc_hash(&desc, &g_prog));
+  desc.block[0] = 64u;
+  const uint64_t wide = wgsl_desc_hash(&desc, &g_prog);
+  desc.block[0] = 32u;
+  CHECK(wide != wgsl_desc_hash(&desc, &g_prog));
 }
 
 /* Level selection (the WebGPU renderer's mip chains): TEXS 2D picks its

@@ -2588,6 +2588,11 @@ uint64_t wgsl_desc_hash(const Wgsl_Program_Desc *desc, const Sm_Program *program
     MIX(desc->output_word, sizeof(desc->output_word));
     MIX(&desc->perspective_mask, sizeof(desc->perspective_mask));
   }
+  if (desc->stage == SM_STAGE_COMPUTE) { /* the bindings and workgroup the translation declares */
+    MIX(&desc->window_count, sizeof(desc->window_count));
+    MIX(desc->block, sizeof(desc->block));
+    MIX(&desc->shared_bytes, sizeof(desc->shared_bytes));
+  }
 #undef MIX
   return h;
 }

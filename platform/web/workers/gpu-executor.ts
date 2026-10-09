@@ -529,6 +529,11 @@ export class GpuExecutor {
   /* ---- storage buffers and compute (stream version 6) ---- */
 
   private empty: GPUBuffer | null = null;
+  /** The read-write storage bindings each compute shader declares. */
+  private readonly computeWindows = new Map<number, number[]>();
+  /** Stand-ins for windows a dispatch did not bind, one per binding (one
+   * buffer may not back two writable bindings). */
+  private readonly missingWindows = new Map<number, GPUBuffer>();
   /** A pulled draw with no mirror bound reads this from R (never, in fact). */
   private emptyStorage(): GPUBuffer {
     this.empty ??= this.device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE });
@@ -591,6 +596,20 @@ export class GpuExecutor {
         windows.push({ binding, buffer });
       }
     }
+    /* A window the shader declares but the dispatch does not bind would
+     * fail the pipeline - and with it every command buffer using it (a
+     * whole frame, black). Bind an empty stand-in and say so once. */
+    for (const binding of this.computeWindows.get(c.shaderId) ?? []) {
+      if (windows.some((w) => w.binding === binding)) continue;
+      this.warnOnce(`window ${c.shaderId}:${binding}`, `dispatch of shader ${c.shaderId} binds no buffer at ${binding}`);
+      let stand = this.missingWindows.get(binding);
+      if (!stand) {
+        stand = this.device.createBuffer({ size: 16, usage: GPUBufferUsage.STORAGE });
+        this.missingWindows.set(binding, stand);
+      }
+      windows.push({ binding, buffer: stand });
+    }
+    windows.sort((a, b) => a.binding - b.binding);
     const key = `cs:${c.shaderId}:${windows.map((w) => w.binding).join(",")}`;
     let cached = this.computePipelines.get(key);
     if (!cached) {
@@ -675,6 +694,9 @@ export class GpuExecutor {
     }
     this.shaders.set(id, module);
     this.shaderHashes.set(id, hash);
+    const windows = [...code.matchAll(/@binding\((\d+)\) var<storage, read_write>/g)].map((m) => Number(m[1]));
+    if (windows.length) this.computeWindows.set(id, windows);
+    else this.computeWindows.delete(id);
     this.cacheStore?.recordShader(hash, code);
   }
 
