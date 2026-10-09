@@ -2498,6 +2498,9 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - System data 0100000000000802 (MiiModel) is a stand-in made by Voland (`hle/fs/system_data.{h,c}`): a RomFS holding the archive's files, each with only a resource header. A title that draws Miis mounts it at start and aborts without it. No Nintendo content is shipped (§1.6).
   - svcBreak logs the link register and the stack's return addresses as module+offset.
   - `VOLAND_DUMP_MODULES` also writes each module's whole image, so the dynamic symbols can name them.
+- **Affinity moves the ideal core (§7).** svcSetThreadCoreMask with a mask that excludes a thread's ideal core moves the ideal core to the highest allowed core, as Horizon does.
+  - GetCurrentProcessorNumber and GetThreadCoreMask report it.
+  - MK8DX indexes per-core rendering contexts by processor number. Its two job workers, pinned to cores 1 and 2, both read core 0, shared one context, and NVN faulted on corrupted control memory when the menu movie started.
 - **User-supplied system data (§1.6).** `OpenDataStorageByDataId` first looks on the SD card for the user's own dump, named after the data id (`/<id>.nca` or `/<id>.romfs`, also under `/systemdata/`).
   - A pre-decrypted data NCA has its RomFS section served; a bare RomFS is served as is.
   - Only then does Voland's stand-in apply.

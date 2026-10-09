@@ -1657,8 +1657,9 @@ static int run(int argc, char **argv) {
       if (error_is_ok(vmm_read_block(emu.vmm, th->thread.tls_gva + (narrow ? 0x1FCu : 0x1F8u), &type, narrow ? 4u : 8u)) && type) {
         char name[33] = {0};
         if (error_is_ok(vmm_read_block(emu.vmm, type + (narrow ? 0xC8u : 0x188u), name, 32)))
-          fprintf(stderr, "    name \"%s\" priority %d core %d mask 0x%llx cycles %llu\n", name, (int)th->thread.priority,
-                  (int)th->thread.preferred_core, (unsigned long long)th->core_mask, (unsigned long long)th->cycles_run);
+          fprintf(stderr, "    name \"%s\" priority %d core %d mask 0x%llx cycles %llu sp 0x%llx\n", name,
+                  (int)th->thread.priority, (int)th->thread.preferred_core, (unsigned long long)th->core_mask,
+                  (unsigned long long)th->cycles_run, (unsigned long long)emu.cpu_backend->get_sp(th->thread.cpu_state));
       }
     }
     if (th->state == THREAD_STATE_CREATED) { /* never started: its entry argument (nn::os: the ThreadType) */
