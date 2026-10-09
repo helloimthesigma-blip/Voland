@@ -10,6 +10,7 @@
  *                       [--phases NAME:SLICE,NAME:SLICE,...,end:SLICE] [--json FILE]
  *                       [--restore-saves BACKUP.tar] [--user-data-dir DIR] [--system-file FILE]...
  *                       [--log-match REGEX] (also print the page's log lines that match)
+ *                       [--dump-targets-at SLICE DIR] (every GPU render target as DIR/*.pam, once)
  *
  * - Builds the app (vite build; the core must already be staged by
  *   `cmake --build --preset web`) and serves it with `vite preview` on a
@@ -133,6 +134,7 @@ function parseArgs(argv) {
     else if (a === "--out-dir") opts.outDir = next();
     else if (a === "--shot") opts.shot = next();
     else if (a === "--shots-every") { opts.shotsEvery = Number(next()); opts.shotsDir = next(); }
+    else if (a === "--dump-targets-at") { opts.dumpTargetsAt = Number(next()); opts.dumpTargetsDir = next(); }
     else if (a === "--drive") opts.drive = next();
     else if (a === "--restore-saves") opts.restoreSaves = next();
     else if (a === "--system-file") (opts.systemFiles ??= []).push(next());
@@ -521,6 +523,25 @@ async function main() {
         opts.nextShot = (Math.floor(progress(s) / opts.shotsEvery) + 1) * opts.shotsEvery;
         const box = await page.getByTestId("screen").boundingBox();
         if (box) await page.screenshot({ clip: box, path: `${opts.shotsDir}/w${progress(s)}.png`, timeout: SHOT_TIMEOUT_MS });
+      }
+      /* --dump-targets-at SLICE DIR: every GPU render target, once (debugging). */
+      if (opts.dumpTargetsAt && !opts.dumpedTargets && progress(s) >= opts.dumpTargetsAt) {
+        opts.dumpedTargets = true;
+        const targets = await page.evaluate(async () => {
+          const list = await globalThis.__volandDebug.dumpTargets();
+          return list.map((t) => {
+            let bin = "";
+            for (let i = 0; i < t.rgba.length; i += 0x8000) bin += String.fromCharCode(...t.rgba.subarray(i, i + 0x8000));
+            return { id: t.id, format: t.format, width: t.width, height: t.height, b64: btoa(bin) };
+          });
+        });
+        mkdirSync(opts.dumpTargetsDir, { recursive: true });
+        for (const t of targets) {
+          const header = `P7\nWIDTH ${t.width}\nHEIGHT ${t.height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n`;
+          writeFileSync(`${opts.dumpTargetsDir}/s${progress(s)}-tex${t.id}-${t.width}x${t.height}-${t.format}.pam`,
+            Buffer.concat([Buffer.from(header), Buffer.from(t.b64, "base64")]));
+        }
+        console.log(`dumped ${targets.length} render targets at ${progress(s)} into ${opts.dumpTargetsDir}`);
       }
       if (opts.mash && Date.now() - opts.mash.last >= opts.mash.every) {
         opts.mash.last = Date.now();

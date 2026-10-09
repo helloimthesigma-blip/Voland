@@ -294,6 +294,15 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
 }
 
 self.addEventListener("message", (event: MessageEvent<MainToGPUMessage>) => {
+  if (event.data.type === "debug-dump-targets") {
+    const executor = activeExecutor;
+    if (!executor) return;
+    executor.debugTargets().then((targets) => {
+      const reply: GPUToMainMessage = { type: "debug-targets", targets };
+      self.postMessage(reply, targets.map((t) => t.rgba.buffer));
+    }).catch((e: unknown) => log("error", `debug-dump-targets: ${String(e)}`));
+    return;
+  }
   if (event.data.type === "title") {
     runningTitle = event.data.titleId;
     attachShaderCache();

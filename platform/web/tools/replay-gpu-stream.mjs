@@ -154,17 +154,26 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
   /* Every RGBA8 and float render target, as it is now. */
   const dumpAll = (index) => {
     for (const [id, t] of ex.textures) {
-      const texel = TEXEL_BYTES[t.format];
+      const isDepth = t.format === "depth32float" || t.format === "depth32float-stencil8";
+      const texel = isDepth ? 4 : TEXEL_BYTES[t.format];
       if (!t.renderView || !texel) continue;
       const bytesPerRow = Math.ceil((t.width * texel) / 256) * 256;
       const buffer = device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       const enc = device.createCommandEncoder();
-      enc.copyTextureToBuffer({ texture: t.texture }, { buffer, bytesPerRow }, [t.width, t.height]);
+      enc.copyTextureToBuffer({ texture: t.texture, aspect: isDepth ? "depth-only" : "all" }, { buffer, bytesPerRow }, [t.width, t.height]);
       device.queue.submit([enc.finish()]);
       pending.push(buffer.mapAsync(GPUMapMode.READ).then(() => {
         const src = new Uint8Array(buffer.getMappedRange());
         const out = new Uint8Array(t.width * t.height * 4);
-        if (texel === 4 && t.format !== "rg11b10ufloat") {
+        if (isDepth) { /* depth as grey: 1 - depth, stretched (near is bright) */
+          const dv = new DataView(src.buffer, src.byteOffset, src.byteLength);
+          for (let y = 0; y < t.height; y++)
+            for (let x = 0; x < t.width; x++) {
+              const d = dv.getFloat32(y * bytesPerRow + x * 4, true), o = (y * t.width + x) * 4;
+              const v = byte(Math.min(1, (1 - d) * 20));
+              out[o] = out[o + 1] = out[o + 2] = v; out[o + 3] = 255;
+            }
+        } else if (texel === 4 && t.format !== "rg11b10ufloat") {
           for (let y = 0; y < t.height; y++) out.set(src.subarray(y * bytesPerRow, y * bytesPerRow + t.width * 4), y * t.width * 4);
         } else {
           const dv = new DataView(src.buffer, src.byteOffset, src.byteLength);

@@ -109,6 +109,32 @@ export interface ExecutorHost {
   log(level: "debug" | "info" | "warn" | "error", message: string): void;
 }
 
+export interface DebugTarget {
+  readonly id: number;
+  readonly format: string;
+  readonly width: number;
+  readonly height: number;
+  readonly rgba: Uint8Array;
+}
+const DEBUG_TEXEL_BYTES: Readonly<Record<string, number>> = {
+  "rgba8unorm": 4, "rgba8unorm-srgb": 4, "bgra8unorm": 4, "rgb10a2unorm": 4, "rgba16float": 8, "rg11b10ufloat": 4, "r16float": 2,
+};
+function debugHalf(h: number): number {
+  const e = (h >> 10) & 31, m = h & 1023, sign = h & 0x8000 ? -1 : 1;
+  if (e === 0) return sign * m * 2 ** -24;
+  if (e === 31) return m ? NaN : sign * Infinity;
+  return sign * (1 + m / 1024) * 2 ** (e - 15);
+}
+function debugSmall(bits: number, mantissa: number): number { /* unsigned 5-bit exponent floats (RG11B10) */
+  const e = bits >> mantissa, m = bits & ((1 << mantissa) - 1);
+  if (e === 0) return (m / (1 << mantissa)) * 2 ** -14;
+  if (e === 31) return m ? NaN : Infinity;
+  return (1 + m / (1 << mantissa)) * 2 ** (e - 15);
+}
+function debugByte(v: number): number {
+  return Number.isFinite(v) ? Math.max(0, Math.min(255, Math.round(v * 255))) : v > 0 ? 255 : 0;
+}
+
 interface Tex {
   readonly texture: GPUTexture;
   readonly format: GPUTextureFormat;
@@ -325,6 +351,42 @@ export class GpuExecutor {
 
   /** Submits everything recorded so far. */
   readonly prof = { write: 0, finish: 0, submit: 0 };
+  /** Debugging (perf.mjs --dump-targets-at): every colour render target as
+   * RGBA8 (float formats clamped to [0, 1]). Not on any per-frame path. */
+  async debugTargets(): Promise<DebugTarget[]> {
+    this.flush();
+    const out: DebugTarget[] = [];
+    for (const [id, t] of this.textures) {
+      const texel = DEBUG_TEXEL_BYTES[t.format];
+      if (!t.renderView || !texel) continue;
+      const bytesPerRow = Math.ceil((t.width * texel) / 256) * 256;
+      const buffer = this.device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+      const enc = this.device.createCommandEncoder();
+      enc.copyTextureToBuffer({ texture: t.texture }, { buffer, bytesPerRow }, [t.width, t.height]);
+      this.device.queue.submit([enc.finish()]);
+      await buffer.mapAsync(GPUMapMode.READ);
+      const dv = new DataView(buffer.getMappedRange());
+      const rgba = new Uint8Array(t.width * t.height * 4);
+      for (let y = 0; y < t.height; y++)
+        for (let x = 0; x < t.width; x++) {
+          const at = y * bytesPerRow + x * texel, o = (y * t.width + x) * 4;
+          if (texel === 4 && t.format !== "rg11b10ufloat") {
+            for (let k = 0; k < 4; k++) rgba[o + k] = dv.getUint8(at + k);
+            continue;
+          }
+          let c: number[];
+          if (t.format === "rgba16float") c = [0, 2, 4, 6].map((k) => debugHalf(dv.getUint16(at + k, true)));
+          else if (t.format === "r16float") { const v = debugHalf(dv.getUint16(at, true)); c = [v, v, v, 1]; }
+          else { const w = dv.getUint32(at, true); c = [debugSmall(w & 2047, 6), debugSmall((w >> 11) & 2047, 6), debugSmall(w >>> 22, 5), 1]; }
+          for (let k = 0; k < 4; k++) rgba[o + k] = debugByte(c[k] ?? 0);
+        }
+      buffer.unmap();
+      buffer.destroy();
+      out.push({ id, format: t.format, width: t.width, height: t.height, rgba });
+    }
+    return out;
+  }
+
   flush(): void {
     this.endPass();
     if (!this.encoder) return;

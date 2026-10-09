@@ -162,9 +162,20 @@ export type MainToGPUMessage =
   | { readonly type: "resize"; readonly width: number; readonly height: number }
   /* The title that just loaded (lifecycle): its persistent shader cache
    * is opened and pre-built (workers/shader-cache.ts). */
-  | { readonly type: "title"; readonly titleId: string };
+  | { readonly type: "title"; readonly titleId: string }
+  /* Debugging only (perf.mjs --dump-targets-at): read back every render target. */
+  | { readonly type: "debug-dump-targets" };
+
+export interface DebugTargetImage {
+  readonly id: number;
+  readonly format: string;
+  readonly width: number;
+  readonly height: number;
+  readonly rgba: Uint8Array;
+}
 
 export type GPUToMainMessage =
   | { readonly type: "ready"; readonly adapterName: string | null; readonly streamRenderer: boolean }
   | { readonly type: "log"; readonly level: LogLevel; readonly message: string }
-  | { readonly type: "error"; readonly message: string };
+  | { readonly type: "error"; readonly message: string }
+  | { readonly type: "debug-targets"; readonly targets: readonly DebugTargetImage[] };

@@ -11,7 +11,7 @@
  * needs the CPU and GPU workers to validate the boot path end to end.
  */
 
-import type { CPUToMainMessage, GPUToMainMessage, MainToCPUMessage, MainToGPUMessage } from "@bindings/protocol";
+import type { CPUToMainMessage, DebugTargetImage, GPUToMainMessage, MainToCPUMessage, MainToGPUMessage } from "@bindings/protocol";
 import { AUDIO_RING_CAPACITY_FRAMES, type MemoryLayout, toByteOffset } from "@bindings/layout";
 import type { GameLoadOutcome, SdImportOutcome, SystemFileOutcome, SystemFilesApi } from "@bindings/load";
 import type { MainToVideoMessage, VideoToMainMessage } from "@bindings/video";
@@ -298,8 +298,24 @@ async function boot(): Promise<BootResult | null> {
     }, () => { cpuSlot = "failed"; updateStatus(); resolve(); });
   });
 
+  /* Debugging (tools/perf.mjs --dump-targets-at): the GPU worker's render
+   * targets, read back on request. Nothing calls it in normal use. */
+  let debugTargetsResolve: ((targets: readonly DebugTargetImage[]) => void) | null = null;
+  (globalThis as unknown as { __volandDebug?: { dumpTargets: () => Promise<readonly DebugTargetImage[]> } }).__volandDebug = {
+    dumpTargets: (): Promise<readonly DebugTargetImage[]> =>
+      new Promise((resolve) => {
+        debugTargetsResolve = resolve;
+        gpuWorker.postMessage({ type: "debug-dump-targets" } satisfies MainToGPUMessage);
+      }),
+  };
+
   const gpuReady = new Promise<void>((resolve) => {
     attachWorkerLogRelay<GPUToMainMessage>("gpu", gpuWorker, msg => {
+      if (msg.type === "debug-targets") {
+        debugTargetsResolve?.(msg.targets);
+        debugTargetsResolve = null;
+        return;
+      }
       if (msg.type === "ready") {
         adapterLabel = msg.adapterName ?? "Software/Unknown";
         appendLogLine("info", `gpu adapter: ${adapterLabel}`);
