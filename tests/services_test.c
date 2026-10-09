@@ -712,6 +712,30 @@ static void test_thread_activity(void) {
   CHECK((uint32_t)regs->x[0] == HLE_RESULT_INVALID_HANDLE);
 }
 
+/* svcSetThreadCoreMask: an affinity that excludes the ideal core moves the
+ * ideal core into it (MK8DX's job workers pin to cores 1 and 2 and index
+ * per-core contexts by GetCurrentProcessorNumber; both reporting core 0
+ * made two workers share one). */
+static void test_core_mask_moves_ideal_core(void) {
+  CPU_Register_File *regs = g_emu.cpu_backend->get_register_file(g_emu.cpu_state);
+  regs->x[1] = g_emu.process.address_space.code.base + 0x40u;
+  regs->x[2] = 0;
+  regs->x[3] = g_emu.process.main_thread_stack.base + g_emu.process.main_thread_stack.size - 0x2000u;
+  regs->x[4] = 44;
+  regs->x[5] = 0; /* ideal core 0 */
+  hle_on_svc(g_emu.cpu_state, 0x08, &g_emu.hle);
+  CHECK((uint32_t)regs->x[0] == 0);
+  const uint32_t thread = (uint32_t)regs->x[1];
+  regs->x[0] = thread;
+  regs->x[1] = 0xFFFFFFFDu; /* -3: keep the ideal core */
+  regs->x[2] = 0x4;         /* core 2 only */
+  hle_on_svc(g_emu.cpu_state, 0x0F, &g_emu.hle);
+  CHECK((uint32_t)regs->x[0] == 0);
+  regs->x[2] = thread;
+  hle_on_svc(g_emu.cpu_state, 0x0E, &g_emu.hle);
+  CHECK((uint32_t)regs->x[0] == 0 && regs->x[1] == 2u && regs->x[2] == 0x4u);
+}
+
 /* Threads whose handle is closed are reclaimed once they can never run:
  * creating and joining short-lived workers far past the thread table's
  * size keeps working (a Unity title does this every few frames), while a
@@ -1374,6 +1398,7 @@ int main(void) {
   test_system_queries();
   test_pctl();
   test_thread_activity();
+  test_core_mask_moves_ideal_core();
   test_thread_reclaim();
   test_sdk_startup_services();
   test_sdk_behaviours();

@@ -156,6 +156,17 @@ void hle_svc_set_thread_core_mask(HLE_Context *c, CPU_State *s) {
     t->thread.preferred_core = (uint32_t)core;
   }
   if (r->x[2]) t->core_mask = r->x[2];
+  /* An ideal core outside the new affinity moves into it (the highest
+   * core allowed), as Horizon does: a thread pinned to core 2 reports
+   * core 2 from GetCurrentProcessorNumber. MK8DX's job workers each pin
+   * to their own core and index per-core contexts by that number. */
+  const uint64_t allowed = t->core_mask & (((uint64_t)1 << THREAD_CORE_COUNT) - 1u);
+  if (allowed && !(allowed & ((uint64_t)1 << t->thread.preferred_core))) {
+    uint32_t highest = 0;
+    for (uint32_t k = 0; k < THREAD_CORE_COUNT; k++)
+      if (allowed & ((uint64_t)1 << k)) highest = k;
+    t->thread.preferred_core = highest;
+  }
   r->x[0] = HLE_RESULT_SUCCESS;
 }
 
@@ -630,7 +641,7 @@ void hle_svc_break(HLE_Context *c, CPU_State *s) {
   const uint32_t reason = (uint32_t)r->x[0];
   log_error("[hle] svcBreak reason=0x%x info=0x%llx size=0x%llx at pc=0x%010llx", reason,
             (unsigned long long)r->x[1], (unsigned long long)r->x[2], (unsigned long long)r->pc);
-  log_break_callers(c, r);
+  if (!(reason & HLE_BREAK_NOTIFICATION_ONLY)) log_break_callers(c, r);
   /* libnx's fatal paths pass the failing Result as a 4-byte info block. */
   uint32_t result = 0;
   if (r->x[2] == sizeof(result) && error_is_ok(vmm_read_block(c->vmm, r->x[1], &result, sizeof(result))))
