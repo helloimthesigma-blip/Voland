@@ -1636,6 +1636,14 @@ static int run(int argc, char **argv) {
           k_status[status], (unsigned long long)slices, (unsigned long long)emu.scheduler.ticks,
           (unsigned long long)emu.hle.svc_call_count);
   if (width) fprintf(stderr, "voland-cli: frame %ux%u fnv1a64=%016llx\n", width, height, (unsigned long long)frame_hash);
+  if (getenv("VOLAND_PEEK")) { /* debugging a stall: a guest word, and the GPU thread's state */
+    const uint64_t at = strtoull(getenv("VOLAND_PEEK"), NULL, 0);
+    uint32_t word = 0;
+    const bool ok = error_is_ok(vmm_read32(emu.vmm, at, &word));
+    fprintf(stderr, "voland-cli: peek 0x%llx = 0x%08x%s; gpu thread %s, busy %d, progress %u\n", (unsigned long long)at,
+            word, ok ? "" : " (unmapped)", gpu_thread_async(&emu.gpu_thread) ? "async" : "sync",
+            gpu_thread_busy(&emu.gpu_thread) ? 1 : 0, gpu_thread_progress(&emu.gpu_thread));
+  }
   /* Where every live guest thread is: module + offset, for stalls. */
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS && emu.program_loaded; i++) {
     const Sched_Thread *th = &emu.scheduler.threads[i];
@@ -1692,9 +1700,17 @@ static int run(int argc, char **argv) {
       fprintf(stderr, "\n");
     }
     if (getenv("VOLAND_BACKTRACE")) {
-      /* AArch64 frame records: x29 -> {previous x29, return address}. */
+      /* AArch64 frame records: x29 -> {previous x29, return address}.
+       * AArch32 (push {..., fp, lr}; add fp, sp, #n): r11 -> {previous
+       * r11, return address}, 32-bit words. */
       const CPU_Register_File *rf = emu.cpu_backend->get_register_file(th->thread.cpu_state);
-      uint64_t fp = rf->x[29], lr = rf->x[30];
+      const bool narrow_frames = !emu.process.npdm.is_64bit_instruction;
+      if (narrow_frames) {
+        fprintf(stderr, "    r0-r12:");
+        for (uint32_t r = 0; r <= 12u; r++) fprintf(stderr, " %08llx", (unsigned long long)rf->x[r]);
+        fprintf(stderr, "\n");
+      }
+      uint64_t fp = rf->x[narrow_frames ? 11 : 29], lr = rf->x[narrow_frames ? 14 : 30];
       for (uint32_t depth = 0; depth < 24u; depth++) {
         const char *m = "?";
         uint64_t off = lr;
@@ -1707,8 +1723,16 @@ static int run(int argc, char **argv) {
         }
         fprintf(stderr, "    #%u %s+0x%llx\n", depth, m, (unsigned long long)off);
         uint64_t next_fp = 0, next_lr = 0;
-        if (!fp || !error_is_ok(vmm_read64(emu.vmm, fp, &next_fp)) || !error_is_ok(vmm_read64(emu.vmm, fp + 8u, &next_lr)))
+        if (narrow_frames) {
+          uint32_t f32 = 0, l32 = 0;
+          if (!fp || !error_is_ok(vmm_read32(emu.vmm, fp, &f32)) || !error_is_ok(vmm_read32(emu.vmm, fp + 4u, &l32)))
+            break;
+          next_fp = f32;
+          next_lr = l32;
+        } else if (!fp || !error_is_ok(vmm_read64(emu.vmm, fp, &next_fp)) ||
+                   !error_is_ok(vmm_read64(emu.vmm, fp + 8u, &next_lr))) {
           break;
+        }
         fp = next_fp;
         lr = next_lr;
       }
