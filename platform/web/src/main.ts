@@ -280,8 +280,9 @@ async function boot(): Promise<BootResult | null> {
       } else if (handleSavestateMessage(msg)) {
         /* save-state replies (src/savestates.ts) */
       } else if (msg.type === "system-file-added") {
-        appendLogLine(msg.outcome.ok ? "info" : "warn",
-          msg.outcome.ok ? `system file added: ${msg.outcome.id}` : `system file not added: ${msg.outcome.message}`);
+        appendLogLine(msg.outcome.errors.length ? "warn" : "info",
+          `system files: added ${msg.outcome.added.join(", ") || "none"}, skipped ${msg.outcome.skipped}` +
+          (msg.outcome.errors.length ? `; ${msg.outcome.errors.join("; ")}` : ""));
         pendingSystemAdd.shift()?.(msg.outcome);
       } else if (msg.type === "system-files-listed") {
         pendingSystemList.shift()?.(msg.ids);
@@ -468,11 +469,13 @@ async function boot(): Promise<BootResult | null> {
   }
 
   const systemFiles: SystemFilesApi = {
-    add(file: File, id: string | null): Promise<SystemFileOutcome> {
-      if (cpuSlot !== "ready") return Promise.resolve<SystemFileOutcome>({ ok: false, message: "the emulator is not ready" });
+    add(files: readonly File[], id: string | null): Promise<SystemFileOutcome> {
+      if (cpuSlot !== "ready") {
+        return Promise.resolve<SystemFileOutcome>({ added: [], skipped: 0, errors: ["the emulator is not ready"] });
+      }
       return new Promise<SystemFileOutcome>((resolve) => {
         pendingSystemAdd.push(resolve);
-        cpuWorker.postMessage({ type: "system-file-add", file, id } satisfies MainToCPUMessage);
+        cpuWorker.postMessage({ type: "system-file-add", files, id } satisfies MainToCPUMessage);
       });
     },
     list(): Promise<readonly string[]> {

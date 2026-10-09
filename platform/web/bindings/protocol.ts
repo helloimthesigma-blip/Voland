@@ -31,10 +31,11 @@ export type MainToCPUMessage =
    * with nothing added. */
   | { readonly type: "sd-clear" }
   /* "System files" (§1.6): store the user's own dump of a system archive
-   * on the SD card, where fsp-srv looks first. `id` names the archive for
-   * a bare RomFS (an NCA says which it is). Answered by system-file-added;
+   * on the SD card, where fsp-srv looks first: single files, or a whole
+   * decrypted firmware folder (only the archives games need are kept).
+   * `id` names the archive for a lone bare RomFS (an NCA says which it is). Answered by system-file-added;
    * system-files-list by system-files-listed. */
-  | { readonly type: "system-file-add"; readonly file: File; readonly id: string | null }
+  | { readonly type: "system-file-add"; readonly files: readonly File[]; readonly id: string | null }
   | { readonly type: "system-files-list" }
   /* Game saves (§15, workers/save-store.ts): a tar of every stored save,
    * answered by saves-exported; or a tar to store (and load into the

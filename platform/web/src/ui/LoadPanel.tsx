@@ -51,21 +51,28 @@ function LoadPanel(props: LoadPanelProps) {
   let input: HTMLInputElement | undefined;
   let sdInput: HTMLInputElement | undefined;
   let systemInput: HTMLInputElement | undefined;
+  let firmwareInput: HTMLInputElement | undefined;
   const [systemIds, setSystemIds] = createSignal<readonly string[]>([]);
   const [systemNote, setSystemNote] = createSignal<string | null>(null);
   /* Which archive a bare RomFS dump is (an NCA says so itself). */
   const [systemKind, setSystemKind] = createSignal<string>(SYSTEM_FILES[0]?.id ?? "");
   const refreshSystemFiles = async (): Promise<void> => { setSystemIds(await props.systemFiles.list()); };
 
-  async function onSystemFileChosen(event: Event & { currentTarget: HTMLInputElement }): Promise<void> {
-    const file = event.currentTarget.files?.[0];
+  async function onSystemFilesChosen(event: Event & { currentTarget: HTMLInputElement }): Promise<void> {
+    const files = Array.from(event.currentTarget.files ?? []);
     event.currentTarget.value = "";
-    if (!file) return;
-    setSystemNote(`Adding ${file.name}…`);
-    const outcome = await props.systemFiles.add(file, systemKind());
-    setSystemNote(outcome.ok ? `Added ${systemFileName(outcome.id)} (${outcome.id}).` : `Not added: ${outcome.message}.`);
+    if (files.length === 0) return;
+    setSystemNote(files.length === 1 ? `Adding ${files[0]?.name ?? "the file"}…` : `Scanning ${files.length} files…`);
+    const outcome = await props.systemFiles.add(files, systemKind());
+    const parts: string[] = [];
+    if (outcome.added.length > 0) parts.push(`Added ${outcome.added.map((id) => `${systemFileName(id)} (${id})`).join(", ")}.`);
+    else parts.push("Nothing added.");
+    if (files.length > 1) parts.push(`${outcome.skipped} file(s) skipped: not ones games need.`);
+    if (outcome.errors.length > 0) parts.push(outcome.errors.join("; ") + ".");
+    setSystemNote(parts.join(" "));
     await refreshSystemFiles();
   }
+
   const [sd, setSd] = createSignal<SdImportOutcome | null>(null);
   const [bootHint, setBootHint] = createSignal(false);
   const [games, setGames] = createSignal<readonly LibraryGame[]>([]);
@@ -185,10 +192,19 @@ function LoadPanel(props: LoadPanelProps) {
       <input
         ref={systemInput}
         type="file"
+        multiple
         accept=".nca,.romfs,.bin"
         class="voland-load-input"
         data-testid="system-input"
-        onChange={(event) => { void onSystemFileChosen(event); }}
+        onChange={(event) => { void onSystemFilesChosen(event); }}
+      />
+      <input
+        ref={(el) => { firmwareInput = el; el.setAttribute("webkitdirectory", ""); }}
+        type="file"
+        multiple
+        class="voland-load-input"
+        data-testid="firmware-input"
+        onChange={(event) => { void onSystemFilesChosen(event); }}
       />
       <GameLibrary
         games={games()}
@@ -236,8 +252,9 @@ function LoadPanel(props: LoadPanelProps) {
       <div class="voland-system-files" data-testid="system-files">
         <h4>System files</h4>
         <p class="voland-load-note">
-          Some games need files from your own Switch's system that Voland does not include. Dump them from your
-          console like your games (a decrypted <code>.nca</code>, or a raw RomFS dump).
+          Some games need files from your own Switch's system that Voland does not include. Add them from your
+          console's dump, decrypted with your own tools like your games: single <code>.nca</code> files or raw
+          RomFS dumps, or a whole decrypted firmware folder (only what games need is kept).
         </p>
         <ul>
           <For each={SYSTEM_FILES}>
@@ -256,7 +273,15 @@ function LoadPanel(props: LoadPanelProps) {
             data-testid="system-add"
             onClick={() => systemInput?.click()}
           >
-            Add system file…
+            Add system files…
+          </button>
+          <button
+            type="button"
+            class="voland-load-button voland-load-secondary"
+            data-testid="firmware-add"
+            onClick={() => firmwareInput?.click()}
+          >
+            Choose firmware folder…
           </button>
           <label class="voland-load-note">
             A raw RomFS dump is the{" "}

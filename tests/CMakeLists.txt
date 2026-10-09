@@ -122,8 +122,10 @@ target_link_libraries(handle_table_test PRIVATE switch_core)
 add_test(NAME handle_table_test COMMAND handle_table_test)
 
 add_executable(svc32_test svc32_test.c)
-target_link_libraries(svc32_test PRIVATE switch_core)
-add_test(NAME svc32_test COMMAND svc32_test)
+target_link_libraries(svc32_test PRIVATE switch_core loader_fixtures)
+# Also writes the synthetic Mii-model data NCA the browser e2e scans as a "firmware folder".
+add_test(NAME svc32_test COMMAND svc32_test ${CMAKE_BINARY_DIR}/fixtures/synthetic_mii_model.nca)
+set_tests_properties(svc32_test PROPERTIES DEPENDS program_nca_fixture)
 
 foreach(ipc_test ipc_parse_test svc_ipc_test)
   add_executable(${ipc_test} ${ipc_test}.c)

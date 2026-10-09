@@ -16,7 +16,7 @@
 import type { CpuBackendId, GameFileReadHook, GuestOutputHook, SwitchCoreExports } from "@bindings/core";
 import { CPU_BACKEND_DISPLAY_NAMES } from "@bindings/core";
 import { readMemoryLayout } from "@bindings/layout";
-import { CoreResult, formatTitleId, loadFailureFromResult, readCString, runStateAfterSlice } from "@bindings/load";
+import { CoreResult, SYSTEM_FILES, formatTitleId, loadFailureFromResult, readCString, runStateAfterSlice } from "@bindings/load";
 import type { CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
 import { clearSdFiles, diffManifests, parseManifest, persistSdFile, removeSdFile, restoreSdFiles } from "./sd-persistence";
 import { isSaveName, loadSaveArchives, readTar, removeSaveArchive, saveNameOfTar, storeSaveArchive, tarNameOfSave, writeTar } from "./save-store";
@@ -467,48 +467,82 @@ const SYSTEM_KIND_NCA = 1;
 const SYSTEM_KIND_ROMFS = 2;
 const SYSTEM_KIND_ENCRYPTED = 3;
 
-/** Stores a system archive the user dumped from their console where
- * fsp-srv looks for it first: /systemdata/<id>.nca or .romfs. */
-async function addSystemFile(file: File, chosenId: string | null): Promise<CPUToMainMessage> {
-  const fail = (message: string): CPUToMainMessage => ({ type: "system-file-added", outcome: { ok: false, message } });
-  if (!core || !coreMemory) return fail("the emulator is not ready");
-  let bytes: Uint8Array;
-  try {
-    bytes = new Uint8Array(fileReader.readAsArrayBuffer(file));
-  } catch (e) {
-    return fail(`could not read ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  const data = copyIntoCore(bytes);
+/* How much of each file identification reads: an NCA's header is 0xC00
+ * bytes, a RomFS's 0x50 (a firmware folder is scanned without reading
+ * every file). */
+const SYSTEM_HEAD_BYTES = 0x10000;
+
+/** What one file is: [System_Data_Kind, data id in hex (data NCAs)]. */
+function identifySystemFile(file: File): [number, string] {
+  if (!core || !coreMemory) return [0, ""];
+  const head = new Uint8Array(fileReader.readAsArrayBuffer(file.slice(0, SYSTEM_HEAD_BYTES)));
+  const data = copyIntoCore(head);
   const out = core._malloc(8);
-  if (data === 0 || out === 0) return fail("not enough memory");
-  let kind = 0;
-  let ncaId = 0n;
+  if (data === 0 || out === 0) return [0, ""];
   try {
-    kind = core._emulator_identify_system_data_ffi(BigInt(data), BigInt(bytes.byteLength), BigInt(out));
-    ncaId = new DataView(coreMemory.buffer).getBigUint64(out, true);
+    const kind = core._emulator_identify_system_data_ffi(BigInt(data), BigInt(head.byteLength), file.size, BigInt(out));
+    const id = new DataView(coreMemory.buffer).getBigUint64(out, true).toString(16).padStart(16, "0");
+    return [kind, id];
   } finally {
     core._free(data);
     core._free(out);
   }
-  if (kind === SYSTEM_KIND_ENCRYPTED) {
-    return fail(`${file.name} is still encrypted: decrypt it with your own tools first, like your games`);
-  }
-  let id: string;
-  if (kind === SYSTEM_KIND_NCA) id = ncaId.toString(16).padStart(16, "0");
-  else if (kind === SYSTEM_KIND_ROMFS && chosenId) id = chosenId;
-  else if (kind === SYSTEM_KIND_ROMFS) return fail(`${file.name} is a RomFS image: pick which system file it is`);
-  else return fail(`${file.name} is not a decrypted system data NCA or a RomFS image`);
-  const extension = kind === SYSTEM_KIND_NCA ? "nca" : "romfs";
-  const other = kind === SYSTEM_KIND_NCA ? "romfs" : "nca";
-  const path = `${SYSTEM_DATA_DIR}/${id}.${extension}`;
-  if (!writeSdFile(path, bytes)) return fail(`could not store ${file.name} (too large or out of space)`);
-  /* One copy per archive: the NCA would win over a stale RomFS, and v.v. */
-  if (readSdManifest()?.has(`${SYSTEM_DATA_DIR}/${id}.${other}`)) {
-    withCString(`${SYSTEM_DATA_DIR}/${id}.${other}`, (p) => { core?._emulator_sd_write_file_ffi(p, 0n, 0n); });
-    await removeSdFile(`${SYSTEM_DATA_DIR}/${id}.${other}`);
+}
+
+/** Stores one archive where fsp-srv looks for it first:
+ * /systemdata/<id>.nca or .romfs (a new copy retires the other form). */
+async function storeSystemFile(file: File, id: string, nca: boolean): Promise<string | null> {
+  const bytes = new Uint8Array(fileReader.readAsArrayBuffer(file));
+  const path = `${SYSTEM_DATA_DIR}/${id}.${nca ? "nca" : "romfs"}`;
+  const other = `${SYSTEM_DATA_DIR}/${id}.${nca ? "romfs" : "nca"}`;
+  if (!writeSdFile(path, bytes)) return `could not store ${file.name} (too large or out of space)`;
+  if (readSdManifest()?.has(other)) {
+    withCString(other, (p) => { core?._emulator_sd_write_file_ffi(p, 0n, 0n); }); /* empty: the core skips it */
+    await removeSdFile(other);
   }
   if (!(await persistSdFile(path, bytes))) log("warn", `system file ${path} will not survive a reload (no OPFS)`);
-  return { type: "system-file-added", outcome: { ok: true, id } };
+  return null;
+}
+
+/** "System files": single dumps, or a whole decrypted firmware folder of
+ * which only the archives games need (SYSTEM_FILES) are kept. */
+async function addSystemFiles(files: readonly File[], chosenId: string | null): Promise<CPUToMainMessage> {
+  const added: string[] = [];
+  const errors: string[] = [];
+  let skipped = 0;
+  let encrypted = 0;
+  const single = files.length === 1;
+  const wanted = new Set(SYSTEM_FILES.map((f) => f.id));
+  for (const file of files) {
+    try {
+      const [kind, id] = identifySystemFile(file);
+      if (kind === SYSTEM_KIND_ENCRYPTED) {
+        encrypted++;
+      } else if (kind === SYSTEM_KIND_NCA && wanted.has(id)) {
+        const error = await storeSystemFile(file, id, true);
+        if (error) errors.push(error);
+        else if (!added.includes(id)) added.push(id);
+      } else if (kind === SYSTEM_KIND_ROMFS && single && chosenId) {
+        const error = await storeSystemFile(file, chosenId, false);
+        if (error) errors.push(error);
+        else added.push(chosenId);
+      } else {
+        if (single) {
+          errors.push(kind === SYSTEM_KIND_NCA
+            ? `${file.name} is system data ${id}, which no game here needs yet`
+            : `${file.name} is not a decrypted system data NCA or a RomFS image`);
+        }
+        skipped++;
+      }
+    } catch (e) {
+      errors.push(`could not read ${file.name}: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
+  if (encrypted > 0) {
+    errors.push(single ? `${files[0]?.name ?? "the file"} is still encrypted: decrypt it with your own tools first, like your games`
+                       : `${encrypted} file(s) are still encrypted (decrypt the firmware with your own tools first)`);
+  }
+  return { type: "system-file-added", outcome: { added, skipped: skipped + encrypted, errors } };
 }
 
 function listSystemFiles(): CPUToMainMessage {
@@ -1000,7 +1034,7 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     return;
   }
   if (msg.type === "system-file-add") {
-    void addSystemFile(msg.file, msg.id).then((reply) => self.postMessage(reply));
+    void addSystemFiles(msg.files, msg.id).then((reply) => self.postMessage(reply));
     return;
   }
   if (msg.type === "system-files-list") {

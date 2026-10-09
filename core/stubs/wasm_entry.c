@@ -70,7 +70,7 @@ EXPORT void emulator_pacing_resync_ffi(void);
 EXPORT int emulator_run_for_ffi(uint32_t host_ms, uint64_t cycle_budget);
 EXPORT void emulator_set_shared_font_ffi(uint64_t bytes, uint32_t size);
 EXPORT int emulator_sd_write_file_ffi(uint64_t path, uint64_t bytes, uint64_t size);
-EXPORT int emulator_identify_system_data_ffi(uint64_t bytes, uint64_t size, uint64_t out_id);
+EXPORT int emulator_identify_system_data_ffi(uint64_t bytes, uint64_t available, double total, uint64_t out_id);
 EXPORT int emulator_sd_clear_ffi(void);
 EXPORT double emulator_sd_generation_ffi(void);
 EXPORT int emulator_text_request_ffi(uint64_t out, double max);
@@ -486,12 +486,29 @@ EXPORT void emulator_set_shared_font_ffi(uint64_t bytes, uint32_t size)
 }
 
 /* Adds a file to the emulated SD card (§15); returns a Result code. */
-/* The shell's "System files": what the bytes are (System_Data_Kind), and
- * for a data NCA its data id into *out_id. */
-EXPORT int emulator_identify_system_data_ffi(uint64_t bytes, uint64_t size, uint64_t out_id)
+/* The shell's "System files": what a file is (System_Data_Kind), and for a
+ * data NCA its data id into *out_id. Only the file's head is here
+ * (`available` bytes of a `total`-byte file: a firmware folder is scanned
+ * by headers); reads past the head fail. */
+typedef struct Head_Source {
+  const uint8_t *bytes;
+  uint64_t available;
+} Head_Source;
+
+static Error head_source_read(void *user, uint64_t offset, void *out, uint64_t size)
+{
+  const Head_Source *head = (const Head_Source *)user;
+  if (offset > head->available || size > head->available - offset)
+    return ERR(RESULT_IO_ERROR, "system data: past the file head");
+  memcpy(out, head->bytes + offset, size);
+  return OK;
+}
+
+EXPORT int emulator_identify_system_data_ffi(uint64_t bytes, uint64_t available, double total, uint64_t out_id)
 {
   if (!bytes || !out_id) return SYSTEM_DATA_UNKNOWN;
-  const Byte_Source source = byte_source_from_memory((const void *)(uintptr_t)bytes, size);
+  Head_Source head = {(const uint8_t *)(uintptr_t)bytes, available};
+  const Byte_Source source = {&head, (uint64_t)total, head_source_read};
   uint64_t id = 0;
   const System_Data_Kind kind = system_data_identify(&source, &id);
   *(uint64_t *)(uintptr_t)out_id = id;

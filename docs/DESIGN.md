@@ -2503,7 +2503,11 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - Only then does Voland's stand-in apply.
   - MK8DX needs this: its Mii renderer cannot build its resources from the header-only MiiModel stand-in, and NVN later faults on the uninitialized texture objects (~4.4 s after boot, under the interpreter and the JIT alike).
   - **"System files" in the web shell.** The load panel lists the archives games may ask for (`SYSTEM_FILES` in `bindings/load.ts`) and whether each was added.
-    - "Add system file…" asks the core what the file is (`emulator_identify_system_data_ffi`): a data NCA names its own id, a raw RomFS takes the kind picked beside the button, and an encrypted or unknown file is refused.
+    - "Add system files…" (one or several files) and "Choose firmware folder…" (a whole decrypted firmware dump) ask the core what each file is from its first 64 KiB (`emulator_identify_system_data_ffi`).
+      - A data NCA names its own id.
+      - A lone raw RomFS takes the kind picked beside the button.
+      - Of a folder, only the archives in `SYSTEM_FILES` are kept; the rest are counted as skipped.
+      - Encrypted NCAs are refused: Voland never decrypts (§1.6).
     - The file is stored at `/systemdata/<id>.nca|.romfs` and kept in OPFS like the SD card.
     - "Empty SD card" keeps system files.
 - **A32 JIT (docs/JIT.md "AArch32").** 32-bit titles run on `CPU_BACKEND_A32_JIT`, the ARM64→WASM JIT's runtime with an A32 front end (`jit_compile_a32.inc`) and the A32 interpreter as its cold path and fallback.

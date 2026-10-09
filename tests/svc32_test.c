@@ -4,6 +4,7 @@
  */
 #include "check.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "common/arena.h"
@@ -11,6 +12,8 @@
 #include "hle/fs/system_data.h"
 #include "hle/kernel/svc32.h"
 #include "hle/loader/romfs.h"
+#include "hle/loader/nca_parse.h"
+#include "loader_fixtures.h"
 
 static void set(CPU_Register_File *r, const uint32_t *v, uint32_t n) {
   memset(r, 0, sizeof(*r));
@@ -135,8 +138,64 @@ static void test_user_system_data(void) {
   ramfs_pool_destroy(&pool);
 }
 
-int main(void) {
+/* A pre-decrypted data NCA (as from the user's own firmware): identify
+ * names its data id from the header alone, and the core serves its RomFS
+ * from /systemdata/<id>.nca. */
+static void test_user_system_data_nca(const char *write_to) {
+  static const uint8_t body[] = "mii model";
+  const System_Data_File files[] = {{"NXShapeMid.dat", body, sizeof(body)}};
+  static uint8_t image[1024];
+  const uint64_t romfs_size = system_data_build_romfs(files, 1, image, sizeof(image));
+  Fixture_Buffer romfs, nca;
+  fixture_buffer_init(&romfs);
+  fixture_buffer_init(&nca);
+  fixture_append(&romfs, image, (size_t)romfs_size);
+  Fixture_NCA_Section sections[4];
+  memset(sections, 0, sizeof(sections));
+  sections[0] = (Fixture_NCA_Section){true, FIXTURE_NCA_FS_TYPE_ROMFS, FIXTURE_NCA_HASH_IVFC, 3, &romfs, 0x1000};
+  fixture_build_nca(NCA_MAGIC_NCA3, NCA_CONTENT_DATA, SYSTEM_DATA_MII_MODEL, sections, &nca);
+
+  if (write_to) { /* the browser e2e's firmware-folder file (platform/web/e2e/system-files.spec.ts); all synthetic */
+    FILE *f = fopen(write_to, "wb");
+    CHECK(f != NULL && fwrite(nca.bytes, 1, nca.size, f) == nca.size);
+    fclose(f);
+  }
+  uint64_t id = 0;
+  const Byte_Source whole = byte_source_from_memory(nca.bytes, nca.size);
+  CHECK(system_data_identify(&whole, &id) == SYSTEM_DATA_NCA && id == SYSTEM_DATA_MII_MODEL);
+  /* A program NCA is not system data. */
+  Fixture_Buffer program;
+  fixture_buffer_init(&program);
+  fixture_build_nca(NCA_MAGIC_NCA3, NCA_CONTENT_PROGRAM, SYSTEM_DATA_MII_MODEL, sections, &program);
+  const Byte_Source program_source = byte_source_from_memory(program.bytes, program.size);
+  CHECK(system_data_identify(&program_source, &id) == SYSTEM_DATA_UNKNOWN);
+
+  Ramfs_Pool pool;
+  CHECK(ramfs_pool_init(&pool, 1u << 20));
+  uint32_t root = RAMFS_NO_NODE, node = RAMFS_NO_NODE;
+  CHECK(ramfs_create_filesystem(&pool, &root) == 0);
+  CHECK(ramfs_create_directory(&pool, root, "/systemdata") == 0);
+  CHECK(ramfs_create_file(&pool, root, "/systemdata/0100000000000802.nca", nca.size) == 0);
+  CHECK(ramfs_lookup(&pool, root, "/systemdata/0100000000000802.nca", &node) == 0);
+  CHECK(ramfs_write(&pool, node, 0, nca.bytes, nca.size) == 0);
+  Byte_Source src;
+  CHECK(system_data_open_user(&pool, root, SYSTEM_DATA_MII_MODEL, &src));
+  Arena arena;
+  CHECK(arena_create(&arena, 1u << 16));
+  RomFS fs;
+  CHECK_OK(romfs_open(&src, &arena, &fs));
+  RomFS_File_Entry e;
+  CHECK_OK(romfs_find_file(&fs, "NXShapeMid.dat", &e));
+  arena_destroy(&arena);
+  ramfs_pool_destroy(&pool);
+  fixture_buffer_free(&program);
+  fixture_buffer_free(&nca);
+  fixture_buffer_free(&romfs);
+}
+
+int main(int argc, char **argv) {
   test_user_system_data();
+  test_user_system_data_nca(argc > 1 ? argv[1] : NULL);
   test_get_info();
   test_create_thread();
   test_timeouts_and_ticks();

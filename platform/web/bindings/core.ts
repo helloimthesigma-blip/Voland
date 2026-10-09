@@ -64,7 +64,7 @@ export interface SwitchCoreExports {
   readonly _emulator_set_shared_font_ffi:  (bytes: bigint, size: number) => void;
   readonly _emulator_sd_write_file_ffi:    (path: bigint, bytes: bigint, size: bigint) => number; /* Result */
   /** System_Data_Kind of the bytes (0 unknown, 1 data NCA, 2 RomFS, 3 encrypted NCA); a data NCA's id to out_id (u64). */
-  readonly _emulator_identify_system_data_ffi: (bytes: bigint, size: bigint, outId: bigint) => number;
+  readonly _emulator_identify_system_data_ffi: (bytes: bigint, available: bigint, total: number, outId: bigint) => number;
   readonly _emulator_sd_clear_ffi:         () => number; /* Result */
   /* Guest-write mirroring (v3.50): the filesystem change counter, the SD
    * manifest ("version size path\n" lines; returns the bytes needed) and

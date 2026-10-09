@@ -121,14 +121,18 @@ export function systemFileName(id: string): string {
   return SYSTEM_FILES.find((f) => f.id === id)?.name ?? `system data ${id}`;
 }
 
-/** What adding a system file did: the archive it was stored as, or why not. */
-export type SystemFileOutcome =
-  | { readonly ok: true; readonly id: string }
-  | { readonly ok: false; readonly message: string };
+/** What adding system files did: the archives stored (data ids), how
+ * many files were not ones games need (the rest of a firmware folder),
+ * and why any file that looked usable could not be used. */
+export interface SystemFileOutcome {
+  readonly added: readonly string[];
+  readonly skipped: number;
+  readonly errors: readonly string[];
+}
 
 /** The shell's handle on "System files" (main.ts -> LoadPanel). */
 export interface SystemFilesApi {
-  readonly add: (file: File, id: string | null) => Promise<SystemFileOutcome>;
+  readonly add: (files: readonly File[], id: string | null) => Promise<SystemFileOutcome>;
   readonly list: () => Promise<readonly string[]>;
 }
 
