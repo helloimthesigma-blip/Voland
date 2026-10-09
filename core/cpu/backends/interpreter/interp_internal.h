@@ -195,6 +195,9 @@ bool interp_decode_bit_masks(uint32_t n, uint32_t imms, uint32_t immr, bool imme
 
 bool interp_read(Interp_State *s, uint64_t address, void *out, uint32_t size);
 bool interp_write(Interp_State *s, uint64_t address, const void *data, uint32_t size);
+/* Compare-and-swap of 1, 2, 4, 8 or 16 bytes at a host address from the
+ * vmm (seq_cst): the multicore store-exclusive (docs/PARALLEL.md). */
+bool interp_compare_and_swap(uint8_t *host, const void *expected, const void *desired, uint32_t size);
 
 /* System registers as MRS/MSR see them (CPU_SYSREG_* encodings). */
 uint64_t interp_read_sys_reg(const Interp_State *s, uint32_t reg, bool *known);

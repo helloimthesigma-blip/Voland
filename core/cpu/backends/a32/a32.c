@@ -347,9 +347,32 @@ static Interp_Status load_store_extra(A32_State *a, uint32_t insn) {
   return INTERP_CONTINUE;
 }
 
+/* Multicore STREX/STLEX (docs/PARALLEL.md): a host compare-and-swap
+ * against what the LDREX read, so a store by another core in between
+ * makes it fail. Exclusives are aligned here (an alignment fault
+ * otherwise, as on hardware). */
+static Interp_Status store_exclusive_shared(A32_State *a, uint32_t address, uint32_t size, uint32_t rd, uint32_t rt) {
+  bool pass = a->s.exclusive_valid && a->s.exclusive_address == address && a->s.exclusive_size == size;
+  if (pass) {
+    VMM_Fault fault;
+    uint8_t *host = vmm_translate_inline(a->s.l1, address, VMM_PERM_W, &fault);
+    if (!host) {
+      a->s.fault_address = fault.gva;
+      return INTERP_FAULT;
+    }
+    const uint32_t v[2] = {a32_reg(a, rt), size == 8u ? a32_reg(a, rt + 1u) : 0u};
+    pass = interp_compare_and_swap(host, a->s.exclusive_value, v, size);
+  }
+  a->s.exclusive_valid = false;
+  a32_set_reg(a, rd, pass ? 0u : 1u);
+  return INTERP_CONTINUE;
+}
+
 /* LDREX/STREX (word, doubleword, byte, halfword) and the ARMv8 acquire /
  * release forms LDA/STL, LDAEX/STLEX. The monitor is the A64
- * interpreter's (one address per thread, cleared at run() entry). */
+ * interpreter's (one address per thread, cleared at run() entry). With
+ * several cores (cpu_multicore()) STREX is a compare-and-swap and the
+ * acquire/release forms are fenced, as in the A64 interpreter. */
 static Interp_Status synchronization(A32_State *a, uint32_t insn) {
   const uint32_t op = f(insn, 22, 21), load = b1(insn, 20), rn = f(insn, 19, 16), rd = f(insn, 15, 12),
                  rt = f(insn, 3, 0);
@@ -357,8 +380,10 @@ static Interp_Status synchronization(A32_State *a, uint32_t insn) {
   static const uint32_t k_size[4] = {4u, 8u, 1u, 2u};
   const uint32_t size = k_size[op];
   const uint32_t address = a32_reg(a, rn);
+  const bool multicore = cpu_multicore();
   if (ordered == 0u) { /* LDA/STL: not exclusive */
     if (op == 1u) return INTERP_UNDEFINED;
+    if (multicore) __atomic_thread_fence(__ATOMIC_SEQ_CST);
     if (load) {
       uint32_t v = 0;
       if (!a32_read(a, address, &v, size)) return INTERP_FAULT;
@@ -367,7 +392,12 @@ static Interp_Status synchronization(A32_State *a, uint32_t insn) {
       const uint32_t v = a32_reg(a, rt);
       if (!a32_write(a, address, &v, size)) return INTERP_FAULT;
     }
+    if (multicore) __atomic_thread_fence(__ATOMIC_SEQ_CST);
     return INTERP_CONTINUE;
+  }
+  if (multicore && (address & (size - 1u))) {
+    a->s.fault_address = address; /* alignment fault */
+    return INTERP_FAULT;
   }
   if (load) {
     uint32_t v[2] = {0, 0};
@@ -375,10 +405,13 @@ static Interp_Status synchronization(A32_State *a, uint32_t insn) {
     a->s.exclusive_valid = true;
     a->s.exclusive_address = address;
     a->s.exclusive_size = size;
+    memcpy(a->s.exclusive_value, v, sizeof(v)); /* for the multicore compare-and-swap */
     a32_set_reg(a, rd, v[0]);
     if (size == 8u) a32_set_reg(a, rd + 1u, v[1]);
+    if (multicore && ordered == 2u) __atomic_thread_fence(__ATOMIC_SEQ_CST); /* LDAEX: acquire */
     return INTERP_CONTINUE;
   }
+  if (multicore) return store_exclusive_shared(a, address, size, rd, rt);
   /* STREX: Rd = 0 on success, 1 when the monitor was lost. */
   if (a->s.exclusive_valid && a->s.exclusive_address == address && a->s.exclusive_size == size) {
     const uint32_t v[2] = {a32_reg(a, rt), size == 8u ? a32_reg(a, rt + 1u) : 0u};
@@ -715,8 +748,11 @@ static Interp_Status cp15(A32_State *a, uint32_t insn) {
       return INTERP_CONTINUE;
     }
   }
-  if (!load && opc1 == 0 && crn == 7u && (crm == 10u || crm == 5u) && (opc2 == 4u || opc2 == 5u || opc2 == 4u))
-    return INTERP_CONTINUE; /* CP15DSB / CP15DMB / CP15ISB: ordered already */
+  if (!load && opc1 == 0 && crn == 7u && (crm == 10u || crm == 5u) && (opc2 == 4u || opc2 == 5u)) {
+    /* CP15DSB / CP15DMB (c10): host fences with several cores; CP15ISB (c5, 4): nothing */
+    if (crm == 10u && cpu_multicore()) __atomic_thread_fence(__ATOMIC_SEQ_CST);
+    return INTERP_CONTINUE;
+  }
   if (!load && opc1 == 0 && crn == 7u && crm == 5u && (opc2 == 1u || opc2 == 6u || opc2 == 7u)) {
     interp_predecode_flush(); /* ICIMVAU / BPI: decoded code may be stale */
     return INTERP_CONTINUE;
@@ -749,6 +785,7 @@ static Interp_Status unconditional(A32_State *a, uint32_t insn) {
   if (f(insn, 27, 20) == 0x57u) { /* CLREX, DSB, DMB, ISB */
     const uint32_t op = f(insn, 7, 4);
     if (op == 1u) a->s.exclusive_valid = false;
+    if ((op == 4u || op == 5u) && cpu_multicore()) __atomic_thread_fence(__ATOMIC_SEQ_CST); /* DSB, DMB */
     return op <= 6u ? INTERP_CONTINUE : INTERP_UNDEFINED;
   }
   const uint32_t top = f(insn, 27, 24);
@@ -1004,7 +1041,7 @@ const CPU_Backend CPU_BACKEND_A32 = {
     .name = "a32",
     .version = "0.1.0",
     .supports_jit = false,
-    .supports_multicore = false, /* the exclusive monitor is not shared across host threads */
+    .supports_multicore = true, /* multicore STREX is a compare-and-swap (docs/PARALLEL.md) */
     .aarch32 = true,
 };
 

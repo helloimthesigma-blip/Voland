@@ -174,6 +174,11 @@ add_executable(a32_jit_diff_test a32_jit_diff_test.c)
 target_link_libraries(a32_jit_diff_test PRIVATE switch_core)
 add_test(NAME a32_jit_diff_test COMMAND a32_jit_diff_test 3000)
 
+# AArch32 exclusives on several host threads (docs/PARALLEL.md).
+add_executable(a32_parallel_test a32_parallel_test.c)
+target_link_libraries(a32_parallel_test PRIVATE switch_core)
+add_test(NAME a32_parallel_test COMMAND a32_parallel_test)
+
 #
 # Guest threads end to end (§7): real ARM64 programs (tests/guest/*.s,
 # assembled into *.inc by tools/guest_asm.py) run on the interpreter

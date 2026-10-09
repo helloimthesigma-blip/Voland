@@ -1080,6 +1080,6 @@ const CPU_Backend CPU_BACKEND_A32_JIT = {
     .name = "a32jit",
     .version = "0.1.0",
     .supports_jit = true,
-    .supports_multicore = false, /* the A32 interpreter's exclusive monitor is per thread */
+    .supports_multicore = true, /* per-host-thread code caches; exclusives as the A32 interpreter's (a CAS) */
     .aarch32 = true,
 };

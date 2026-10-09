@@ -270,7 +270,7 @@ static uint64_t granule_of(uint64_t address) {
 
 /* Compare-and-swap of `size` bytes at `host`: true if it held `expected`
  * and now holds `desired` (both little-endian byte images). */
-static bool host_compare_and_swap(uint8_t *host, const void *expected, const void *desired, uint32_t size) {
+bool interp_compare_and_swap(uint8_t *host, const void *expected, const void *desired, uint32_t size) {
   switch (size) {
   case 1: {
     uint8_t e, d;
@@ -334,7 +334,7 @@ static Interp_Status store_exclusive_shared(Interp_State *s, uint64_t address, u
     uint8_t data[MAX_ACCESS_BYTES];
     store_le(data, xreg(s, t), element);
     if (pair) store_le(data + element, xreg(s, t2), element);
-    pass = host_compare_and_swap(host, s->exclusive_value, data, total);
+    pass = interp_compare_and_swap(host, s->exclusive_value, data, total);
   } else {
     /* Hardware still checks translation on a failing store-exclusive. */
     uint8_t probe;

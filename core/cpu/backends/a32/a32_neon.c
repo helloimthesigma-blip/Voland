@@ -664,7 +664,7 @@ static void build_sbox(void) {
     g_sbox[x] = s;
     g_inv_sbox[s] = (uint8_t)x;
   }
-  g_sbox_ready = true;
+  __atomic_store_n(&g_sbox_ready, true, __ATOMIC_RELEASE); /* cores may race to build it: same bytes */
 }
 
 static void vec_bytes(const Vec *v, uint8_t out[AES_BYTES]) { memcpy(out, v->d, AES_BYTES); }
@@ -694,7 +694,7 @@ static void mix_column(uint8_t *c, bool inverse) {
 static Interp_Status aes(A32_State *a, uint32_t insn) {
   const uint32_t op = f(insn, 7, 6), d = reg_d(insn), m = reg_m(insn);
   if (f(insn, 19, 18) != 0u || ((d | m) & 1u)) return INTERP_UNDEFINED;
-  if (!g_sbox_ready) build_sbox();
+  if (!__atomic_load_n(&g_sbox_ready, __ATOMIC_ACQUIRE)) build_sbox();
   uint8_t s[AES_BYTES], t[AES_BYTES];
   const Vec vd = get_v(a, d, true), vm = get_v(a, m, true);
   if (op < 2u) {

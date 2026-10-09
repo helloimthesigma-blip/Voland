@@ -478,7 +478,10 @@ static Error use_backend(Emulator* emulator, const CPU_Backend* backend) {
   if (emulator->cpu_backend == backend) return OK;
   CPU_State* state = backend->create(emulator->vmm, &emulator->hle);
   if (!state) return ERR(RESULT_OUT_OF_MEMORY, "emulator: CPU backend failed to init");
-  if (emulator->parallel && !backend->supports_multicore) (void)emulator_set_host_cores(emulator, 0);
+  /* The cores run the old backend: stop them, and start as many again
+   * on the new one if it can run on several. */
+  const uint32_t cores = emulator->parallel ? parallel_core_count(emulator->parallel) : 0u;
+  if (cores) (void)emulator_set_host_cores(emulator, 0);
   emulator->cpu_backend->destroy(emulator->cpu_state);
   emulator->cpu_backend = backend;
   emulator->cpu_state = state;
@@ -488,6 +491,7 @@ static Error use_backend(Emulator* emulator, const CPU_Backend* backend) {
   scheduler_init(&emulator->scheduler, backend);
   emulator->scheduler.parallel = emulator->parallel;
   emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
+  if (cores && backend->supports_multicore) (void)emulator_set_host_cores(emulator, cores);
   log_info("[emulator] CPU backend for this program: %s", backend->name);
   return OK;
 }
@@ -914,7 +918,8 @@ uint32_t emulator_set_host_cores(Emulator* emulator, uint32_t cores) {
   if (!emulator->parallel) return 0;
   parallel_set_device_hook(emulator->parallel, update_devices_hook, emulator);
 #ifdef SWITCH_CPU_BACKEND_JIT
-  if (emulator->cpu_backend == &CPU_BACKEND_JIT) parallel_set_report_hook(emulator->parallel, report_jit);
+  if (emulator->cpu_backend == &CPU_BACKEND_JIT || emulator->cpu_backend == &CPU_BACKEND_A32_JIT)
+    parallel_set_report_hook(emulator->parallel, report_jit);
 #endif
   cpu_set_multicore(parallel_core_count(emulator->parallel) >= 2u);
   return parallel_core_count(emulator->parallel);

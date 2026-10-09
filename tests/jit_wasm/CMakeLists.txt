@@ -46,6 +46,17 @@ set_target_properties(a32_jit_diff_test_wasm PROPERTIES OUTPUT_NAME "a32_jit_dif
 add_test(NAME a32_jit_diff_test_node
   COMMAND ${VOLAND_NODE} $<TARGET_FILE:a32_jit_diff_test_wasm> 20000)
 
+# A32 exclusives on three host threads, the A32 JIT compiling on each
+# (a pool, so pthread_create needs no event-loop turn on the main thread).
+add_executable(a32_parallel_test_wasm ../a32_parallel_test.c)
+target_link_libraries(a32_parallel_test_wasm PRIVATE switch_core)
+target_include_directories(a32_parallel_test_wasm PRIVATE ..)
+target_link_options(a32_parallel_test_wasm PRIVATE
+  -sENVIRONMENT=node,worker -sIMPORTED_MEMORY=0 -sMODULARIZE=0 -sEXPORT_ES6=0 -sEXIT_RUNTIME=1
+  -sPTHREAD_POOL_SIZE=4 -sNODERAWFS=1 "-sEXPORTED_FUNCTIONS=['_main']")
+set_target_properties(a32_parallel_test_wasm PROPERTIES OUTPUT_NAME "a32_parallel_test" SUFFIX ".js")
+add_test(NAME a32_parallel_test_node COMMAND ${VOLAND_NODE} $<TARGET_FILE:a32_parallel_test_wasm>)
+
 # voland-cli as a Node program: the real-workload harness for the JIT
 # (docs/JIT.md "Measuring"). Same core and flags as the browser build, so
 # `--backend interpreter` vs `--backend jit` compares what the browser

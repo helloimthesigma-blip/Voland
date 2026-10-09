@@ -320,6 +320,15 @@ core nothing changes.
 - **Plain loads and stores** stay plain. Aligned accesses of up to 8 bytes
   are single-copy atomic on both hosts (AArch64, and wasm's aligned
   loads/stores in practice).
+- **AArch32** (`CPU_BACKEND_A32`, `CPU_BACKEND_A32_JIT`) follows the same
+  rules: STREX/STLEX of 1, 2, 4 and 8 bytes is the compare-and-swap,
+  exclusives are aligned (an alignment fault otherwise), and DMB/DSB,
+  CP15DMB/CP15DSB, LDA/STL and LDAEX fence. The A32 JIT compiles
+  exclusives only for one core; with several it calls the interpreter
+  for them. `tests/a32_parallel_test.c` (and `a32_parallel_test_node` on
+  the JIT) runs three host threads of LDREX/STREX and LDAEX/STLEX
+  increments under random budgets: without the compare-and-swap it
+  loses about a third of them.
 - **The exclusive monitor** is still cleared at every `run()` entry, and
   the grace rule (keep running up to 64 instructions past the budget
   while a monitor is held) still applies per core.
