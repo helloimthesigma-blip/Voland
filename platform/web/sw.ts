@@ -35,7 +35,9 @@ const SHELL_URL = `${SCOPE_PATH}index.html`;
 const CROSS_ORIGIN_ISOLATION_HEADERS: ReadonlyArray<readonly [string, string]> = [
   ["Cross-Origin-Opener-Policy", "same-origin"],
   ["Cross-Origin-Embedder-Policy", "require-corp"],
-  ["Content-Security-Policy", "frame-ancestors 'self'"],
+  /* Isolates this document itself, even framed by a page that is not
+   * isolated (another site's iframe): SharedArrayBuffer in any frame. */
+  ["Document-Isolation-Policy", "isolate-and-require-corp"],
 ];
 
 function addCrossOriginIsolationHeaders(response: Response): Response {

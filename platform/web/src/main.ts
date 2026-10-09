@@ -170,20 +170,17 @@ async function boot(): Promise<BootResult | null> {
     }
   }
 
-  if (!crossOriginIsolated && inLauncherFrame()) {
-    /* Framed by a page that is not cross-origin isolated (another site's
-     * launcher or about:blank tab): isolation comes from the top-level
-     * page, so no reload or header here can give it. Voland's own
-     * launcher does (Settings, "Open in about:blank"; src/blank-launch.ts). */
-    fatal("Voland is inside a frame from a page that cannot run it: emulation needs the whole tab to be " +
-          "cross-origin isolated, and this tab is not. Open Voland directly (" + location.href + ") and use " +
-          "Settings > \"Open in about:blank\" to run it in a blank tab.");
-    return null;
-  }
-
   if (!crossOriginIsolated) {
     const reloaded = await reloadOnceForCrossOriginIsolation();
     if (reloaded) return null; // navigation is in flight
+    if (inLauncherFrame()) {
+      /* In a frame, isolation comes from Document-Isolation-Policy (the
+       * service worker adds it from the second load on): a browser
+       * without it (not Chromium 137+) cannot run Voland in a frame. */
+      fatal("Voland cannot run in this frame: this browser does not isolate framed pages " +
+            "(Document-Isolation-Policy, Chrome/Edge 137 or newer). Open Voland directly (" + location.href + ").");
+      return null;
+    }
     fatal("Cross-origin isolation is not active. Ensure the server sets " +
           "COOP: same-origin and COEP: require-corp (§16).");
     return null;

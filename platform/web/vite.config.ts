@@ -28,7 +28,9 @@ const alias = {
 const crossOriginIsolationHeaders = {
   "Cross-Origin-Opener-Policy":   "same-origin",
   "Cross-Origin-Embedder-Policy": "require-corp",
-  "Content-Security-Policy":     "frame-ancestors 'self'",
+  /* The document isolates itself (Chromium 137+), so Voland is
+   * cross-origin isolated in any site's iframe too (DESIGN.md §16). */
+  "Document-Isolation-Policy":    "isolate-and-require-corp",
 };
 
 /* The URL path the app is served under. "/" for local use; a GitHub Pages
