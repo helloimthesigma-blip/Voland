@@ -1148,7 +1148,7 @@ export class GpuExecutor {
       this.materialize(c.dstId);
       this.endPass();
       this.ensureEncoder().copyTextureToTexture({ texture: src.texture, origin: { x: sx, y: sy } },
-        { texture: dst.texture, origin: { x: dx, y: dy } }, [sw, sh, 1]);
+        { texture: dst.texture, origin: { x: dx, y: dy, z: c.dstLayer } }, [sw, sh, 1]);
       this.stats.copies++;
       return;
     }

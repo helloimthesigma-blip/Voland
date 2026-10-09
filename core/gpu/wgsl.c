@@ -560,9 +560,17 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
   const uint32_t pw = WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEX_PARAM_WORDS * i;
   out_add(o, "@group(0) @binding(%u) var T%u: texture_2d_array<%s>;\n", WGSL_TEXTURE_BINDING_BASE + i, i, type);
   if (hw) out_add(o, "@group(0) @binding(%u) var S%u: sampler;\n", WGSL_SAMPLER_BINDING_BASE + i, i);
+  /* The texture's own size at a level: a GOB-padded render target is
+   * sampled as the smaller texture the guest describes (WGSL_TEXP_SIZE). */
+  out_add(o,
+          "fn t%u_size(lv: u32) -> vec2<i32> {\n"
+          "  let s = D[%uu]; if (s == 0u) { return vec2<i32>(textureDimensions(T%u, lv)); }\n"
+          "  return max(vec2<i32>(i32(s & 0xffffu) >> lv, i32(s >> 16u) >> lv), vec2<i32>(1));\n"
+          "}\n",
+          i, pw + WGSL_TEXP_SIZE, i);
   out_add(o,
           "fn t%u_texel(x: i32, y: i32, l: u32, lv: u32) -> vec4<u32> {\n"
-          "  let dm = vec2<i32>(textureDimensions(T%u, lv)); let wr = D[%uu];\n"
+          "  let dm = t%u_size(lv); let wr = D[%uu];\n"
           "  let wx = wrapi(x, dm.x, wr & 15u); let wy = wrapi(y, dm.y, (wr >> 4u) & 15u);\n"
           "  if (wx < 0 || wy < 0) { return vec4<u32>(D[%uu], D[%uu], D[%uu], D[%uu]); }\n"
           "  let v = textureLoad(T%u, vec2<i32>(wx, wy), min(l, textureNumLayers(T%u) - 1u), lv);\n"
@@ -573,7 +581,7 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
   /* Coordinates -> texel space (resolve_coords): (u, v, layer). */
   out_add(o,
           "fn t%u_coords(c: vec3<f32>, layer: f32) -> vec3<f32> {\n"
-          "  let fl = D[%uu]; let dm = vec2<f32>(textureDimensions(T%u));\n"
+          "  let fl = D[%uu]; let dm = vec2<f32>(t%u_size(0u));\n"
           "  var s = c.x; var t = select(0.0, c.y, dm.y > 1.0);\n"
           "  var l = select(floor(layer + 0.5), 0.0, layer < 0.0);\n"
           "  if ((fl & %uu) != 0u) { let cf = cubeface(c); s = cf.x; t = cf.y; l = l * 6.0 + cf.z; }\n"
@@ -605,8 +613,8 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
           "  let nl = textureNumLevels(T%u); var lf = 0.0; var lv = 0u; var lin = (fl & %uu) != 0u;\n"
           "  if (nl > 1u) { let lc = clamp(lod, F(D[%uu]), F(D[%uu]));\n"
           "    lf = clamp(lc, 0.0, f32(nl - 1u)); lv = u32(floor(lf + 0.5)); if (lc > 0.0) { lin = (fl & %uu) != 0u; } }\n"
-          "  var q = q0; if (lv > 0u) { q = vec3<f32>(q0.xy * vec2<f32>(textureDimensions(T%u, lv)) /\n"
-          "    vec2<f32>(textureDimensions(T%u)), q0.z); }\n"
+          "  var q = q0; if (lv > 0u) { q = vec3<f32>(q0.xy * vec2<f32>(t%u_size(lv)) /\n"
+          "    vec2<f32>(t%u_size(0u)), q0.z); }\n"
           "  let cmp = shadow && (fl & %uu) != 0u;\n"
           "%s"
           "  if (!%s || !lin) {\n"
@@ -618,7 +626,7 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
           "  let ax = x - fx; let ay = y - fy; let x0 = i32(fx) + off.x; let y0 = i32(fy) + off.y;\n"
           "  let t00 = t%u_texel(x0, y0, l, lv); let t10 = t%u_texel(x0 + 1, y0, l, lv);\n"
           "  var t01 = t%u_texel(x0, y0 + 1, l, lv); var t11 = t%u_texel(x0 + 1, y0 + 1, l, lv);\n"
-          "  if (textureDimensions(T%u, lv).y <= 1u) { t01 = t00; t11 = t10; }\n"
+          "  if (t%u_size(lv).y <= 1) { t01 = t00; t11 = t10; }\n"
           "  var a = bitcast<vec4<f32>>(t00); var b = bitcast<vec4<f32>>(t10);\n"
           "  var cc = bitcast<vec4<f32>>(t01); var d = bitcast<vec4<f32>>(t11);\n"
           "  if (cmp) {\n"
@@ -669,7 +677,7 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
           i, pw + WGSL_TEXP_FLAGS, pw + WGSL_TEXP_SWIZZLE, pw + WGSL_TEXP_COMPARE, i, i, WGSL_TEXP_DEPTH_COMPARE);
   out_add(o,
           "fn t%u_fetch(x: i32, y: i32, l: i32) -> vec4<u32> {\n"
-          "  let dm = vec2<i32>(textureDimensions(T%u));\n"
+          "  let dm = t%u_size(0u);\n"
           "  if (x < 0 || y < 0 || x >= dm.x || y >= dm.y) { return vec4<u32>(0u); }\n"
           "  let v = textureLoad(T%u, vec2<i32>(x, y), min(u32(max(l, 0)), textureNumLayers(T%u) - 1u), 0);\n"
           "  return swz(%s, D[%uu]);\n"
@@ -677,7 +685,7 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
           i, i, i, i, conv, pw + WGSL_TEXP_SWIZZLE);
   out_add(o,
           "fn t%u_dims() -> vec4<u32> {\n"
-          "  let dm = textureDimensions(T%u); return vec4<u32>(dm.x, dm.y, textureNumLayers(T%u), D[%uu]);\n"
+          "  let dm = vec2<u32>(t%u_size(0u)); return vec4<u32>(dm.x, dm.y, textureNumLayers(T%u), D[%uu]);\n"
           "}\n",
           i, i, i, pw + WGSL_TEXP_LEVELS);
 }

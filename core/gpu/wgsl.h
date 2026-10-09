@@ -42,7 +42,7 @@
  *   state - flags (WGSL_TEXP_*), wrap (TSC modes, 4 bits each: u, v, p),
  *   swizzle (TEX_SOURCE_* 4 bits each: x, y, z, w), mip levels, compare
  *   function (0 NEVER .. 7 ALWAYS: ref OP texel), LOD bias, min LOD, max LOD
- *   (f32), border (f32 x 4).
+ *   (f32), border (f32 x 4), size (width | height << 16; 0: the GPU texture's).
  *   WGSL_DRAW_CBUF_TABLE + 2 * slot: constant buffer `slot`'s first word in
  *   this buffer and its size in words (0: unbound, reads 0).
  */
@@ -66,7 +66,7 @@
 #define WGSL_DRAW_ALPHA_FUNC 2u
 #define WGSL_DRAW_ALPHA_REF 3u
 #define WGSL_DRAW_TEXTURE_PARAMS 4u
-#define WGSL_TEX_PARAM_WORDS 12u
+#define WGSL_TEX_PARAM_WORDS 13u
 #define WGSL_DRAW_CBUF_TABLE (WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEX_PARAM_WORDS * WGSL_MAX_TEXTURES)
 /* Vertex programs on the GPU (WGSL_STAGE vertex): their own constant
  * buffer table, then the viewport the CPU path applies in to_screen. */
@@ -129,6 +129,8 @@
 #define WGSL_TEXP_MIN_LOD 6u  /* f32: the sampler's level clamps (0, 0: level 0 only) */
 #define WGSL_TEXP_MAX_LOD 7u
 #define WGSL_TEXP_BORDER 8u
+#define WGSL_TEXP_SIZE 12u   /* u32: the texture's width | height << 16 inside a larger GPU texture (a
+                              * GOB-padded render target); 0: the GPU texture's own size */
 #define WGSL_TEXP_SCALE 1u   /* coordinates are normalized (scale by the size) */
 #define WGSL_TEXP_LINEAR 2u  /* bilinear (float formats only) */
 #define WGSL_TEXP_CUBE 4u    /* cube map: direction -> face layer */

@@ -123,11 +123,27 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
       return window.saveFrame(index, w, h, toBase64(rgb), last);
     }));
   };
-  /* Every RGBA8 render target, as it is now. */
+  /* Float texels to bytes (clamped to [0, 1]) for the float targets. */
+  const half = (h) => {
+    const e = (h >> 10) & 31, m = h & 1023, sgn = h & 0x8000 ? -1 : 1;
+    if (e === 0) return sgn * m * 2 ** -24;
+    if (e === 31) return m ? NaN : sgn * Infinity;
+    return sgn * (1 + m / 1024) * 2 ** (e - 15);
+  };
+  const small = (bits, mbits) => { /* unsigned 5-bit exponent floats (RG11B10) */
+    const e = bits >> mbits, m = bits & ((1 << mbits) - 1);
+    if (e === 0) return (m / (1 << mbits)) * 2 ** -14;
+    if (e === 31) return m ? NaN : Infinity;
+    return (1 + m / (1 << mbits)) * 2 ** (e - 15);
+  };
+  const byte = (v) => (Number.isFinite(v) ? Math.max(0, Math.min(255, Math.round(v * 255))) : v > 0 ? 255 : 0);
+  const TEXEL_BYTES = { "rgba8unorm": 4, "rgba8unorm-srgb": 4, "bgra8unorm": 4, "rgb10a2unorm": 4, "rgba16float": 8, "rg11b10ufloat": 4, "r16float": 2 };
+  /* Every RGBA8 and float render target, as it is now. */
   const dumpAll = (index) => {
     for (const [id, t] of ex.textures) {
-      if (!t.renderView || !["rgba8unorm", "rgba8unorm-srgb", "bgra8unorm", "rgb10a2unorm"].includes(t.format)) continue;
-      const bytesPerRow = Math.ceil((t.width * 4) / 256) * 256;
+      const texel = TEXEL_BYTES[t.format];
+      if (!t.renderView || !texel) continue;
+      const bytesPerRow = Math.ceil((t.width * texel) / 256) * 256;
       const buffer = device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       const enc = device.createCommandEncoder();
       enc.copyTextureToBuffer({ texture: t.texture }, { buffer, bytesPerRow }, [t.width, t.height]);
@@ -135,7 +151,20 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
       pending.push(buffer.mapAsync(GPUMapMode.READ).then(() => {
         const src = new Uint8Array(buffer.getMappedRange());
         const out = new Uint8Array(t.width * t.height * 4);
-        for (let y = 0; y < t.height; y++) out.set(src.subarray(y * bytesPerRow, y * bytesPerRow + t.width * 4), y * t.width * 4);
+        if (texel === 4 && t.format !== "rg11b10ufloat") {
+          for (let y = 0; y < t.height; y++) out.set(src.subarray(y * bytesPerRow, y * bytesPerRow + t.width * 4), y * t.width * 4);
+        } else {
+          const dv = new DataView(src.buffer, src.byteOffset, src.byteLength);
+          for (let y = 0; y < t.height; y++)
+            for (let x = 0; x < t.width; x++) {
+              const at = y * bytesPerRow + x * texel, o = (y * t.width + x) * 4;
+              let c;
+              if (t.format === "rgba16float") c = [0, 2, 4, 6].map((k) => half(dv.getUint16(at + k, true)));
+              else if (t.format === "r16float") { const v = half(dv.getUint16(at, true)); c = [v, v, v, 1]; }
+              else { const w = dv.getUint32(at, true); c = [small(w & 2047, 6), small((w >> 11) & 2047, 6), small(w >>> 22, 5), 1]; }
+              for (let k = 0; k < 4; k++) out[o + k] = byte(c[k]);
+            }
+        }
         buffer.destroy();
         return window.saveTarget(`p${index}-tex${id}-${t.width}x${t.height}.pam`, t.width, t.height, toBase64(out));
       }));

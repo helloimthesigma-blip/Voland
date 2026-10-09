@@ -1621,10 +1621,16 @@ static uint32_t f32_bits(float f) {
   return u;
 }
 
+/* The instance id a shader reads (InstanceId): the draw's instance plus
+ * the base instance, as hardware counts it (Vulkan's InstanceIndex).
+ * MK8DX draws each slice of its colour-grading LUT as instance 0 with
+ * base instance = the slice, and colours the slice from it. */
+static uint32_t shader_instance_id(const Draw_Context *ctx) { return ctx->instance + ctx->regs[REG_BASE_INSTANCE]; }
+
 static void raw_vertices(Draw_Context *ctx, const uint32_t *indices, uint32_t n, Vertex *const *out) {
   const Sm_Header *h = &ctx->vs->header;
   for (uint32_t l = 0; l < n; l++) {
-    const uint32_t ids[2] = {indices[l], ctx->instance};
+    const uint32_t ids[2] = {indices[l], shader_instance_id(ctx)};
     memcpy(&out[l]->pos[0], &ids[0], 4);
     memcpy(&out[l]->pos[1], &ids[1], 4);
   }
@@ -1663,7 +1669,7 @@ static bool shade_vertices(Draw_Context *ctx, const uint32_t *indices, uint32_t 
   for (uint32_t l = 0; l < n; l++) {
     t->attr_out[(SM_ATTR_POSITION / 4u) + 3u][l] = u32f(1.0f);
     t->vertex_id[l] = indices[l];
-    t->instance_id[l] = ctx->instance;
+    t->instance_id[l] = shader_instance_id(ctx);
   }
   if (!sm_run(ctx->vs, &ctx->env[0], t)) {
     ctx->r->stats.shader_faults++;
@@ -1925,7 +1931,11 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
   rs->ctx = ctx;
   const uint32_t select = regs[REG_CT_SELECT];
   const uint32_t count = select & 0xfu;
-  rs->mrt = (regs[REG_CT_MRT_ENABLE] & 1u) != 0;
+  /* Separate outputs per target: SET_CT_MRT_ENABLE, or the pixel
+   * program's own header (SPH MRT enable). MK8DX draws its 3D LUT's eight
+   * slices as eight targets with the register clear and the header set;
+   * broadcasting output 0 made every slice the blue = 0 one. */
+  rs->mrt = (regs[REG_CT_MRT_ENABLE] & 1u) != 0 || (ctx->ps && ctx->ps->header.mrt_enable);
   const bool per_target = (regs[REG_BLEND_PER_TARGET] & 1u) != 0;
   int32_t width = 0x7fffffff, height = 0x7fffffff;
   for (uint32_t i = 0; i < count && i < MAX_TARGETS; i++) {
@@ -3093,10 +3103,100 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
   return victim;
 }
 
+/* A texture read from guest memory that overlaps a GPU-only render
+ * target without naming it (another base, width or view): the guest's
+ * bytes there are stale, so the draw samples what was there before the
+ * target was drawn. Logged (a few lines) - each such shape is a missing
+ * surface view. */
+#define PARTIAL_SURFACE_LOG_LIMIT 32u
+static void gpu_note_partial_surface(Raster3d *r, const Tex_Header *h) {
+  static uint64_t seen[PARTIAL_SURFACE_LOG_LIMIT]; /* one line per shape pair */
+  static uint32_t logged;
+  if (logged >= PARTIAL_SURFACE_LOG_LIMIT) return;
+  for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
+    const Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
+    if (!s->in_use || h->address < s->address || h->address >= s->address + s->guest_bytes) continue;
+    const uint64_t shape = ((uint64_t)h->width << 48) ^ ((uint64_t)h->height << 32) ^ ((uint64_t)h->format << 24) ^
+                           ((uint64_t)s->width << 12) ^ s->height ^ ((uint64_t)s->format << 40) ^ (h->address - s->address);
+    for (uint32_t k = 0; k < logged; k++)
+      if (seen[k] == shape) return;
+    seen[logged++] = shape;
+    log_warn("[gpu] texture %ux%u fmt 0x%02x type %u levels %u @%llx samples inside target %ux%u fmt 0x%02x @%llx (+0x%llx)",
+             h->width, h->height, h->format, (unsigned)h->type, h->levels, (unsigned long long)h->address, s->width, s->height,
+             s->format, (unsigned long long)s->address, (unsigned long long)(h->address - s->address));
+    return;
+  }
+}
+
+#define GOB_WIDTH_BYTES 64u
+/* A render target `s` holds a texture `width` wide at its base: the same
+ * width, or the width the guest rounded up to whole GOBs when it bound
+ * the target (NVN declares small and odd-sized targets padded; the
+ * texture keeps the true width). */
+static bool surface_width_matches(const Raster3d_Gpu_Surface *s, uint32_t width) {
+  if (!width || s->width == width) return true;
+  if (!s->block_linear || !s->bytes_per_pixel || width > s->width) return false;
+  const uint32_t per_gob = GOB_WIDTH_BYTES / s->bytes_per_pixel;
+  return per_gob && (width + per_gob - 1u) / per_gob * per_gob == s->width;
+}
+
+static Raster3d_Gpu_Surface *gpu_surface_at(Raster3d *r, uint64_t address, uint32_t width);
+static void gpu_create(Raster3d *r, uint32_t id, uint32_t format, uint32_t width, uint32_t height, uint32_t layers,
+                       uint32_t usage, uint32_t levels);
+static void gpu_destroy(Raster3d *r, uint32_t id);
+static uint32_t gpu_new_id(Raster3d *r);
+
+/* A block-linear 3D texture whose slices are GPU render targets: a guest
+ * that renders a volume (MK8DX's colour-grading LUT) binds each slice as
+ * its own target, slice k at base + k GOB columns of one block (512 bytes
+ * << block height) when the volume fits one block deep. Those surfaces
+ * are copied into the layers of one GPU texture, which the draw samples
+ * (3D textures are layered; WGSL_TEXP_3D blends slices). 0: not such a
+ * texture (the slice-0 surface alone would serve every slice). */
+#define GOB_BYTES 512u
+static uint32_t gpu_gather_slices(Raster3d *r, const Tex_Header *h, const Raster3d_Gpu_Surface *first) {
+  if (h->type != TEX_TYPE_3D || h->depth < 2u || h->layout != TEX_LAYOUT_BLOCK_LINEAR) return 0;
+  if (h->depth > (1u << h->block_depth_log2)) return 0; /* deeper than one block: not gathered */
+  const uint64_t slice_bytes = (uint64_t)GOB_BYTES << h->block_height_log2;
+  uint32_t slot = RASTER_GPU_GATHERS;
+  for (uint32_t i = 0; i < RASTER_GPU_GATHERS && slot == RASTER_GPU_GATHERS; i++)
+    if (r->gpu_gathers[i].id && r->gpu_gathers[i].address == h->address) slot = i;
+  if (slot == RASTER_GPU_GATHERS) slot = r->gpu_gather_next++ % RASTER_GPU_GATHERS;
+  __typeof__(r->gpu_gathers[0]) *g = &r->gpu_gathers[slot];
+  if (!g->id || g->address != h->address || g->width != first->width || g->height != first->height ||
+      g->layers != h->depth || g->gpu_format != first->gpu_format) {
+    if (g->id) gpu_destroy(r, g->id);
+    g->id = gpu_new_id(r);
+    g->address = h->address;
+    g->width = first->width;
+    g->height = first->height;
+    g->layers = h->depth;
+    g->gpu_format = first->gpu_format;
+    gpu_create(r, g->id, g->gpu_format, g->width, g->height, g->layers, GPU_USAGE_SAMPLED | GPU_USAGE_RENDER, 1u);
+  }
+  for (uint32_t k = 0; k < h->depth; k++) {
+    const Raster3d_Gpu_Surface *s = gpu_surface_at(r, h->address + k * slice_bytes, h->width);
+    if (!s || s->width != g->width || s->height != g->height || s->gpu_format != g->gpu_format) continue;
+    Gpu_Rec_Copy c;
+    memset(&c, 0, sizeof(c));
+    c.src_id = s->id;
+    c.dst_id = g->id;
+    c.src_rect[2] = c.dst_rect[2] = (int32_t)g->width;
+    c.src_rect[3] = c.dst_rect[3] = (int32_t)g->height;
+    c.dst_layer = k;
+    gpu_stream_write(r->gpu, GPU_REC_COPY, &c, sizeof(c));
+  }
+  return g->id;
+}
+
 static Raster3d_Gpu_Surface *gpu_surface_at(Raster3d *r, uint64_t address, uint32_t width) {
   for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
     Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
     if (s->in_use && s->address == address && (!width || s->width == width)) return s;
+  }
+  for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) { /* a GOB-padded target */
+    Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
+    if (s->in_use && s->address == address && surface_width_matches(s, width)) return s;
   }
   return NULL;
 }
@@ -3742,12 +3842,17 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
         tex_sampler_parse(tsc, &s);
       uint32_t id = 0, sample_type = WGSL_SAMPLE_FLOAT, gpu_format = 0;
       Raster3d_Gpu_Surface *surf = gpu_surface_at(r, h.address, h.width);
-      if (surf) {
+      const uint32_t gathered = surf ? gpu_gather_slices(r, &h, surf) : 0u;
+      if (gathered) {
+        id = gathered;
+        gpu_format = surf->gpu_format;
+      } else if (surf) {
         bool is_signed = false;
         id = surf->id;
         gpu_format = surf->gpu_format;
         if (gpu_format_is_int(surf->gpu_format, &is_signed)) sample_type = is_signed ? WGSL_SAMPLE_SINT : WGSL_SAMPLE_UINT;
       } else {
+        gpu_note_partial_surface(r, &h);
         Raster3d_Texture *tex = texture_load(r, tic, ctx->mem, false);
         if (!tex) continue;
         id = gpu_texture(r, tex);
@@ -3784,6 +3889,10 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
                              ((uint32_t)h.swizzle[3] << 12);
       p[WGSL_TEXP_LEVELS] = h.levels;
       p[WGSL_TEXP_COMPARE] = s.compare_func;
+      /* Sampled inside a GOB-padded target: the texture's own size. */
+      p[WGSL_TEXP_SIZE] = surf && (surf->width != h.width || surf->height != h.height)
+                              ? (h.width & 0xffffu) | ((h.height & 0xffffu) << 16)
+                              : 0u;
       /* Level selection (textures with a mip chain only; the shader
        * clamps to the levels the GPU texture has). */
       if (s.mip_filter > TEX_MIP_NONE && s.min_filter == 2u) p[WGSL_TEXP_FLAGS] |= WGSL_TEXP_MIN_LINEAR;
@@ -3994,7 +4103,7 @@ static void gpu_emit_draw(Raster_State *rs) {
       at[2] = rs->ctx->regs[REG_VERTEX_ATTRIB + g->input_vector[l]];
       at[3] = streams[k].instanced ? 0u : g->id_lo;
     }
-    words[WGSL_DRAW_VS_INSTANCE] = rs->ctx->instance;
+    words[WGSL_DRAW_VS_INSTANCE] = shader_instance_id(rs->ctx);
     uint8_t *blob = p + (size_t)g->data_words * 4u;
     memset(blob, 0, (size_t)pull_bytes);
     for (uint32_t k = 0; k < stream_count; k++) {
@@ -4068,7 +4177,7 @@ static void gpu_put_raw(Raster_State *rs, uint32_t id) {
   Gpu_Draw *g = &g_gpu_draw;
   uint32_t *p = (uint32_t *)(void *)(rs->ctx->r->gpu_vertices + g->vertex_bytes);
   p[0] = id;
-  p[1] = rs->ctx->instance;
+  p[1] = shader_instance_id(rs->ctx);
   p[2] = p[3] = 0;
   for (uint32_t i = 0; i < g->input_count; i++) fetch_attribute(rs->ctx, g->input_vector[i], id, p + 4u + 4u * i);
   g->vertex_bytes += g->stride;

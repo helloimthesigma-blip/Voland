@@ -78,6 +78,7 @@ struct Gpu_Stream;
  * and below, plus the frame's 1080p targets). */
 #define RASTER_GPU_SURFACES 2048u
 #define RASTER_GPU_SHADERS 1024u
+#define RASTER_GPU_GATHERS 8u /* 3D textures assembled from slice render targets */
 
 typedef struct Raster3d_Bindings {
   uint64_t address[RASTER_BIND_GROUPS][SM_CBUF_SLOTS];
@@ -244,6 +245,14 @@ typedef struct Raster3d {
   struct Gpu_Stream *gpu;
   uint32_t gpu_next_id;
   Raster3d_Gpu_Surface gpu_surfaces[RASTER_GPU_SURFACES];
+  /* A 3D texture whose slices the guest drew as separate render targets
+   * (raster3d.c gpu_gather_slices): the slices copied into one layered
+   * GPU texture before a draw samples it. */
+  struct {
+    uint64_t address;
+    uint32_t id, width, height, layers, gpu_format;
+  } gpu_gathers[RASTER_GPU_GATHERS];
+  uint32_t gpu_gather_next;
   Raster3d_Gpu_Shader *gpu_shaders;  /* RASTER_GPU_SHADERS, open addressing */
   char *gpu_wgsl;                    /* translation buffer */
   uint8_t *gpu_vertices;             /* the current draw's vertices */

@@ -1,4 +1,4 @@
-# GPU command stream (version 6)
+# GPU command stream (version 7)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -72,7 +72,7 @@ means none.
 | 10 | BUFFER_DESTROY | id |
 | 11 | BUFFER_WRITE | id, byte offset, bytes, then the bytes |
 | 12 | COMPUTE | `Gpu_Rec_Compute` (shader id, grid x/y/z, binding count), then its bindings |
-| 7 | COPY | source id, destination id, source rect, destination rect, filter |
+| 7 | COPY | source id, destination id, source rect, destination rect, filter, destination layer (version 7) |
 | 8 | PRESENT | id, rect, flags (1 flip x, 2 flip y) |
 
 ### DRAW
@@ -183,6 +183,15 @@ The CPU's work per vertex goes away: no attribute fetch, no format
 decoding and no per-record vertex map. In an SSBU fight, `fetch_attribute`
 and its vertex window refills were about a third of the CPU worker before.
 `voland-cli --no-vertex-pull` keeps the version-4 form.
+
+### Slices into layers (version 7)
+
+COPY carries the destination's array layer. A guest that renders a 3D
+texture binds each slice as its own render target; before a draw samples
+the volume, raster3d copies those slice targets into the layers of one GPU
+texture (`gpu_gather_slices`), and the shader blends between layers as for
+any 3D texture. Mario Kart 8 Deluxe draws its colour-grading LUT this way.
+Version 6 copies have no layer word, and parse as layer 0.
 
 ### Compute and storage buffers (version 6)
 
