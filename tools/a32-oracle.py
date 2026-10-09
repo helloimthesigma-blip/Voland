@@ -227,6 +227,24 @@ def g_neonls():
         random.choice([15, 13, 10])
 
 
+EXCL_SIZE = [0]
+
+
+def g_excl():
+    """LDREX/STREX (word, byte, half, doubleword) and LDA/STL forms through r11/r12."""
+    c = cond() << 28
+    rn = random.choice([11, 12])
+    size = EXCL_SIZE[0]  # one size per stream: mixed sizes are IMPLEMENTATION DEFINED
+    rt = random.randint(0, 4) * 2  # even: LDREXD/STREXD pairs
+    k = random.randint(0, 2)
+    if k == 0:  # load exclusive
+        return c | 0x01900F9F | (size << 21) | (rn << 16) | (rt << 12)
+    if k == 1:  # store exclusive: Rd status in r6-r9, value Rt
+        rd = random.randint(6, 9)
+        return c | 0x01800F90 | (size << 21) | (rn << 16) | (rd << 12) | rt
+    return 0xF57FF01F  # CLREX
+
+
 def qreg_fields(word, d, n, m):
     """Even (Q) register numbers into the D:Vd, N:Vn, M:Vm fields."""
     return word | ((d >> 4) << 22) | ((d & 15) << 12) | ((n >> 4) << 7) | ((n & 15) << 16) | ((m >> 4) << 5) | (m & 15)
@@ -267,13 +285,14 @@ def g_vfp8():
 
 ISOLATE = False
 GENERATORS = {'dp': g_dp, 'mul': g_mul, 'halfmul': g_halfmul, 'media': g_media, 'flags': g_flags, 'ldst': g_ldst,
-              'vfp': g_vfp, 'neon': g_neon, 'neonls': g_neonls, 'crypto': g_crypto, 'vfp8': g_vfp8}
-WEIGHTS = {'dp': 6, 'mul': 2, 'halfmul': 1, 'media': 4, 'flags': 1, 'ldst': 4, 'vfp': 4, 'neon': 4, 'neonls': 2, 'crypto': 1, 'vfp8': 1}
+              'vfp': g_vfp, 'neon': g_neon, 'neonls': g_neonls, 'crypto': g_crypto, 'vfp8': g_vfp8, 'excl': g_excl}
+WEIGHTS = {'dp': 6, 'mul': 2, 'halfmul': 1, 'media': 4, 'flags': 1, 'ldst': 4, 'vfp': 4, 'neon': 4, 'neonls': 2, 'crypto': 1, 'vfp8': 1, 'excl': 1}
 
 
 def make_case(kinds):
     n = 1 if os.environ.get('A32_ONE') else random.randint(1, 12)
     pool = [k for k in kinds for _ in range(WEIGHTS[k])]
+    EXCL_SIZE[0] = random.randint(0, 3)  # 0 word, 1 doubleword, 2 byte, 3 half
     code = [GENERATORS[random.choice(pool)]() for _ in range(n)]
     r = [random.choice([0, 1, 0xFFFFFFFF, 0x80000000, 0x7FFFFFFF, random.getrandbits(32), random.randint(0, 100)])
          for _ in range(15)]

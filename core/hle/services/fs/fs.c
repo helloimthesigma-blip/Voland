@@ -628,6 +628,7 @@ static HLE_ServiceResult cmd_storage_read(HLE_Context *c, Service_Object *self, 
   const IPC_Buffer *buf = service_out_buffer(req, 0);
   if (!buf) return size ? FS_RESULT_OUT_OF_RANGE : HLE_RESULT_SUCCESS;
   if (size > buf->size) size = buf->size;
+  if (self->state == FS_STORAGE_CONTENT_ROMFS) log_debug("[fs] romfs read 0x%llx+0x%llx", (unsigned long long)offset, (unsigned long long)size);
   if (self->state == FS_STORAGE_SYSTEM_DATA)
     log_debug("[fs] system data read 0x%llx+0x%llx of 0x%llx", (unsigned long long)offset, (unsigned long long)size,
               (unsigned long long)source->size);

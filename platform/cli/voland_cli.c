@@ -1651,6 +1651,31 @@ static int run(int argc, char **argv) {
     fprintf(stderr, "voland-cli: thread %llu (handle 0x%x) %s pc=%016llx (%s+0x%llx)\n", (unsigned long long)th->thread_id,
             th->handle,
             k_state[th->state], (unsigned long long)pc, module, (unsigned long long)offset);
+    { /* nn::os's ThreadType from the TLS (32-bit: TLS+0x1FC; 64-bit: +0x1F8): its name */
+      const bool narrow = !emu.process.npdm.is_64bit_instruction;
+      uint64_t type = 0;
+      if (error_is_ok(vmm_read_block(emu.vmm, th->thread.tls_gva + (narrow ? 0x1FCu : 0x1F8u), &type, narrow ? 4u : 8u)) && type) {
+        char name[33] = {0};
+        if (error_is_ok(vmm_read_block(emu.vmm, type + (narrow ? 0xC8u : 0x188u), name, 32)))
+          fprintf(stderr, "    name \"%s\" priority %d core %d mask 0x%llx cycles %llu\n", name, (int)th->thread.priority,
+                  (int)th->thread.preferred_core, (unsigned long long)th->core_mask, (unsigned long long)th->cycles_run);
+      }
+    }
+    if (th->state == THREAD_STATE_CREATED) { /* never started: its entry argument (nn::os: the ThreadType) */
+      const CPU_Register_File *rf = emu.cpu_backend->get_register_file(th->thread.cpu_state);
+      fprintf(stderr, "    entry argument 0x%llx, priority %d\n", (unsigned long long)rf->x[0], (int)th->thread.priority);
+      uint8_t t[0x200];
+      if (error_is_ok(vmm_read_block(emu.vmm, rf->x[0], t, sizeof(t)))) {
+        for (uint32_t at = 0; at < sizeof(t); at++) { /* its strings: the thread's name among them */
+          uint32_t n = 0;
+          while (at + n < sizeof(t) && t[at + n] >= 0x20 && t[at + n] < 0x7f) n++;
+          if (n >= 4) {
+            fprintf(stderr, "      +0x%x \"%.*s\"\n", at, (int)n, (const char *)t + at);
+            at += n;
+          }
+        }
+      }
+    }
     if (th->state == THREAD_STATE_WAITING) {
       uint32_t word = 0;
       (void)vmm_read32(emu.vmm, th->wait_address, &word);
@@ -1937,7 +1962,7 @@ static uint32_t romfs_walk(const RomFS *fs, uint32_t dir_offset, char *path, siz
     if (!error_is_ok(romfs_file_entry(fs, f, &file))) break;
     const int n = snprintf(path + length, ROMFS_MAX_PATH_BYTES - length, "/%.*s", (int)file.name_length, file.name);
     if (n > 0 && (!filter || strstr(path, filter))) {
-      printf("%12llu  %s\n", (unsigned long long)file.data_size, path);
+      printf("%12llu  %s  @0x%llx\n", (unsigned long long)file.data_size, path, (unsigned long long)file.data_offset);
       matches++;
       if (out_dir) {
         char target[2048];

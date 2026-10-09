@@ -140,6 +140,8 @@ static uint32_t nvmap_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
     h->kind = d[16];
     h->address = rd64(d + 24);
     h->allocated = true;
+    log_debug("[nvmap] ALLOC handle %u size 0x%llx address 0x%llx flags 0x%x", rd32(d), (unsigned long long)h->size,
+              (unsigned long long)h->address, h->flags);
     return NV_SUCCESS;
   }
   case 0x05: { /* FREE {u32 handle; pad; u64 address out; u32 size out; u32 flags out} */
@@ -357,7 +359,11 @@ static uint32_t as_gpu_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
   switch (nr) {
   case AS_REMAP_NR:
     return as_remap(s, d, s->ioctl_in_bytes);
-  case 0x01: case 0x03: case 0x09: /* BIND_CHANNEL, FREE_SPACE, INITIALIZE_EX */
+  case 0x09: /* INITIALIZE_EX {big page size, as fd, flags, reserved, va range start, end, split} */
+    log_debug("[as] INITIALIZE_EX big page 0x%x flags 0x%x range 0x%llx..0x%llx split 0x%llx", rd32(d), rd32(d + 8),
+              (unsigned long long)rd64(d + 16), (unsigned long long)rd64(d + 24), (unsigned long long)rd64(d + 32));
+    return NV_SUCCESS;
+  case 0x01: case 0x03: /* BIND_CHANNEL, FREE_SPACE */
     return NV_SUCCESS;
   case 0x02: { /* ALLOC_SPACE {pages, page_size, flags, pad, offset/align} */
     const uint64_t pages = rd32(d), page_size = rd32(d + 4), flags = rd32(d + 8);
@@ -370,6 +376,8 @@ static uint32_t as_gpu_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
       s->next_gpu_va = offset + pages * page_size;
     }
     wr64(d + 16, offset);
+    log_debug("[as] ALLOC_SPACE pages 0x%llx page 0x%llx flags 0x%llx -> 0x%llx", (unsigned long long)pages,
+              (unsigned long long)page_size, (unsigned long long)flags, (unsigned long long)offset);
     return NV_SUCCESS;
   }
   case 0x05: { /* UNMAP_BUFFER {u64 offset} */
