@@ -135,6 +135,17 @@ void gpu_channel_init(Gpu_Channel *channel);
 
 /* Runs `count` GP entries to completion. */
 void gpu_channel_submit(Gpu_Channel *channel, const Gpu_Memory *memory, const uint64_t *entries, uint32_t count);
+/* The same, decoding `captured` - every entry's words, consecutively, as
+ * gpu_channel_capture read them - instead of reading guest memory now: the
+ * asynchronous GPU thread runs a submission after the guest may have
+ * reused its command memory (docs/ASYNC_GPU.md "Captured commands"). */
+void gpu_channel_submit_words(Gpu_Channel *channel, const Gpu_Memory *memory, const uint64_t *entries, uint32_t count,
+                              const uint32_t *captured);
+/* A GPFIFO entry's length in words; the entries' words into `out` (false:
+ * more than `capacity` words, or unreadable). */
+uint32_t gpu_channel_entry_words(uint64_t entry);
+bool gpu_channel_capture(const Gpu_Memory *memory, const uint64_t *entries, uint32_t count, uint32_t *out,
+                         uint32_t capacity);
 
 /* One method write, as the pushbuffer decoder issues it (tests). */
 void gpu_channel_method(Gpu_Channel *channel, const Gpu_Memory *memory, uint32_t subchannel, uint32_t method,

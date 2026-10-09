@@ -75,6 +75,25 @@ make progress, polling the devices after each wait. It does not let
 virtual time jump past the work. Synchronously, the GPU's work took no
 virtual time either.
 
+## Captured commands
+
+A submission's GPFIFO entries name command words in guest memory. The
+GPU thread used to read those words when it ran the submission, but the
+guest reuses command memory as soon as it believes the GPU has fetched
+it, often before the GPU thread gets there. MK8DX's frames then decoded
+overwritten words. Hashing each submission's words at submit and again at
+run time found changes within the first few submissions. The results were
+whole frames lost, semaphore releases that never came (NVN's polls
+spinning forever: the hangs at loading and race start), stray
+"untranslated draws", and a black race view.
+
+So in asynchronous mode `run_gpfifo` copies every entry's words into the
+call's payload (`gpu_channel_capture`), and the GPU thread decodes the copy
+(`gpu_channel_submit_words`). A call carries up to `GPU_THREAD_MAX_PAYLOAD`
+(1 MB). A larger submission drains the queue and runs in place, in order.
+Data the commands point at (vertices, constants, textures) is still read
+when the commands run; the guest fences those itself.
+
 ## Latency bound
 
 "Idle" covers a guest that waits by blocking. A guest that *spins* keeps

@@ -1056,13 +1056,33 @@ static void decode_word(Gpu_Channel *ch, const Gpu_Memory *mem, Decoder *d, uint
   /* Anything else (including 0: a NOP word) carries no data. */
 }
 
-void gpu_channel_submit(Gpu_Channel *ch, const Gpu_Memory *mem, const uint64_t *entries, uint32_t count) {
+uint32_t gpu_channel_entry_words(uint64_t entry) { return (uint32_t)((entry >> GP_LENGTH_SHIFT) & GP_LENGTH_MASK); }
+
+bool gpu_channel_capture(const Gpu_Memory *mem, const uint64_t *entries, uint32_t count, uint32_t *out, uint32_t capacity) {
+  uint32_t at = 0;
+  for (uint32_t i = 0; i < count; i++) {
+    const uint32_t words = gpu_channel_entry_words(entries[i]);
+    if (words > capacity - at) return false;
+    if (words && !mem->read(mem->user, entries[i] & GP_VA_MASK, out + at, (uint64_t)words * 4u)) return false;
+    at += words;
+  }
+  return true;
+}
+
+void gpu_channel_submit_words(Gpu_Channel *ch, const Gpu_Memory *mem, const uint64_t *entries, uint32_t count,
+                              const uint32_t *captured) {
   if (mem->renderer) raster3d_begin_submission(mem->renderer);
+  const uint32_t *next = captured;
   for (uint32_t i = 0; i < count; i++) {
     const uint64_t va = entries[i] & GP_VA_MASK;
-    const uint32_t words = (uint32_t)((entries[i] >> GP_LENGTH_SHIFT) & GP_LENGTH_MASK);
+    const uint32_t words = gpu_channel_entry_words(entries[i]);
     Decoder d;
     memset(&d, 0, sizeof(d));
+    if (captured) {
+      for (uint32_t w = 0; w < words; w++) decode_word(ch, mem, &d, next[w]);
+      next += words;
+      continue;
+    }
     for (uint32_t at = 0; at < words;) {
       const uint32_t n = words - at < GPU_FETCH_WORDS ? words - at : GPU_FETCH_WORDS;
       if (!mem->read(mem->user, va + (uint64_t)at * 4u, ch->fetch, (uint64_t)n * 4u)) {
@@ -1075,4 +1095,8 @@ void gpu_channel_submit(Gpu_Channel *ch, const Gpu_Memory *mem, const uint64_t *
   }
   gpu_channel_flush_macro(ch, mem);
   if (mem->renderer) raster3d_flush(mem->renderer, mem);
+}
+
+void gpu_channel_submit(Gpu_Channel *ch, const Gpu_Memory *mem, const uint64_t *entries, uint32_t count) {
+  gpu_channel_submit_words(ch, mem, entries, count, NULL);
 }

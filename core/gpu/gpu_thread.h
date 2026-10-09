@@ -37,7 +37,7 @@ typedef struct Gpu_Thread {
 /* Every function below takes NULL as a synchronous thread. */
 
 /* The largest payload one call carries. */
-#define GPU_THREAD_MAX_PAYLOAD (64u * 1024u)
+#define GPU_THREAD_MAX_PAYLOAD (1024u * 1024u) /* a submission with its captured commands (larger: run in place) */
 
 /* Starts the thread: asynchronous mode. False (and synchronous) when
  * threads are unavailable. Safe to call when already started. */

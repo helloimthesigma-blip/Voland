@@ -9,6 +9,7 @@
 #include "hle/kernel/scheduler.h"
 #include "video/host1x.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* ---- ioctl encoding (Linux ioctl.h, as libnx nvidia/ioctl.h) ------- */
@@ -656,6 +657,7 @@ typedef struct Gpfifo_Call {
   uint32_t fence;    /* the promised value: reached once the commands ran */
   bool promised;     /* increments were promised */
   uint32_t count;
+  bool captured;     /* the entries' command words follow them (async) */
 } Gpfifo_Call;
 
 static void gpfifo_run(void *user, const void *payload, uint32_t bytes) {
@@ -670,7 +672,10 @@ static void gpfifo_run(void *user, const void *payload, uint32_t bytes) {
   t_submit_syncpoint = call.syncpoint;
   t_submit_fence = call.fence;
   t_submit_promised = call.promised;
-  gpu_channel_submit(call.channel, &memory, entries, call.count);
+  gpu_channel_submit_words(call.channel, &memory, entries, call.count,
+                           call.captured ? (const uint32_t *)(const void *)((const uint8_t *)payload + sizeof(call) +
+                                                                             (size_t)call.count * 8u)
+                                         : NULL);
   t_submit_promised = false;
   /* Whatever the commands did, the promise is kept. */
   if (call.promised) syncpoint_complete(&s->syncpoints, call.syncpoint, call.fence);
@@ -724,13 +729,34 @@ static uint32_t run_gpfifo(Nvdrv_State *s, Nv_Fd *f, uint8_t *d) {
   uint32_t count = rd32(d + 8);
   if (count > GPFIFO_MAX_ENTRIES) count = GPFIFO_MAX_ENTRIES;
   static _Thread_local uint8_t payload[sizeof(Gpfifo_Call) + GPFIFO_MAX_ENTRIES * 8u];
-  const Gpfifo_Call call = {s, channel, id, fence, increments != 0u, count};
+  Gpfifo_Call call = {s, channel, id, fence, increments != 0u, count, false};
   memcpy(payload, &call, sizeof(call));
   memcpy(payload + sizeof(call), d + GPFIFO_HEADER_BYTES, (size_t)count * 8u);
-  const uint32_t bytes = (uint32_t)sizeof(call) + count * 8u;
+  uint32_t bytes = (uint32_t)sizeof(call) + count * 8u;
   if (gpu_thread_async(s->gpu_thread)) {
-    gpu_thread_call(s->gpu_thread, gpfifo_run, NULL, payload, bytes);
-    note_submission(s, gpu_thread_queued(s->gpu_thread));
+    /* The command words go with the call: the guest reuses command memory
+     * once it believes the GPU has fetched it, often before the GPU
+     * thread gets there (MK8DX lost whole frames and semaphore releases). */
+    static _Thread_local uint8_t *capture; /* GPU_THREAD_MAX_PAYLOAD, once per submitting thread */
+    if (!capture) capture = (uint8_t *)malloc(GPU_THREAD_MAX_PAYLOAD);
+    if (capture && bytes <= GPU_THREAD_MAX_PAYLOAD) {
+      const uint32_t room = (GPU_THREAD_MAX_PAYLOAD - bytes) / 4u;
+      memcpy(capture, payload, bytes);
+      const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate, gpu_extent};
+      const uint64_t *entries = (const uint64_t *)(const void *)(capture + sizeof(call));
+      uint32_t words = 0;
+      for (uint32_t i = 0; i < count; i++) words += gpu_channel_entry_words(entries[i]);
+      if (words <= room && gpu_channel_capture(&memory, entries, count, (uint32_t *)(void *)(capture + bytes), room)) {
+        call.captured = true;
+        memcpy(capture, &call, sizeof(call));
+        gpu_thread_call(s->gpu_thread, gpfifo_run, NULL, capture, bytes + words * 4u);
+        note_submission(s, gpu_thread_queued(s->gpu_thread));
+        return fence;
+      }
+    }
+    /* Too large to carry: run it now, in order, once the thread is idle. */
+    gpu_thread_drain(s->gpu_thread);
+    gpfifo_run(NULL, payload, bytes);
     return fence;
   }
   /* Synchronously the commands run outside the kernel lock
