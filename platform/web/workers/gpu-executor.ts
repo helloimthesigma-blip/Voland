@@ -656,8 +656,13 @@ export class GpuExecutor {
     const bytes = v.getUint32(4, true);
     let code = new TextDecoder().decode(payload.slice(8, 8 + bytes));
     if ((globalThis as { TRIVIAL_SHADERS?: boolean }).TRIVIAL_SHADERS) {
-      code = code.replace(/@fragment fn fs\(([^)]*)\)( -> FOut)? \{[\s\S]*$/, (_m, args: string, ret: string | undefined) =>
+      code = code.replace(/@fragment fn fs\((.*?)\)( -> FOut)? \{[\s\S]*$/, (_m, args: string, ret: string | undefined) =>
         ret ? `@fragment fn fs(${args}) -> FOut { var fo: FOut; return fo; }` : `@fragment fn fs(${args}) { }`);
+    }
+    if ((globalThis as { PRINT_SHADER?: number }).PRINT_SHADER === id) console.log(`shader ${id}:\n${code}`);
+    if ((globalThis as { SOLID_SHADERS?: number[] }).SOLID_SHADERS?.includes(id) && !code.includes("@builtin(frag_depth)")) {
+      code = code.replace(/@fragment fn fs\((.*)\) -> FOut \{[\s\S]*$/, (_m, args: string) =>
+        `@fragment fn fs(${args}) -> FOut { var fo: FOut; fo.c0 = vec4<f32>(1.0, 0.0, 1.0, 1.0); return fo; }`);
     }
     const hash = wgslHash(code);
     let module = this.modulesByHash.get(hash);
@@ -923,7 +928,7 @@ export class GpuExecutor {
       primitive: {
         topology: "triangle-list",
         frontFace: spec.vs && spec.vs.front !== FRONT_CCW ? "cw" : "ccw",
-        cullMode: !spec.vs || spec.vs.cull === CULL_NONE ? "none" : spec.vs.cull === CULL_FRONT ? "front" : "back",
+        cullMode: !spec.vs || spec.vs.cull === CULL_NONE || (globalThis as { NO_CULL?: boolean }).NO_CULL ? "none" : spec.vs.cull === CULL_FRONT ? "front" : "back",
       },
     };
     const depth = spec.depth;

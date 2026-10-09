@@ -482,6 +482,47 @@ static void test_stencil(Raster3d *r) {
   g_regs[0x54e] = 0;
 }
 
+/* DEPTH_WRITE without DEPTH_TEST writes nothing (GL's and Vulkan's rule):
+ * MK8DX draws a full-screen quad that way between its depth pre-pass and
+ * the passes that read the depth. With the test on (ALWAYS), the same
+ * draw writes. */
+static void test_depth_write_needs_test(Raster3d *r) {
+  base_state(RT, false, PS_OFFSET);
+  g_regs[0x3f8] = (uint32_t)(ZT >> 32);
+  g_regs[0x3f9] = (uint32_t)ZT;
+  g_regs[0x3fa] = ZT_Z24S8;
+  g_regs[0x3fb] = 0;              /* block height 1 GOB */
+  g_regs[0x48a] = RT_SIZE;
+  g_regs[0x48b] = RT_SIZE;
+  g_regs[0x54e] = 1;              /* zeta enabled */
+  raster3d_begin_submission(r);
+  memcpy(&g_regs[0x364], &(float){1.0f}, 4); /* depth clear value */
+  raster3d_clear(r, g_regs, &k_mem, 1u);
+  vertex(0, -1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(1, 1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(2, -1.0f, 1.0f, 1, 0, 0, 1);
+  vertex(3, 1.0f, 1.0f, 1, 0, 0, 1);
+  g_regs[0x4b3] = 0;              /* depth test off */
+  g_regs[0x4ba] = 1;              /* depth write on */
+  draw_arrays(r, 5, 4);
+  raster3d_flush(r, &k_mem);
+  const uint8_t *zt = g_gpu + (ZT - GPU_BASE);
+  const uint32_t at = (uint32_t)block_linear_offset(20u * 4u, 20, RT_SIZE * 4u, 0);
+  uint8_t cleared[3];
+  memcpy(cleared, zt + at + 1u, sizeof(cleared));
+  CHECK(cleared[0] == 0xff && cleared[1] == 0xff && cleared[2] == 0xff, "depth keeps the clear without a depth test (%02x%02x%02x)",
+        cleared[2], cleared[1], cleared[0]);
+  raster3d_begin_submission(r);
+  g_regs[0x4b3] = 1;              /* depth test on */
+  g_regs[0x4c3] = FUNC_ALWAYS;
+  draw_arrays(r, 5, 4);
+  raster3d_flush(r, &k_mem);
+  CHECK(memcmp(zt + at + 1u, cleared, sizeof(cleared)) != 0, "the same draw writes depth with the test on");
+  g_regs[0x4b3] = 0;
+  g_regs[0x4ba] = 0;
+  g_regs[0x54e] = 0;
+}
+
 /* Derivatives through the rasterizer's quads: u = x and v = y in pixels,
  * so dFdx(u) = dFdy(v) = 1 and dFdy(u) = 0 at every covered pixel -
  * including along the diagonal edge, whose quads need helper lanes. A
@@ -990,6 +1031,7 @@ int main(void) {
   test_texture(&r);
   test_render_to_texture(&r);
   test_stencil(&r);
+  test_depth_write_needs_test(&r);
   test_derivatives(&r);
   test_worker_count_invariance(&r);
   test_gpu_vertex_stage(&r);

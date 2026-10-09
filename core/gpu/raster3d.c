@@ -1978,7 +1978,10 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
   Surface_Desc zd;
   if (zeta_desc(regs, &zd)) {
     rs->depth_test = (regs[REG_DEPTH_TEST] & 1u) != 0;
-    rs->depth_write = (regs[REG_DEPTH_WRITE] & 1u) != 0;
+    /* A disabled depth test writes no depth either (as GL's, and Vulkan's
+     * depthTestEnable): MK8DX's linear-depth pass draws a quad with the
+     * test off and DEPTH_WRITE on, which must not wipe the pre-pass. */
+    rs->depth_write = rs->depth_test && (regs[REG_DEPTH_WRITE] & 1u) != 0;
     rs->depth_func = regs[REG_DEPTH_FUNC];
     rs->stencil_byte = stencil_byte(zd.format);
     rs->stencil = (regs[REG_STENCIL_ENABLE] & 1u) != 0 && rs->stencil_byte != ZT_NO_STENCIL;

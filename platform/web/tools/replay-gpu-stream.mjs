@@ -91,8 +91,14 @@ if (process.env.MEASURE) await page.evaluate(() => { globalThis.MEASURE = true; 
 if (process.env.DRAW_TRACE) await page.evaluate((n) => { globalThis.DRAW_TRACE = n; }, Number(process.env.DRAW_TRACE));
 if (process.env.NO_SHADOW_COMPARE) await page.evaluate(() => { globalThis.NO_SHADOW_COMPARE = true; });
 if (process.env.TRACE_SHAPES) await page.evaluate((n) => { globalThis.TRACE_SHAPES = n; }, Number(process.env.TRACE_SHAPES));
+if (process.env.TEX_INFO) await page.evaluate((t) => { globalThis.TEX_INFO = t; }, process.env.TEX_INFO.split(",").map(Number));
 if (process.env.TRACE_TARGET) await page.evaluate((n) => { globalThis.TRACE_TARGET = n; }, Number(process.env.TRACE_TARGET));
 if (process.env.SYNC_DRAWS) await page.evaluate(() => { globalThis.SYNC_DRAWS = true; });
+if (process.env.NO_CULL) await page.evaluate(() => { globalThis.NO_CULL = true; });
+if (process.env.SOLID_SHADERS) await page.evaluate((t) => { globalThis.SOLID_SHADERS = t; }, process.env.SOLID_SHADERS.split(",").map(Number));
+if (process.env.PRINT_SHADER) await page.evaluate((n) => { globalThis.PRINT_SHADER = n; }, Number(process.env.PRINT_SHADER));
+if (process.env.CB_DUMP) await page.evaluate((t) => { globalThis.CB_DUMP = { shader: t[0], slot: t[1], words: t[2] }; }, process.env.CB_DUMP.split(",").map(Number));
+if (process.env.TRACE_SIZES) await page.evaluate(() => { globalThis.TRACE_SIZES = true; });
 if (process.env.NO_DEPTH) await page.evaluate(() => { globalThis.NO_DEPTH = true; });
 if (process.env.SKIP_TYPES) await page.evaluate((t) => { globalThis.SKIP_TYPES = t; }, process.env.SKIP_TYPES.split(",").map(Number));
 const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
@@ -205,6 +211,11 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
       presents++;
       if ((every && presents % every === 0) || wanted.has(presents)) readback(presents, false);
       if (targetsAt.has(presents)) dumpAll(presents);
+      if (targetsAt.has(presents) && globalThis.TEX_INFO)
+        for (const id of globalThis.TEX_INFO) {
+          const t = ex.textures.get(id);
+          console.log(`texture ${id}: ${t ? `${t.format} ${t.width}x${t.height}x${t.texture.depthOrArrayLayers} levels ${t.texture.mipLevelCount} ${t.texture.dimension}${t.renderView ? " render" : ""}` : "missing"}`);
+        }
     },
     log(level, message) { console.log(`${level}: ${message}`); },
   };
@@ -240,8 +251,46 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
         /* Each draw's shader, colour targets and depth target (Gpu_Rec_Draw: targets of 36 bytes at 8, depth at 296). */
         const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
         const n = dv.getUint32(4, true), ids = [];
-        for (let k = 0; k < n && k < 8; k++) ids.push(dv.getUint32(8 + 36 * k, true));
-        console.log(`shape ${records} shader ${dv.getUint32(0, true)} vs ${dv.getUint32(8 + 36 * 8 + 4 * 13 + 4 * 4 + 4 * 4 + 4 * 4 + 4 * 4, true)} targets ${ids.join(",")} depth ${dv.getUint32(296, true)} test ${dv.getUint32(300, true)} write ${dv.getUint32(304, true)} cmp ${dv.getUint32(308, true)}`);
+        for (let k = 0; k < n && k < 8; k++) {
+          const id = dv.getUint32(8 + 36 * k, true), t = ex.textures.get(id);
+          ids.push(id && globalThis.TRACE_SIZES ? `${id}(${t ? `${t.format} ${t.width}x${t.height}` : "missing"})` : id);
+        }
+        if (globalThis.TRACE_SIZES) { const t = ex.textures.get(dv.getUint32(296, true)); ids.push(`depth(${t ? `${t.format} ${t.width}x${t.height}` : "-"})`); }
+        /* The sampled textures: Gpu_Rec_Binding {kind, binding, bytes, id} from byte 432 (binding_count at 400). */
+        const tex = [];
+        for (let k = 0, at = 432; k < dv.getUint32(400, true) && at + 16 <= payload.byteLength; k++) {
+          const kind = dv.getUint32(at, true);
+          if (kind === 2) tex.push(dv.getUint32(at + 12, true));
+          if (kind === 1 && globalThis.CB_DUMP && (globalThis.CB_DUMP.shader === dv.getUint32(0, true) || globalThis.CB_DUMP.shader === dv.getUint32(408, true))) {
+            /* The draw's data words D: constant buffer s at D[D[248 + 2s]], D[249 + 2s] words. */
+            const D = new DataView(payload.buffer, payload.byteOffset + at + 16, dv.getUint32(at + 8, true));
+            const w = (i) => D.getUint32(4 * i, true), f = (i) => D.getFloat32(4 * i, true);
+            const s = globalThis.CB_DUMP.slot, base = w(248 + 2 * s), size = w(249 + 2 * s);
+            const vals = [];
+            for (let i = 0; i < Math.min(size, globalThis.CB_DUMP.words); i++) vals.push(f(base + i).toPrecision(5));
+            console.log(`cb${s} record ${records} (${size} words): ${vals.join(" ")}`);
+            const hdr = [];
+            for (let i = 284; i < 360; i++) hdr.push(w(i).toString(16));
+            console.log(`D[284..360] record ${records}: ${hdr.join(" ")}`);
+            /* The first input's (position's) values for the first indices, through cb3's view (0..11) and projection (28..43). */
+            const idxCount = dv.getUint32(424, true), idxAt = payload.byteLength - 4 * idxCount;
+            const posOff = w(294), stride = w(295) & 0xfff, idLo = w(297);
+            const cb = (i) => f(base + i);
+            const out = [];
+            for (let k = 0; k < 6 && k < idxCount; k++) {
+              const id = dv.getUint32(idxAt + 4 * k, true);
+              const at = posOff + (id - idLo) * stride;
+              if (at + 12 > D.byteLength) { out.push(`id ${id} out of range`); continue; }
+              const x = D.getFloat32(at, true), y = D.getFloat32(at + 4, true), z = D.getFloat32(at + 8, true);
+              const v = [0, 1, 2].map((r) => cb(4 * r) * x + cb(4 * r + 1) * y + cb(4 * r + 2) * z + cb(4 * r + 3));
+              const c = [0, 1, 2, 3].map((r) => cb(28 + 4 * r) * v[0] + cb(29 + 4 * r) * v[1] + cb(30 + 4 * r) * v[2] + cb(31 + 4 * r));
+              out.push(`id ${id} pos ${[x, y, z].map((q) => q.toFixed(1))} ndc ${[c[0] / c[3], c[1] / c[3], c[2] / c[3]].map((q) => q.toFixed(2))} w ${c[3].toFixed(1)}`);
+            }
+            console.log(out.join(" | "));
+          }
+          at += 16 + (kind === 1 ? dv.getUint32(at + 8, true) : 0);
+        }
+        console.log(`shape ${records} shader ${dv.getUint32(0, true)} vs ${dv.getUint32(8 + 36 * 8 + 4 * 13 + 4 * 4 + 4 * 4 + 4 * 4 + 4 * 4, true)} targets ${ids.join(",")} depth ${dv.getUint32(296, true)} test ${dv.getUint32(300, true)} write ${dv.getUint32(304, true)} cmp ${dv.getUint32(308, true)} tex ${tex.join(",")} vtx ${dv.getUint32(404, true)} vsid ${dv.getUint32(408, true)} inputs ${dv.getUint32(412, true)} cull ${dv.getUint32(416, true)} idx ${dv.getUint32(424, true)} flags ${dv.getUint32(428, true).toString(16)} scissor ${[0, 1, 2, 3].map((k) => dv.getInt32(376 + 4 * k, true)).join(",")}`);
       }
       if (globalThis.DRAW_TRACE && type === 6 && presents + 1 === globalThis.DRAW_TRACE) {
         /* Diagnostics: each RGBA8 target's channel sums after every draw of one present
@@ -251,22 +300,24 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
         const only = globalThis.TRACE_TARGET;
         if (only) {
           const t = ex.textures.get(only);
-          const texel = t ? TEXEL_BYTES[t.format] : 0;
+          const isDepth = t && (t.format === "depth32float" || t.format === "depth32float-stencil8");
+          const texel = t ? (isDepth ? 4 : TEXEL_BYTES[t.format]) : 0;
           if (t && texel) {
             const bytesPerRow = Math.ceil((t.width * texel) / 256) * 256;
             const buffer = device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
             const enc = device.createCommandEncoder();
-            enc.copyTextureToBuffer({ texture: t.texture }, { buffer, bytesPerRow }, [t.width, t.height]);
+            enc.copyTextureToBuffer({ texture: t.texture, aspect: isDepth ? "depth-only" : "all" }, { buffer, bytesPerRow }, [t.width, t.height]);
             device.queue.submit([enc.finish()]);
             await buffer.mapAsync(GPUMapMode.READ);
             const dv2 = new DataView(buffer.getMappedRange());
             let sum = 0;
+            if (isDepth) for (let y = 0; y < t.height; y += 4) for (let x = 0; x < t.width; x += 4) sum += 1 - dv2.getFloat32(y * bytesPerRow + x * 4, true);
             for (let y = 0; y < t.height; y += 4)
               for (let x = 0; x < t.width; x += 4) {
                 const at = y * bytesPerRow + x * texel;
                 if (t.format === "rgba16float") sum += half(dv2.getUint16(at, true)) + half(dv2.getUint16(at + 2, true)) + half(dv2.getUint16(at + 4, true));
                 else if (t.format === "rg11b10ufloat") { const w = dv2.getUint32(at, true); sum += small(w & 2047, 6) + small((w >> 11) & 2047, 6) + small(w >>> 22, 5); }
-                else sum += dv2.getUint8(at) + dv2.getUint8(at + 1) + dv2.getUint8(at + 2);
+                else if (!isDepth) sum += dv2.getUint8(at) + dv2.getUint8(at + 1) + dv2.getUint8(at + 2);
               }
             buffer.destroy();
             const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
