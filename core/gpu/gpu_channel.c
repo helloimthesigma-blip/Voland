@@ -588,9 +588,20 @@ static void host_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t subchan
   }
 }
 
-/* REPORT_SEMAPHORE: releases (and counter reports, whose counters all
- * read 0 here) write the payload, as one word or {payload, 0, u64
- * timestamp 0}; acquires are satisfied. */
+/* REPORT_SEMAPHORE: releases write the payload; counter reports write the
+ * counter. As one word, or {u64 payload or counter, u64 timestamp}.
+ * Acquires are satisfied.
+ *
+ * Counters are not measured. Sample counts (ZPASS_PIXEL_CNT, occlusion
+ * queries) grow by M3D_ZPASS_STEP with every report, so a query's
+ * end - begin is always positive: everything tested is visible. Reading
+ * 0 made MK8DX cull its track, stands and the player's kart. Other
+ * counters read 0. The timestamp grows with every report. */
+#define M3D_REPORT_TYPE(op) (((op) >> 23) & 0x1Fu)
+#define M3D_REPORT_ZPASS_PIXEL_CNT 0x02u
+#define M3D_REPORT_ZPASS_PIXEL_CNT64 0x15u
+#define M3D_ZPASS_STEP 0x10000u        /* "samples" per report: any visible amount */
+#define M3D_TIMESTAMP_STEP 1000u       /* ns per report */
 static void report_semaphore(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t operation) {
   const uint32_t op = operation & M3D_REPORT_OPERATION_MASK;
   if (op != M3D_REPORT_RELEASE && op != M3D_REPORT_COUNTER) return;
@@ -598,6 +609,15 @@ static void report_semaphore(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t op
   uint8_t release[SEMAPHORE_FOUR_WORD_BYTES];
   memset(release, 0, sizeof(release));
   if (op == M3D_REPORT_RELEASE) memcpy(release, &ch->engine3d[M3D_REPORT_SEMAPHORE_C], 4);
+  if (op == M3D_REPORT_COUNTER) {
+    const uint32_t type = M3D_REPORT_TYPE(operation);
+    if (type == M3D_REPORT_ZPASS_PIXEL_CNT || type == M3D_REPORT_ZPASS_PIXEL_CNT64) {
+      ch->zpass_samples += M3D_ZPASS_STEP;
+      memcpy(release, &ch->zpass_samples, sizeof(ch->zpass_samples));
+    }
+  }
+  ch->report_time += M3D_TIMESTAMP_STEP;
+  memcpy(release + 8, &ch->report_time, sizeof(ch->report_time));
   if (!mem->write(mem->user, va, release, (operation & M3D_REPORT_ONE_WORD) ? 4u : sizeof(release))) ch->faults++;
 }
 

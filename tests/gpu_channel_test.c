@@ -190,6 +190,12 @@ static void test_3d_sync(void) {
   memset(g_mem + 0x310, 0xAA, 16);
   const uint32_t counter[4] = {0, (uint32_t)(MEM_BASE + 0x310), 0x99, 2u};
   inc(2, 0x6C0, counter, 4);
+  /* Two ZPASS_PIXEL_CNT64 reports (occlusion query begin, end): the
+   * count grows, so the query passes. */
+  const uint32_t zpass[4] = {0, (uint32_t)(MEM_BASE + 0x320), 0, 2u | (0x15u << 23)};
+  inc(2, 0x6C0, zpass, 4);
+  const uint32_t zpass2[4] = {0, (uint32_t)(MEM_BASE + 0x330), 0, 2u | (0x15u << 23)};
+  inc(2, 0x6C0, zpass2, 4);
   const uint64_t ignored = g_channel.ignored_methods;
   one(2, 0x35E, 1); /* a draw-state register: kept, otherwise ignored */
   submit();
@@ -197,7 +203,13 @@ static void test_3d_sync(void) {
   memcpy(v, g_mem + 0x300, 4);
   CHECK(v[0] == 0x77 && g_syncpoint_increments[3] == 1);
   memcpy(v, g_mem + 0x310, sizeof(v));
-  CHECK(v[0] == 0 && v[1] == 0 && v[2] == 0 && v[3] == 0);
+  CHECK(v[0] == 0 && v[1] == 0 && (v[2] | v[3]) != 0); /* counter NONE reads 0; a timestamp */
+  uint64_t begin = 0, end = 0, t_begin = 0, t_end = 0;
+  memcpy(&begin, g_mem + 0x320, 8);
+  memcpy(&t_begin, g_mem + 0x328, 8);
+  memcpy(&end, g_mem + 0x330, 8);
+  memcpy(&t_end, g_mem + 0x338, 8);
+  CHECK(end > begin && t_end > t_begin);
   CHECK(g_channel.engine3d[0x35E] == 1 && g_channel.ignored_methods > ignored);
 }
 

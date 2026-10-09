@@ -126,6 +126,8 @@ typedef struct Gpu_Channel {
   uint64_t dma_copies;
   uint64_t blits;                            /* 2D PIXELS_FROM_MEMORY */
   uint64_t faults;                           /* reads/writes to unmapped GPU VA */
+  uint64_t zpass_samples;                    /* reported sample count, grows per report */
+  uint64_t report_time;                      /* reported timestamp, grows per report */
   uint8_t line[GPU_LINE_BYTES];              /* DMA staging */
   uint8_t line_out[GPU_LINE_BYTES];
   uint32_t fetch[GPU_FETCH_WORDS];           /* pushbuffer staging */
