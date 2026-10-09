@@ -75,6 +75,26 @@ make progress, polling the devices after each wait. It does not let
 virtual time jump past the work. Synchronously, the GPU's work took no
 virtual time either.
 
+## Latency bound
+
+"Idle" covers a guest that waits by blocking. A guest that *spins* keeps
+running, so virtual time runs ahead of a GPU thread that is behind, and
+the guest's timeouts expire long before a real GPU would have finished.
+MK8DX's presentation thread polls a 3D report semaphore with a 100 ms
+(virtual) timeout while it holds a mutex. Its timeout path then deadlocks
+with the main thread, which needs that mutex to submit the work that
+releases the semaphore. This happened at every race start with a lagging
+GPU thread, even with VI presents synchronous or the queue limited to
+zero submissions; only the two together avoided it.
+
+So every queued submission records its virtual time and the GPU thread's
+call count after it (`note_submission`, `nvdrv.c`). Each slice,
+`nvdrv_bound_gpu_latency` waits in host time for the oldest submission
+still queued once it is one 60 Hz frame (`EMULATOR_GPU_MAX_LATENCY_TICKS`)
+old. A frame of overlap stays, and that is where the async speedup comes
+from: an SSBU fight still runs at 18.5 fps (18.2 before), and an MK8DX
+race in the browser at 12.7 fps against 9.2 synchronous.
+
 ## Host-side flow control
 
 Waiting for room in the queue, or for it to drain, is the same kind of

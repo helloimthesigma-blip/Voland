@@ -32,6 +32,11 @@ void gpu_thread_wait(Gpu_Thread *t, uint32_t seen, uint64_t timeout_ns) {
   (void)seen;
   (void)timeout_ns;
 }
+uint32_t gpu_thread_queued(const Gpu_Thread *t) { (void)t; return 0; }
+void gpu_thread_wait_until(Gpu_Thread *t, uint32_t calls) {
+  (void)t;
+  (void)calls;
+}
 void gpu_thread_lock(Gpu_Thread *t) { (void)t; }
 void gpu_thread_unlock(Gpu_Thread *t) { (void)t; }
 
@@ -65,6 +70,7 @@ struct Gpu_Thread_Impl {
   pthread_mutex_t state;   /* gpu_thread_lock */
   uint64_t head, tail;     /* byte positions: tail = next write, head = next read */
   uint32_t finished;       /* records run */
+  uint32_t queued;         /* records queued (finished trails it) */
   bool running;            /* a record is being run */
   bool quit;
   uint8_t ring[QUEUE_BYTES + RECORD_HEADER]; /* the slack holds a wrap marker at the very end */
@@ -169,6 +175,7 @@ void gpu_thread_call(Gpu_Thread *t, Gpu_Thread_Fn fn, void *user, const void *pa
   memcpy(dst, &r, sizeof(r));
   if (bytes) memcpy(dst + RECORD_HEADER, payload, bytes);
   p->tail += size;
+  p->queued++;
   pthread_cond_signal(&p->work);
   pthread_mutex_unlock(&p->mutex);
 }
@@ -197,6 +204,23 @@ uint32_t gpu_thread_progress(const Gpu_Thread *t) {
   const uint32_t finished = p->finished;
   pthread_mutex_unlock(&p->mutex);
   return finished;
+}
+
+uint32_t gpu_thread_queued(const Gpu_Thread *t) {
+  Gpu_Thread_Impl *p = t ? t->impl : NULL;
+  if (!p) return 0;
+  pthread_mutex_lock(&p->mutex);
+  const uint32_t queued = p->queued;
+  pthread_mutex_unlock(&p->mutex);
+  return queued;
+}
+
+void gpu_thread_wait_until(Gpu_Thread *t, uint32_t calls) {
+  Gpu_Thread_Impl *p = t ? t->impl : NULL;
+  if (!p) return;
+  pthread_mutex_lock(&p->mutex);
+  while ((int32_t)(p->finished - calls) < 0) pthread_cond_wait(&p->progress, &p->mutex);
+  pthread_mutex_unlock(&p->mutex);
 }
 
 void gpu_thread_wait(Gpu_Thread *t, uint32_t seen, uint64_t timeout_ns) {

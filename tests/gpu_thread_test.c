@@ -5,7 +5,7 @@
  * losing calls; drain returns only when everything has run; the state
  * lock keeps the thread between calls; payloads over the limit run in
  * order on the caller; a NULL or stopped thread runs calls at once; stop
- * drains first.
+ * drains first; queued/wait_until count and wait for calls by number.
  */
 #define CHECK_NAME "gpu_thread_test"
 #include "check.h"
@@ -90,9 +90,13 @@ int main(void) {
   }
   CHECK(seen.next == 100u + CALLS && __atomic_load_n(&seen.in_call, __ATOMIC_SEQ_CST) == 0u);
   CHECK(gpu_thread_busy(&t));
+  const uint32_t queued = gpu_thread_queued(&t); /* every call queued since start */
+  CHECK(queued == CALLS + 10u && gpu_thread_progress(&t) == CALLS);
   gpu_thread_unlock(&t);
   const uint32_t before = gpu_thread_progress(&t);
   gpu_thread_wait(&t, before, 1000000000ull);
+  gpu_thread_wait_until(&t, queued); /* the latency bound's wait: these ten have run */
+  CHECK(gpu_thread_progress(&t) == queued);
   gpu_thread_drain(&t);
   CHECK(seen.next == 110u + CALLS && seen.bad == 0u);
 

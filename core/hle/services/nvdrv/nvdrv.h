@@ -57,6 +57,7 @@
 #define NVMAP_MAX_HANDLES 8192u
 #define NVDRV_MAX_GPU_MAPPINGS 16384u
 #define NVDRV_MAX_EVENTS 64u
+#define NVDRV_GPU_LATENCY_RING 256u /* queued submissions tracked for nvdrv_bound_gpu_latency */
 #define NVDRV_MAX_CHANNELS 8u     /* GPU channels with command processing */
 #define NVDRV_NO_CHANNEL UINT32_MAX
 #define NVDRV_IOCTL_MAX_BYTES 0x4000u /* the 14-bit size field */
@@ -171,6 +172,12 @@ typedef struct Nvdrv_State {
   Mm_Engine vic;
   Mm_Video mm_video;
   uint32_t cmdbuf[NVDRV_MAX_CMDBUF_WORDS];
+  /* Async GPU: when each queued submission was made (virtual ticks) and
+   * the GPU thread's call count after it (nvdrv_bound_gpu_latency). */
+  uint64_t submit_ticks[NVDRV_GPU_LATENCY_RING];
+  uint32_t submit_calls[NVDRV_GPU_LATENCY_RING];
+  uint32_t submit_head, submit_tail;
+  uint64_t stalls_for_latency; /* waits nvdrv_bound_gpu_latency made */
 } Nvdrv_State;
 
 /* Resets the state and initializes `state->interface`. `channels`:
@@ -188,6 +195,14 @@ Error nvdrv_register(Nvdrv_State *state, SM_Registry *registry);
 /* The guest VA and size behind an nvmap id (ids are handles here), for
  * the display compositor. False if the id is unknown or unallocated. */
 bool nvdrv_nvmap_lookup(const Nvdrv_State *state, uint32_t id, uint64_t *address, uint64_t *size);
+
+/* Async GPU (gpu_thread.h): a submission still queued `max_ticks` of
+ * virtual time after it was made is waited for, in host time. A real GPU
+ * keeps up with the CPU; a GPU thread that does not lets virtual time run
+ * on while the guest waits for a fence, and the guest's timeouts expire
+ * (MK8DX's presentation thread then deadlocks with its main thread).
+ * Called every slice; resets in synchronous mode. */
+void nvdrv_bound_gpu_latency(Nvdrv_State *state, uint64_t now_ticks, uint64_t max_ticks);
 
 /* Applies GPU completion-ring records and signals async waiters whose
  * syncpoint threshold was reached. Called every scheduler slice. */

@@ -57,6 +57,10 @@ bool gpu_thread_busy(const Gpu_Thread *t);
  * host time) for it to move past `seen` or for the queue to empty. */
 uint32_t gpu_thread_progress(const Gpu_Thread *t);
 void gpu_thread_wait(Gpu_Thread *t, uint32_t seen, uint64_t timeout_ns);
+/* Calls queued so far (gpu_thread_progress counts the finished ones);
+ * gpu_thread_wait_until returns once `calls` of them have finished. */
+uint32_t gpu_thread_queued(const Gpu_Thread *t);
+void gpu_thread_wait_until(Gpu_Thread *t, uint32_t calls);
 
 /* Guards state the GPU thread reads while the guest's threads change it
  * (the GPU page table). The GPU thread holds it while a call runs. No-ops

@@ -676,6 +676,37 @@ static void gpfifo_run(void *user, const void *payload, uint32_t bytes) {
   if (call.promised) syncpoint_complete(&s->syncpoints, call.syncpoint, call.fence);
 }
 
+/* Async GPU: this submission's virtual time and the GPU thread's call
+ * count after it, for nvdrv_bound_gpu_latency (a full ring waits for its
+ * oldest first). */
+static void note_submission(Nvdrv_State *s, uint32_t calls) {
+  if (s->submit_tail - s->submit_head >= NVDRV_GPU_LATENCY_RING) {
+    gpu_thread_wait_until(s->gpu_thread, s->submit_calls[s->submit_head % NVDRV_GPU_LATENCY_RING]);
+    s->submit_head++;
+  }
+  const uint32_t at = s->submit_tail++ % NVDRV_GPU_LATENCY_RING;
+  s->submit_ticks[at] = s->hle && s->hle->scheduler ? s->hle->scheduler->ticks : 0u;
+  s->submit_calls[at] = calls;
+}
+
+void nvdrv_bound_gpu_latency(Nvdrv_State *s, uint64_t now_ticks, uint64_t max_ticks) {
+  if (!gpu_thread_async(s->gpu_thread)) {
+    s->submit_head = s->submit_tail;
+    return;
+  }
+  uint32_t finished = gpu_thread_progress(s->gpu_thread);
+  while (s->submit_head != s->submit_tail) {
+    const uint32_t at = s->submit_head % NVDRV_GPU_LATENCY_RING;
+    if ((int32_t)(finished - s->submit_calls[at]) < 0) {
+      if (now_ticks - s->submit_ticks[at] <= max_ticks) break;
+      gpu_thread_wait_until(s->gpu_thread, s->submit_calls[at]); /* in host time: the GPU is that far behind */
+      finished = gpu_thread_progress(s->gpu_thread);
+      s->stalls_for_latency++;
+    }
+    s->submit_head++;
+  }
+}
+
 /* Queues the submission (or runs it, synchronously): its syncpoint
  * promise is made now, in submission order; returns the fence. */
 static uint32_t run_gpfifo(Nvdrv_State *s, Nv_Fd *f, uint8_t *d) {
@@ -699,6 +730,7 @@ static uint32_t run_gpfifo(Nvdrv_State *s, Nv_Fd *f, uint8_t *d) {
   const uint32_t bytes = (uint32_t)sizeof(call) + count * 8u;
   if (gpu_thread_async(s->gpu_thread)) {
     gpu_thread_call(s->gpu_thread, gpfifo_run, NULL, payload, bytes);
+    note_submission(s, gpu_thread_queued(s->gpu_thread));
     return fence;
   }
   /* Synchronously the commands run outside the kernel lock

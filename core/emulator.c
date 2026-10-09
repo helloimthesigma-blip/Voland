@@ -723,13 +723,17 @@ void emulator_unload_program(Emulator* emulator) {
   if (!error_is_ok(backend_err)) log_warn("[emulator] %s; keeping %s", backend_err.message, emulator->cpu_backend->name);
 }
 
+#define EMULATOR_GPU_MAX_LATENCY_TICKS (SCHEDULER_TIMER_HZ / 60u) /* one 60 Hz frame of virtual time */
+
 /* The devices the run loop drives between guest runs (§13, §14, §18), then
  * the next time one of them signals something. Slice mode runs it before
  * every slice; free-running mode on whichever core finds it due, under the
  * kernel lock (docs/PARALLEL.md "Free-running mode"). */
 static void update_devices(Emulator* emulator) {
-  /* GPU completions (§13) arrive at scheduler-tick cadence. */
+  /* GPU completions (§13) arrive at scheduler-tick cadence; the async
+   * GPU stays within a frame of the guest's virtual time. */
   nvdrv_poll_completions(&emulator->nvdrv, &emulator->hle);
+  nvdrv_bound_gpu_latency(&emulator->nvdrv, emulator->scheduler.ticks, EMULATOR_GPU_MAX_LATENCY_TICKS);
   /* Controllers (§18): the input region into hid's shared memory. */
   const Memory_Layout* layout = layout_get();
   hid_update(&emulator->hid, &emulator->hle, layout ? (const void*)(uintptr_t)layout->input_region_base : NULL,
