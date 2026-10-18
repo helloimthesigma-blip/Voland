@@ -53,6 +53,9 @@ static int g_failures;
 #define REG_CULL_ENABLE_TEST 0x646u
 #define REG_FRONT_FACE_TEST 0x647u
 #define REG_CULL_FACE_TEST 0x648u
+#define CULL_BACK_REG 0x405u
+#define FRONT_CW_REG 0x900u
+#define FRONT_CCW_REG 0x901u
 
 static uint8_t g_gpu[GPU_BYTES];
 
@@ -201,6 +204,7 @@ static void base_state(uint64_t rt, bool block_linear, uint32_t ps_offset) {
   memcpy(&g_regs[0x283], &scale, 4);
   memcpy(&g_regs[0x284], &scale, 4);
   memcpy(&g_regs[0x285], &half, 4);
+  g_regs[0x286] = 0x6420;       /* viewport swizzle: +x +y +z +w */
   g_regs[0x64b] = 1;           /* viewport transform on */
   g_regs[0x582] = (uint32_t)(PROGRAM_REGION >> 32);
   g_regs[0x583] = (uint32_t)PROGRAM_REGION;
@@ -306,6 +310,36 @@ static void test_triangle_and_blend(Raster3d *r, bool block_linear) {
   CHECK(r->stats.draws == draws && r->stats.clears == clears, "skipped draws are not counted");
   CHECK(rgba_is(pixel(rt, block_linear, 20, 10), 255, 0, 0, 255), "a skipped frame leaves the target alone");
   r->skip_draws = false;
+}
+
+/* Viewport swizzle NEGATIVE_Y (OpenGL titles' y flip): the lower-left
+ * triangle (y down) lands in the upper-left half instead. */
+static void test_viewport_swizzle(Raster3d *r) {
+  base_state(RT, false, PS_OFFSET);
+  g_regs[0x286] = 0x6430;
+  raster3d_begin_submission(r);
+  clear_to(r, 0.0f, 0.0f, 1.0f, 1.0f);
+  vertex(0, -1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(1, 1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(2, -1.0f, 1.0f, 1, 0, 0, 1);
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  CHECK(rgba_is(pixel(RT, false, 10, 53), 255, 0, 0, 255), "NEGATIVE_Y: the flipped triangle is red");
+  CHECK(rgba_is(pixel(RT, false, 10, 10), 0, 0, 255, 255), "NEGATIVE_Y: its mirror image is the clear colour");
+  /* WINDOW_ORIGIN flip y swaps the facing: the same triangle (clockwise on
+   * screen) is a front face under FRONT_FACE CW, a back face with flip y. */
+  g_regs[0x286] = 0x6420;
+  g_regs[REG_CULL_ENABLE_TEST] = 1;
+  g_regs[REG_CULL_FACE_TEST] = CULL_BACK_REG;
+  g_regs[REG_FRONT_FACE_TEST] = FRONT_CW_REG;
+  const uint64_t drawn = r->stats.triangles;
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  CHECK(r->stats.triangles == drawn + 1u, "front face CW: drawn");
+  g_regs[0x4eb] = 0x10;
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  CHECK(r->stats.triangles == drawn + 1u, "front face CW with flip y: culled");
 }
 
 /* A 2x2 A8B8G8R8 pitch texture (32-byte rows): red, green / blue, white;
@@ -605,9 +639,6 @@ static void test_worker_count_invariance(Raster3d *r) {
 #define GPU_RING_BYTES (1u << 20)
 #define SEEN_INDICES 12u
 #define TOPOLOGY_STRIP_TEST 5u /* Maxwell TRIANGLE_STRIP */
-#define CULL_BACK_REG 0x405u
-#define FRONT_CW_REG 0x900u
-#define FRONT_CCW_REG 0x901u
 
 static uint8_t g_stream_header[GPU_STREAM_HEADER_BYTES];
 static uint64_t g_stream_ring[GPU_RING_BYTES / 8u];
@@ -1028,6 +1059,7 @@ int main(void) {
   build_programs();
   test_triangle_and_blend(&r, false);
   test_triangle_and_blend(&r, true);
+  test_viewport_swizzle(&r);
   test_texture(&r);
   test_render_to_texture(&r);
   test_stencil(&r);

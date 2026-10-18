@@ -23,6 +23,7 @@
 #define REG_RT 0x200u               /* + 16 * target: A, B, WIDTH, HEIGHT, FORMAT, MEMORY */
 #define REG_RT_STRIDE 16u
 #define REG_VIEWPORT 0x280u         /* scale x/y/z, offset x/y/z */
+#define REG_VIEWPORT_SWIZZLE 0x286u /* viewport 0's swizzle (WGSL_VP_SWIZZLE layout) */
 #define REG_VIEWPORT_CLIP 0x300u    /* horizontal, vertical */
 #define REG_CLEAR_RECT_H 0x35bu
 #define REG_CLEAR_RECT_V 0x35cu
@@ -68,6 +69,8 @@
 #define REG_BLEND_ALPHA_DST 0x4d6u
 #define REG_BLEND_ENABLE 0x4d8u
 #define REG_WINDOW_ORIGIN 0x4ebu
+#define WINDOW_ORIGIN_LOWER_LEFT 0x1u
+#define WINDOW_ORIGIN_FLIP_Y 0x10u /* swaps the facing (OpenGL drivers, with a NEGATIVE_Y swizzle) */
 #define REG_BASE_VERTEX 0x50du
 #define REG_BASE_INSTANCE 0x50eu
 #define REG_POINT_SIZE 0x546u
@@ -1651,6 +1654,18 @@ static bool run_vertices(Draw_Context *ctx, const uint32_t *indices, uint32_t n,
   return shade_vertices(ctx, indices, n, out);
 }
 
+/* The viewport swizzle (after the vertex program, before clipping): each
+ * output component is a signed copy of one clip-space component. OpenGL
+ * titles flip y with it (NEGATIVE_Y). */
+static void viewport_swizzle(uint32_t swizzle, float pos[4]) {
+  const float in[4] = {pos[0], pos[1], pos[2], pos[3]};
+  for (uint32_t c = 0; c < 4u; c++) {
+    const uint32_t sel = swizzle >> (c * WGSL_VP_SWIZZLE_SHIFT);
+    const float v = in[(sel >> 1u) & 3u];
+    pos[c] = (sel & WGSL_VP_SWIZZLE_NEGATE) ? -v : v;
+  }
+}
+
 static bool shade_vertices(Draw_Context *ctx, const uint32_t *indices, uint32_t n, Vertex *const *out) {
   Sm_Thread *t = ctx->r->thread;
   sm_thread_reset(t, n);
@@ -1675,8 +1690,10 @@ static bool shade_vertices(Draw_Context *ctx, const uint32_t *indices, uint32_t 
     ctx->r->stats.shader_faults++;
     return false;
   }
+  const uint32_t swizzle = ctx->regs[REG_VIEWPORT_SWIZZLE];
   for (uint32_t l = 0; l < n; l++) {
     for (uint32_t c = 0; c < 4; c++) out[l]->pos[c] = f32(t->attr_out[SM_ATTR_POSITION / 4u + c][l]);
+    if (swizzle != WGSL_VP_SWIZZLE_IDENTITY) viewport_swizzle(swizzle, out[l]->pos);
     for (uint32_t i = 0; i < MAX_VARYINGS; i++) out[l]->varying[i] = t->attr_out[SM_ATTR_GENERIC / 4u + i][l];
   }
   return true;
@@ -1758,6 +1775,7 @@ typedef struct Raster_State {
   int32_t surface_height;
   float vp_scale[3], vp_offset[3];
   bool viewport_transform;
+  uint32_t viewport_swizzle;
   bool lower_left;
   bool z_zero_to_one;
   bool cull;
@@ -2030,11 +2048,12 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
     rs->vp_offset[c] = f32(regs[REG_VIEWPORT + 3u + c]);
   }
   rs->viewport_transform = (regs[REG_VIEWPORT_SCALE_OFFSET] & 1u) != 0;
-  rs->lower_left = (regs[REG_WINDOW_ORIGIN] & 1u) != 0;
+  rs->viewport_swizzle = regs[REG_VIEWPORT_SWIZZLE];
+  rs->lower_left = (regs[REG_WINDOW_ORIGIN] & WINDOW_ORIGIN_LOWER_LEFT) != 0;
   rs->z_zero_to_one = (regs[REG_Z_CLIP_RANGE] & 1u) != 0;
   rs->cull = (regs[REG_CULL_ENABLE] & 1u) != 0;
   rs->cull_face = regs[REG_CULL_FACE];
-  rs->front_ccw = regs[REG_FRONT_FACE] == 0x901u;
+  rs->front_ccw = (regs[REG_FRONT_FACE] == 0x901u) != ((regs[REG_WINDOW_ORIGIN] & WINDOW_ORIGIN_FLIP_Y) != 0);
   rs->provoking_last = regs[REG_PROVOKING_VERTEX] & 1u;
   /* Varyings the pixel program reads, and how. */
   const Sm_Header *ph = &ctx->ps->header;
@@ -3990,6 +4009,7 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
     vp[WGSL_VP_TARGET] = u32f((float)g->width);
     vp[WGSL_VP_TARGET + 1u] = u32f((float)g->height);
     vp[WGSL_VP_FLAGS] = rs->viewport_transform ? WGSL_VP_TRANSFORM : 0u;
+    vp[WGSL_VP_SWIZZLE] = rs->viewport_swizzle;
   }
   if (words & 1u) data[words++] = 0; /* records stay 8-aligned */
   g->data_words = words;

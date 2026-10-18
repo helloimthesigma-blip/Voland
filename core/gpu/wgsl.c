@@ -2216,8 +2216,14 @@ static void emit_vertex_io(Out *o, const Wgsl_Program_Desc *d) {
 static void emit_vertex_epilogue(Out *o, const Wgsl_Program_Desc *d) {
   const uint32_t vp = WGSL_DRAW_VIEWPORT, pw = SM_ATTR_POSITION / 4u;
   out_add(o, "  var o: VOut;\n");
-  out_add(o, "  let x = F(aout[%uu]); let y = F(aout[%uu]); let z = F(aout[%uu]); let w = F(aout[%uu]);\n", pw,
-          pw + 1u, pw + 2u, pw + 3u);
+  out_add(o, "  let vp_clip = vec4<f32>(F(aout[%uu]), F(aout[%uu]), F(aout[%uu]), F(aout[%uu]));\n", pw, pw + 1u, pw + 2u,
+          pw + 3u);
+  /* The viewport swizzle: a signed copy of one clip-space component each. */
+  out_add(o, "  let vp_sw = D[%uu];\n", vp + WGSL_VP_SWIZZLE);
+  static const char comp_name[4] = {'x', 'y', 'z', 'w'};
+  for (uint32_t c = 0; c < 4u; c++)
+    out_add(o, "  let %c = select(1.0, -1.0, ((vp_sw >> %uu) & %uu) != 0u) * vp_clip[(vp_sw >> %uu) & 3u];\n", comp_name[c],
+            c * WGSL_VP_SWIZZLE_SHIFT, WGSL_VP_SWIZZLE_NEGATE, c * WGSL_VP_SWIZZLE_SHIFT + 1u);
   /* Window coordinates times w (no division until the GPU's). */
   out_add(o, "  var xw = x; var yw = y; var zw = z;\n");
   out_add(o, "  if ((D[%uu] & %uu) != 0u) { xw = x * F(D[%uu]) + F(D[%uu]) * w; yw = y * F(D[%uu]) + F(D[%uu]) * w; "

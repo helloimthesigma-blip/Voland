@@ -153,6 +153,11 @@
 #define M3D_PIPELINE_TYPE_SHIFT 4u
 #define M3D_PIPELINE_VERTEX 1u
 static const uint8_t k_default_binding_group[6] = {0, 0, 1, 2, 3, 4};
+/* VIEWPORT_SWIZZLE(i) power-on value: +x, +y, +z, +w. Only OpenGL-style
+ * drivers write it (NEGATIVE_Y flips y). */
+#define M3D_VIEWPORT_SWIZZLE(i) (0x286u + 8u * (i))
+#define M3D_VIEWPORTS 16u
+#define M3D_VIEWPORT_SWIZZLE_IDENTITY 0x6420u
 
 void gpu_channel_init(Gpu_Channel *channel) {
   memset(channel, 0, sizeof(*channel));
@@ -162,6 +167,7 @@ void gpu_channel_init(Gpu_Channel *channel) {
    * the other slots but never slot 1's control word - it relies on this. */
   for (uint32_t j = 0; j < 6u; j++)
     channel->engine3d[M3D_PIPELINE_SHADER(j)] = (j << M3D_PIPELINE_TYPE_SHIFT) | (j == M3D_PIPELINE_VERTEX ? 1u : 0u);
+  for (uint32_t i = 0; i < M3D_VIEWPORTS; i++) channel->engine3d[M3D_VIEWPORT_SWIZZLE(i)] = M3D_VIEWPORT_SWIZZLE_IDENTITY;
 }
 
 static uint64_t addr40(uint32_t upper, uint32_t lower) { return ((uint64_t)(upper & 0xFFu) << 32) | lower; }

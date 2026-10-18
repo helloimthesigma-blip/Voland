@@ -76,8 +76,13 @@
 #define WGSL_VP_OFFSET 3u     /* f32 x, y, z */
 #define WGSL_VP_TARGET 6u     /* f32 target width, height (the NDC mapping) */
 #define WGSL_VP_FLAGS 8u      /* WGSL_VP_TRANSFORM */
+#define WGSL_VP_SWIZZLE 9u    /* the guest's viewport swizzle: per component c, bits 4c..4c+2
+                                 hold (source component << 1) | negate */
 #define WGSL_VP_WORDS 10u
 #define WGSL_VP_TRANSFORM 1u  /* the viewport transform is enabled */
+#define WGSL_VP_SWIZZLE_SHIFT 4u
+#define WGSL_VP_SWIZZLE_NEGATE 1u
+#define WGSL_VP_SWIZZLE_IDENTITY 0x6420u /* +x, +y, +z, +w */
 /* Vertex pulling (Wgsl_Program_Desc.vertex_pull): per vertex input location
  * l, words WGSL_DRAW_VS_INPUTS + 4 l: the byte offset in this buffer of its
  * stream's first copied element, the stride (bits 0-11) | WGSL_VSI_ACTIVE |
