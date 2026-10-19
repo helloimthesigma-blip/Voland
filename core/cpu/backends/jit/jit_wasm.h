@@ -93,6 +93,7 @@ static inline void wasm_patch_size(Wasm_Buf *b, uint32_t at) {
 #define WASM_VERSION_BYTES 4u
 
 enum {
+  WASM_SECTION_CUSTOM = 0,
   WASM_SECTION_TYPE = 1,
   WASM_SECTION_IMPORT = 2,
   WASM_SECTION_FUNCTION = 3,

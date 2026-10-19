@@ -33,6 +33,7 @@
 #include "cpu/backends/jit/jit_internal.h"
 
 #include <stddef.h>
+#include <stdio.h>
 
 #include "common/assert.h"
 #include "cpu/backends/interpreter/softfloat.h"
@@ -41,6 +42,13 @@
 /* ------------------------------------------------------------------ */
 /* Function layout.                                                    */
 /* ------------------------------------------------------------------ */
+
+/* Branch hints recorded per region (more are dropped). */
+#define JIT_MAX_HINTS 4096u
+
+/* Translation-cache slots for the busiest base registers of a region
+ * (emit_walk). */
+#define JIT_TLB_SLOTS 4u
 
 enum {
   L_STATE = 0, /* the parameter */
@@ -70,34 +78,37 @@ enum {
   L_TLB_RDELTA = 54, /* ...and host - guest for it */
   L_TLB_WBASE = 55, /* the same for writes */
   L_TLB_WDELTA = 56,
-  L_LAST_I64 = 56,
-  L_NZCV = 57,
-  L_STATUS = 58,
-  L_IDX = 59,    /* the region target to dispatch to */
-  L_HINSN = 60,  /* the handlers' instruction word */
-  L_RESUME = 61, /* $helper: the region block to resume in */
-  L_PASS = 62,   /* store-exclusive: did the monitor pass */
-  L_EXACT = 63,  /* FP fast paths: FP_EXACT, FP_INEXACT or FP_UNKNOWN (fp_note_inexact) */
-  L_LAST_I32 = 63,
-  L_FS = 64,     /* FP fast paths: f32 */
-  L_FS2 = 65,
-  L_FS3 = 66,
-  L_LAST_F32 = 66,
-  L_FD = 67,     /* ...f64 */
-  L_FD2 = 68,
-  L_FD3 = 69,
-  L_FD4 = 70,    /* ...exactness checks' scratch */
-  L_FD5 = 71,
-  L_FD6 = 72,
-  L_FD7 = 73,
-  L_LAST_F64 = 73,
-  L_VA = 74,     /* vector FP fast paths: v128 */
-  L_VB = 75,
-  L_VD = 76,
-  L_VR = 77,
-  L_VR2 = 78,
-  L_VT = 79,
-  L_LAST_V128 = 79,
+  L_TLB_SBASE = 57, /* the same for SP-based accesses (pages both readable and writable) */
+  L_TLB_SDELTA = 58,
+  L_TLB_SLOT = 59, /* JIT_TLB_SLOTS more (base, delta) pairs: one per busy (base register, permission) */
+  L_LAST_I64 = L_TLB_SLOT + 2 * JIT_TLB_SLOTS - 1,
+  L_NZCV,
+  L_STATUS,
+  L_IDX,    /* the region target to dispatch to */
+  L_HINSN,  /* the handlers' instruction word */
+  L_RESUME, /* $helper: the region block to resume in */
+  L_PASS,   /* store-exclusive: did the monitor pass */
+  L_EXACT,  /* FP fast paths: FP_EXACT, FP_INEXACT or FP_UNKNOWN (fp_note_inexact) */
+  L_LAST_I32 = L_EXACT,
+  L_FS,     /* FP fast paths: f32 */
+  L_FS2,
+  L_FS3,
+  L_LAST_F32 = L_FS3,
+  L_FD,     /* ...f64 */
+  L_FD2,
+  L_FD3,
+  L_FD4,    /* ...exactness checks' scratch */
+  L_FD5,
+  L_FD6,
+  L_FD7,
+  L_LAST_F64 = L_FD7,
+  L_VA,     /* vector FP fast paths: v128 */
+  L_VB,
+  L_VD,
+  L_VR,
+  L_VR2,
+  L_VT,
+  L_LAST_V128 = L_VT,
 };
 #define I64_LOCALS (L_LAST_I64 - L_STATE)
 #define I32_LOCALS (L_LAST_I32 - L_LAST_I64)
@@ -130,6 +141,12 @@ enum {
 #define MASK_SP ((uint64_t)1 << 31)
 #define MASK_NZCV ((uint64_t)1 << 32)
 #define REG_ZR 31u
+#define REG_SP_BASE 31u   /* Rn = 31 in a load/store: SP */
+#define MEM_BASE_NONE 32u /* no base register (A32, literal loads) */
+#define A64_LDST_MASK 0x0A000000u /* op0 = x1x0: loads and stores */
+#define A64_LDST_VALUE 0x08000000u
+#define A64_LDR_LITERAL_MASK 0x3B000000u /* LDR (literal), general or SIMD&FP */
+#define A64_LDR_LITERAL_VALUE 0x18000000u
 
 #define STATE_OFFSET(field) ((uint64_t)offsetof(Jit_State, field))
 #define OFF_X(r) (STATE_OFFSET(interp.regs.x) + (uint64_t)(r) * sizeof(uint64_t))
@@ -152,6 +169,8 @@ enum {
 #define OFF_TLB_RDELTA STATE_OFFSET(tlb_rdelta)
 #define OFF_TLB_WBASE STATE_OFFSET(tlb_wbase)
 #define OFF_TLB_WDELTA STATE_OFFSET(tlb_wdelta)
+#define OFF_TLB_SBASE STATE_OFFSET(tlb_sbase)
+#define OFF_TLB_SDELTA STATE_OFFSET(tlb_sdelta)
 #define OFF_EXCLUSIVE_ADDRESS STATE_OFFSET(interp.exclusive_address)
 #define OFF_EXCLUSIVE_SIZE STATE_OFFSET(interp.exclusive_size)
 #define OFF_EXCLUSIVE_VALUE STATE_OFFSET(interp.exclusive_value)
@@ -236,6 +255,22 @@ typedef struct Ctx {
   uint32_t max_local;     /* highest local used (this pass) */
   uint32_t declared_local; /* how many to declare (the analysis pass's max_local) */
   bool uses_tlb;           /* an access went through the translation cache (the analysis pass's) */
+  uint32_t tlb_carried;    /* which of g_carried's entries (bit i) it used (this pass; then the analysis pass's) */
+  /* The current instruction's base register for emit_walk's choice of
+   * translation cache (0-30, REG_SP_BASE, or MEM_BASE_NONE); per
+   * (permission, register) the accesses the analysis pass saw, and the
+   * slot (1-based; 0 = the shared cache) the final pass gives them. */
+  uint32_t mem_base;
+  /* Final pass: the region block being compiled and the dispatch
+   * br_table's target count (branch_to's direct forward branches). */
+  uint32_t current_block, dispatch_targets;
+  /* Final pass: branch hints (emit_branch_hints) - where in the body
+   * an if/br_if is and whether it is likely taken. */
+  uint32_t body_start, hint_count;
+  uint32_t hint_offset[JIT_MAX_HINTS];
+  uint8_t hint_likely[JIT_MAX_HINTS];
+  uint32_t tlb_uses[2][31];
+  uint8_t tlb_slot[2][31];
   bool a32;               /* the code is A32 (jit_compile_a32.inc) */
 } Ctx;
 
@@ -293,6 +328,18 @@ static void end_(Ctx *c) {
 static void br(Ctx *c, uint32_t level) {
   op(c, WASM_OP_BR);
   wasm_uleb(c->b, c->depth - level);
+}
+/* The next if/br_if is (un)likely taken: V8 moves unlikely arms out of
+ * the hot path (the branch-hinting proposal). JIT_NO_HINTS: none. */
+static bool hints_enabled(void) {
+  static int enabled = -1;
+  if (enabled < 0) enabled = getenv("JIT_NO_HINTS") == NULL;
+  return enabled != 0;
+}
+static void hint(Ctx *c, bool likely) {
+  if (c->discover || c->hint_count >= JIT_MAX_HINTS || !hints_enabled()) return;
+  c->hint_offset[c->hint_count] = c->b->length - c->body_start;
+  c->hint_likely[c->hint_count++] = likely ? 1u : 0u;
 }
 static void br_if(Ctx *c, uint32_t level) {
   op(c, WASM_OP_BR_IF);
@@ -509,27 +556,38 @@ static int32_t find_block(const Ctx *c, uint64_t pc) {
 
 /* Is the code at `target` worth copying into every region that calls it?
  * A leaf function or a PLT stub is: within its first few instructions it
- * returns or branches away (RET/BR) without calling anything. Larger
- * callees stay regions of their own - compiled once, not into each
- * caller (measured: inlining every callee doubled module bytes). */
+ * returns or branches away (RET/BR) without calling anything. So is a
+ * slightly larger function whose only calls are to such leaves (managed
+ * code's helpers: a getter or two and a GC poll), called tens of millions
+ * of times while Celeste loads - every call to it was two region
+ * transitions. Larger callees stay regions of their own - compiled once,
+ * not into each caller (measured: inlining every callee doubled module
+ * bytes). */
 #define JIT_SMALL_CALLEE_INSNS 16u
+#define JIT_SMALL_CALLER_INSNS 48u /* the larger form, with calls to leaves */
 #define BRANCH_REGISTER_MASK 0xFF9FFC1Fu /* BR/RET with any Rn */
 #define BR_ENCODING 0xD61F0000u
 #define RET_ENCODING 0xD65F0000u
-static bool small_callee(const Ctx *c, uint64_t target) {
+static bool small_function(const Ctx *c, uint64_t target, bool calls_allowed) {
   const uint64_t page = target & ~(uint64_t)VMM_PAGE_OFFSET_MASK;
   const uint32_t *code = c->source->page_code(c->source->context, page);
   if (!code || (target & 3u)) return false;
   const uint32_t first = (uint32_t)((target - page) / INSN_BYTES);
-  for (uint32_t i = first; i < first + JIT_SMALL_CALLEE_INSNS && i < VMM_PAGE_SIZE / INSN_BYTES; i++) {
+  const uint32_t limit = calls_allowed ? JIT_SMALL_CALLER_INSNS : JIT_SMALL_CALLEE_INSNS;
+  for (uint32_t i = first; i < first + limit && i < VMM_PAGE_SIZE / INSN_BYTES; i++) {
     const uint32_t insn = code[i];
     const uint32_t masked = insn & BRANCH_REGISTER_MASK;
     if (masked == BR_ENCODING || masked == RET_ENCODING) return true;
-    if (bits(insn, 30, 26) == 0x05 && bit(insn, 31)) return false; /* BL */
-    if ((insn & 0xFFFFFC1Fu) == 0xD63F0000u) return false;          /* BLR */
+    if (bits(insn, 30, 26) == 0x05 && bit(insn, 31)) { /* BL */
+      const uint64_t callee = page + (uint64_t)i * INSN_BYTES + (uint64_t)sign_extend((uint64_t)bits(insn, 25, 0) << 2, 28);
+      if (!calls_allowed || !small_function(c, callee, false)) return false;
+    }
+    if ((insn & 0xFFFFFC1Fu) == 0xD63F0000u) return false; /* BLR */
   }
   return false;
 }
+
+static bool small_callee(const Ctx *c, uint64_t target) { return small_function(c, target, true); }
 
 /* Adds `pc` as a region block if it can be one; true if it is one. */
 static bool add_block(Ctx *c, uint64_t pc) {
@@ -593,17 +651,25 @@ static void branch_to(Ctx *c, uint64_t target) {
   ltee(c, L_T0);
   lget(c, L_ROOM);
   op(c, WASM_OP_I64_GT_U);
+  hint(c, false);
   open_if(c, WASM_BLOCK_VOID); /* does not fit: out, the dispatcher interprets it */
   i64c(c, target);
   exit_to_stack(c);
   end_(c);
   lget(c, L_T0);
   lset(c, L_CYC);
+  if (c->blocks[m].needs_flags) emit_materialize(c);
+  if (!c->discover && c->dispatch_targets > 1u && (uint32_t)m > c->current_block) {
+    /* Forward: the blocks nest in order inside the dispatch loop, so the
+     * end of block m's label is where its code starts - a plain br, not
+     * the loop's br_table (an indirect jump per branch). */
+    br(c, LEVEL_DISPATCH + c->dispatch_targets - (uint32_t)m);
+    return;
+  }
   if (c->block_count > 1u) {
     i32c(c, (uint32_t)m);
     lset(c, L_IDX);
   }
-  if (c->blocks[m].needs_flags) emit_materialize(c);
   br(c, LEVEL_DISPATCH);
 }
 
@@ -1644,6 +1710,9 @@ static bool shared_walk(void) {
  * the same window between its read of the tables and the access.
  * JIT_NO_TLB=1: no cache. */
 #define TLB_EMPTY ((uint64_t)1 << 63) /* a page base no address matches */
+#define TLB_CARRIED_R 1u /* Ctx.tlb_carried: g_carried[0], [1], [2] */
+#define TLB_CARRIED_W 2u
+#define TLB_CARRIED_SP 4u
 static bool g_no_tlb_set, g_no_tlb;
 static bool no_tlb(void) {
   if (!g_no_tlb_set) {
@@ -1653,26 +1722,58 @@ static bool no_tlb(void) {
   return g_no_tlb;
 }
 static void emit_walk_full(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow);
+
+/* Which (base, delta) locals cache this access, and whether a miss also
+ * refills the shared cache of its permission. Several entries matter
+ * because one was not enough: a loop reading two buffers, or a function
+ * mixing its stack frame with heap data, missed on nearly every access
+ * (Celeste's PNG decoding while it loads). SP-based accesses get an entry
+ * carried between regions like the shared ones, for pages that are both
+ * readable and writable; the busiest other base registers of the region
+ * get slots of their own, which start each call from the shared cache. */
+static void tlb_entry(Ctx *c, uint32_t perm, uint32_t *base, uint32_t *delta, bool *refill_shared) {
+  const bool write = perm == VMM_PERM_W;
+  *base = write ? L_TLB_WBASE : L_TLB_RBASE;
+  *delta = write ? L_TLB_WDELTA : L_TLB_RDELTA;
+  *refill_shared = false;
+  if (c->mem_base == REG_SP_BASE && !shared_walk()) {
+    *base = L_TLB_SBASE;
+    *delta = L_TLB_SDELTA;
+  } else if (c->mem_base < REG_SP_BASE) {
+    if (c->discover) {
+      c->tlb_uses[write][c->mem_base]++;
+    } else if (c->tlb_slot[write][c->mem_base]) {
+      const uint32_t slot = c->tlb_slot[write][c->mem_base] - 1u;
+      *base = L_TLB_SLOT + 2u * slot;
+      *delta = *base + 1u;
+      *refill_shared = true;
+    }
+  }
+}
+
 static void emit_walk(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) {
   if (no_tlb()) {
     emit_walk_full(c, size, perm, slow);
     return;
   }
   c->uses_tlb = true;
-  const bool write = perm == VMM_PERM_W;
-  const uint32_t base = write ? L_TLB_WBASE : L_TLB_RBASE, delta = write ? L_TLB_WDELTA : L_TLB_RDELTA;
+  uint32_t base, delta;
+  bool refill_shared;
+  tlb_entry(c, perm, &base, &delta, &refill_shared);
+  c->tlb_carried |= base == L_TLB_SBASE ? TLB_CARRIED_SP : perm == VMM_PERM_W ? TLB_CARRIED_W : TLB_CARRIED_R;
   lget(c, L_ADDR);
   lget(c, base);
   op(c, WASM_OP_I64_SUB);
   i64c(c, VMM_PAGE_SIZE - size + 1u); /* in the page, and the access does not cross it */
   op(c, WASM_OP_I64_LT_U);
+  hint(c, true);
   open_if(c, WASM_BLOCK_VOID);
   lget(c, L_ADDR);
   lget(c, delta);
   op(c, WASM_OP_I64_ADD);
   lset(c, L_HOST);
   else_(c);
-  emit_walk_full(c, size, perm, slow);
+  emit_walk_full(c, size, base == L_TLB_SBASE ? VMM_PERM_RW : perm, slow);
   lget(c, L_ADDR);
   i64c(c, ~(uint64_t)VMM_PAGE_OFFSET_MASK);
   op(c, WASM_OP_I64_AND);
@@ -1681,6 +1782,13 @@ static void emit_walk(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) {
   lget(c, L_ADDR);
   op(c, WASM_OP_I64_SUB);
   lset(c, delta);
+  if (refill_shared) {
+    const bool write = perm == VMM_PERM_W;
+    lget(c, base);
+    lset(c, write ? L_TLB_WBASE : L_TLB_RBASE);
+    lget(c, delta);
+    lset(c, write ? L_TLB_WDELTA : L_TLB_RDELTA);
+  }
   end_(c);
 }
 
@@ -1694,12 +1802,14 @@ static void emit_walk_full(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) 
     wasm_uleb(c->b, FUNC_WALK);
     ltee(c, L_HOST);
     op(c, WASM_OP_I64_EQZ);
+    hint(c, false);
     br_if(c, slow);
     return;
   }
   lget(c, L_ADDR);
   i64c(c, VMM_ADDRESS_SPACE_SIZE);
   op(c, WASM_OP_I64_GE_U);
+  hint(c, false);
   br_if(c, slow);
   if (size > 1u) {
     lget(c, L_ADDR);
@@ -1707,6 +1817,7 @@ static void emit_walk_full(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) 
     op(c, WASM_OP_I64_AND);
     i64c(c, VMM_PAGE_SIZE - size);
     op(c, WASM_OP_I64_GT_U);
+    hint(c, false);
     br_if(c, slow);
   }
   lget(c, L_L1);
@@ -1719,6 +1830,7 @@ static void emit_walk_full(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) 
   mem(c, WASM_OP_I64_LOAD, ALIGN_8, 0);
   ltee(c, L_HOST);
   op(c, WASM_OP_I64_EQZ);
+  hint(c, false);
   br_if(c, slow);
   lget(c, L_HOST);
   lget(c, L_ADDR);
@@ -1731,7 +1843,13 @@ static void emit_walk_full(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) 
   ltee(c, L_HOST);
   i64c(c, perm);
   op(c, WASM_OP_I64_AND);
-  op(c, WASM_OP_I64_EQZ);
+  if (perm == VMM_PERM_RW) { /* both (the SP entry) */
+    i64c(c, perm);
+    op(c, WASM_OP_I64_NE);
+  } else {
+    op(c, WASM_OP_I64_EQZ);
+  }
+  hint(c, false);
   br_if(c, slow);
   lget(c, L_HOST);
   i64c(c, VMM_PTE_HOST_MASK);
@@ -1759,6 +1877,7 @@ static void emit_load_address(Ctx *c, uint32_t size) {
   op(c, WASM_OP_CALL);
   wasm_uleb(c->b, FUNC_READ);
   op(c, WASM_OP_I32_EQZ);
+  hint(c, false);
   open_if(c, WASM_BLOCK_VOID);
   leave_via_interpreter(c);
   end_(c);
@@ -1827,6 +1946,7 @@ static void emit_store(Ctx *c, uint32_t size, uint32_t t, bool pair, uint32_t t2
   op(c, WASM_OP_CALL);
   wasm_uleb(c->b, FUNC_STORE);
   op(c, WASM_OP_I32_EQZ);
+  hint(c, false);
   open_if(c, WASM_BLOCK_VOID);
   leave_via_interpreter(c);
   end_(c);
@@ -2047,6 +2167,7 @@ static void emit_direct_call(Ctx *c, const Sync *sync) {
   i32c(c, c->insn);
   op(c, WASM_OP_CALL);
   wasm_uleb(c->b, FUNC_SIMD);
+  hint(c, false);
   open_if(c, WASM_BLOCK_VOID);
   leave_via_interpreter(c);
   end_(c);
@@ -2475,7 +2596,10 @@ static void emit_tiny_single_in_double(Ctx *c, uint32_t local) {
 
 /* if (guard on the stack) { fast } else { exact direct call }: opens the
  * fast arm; finish with fp_else_exact(). */
-static void fp_fast_arm(Ctx *c) { open_if(c, WASM_BLOCK_VOID); }
+static void fp_fast_arm(Ctx *c) {
+  hint(c, true);
+  open_if(c, WASM_BLOCK_VOID);
+}
 static void fp_else_exact(Ctx *c, const Sync *sync) {
   jit_note_fast_path(c->insn);
   else_(c);
@@ -3976,6 +4100,7 @@ static void emit_vector_store(Ctx *c, uint32_t bytes, uint32_t t, bool pair, uin
   op(c, WASM_OP_CALL);
   wasm_uleb(c->b, FUNC_WRITE);
   op(c, WASM_OP_I32_EQZ);
+  hint(c, false);
   open_if(c, WASM_BLOCK_VOID);
   leave_via_interpreter(c);
   end_(c);
@@ -4136,6 +4261,7 @@ static void emit_store_exclusive_shared(Ctx *c, uint32_t element, uint32_t t, ui
   i32c(c, element);
   op(c, WASM_OP_I32_EQ);
   op(c, WASM_OP_I32_AND);
+  hint(c, true);
   open_if(c, WASM_BLOCK_VOID);
   {
     open_block(c); /* $done */
@@ -4189,6 +4315,7 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
     op(c, WASM_OP_I64_AND);
     op(c, WASM_OP_I64_EQZ);
     op(c, WASM_OP_I32_EQZ);
+    hint(c, false);
     open_if(c, WASM_BLOCK_VOID);
     leave_via_interpreter(c);
     end_(c);
@@ -4483,6 +4610,15 @@ static Outcome c_branch_system(Ctx *c, uint32_t insn) {
 /* The A32 front end shares this file's emitter. */
 #include "cpu/backends/jit/jit_compile_a32.inc"
 
+/* The base register of an A64 load/store (Rn, bits 9:5; 31 is SP), for
+ * emit_walk's choice of translation cache: only a heuristic, any choice
+ * is correct. */
+static uint32_t a64_mem_base(uint32_t insn) {
+  if ((insn & A64_LDST_MASK) != A64_LDST_VALUE) return MEM_BASE_NONE;
+  if ((insn & A64_LDR_LITERAL_MASK) == A64_LDR_LITERAL_VALUE) return MEM_BASE_NONE;
+  return bits(insn, 9, 5);
+}
+
 static Outcome compile_instruction(Ctx *c, uint32_t insn) {
   if (c->a32) return a32_compile_instruction(c, insn);
   switch (bits(insn, 28, 25)) {
@@ -4517,6 +4653,7 @@ static uint32_t compile_block_code(Ctx *c, uint32_t b) {
   for (uint32_t i = 0; i < count; i++, c->pc += INSN_BYTES) {
     c->insn = code[i];
     c->index = i;
+    c->mem_base = c->a32 ? MEM_BASE_NONE : a64_mem_base(c->insn);
     const uint32_t mark = c->b->length;
     const uint64_t used = c->used, written = c->written;
     const uint32_t depth = c->depth, blocks = c->block_count;
@@ -4573,6 +4710,7 @@ static void emit_chain(Ctx *c) {
     i64c(c, c->link->generation_address);
     mem(c, WASM_OP_I64_LOAD, ALIGN_8, 0);
     op(c, WASM_OP_I64_NE);
+    hint(c, false);
     br_if(c, miss);
     lget(c, L_T0);
     lget(c, L_HOST);
@@ -4580,11 +4718,13 @@ static void emit_chain(Ctx *c) {
     op(c, WASM_OP_I64_ADD);
     state_load64(c, OFF_BUDGET);
     op(c, WASM_OP_I64_GT_U);
+    hint(c, false);
     br_if(c, miss);
     lget(c, L_HOST);
     mem(c, WASM_OP_I64_LOAD, ALIGN_8, at + ENTRY_OFFSET(function));
     ltee(c, L_ADDR);
     op(c, WASM_OP_I64_EQZ);
+    hint(c, false);
     br_if(c, miss);
     lget(c, L_HOST); /* second chance: entered */
     i32c(c, 1);
@@ -4610,44 +4750,93 @@ static void emit_chain(Ctx *c) {
 /* The translation caches from the state when its generation is current;
  * else empty, and the state takes the current generation (what this
  * region fills is valid in it). Regions with no cached access (known
- * from the analysis pass) skip both ends. */
+ * from the analysis pass) skip both ends. Slots start from the shared
+ * cache of their permission. */
+static const struct {
+  uint32_t base, delta;
+  uint64_t base_offset, delta_offset;
+} g_carried[3] = {{L_TLB_RBASE, L_TLB_RDELTA, OFF_TLB_RBASE, OFF_TLB_RDELTA},
+                  {L_TLB_WBASE, L_TLB_WDELTA, OFF_TLB_WBASE, OFF_TLB_WDELTA},
+                  {L_TLB_SBASE, L_TLB_SDELTA, OFF_TLB_SBASE, OFF_TLB_SDELTA}};
+
 static void emit_tlb_load(Ctx *c) {
   if (c->discover || !c->uses_tlb) {
-    i64c(c, TLB_EMPTY);
-    lset(c, L_TLB_RBASE);
-    i64c(c, TLB_EMPTY);
-    lset(c, L_TLB_WBASE);
+    for (uint32_t i = 0; i < 3u; i++) {
+      i64c(c, TLB_EMPTY);
+      lset(c, g_carried[i].base);
+    }
     return;
   }
   i64c(c, c->link->generation_address);
   mem(c, WASM_OP_I64_LOAD, ALIGN_8, 0);
-  lset(c, L_TLB_RDELTA); /* the current generation, for now */
+  lset(c, L_T0); /* the current generation */
   state_load64(c, OFF_TLB_GENERATION);
-  lget(c, L_TLB_RDELTA);
+  lget(c, L_T0);
   op(c, WASM_OP_I64_EQ);
+  hint(c, true);
   open_if(c, WASM_BLOCK_VOID);
-  static const struct { uint32_t local; uint64_t offset; } carried[4] = {
-      {L_TLB_RBASE, OFF_TLB_RBASE}, {L_TLB_RDELTA, OFF_TLB_RDELTA}, {L_TLB_WBASE, OFF_TLB_WBASE},
-      {L_TLB_WDELTA, OFF_TLB_WDELTA}};
-  for (uint32_t i = 0; i < 4u; i++) {
-    state_load64(c, carried[i].offset);
-    lset(c, carried[i].local);
+  for (uint32_t i = 0; i < 3u; i++) {
+    if (!(c->tlb_carried & (1u << i))) continue;
+    state_load64(c, g_carried[i].base_offset);
+    lset(c, g_carried[i].base);
+    state_load64(c, g_carried[i].delta_offset);
+    lset(c, g_carried[i].delta);
   }
   else_(c);
-  state_store64_local(c, OFF_TLB_GENERATION, L_TLB_RDELTA);
-  i64c(c, TLB_EMPTY);
-  lset(c, L_TLB_RBASE);
-  i64c(c, TLB_EMPTY);
-  lset(c, L_TLB_WBASE);
+  /* Entries this region does not use are stale in the new generation:
+   * empty them in the state too. */
+  state_store64_local(c, OFF_TLB_GENERATION, L_T0);
+  for (uint32_t i = 0; i < 3u; i++) {
+    i64c(c, TLB_EMPTY);
+    lset(c, g_carried[i].base);
+    if (!(c->tlb_carried & (1u << i))) state_store64_local(c, g_carried[i].base_offset, g_carried[i].base);
+  }
   end_(c);
+  for (uint32_t i = 0; i < 3u; i++) { /* unused: never matches, never stored */
+    if (c->tlb_carried & (1u << i)) continue;
+    i64c(c, TLB_EMPTY);
+    lset(c, g_carried[i].base);
+  }
+  for (uint32_t write = 0; write < 2u; write++) {
+    for (uint32_t r = 0; r < REG_SP_BASE; r++) {
+      if (!c->tlb_slot[write][r]) continue;
+      const uint32_t base = L_TLB_SLOT + 2u * (c->tlb_slot[write][r] - 1u);
+      lget(c, g_carried[write].base);
+      lset(c, base);
+      lget(c, g_carried[write].delta);
+      lset(c, base + 1u);
+    }
+  }
 }
 
 static void emit_tlb_store(Ctx *c) {
   if (c->discover || !c->uses_tlb) return;
-  state_store64_local(c, OFF_TLB_RBASE, L_TLB_RBASE);
-  state_store64_local(c, OFF_TLB_RDELTA, L_TLB_RDELTA);
-  state_store64_local(c, OFF_TLB_WBASE, L_TLB_WBASE);
-  state_store64_local(c, OFF_TLB_WDELTA, L_TLB_WDELTA);
+  for (uint32_t i = 0; i < 3u; i++) {
+    if (!(c->tlb_carried & (1u << i))) continue;
+    state_store64_local(c, g_carried[i].base_offset, g_carried[i].base);
+    state_store64_local(c, g_carried[i].delta_offset, g_carried[i].delta);
+  }
+}
+
+/* The analysis pass's busiest (permission, base register) pairs get the
+ * slots; an access made once per call gains nothing over the shared
+ * cache it would start from. */
+#define TLB_SLOT_MIN_USES 2u
+static void assign_tlb_slots(Ctx *c, const Ctx *analysis) {
+  memset(c->tlb_slot, 0, sizeof(c->tlb_slot));
+  for (uint32_t slot = 0; slot < JIT_TLB_SLOTS; slot++) {
+    uint32_t best_uses = TLB_SLOT_MIN_USES - 1u, best_write = 0, best_reg = 0;
+    for (uint32_t write = 0; write < 2u; write++) {
+      for (uint32_t r = 0; r < REG_SP_BASE; r++) {
+        if (c->tlb_slot[write][r] || analysis->tlb_uses[write][r] <= best_uses) continue;
+        best_uses = analysis->tlb_uses[write][r];
+        best_write = write;
+        best_reg = r;
+      }
+    }
+    if (best_uses < TLB_SLOT_MIN_USES) return;
+    c->tlb_slot[best_write][best_reg] = (uint8_t)(slot + 1u);
+  }
 }
 
 static void emit_function(Ctx *c) {
@@ -4700,8 +4889,10 @@ static void emit_function(Ctx *c) {
     for (uint32_t i = 0; i < targets; i++) wasm_uleb(c->b, i);
     wasm_uleb(c->b, 0);
   }
+  c->dispatch_targets = targets;
   for (uint32_t b = 0; b < c->block_count; b++) {
     if (targets > 1u) end_(c);
+    c->current_block = b;
     const uint32_t length = compile_block_code(c, b);
     if (c->discover) {
       c->blocks[b].length = length;
@@ -4719,6 +4910,7 @@ static void emit_function(Ctx *c) {
     flush_cycles(c);
     call_interpreter(c);
     ltee(c, L_STATUS);
+    hint(c, false);
     open_if(c, WASM_BLOCK_VOID);
     lget(c, L_STATUS);
     op(c, WASM_OP_RETURN);
@@ -4728,6 +4920,7 @@ static void emit_function(Ctx *c) {
     lget(c, L_HNEXTLEN);
     lget(c, L_ROOM);
     op(c, WASM_OP_I64_GT_U);
+    hint(c, false);
     open_if(c, WASM_BLOCK_VOID);
     i64c(c, 0);
     lset(c, L_CYC);
@@ -4873,6 +5066,54 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
   wasm_patch_size(b, size);
 }
 
+/* JIT_NAMES set in the environment: a "name" section calls the region
+ * function j<pc>, so engine profiles tell regions apart (diagnostics). */
+#define NAME_SUBSECTION_FUNCTIONS 1u
+static void emit_name_section(Wasm_Buf *b, uint64_t pc) {
+  static int enabled = -1;
+  if (enabled < 0) enabled = getenv("JIT_NAMES") != NULL;
+  if (!enabled) return;
+  char text[24];
+  snprintf(text, sizeof(text), "j%llx", (unsigned long long)pc);
+  wasm_u8(b, WASM_SECTION_CUSTOM);
+  const uint32_t size = wasm_reserve_size(b);
+  name(b, "name");
+  wasm_u8(b, NAME_SUBSECTION_FUNCTIONS);
+  const uint32_t sub = wasm_reserve_size(b);
+  wasm_uleb(b, 1);
+  wasm_uleb(b, FUNC_BLOCK);
+  name(b, text);
+  wasm_patch_size(b, sub);
+  wasm_patch_size(b, size);
+}
+
+/* The branch-hint custom section for the region function, moved in
+ * before the code section at `code_section` (the proposal requires that
+ * order). Returns false if the buffer has no room. */
+#define BRANCH_HINT_BYTES 1u
+static bool emit_branch_hints(Wasm_Buf *b, const Ctx *c, uint32_t code_section) {
+  if (!c->hint_count) return true;
+  static uint8_t section[JIT_MAX_HINTS * 12u + 64u];
+  Wasm_Buf h = wasm_buf(section, sizeof(section));
+  wasm_u8(&h, WASM_SECTION_CUSTOM);
+  const uint32_t size = wasm_reserve_size(&h);
+  name(&h, "metadata.code.branch_hint");
+  wasm_uleb(&h, 1); /* functions */
+  wasm_uleb(&h, FUNC_BLOCK);
+  wasm_uleb(&h, c->hint_count);
+  for (uint32_t i = 0; i < c->hint_count; i++) {
+    wasm_uleb(&h, c->hint_offset[i]);
+    wasm_uleb(&h, BRANCH_HINT_BYTES);
+    wasm_u8(&h, c->hint_likely[i]);
+  }
+  wasm_patch_size(&h, size);
+  if (h.overflow || b->overflow || b->length + h.length > b->capacity) return false;
+  memmove(b->data + code_section + h.length, b->data + code_section, b->length - code_section);
+  memcpy(b->data + code_section, section, h.length);
+  b->length += h.length;
+  return true;
+}
+
 /* Analysis output is discarded; it only needs room. */
 #define JIT_ANALYSIS_BYTES (256u * 1024u)
 static uint8_t g_analysis[JIT_ANALYSIS_BYTES];
@@ -4900,11 +5141,13 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     /* Pass 2: the module. */
     Wasm_Buf b = wasm_buf(out, capacity);
     emit_module_header(&b, memory_pages);
+    const uint32_t code_section = b.length;
     wasm_u8(&b, WASM_SECTION_CODE);
     const uint32_t section = wasm_reserve_size(&b);
     wasm_uleb(&b, 2);
     const uint32_t body = wasm_reserve_size(&b);
     memset(&c, 0, sizeof(c));
+    c.body_start = body + WASM_PATCHABLE_LEB_BYTES;
     c.b = &b;
     c.link = link;
     c.a32 = link->aarch32;
@@ -4918,12 +5161,16 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     c.uses_helper = analysis.uses_helper;
     c.declared_local = analysis.max_local;
     c.uses_tlb = analysis.uses_tlb;
+    c.tlb_carried = analysis.tlb_carried;
+    assign_tlb_slots(&c, &analysis);
     c.all_used = analysis.used | analysis.written;
     c.all_written = analysis.written;
     emit_function(&c);
     wasm_patch_size(&b, body);
     emit_walk_function(&b);
     wasm_patch_size(&b, section);
+    if (!emit_branch_hints(&b, &c, code_section)) b.overflow = true;
+    emit_name_section(&b, pc);
     if (!b.overflow && !scratch.overflow) {
       /* One code range per page: the span of the blocks in it. */
       result->range_count = c.page_count;

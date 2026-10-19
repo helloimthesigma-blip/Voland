@@ -132,6 +132,15 @@ arithmetic into guest RAM happens beyond what that walk produces.
 - In front of the walk sits a one-entry translation cache per
   permission, in locals: an access within the page last translated for
   the same permission is `host = gva + delta`.
+  - SP-based accesses have an entry of their own (pages both readable
+    and writable, filled by a walk that requires both), carried between
+    regions like the others. A function's stack frame and the heap data
+    it works on no longer evict each other: on Celeste's loading, 3.0 G
+    SP-based accesses missed 0.2 M times.
+  - The four busiest other base registers of a region get slots of their
+    own (`JIT_TLB_SLOTS`), which start each call from the shared entry
+    and refill it on a miss: a loop reading two buffers keeps both pages.
+  - A region loads and stores only the carried entries it uses.
   - The cache goes from region to region through the state
     (`Jit_State.tlb_*`). A region's prologue takes it only if the vmm
     generation, which every mapping or permission change bumps, is the
@@ -244,7 +253,24 @@ executable and not writable.
 A region is the block at the entry PC plus the blocks it reaches, all
 in one wasm function. Inside the function, a `loop` and a `br_table` over
 the region's blocks act as the dispatcher, so a branch between region
-blocks is a local jump.
+blocks is a local jump. The blocks nest in order inside the loop, so a
+**forward** branch is a plain `br` to the end of the target's label,
+where its code starts; only backward branches go through the `br_table`
+(an indirect jump). That took 6.5% off Celeste's load under Node and
+halved the BL/RET loop of `tests/jit_bench.c`.
+
+**Branch hints.** Each module carries a `metadata.code.branch_hint`
+section (the WebAssembly branch-hinting proposal) before its code
+section: the translation-cache hit is likely, and the softmmu walk, the
+budget exits, helper failures and the generation check's miss are
+unlikely. V8 then moves the cold arms out of the hot path. Chrome honours
+the section by default (Chrome 155 no longer has the flag); Node 24 needs
+`--experimental-wasm-branch-hinting`. Celeste's load to slice 200k under
+Node: 53.0 s without, 42.2 s with; in Chromium its main load phase went
+from 62.5 to 49.2 s of worker time together with the changes above.
+`JIT_NO_HINTS` in the environment leaves the section out. `JIT_NAMES`
+adds a `name` section calling the region function `j<pc>`, so engine
+profiles (`node --cpu-prof`, `--perf-basic-prof`) tell regions apart.
 
 What joins a region:
 
@@ -253,7 +279,10 @@ What joins a region:
   interpreter.
 - **Calls into small callees.** A BL target joins the region if it is a
   leaf function or a PLT stub: within its first 16 instructions it
-  returns or branches away (RET or BR) without calling anything. The
+  returns or branches away (RET or BR) without calling anything. So does
+  a function that returns within 48 instructions and calls only such
+  leaves: managed code's helpers (an array's length, a GC poll), which
+  Celeste calls 170 M times while it loads. The
   return site joins too, and a RET goes back to an in-region return site
   through a guarded internal transition. Larger callees stay regions of
   their own, compiled once instead of into every caller.
@@ -587,6 +616,9 @@ shows it next to the backend name.
 - **0.3.0** (2026-10-09) - the A32 front end (MK8DX): VFP and Advanced
   SIMD inline, A32 call spanning with PLT and vtable prediction; the
   translation cache carried across regions and kept in multicore mode.
+- **0.4.0** (2026-10-19) - load speed (Celeste): direct forward branches,
+  branch hints, small callers spanned, an SP translation entry and
+  per-register slots.
 
 ## Limits and next steps
 

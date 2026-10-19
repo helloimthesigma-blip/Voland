@@ -47,6 +47,7 @@ typedef struct Jit_State {
    * they were: valid when tlb_generation is the current vmm generation. */
   uint64_t tlb_generation;
   uint64_t tlb_rbase, tlb_rdelta, tlb_wbase, tlb_wdelta;
+  uint64_t tlb_sbase, tlb_sdelta; /* SP-based accesses (read-write pages) */
   uint32_t isa; /* JIT_ISA_*: what the state's code is (an A32 state is cpu/backends/a32's A32_State) */
 } Jit_State;
 

@@ -45,6 +45,7 @@ static double bench_once(VMM_Context *vmm, const uint32_t *code, uint32_t words,
   cpu->clear_cache(s);
   cpu->set_reg(s, 0, x0);
   cpu->set_reg(s, 16, DATA_GVA);
+  cpu->set_reg(s, 17, DATA_GVA + VMM_PAGE_SIZE);
   cpu->set_sp(s, DATA_GVA + 0x800);
   cpu->set_pc(s, CODE_GVA);
   uint64_t instructions = 0;
@@ -79,8 +80,9 @@ int main(int argc, char **argv) {
   VMM_Context *vmm = vmm_create();
   CHECK(vmm != NULL);
   CHECK_OK(vmm_map(vmm, CODE_GVA, CODE_PA, VMM_PAGE_SIZE, VMM_PERM_RX));
-  CHECK_OK(vmm_map(vmm, DATA_GVA, DATA_PA, VMM_PAGE_SIZE, VMM_PERM_RW));
+  CHECK_OK(vmm_map(vmm, DATA_GVA, DATA_PA, 2u * VMM_PAGE_SIZE, VMM_PERM_RW));
   jit_set_hot_threshold(2);
+  if (getenv("JIT_BENCH_DUMP")) jit_set_dump_directory(getenv("JIT_BENCH_DUMP")); /* each module, for reading */
 
   /* 1. ALU loop: x1 += x0 ... (8 ALU + subs/b.ne). */
   const uint32_t alu[] = {
@@ -96,6 +98,16 @@ int main(int argc, char **argv) {
       0xF1000400, 0x54FFFF41, /* subs, b.ne -6 */
       0xD4000001};
   bench(vmm, "load/store loop", mem, sizeof(mem) / 4, n);
+
+  /* 2b. Loads from two pages through two base registers (x16, x17 = the
+   *     next page), then through one (x16 and x16 + one page): one-entry
+   *     translation caches miss on every access of the second. */
+  const uint32_t two_bases[] = {0xAA0003F8u, 0xF9400201u, 0xF9400222u, 0x8B020023u, 0xF9400601u,
+                                0xF9400622u, 0x8B020063u, 0xF1000718u, 0x54FFFF21u, 0xD4000001u};
+  const uint32_t one_base[] = {0xAA0003F8u, 0xF9400201u, 0xF9480202u, 0x8B020023u, 0xF9400601u,
+                               0xF9480602u, 0x8B020063u, 0xF1000718u, 0x54FFFF21u, 0xD4000001u};
+  bench(vmm, "two pages, two bases", two_bases, sizeof(two_bases) / 4, n);
+  bench(vmm, "two pages, one base", one_base, sizeof(one_base) / 4, n);
 
   /* 3. Call loop: bl f; subs; b.ne; svc ... f: add x1, x1, #1; ret
    *    (f on the same page, but a call is a region exit + entry). */
@@ -124,6 +136,38 @@ int main(int argc, char **argv) {
   const uint64_t f = CODE_GVA + 32u * 4u;
   CHECK_OK(vmm_write_physical(vmm, DATA_PA, &f, sizeof(f)));
   bench(vmm, "call through stub", plt, 64, n);
+
+  /* 5. A managed-code helper Celeste calls tens of millions of times
+   * while it loads: the product of a multi-dimensional array's lengths.
+   * Not a leaf (it calls a getter and a GC poll), so every call enters
+   * and leaves its own region; inside, two small callees are spanned. */
+  static const struct { uint32_t index, word; } array_length[] = {
+      {0, 0xAA0003F8u},   {1, 0xAA1003F3u},   {2, 0xAA1303E0u},   {3, 0x9400003Du},   {4, 0xF1000718u},
+      {5, 0x54FFFFA1u},   {6, 0xD4000001u},   {64, 0xA9BD57F6u},  {65, 0xA9014FF4u},  {66, 0xA9027BFDu},
+      {67, 0x910083FDu},  {68, 0x90000816u},  {69, 0xF9419AD6u},  {70, 0xB94002C8u},  {71, 0xAA0003F3u},
+      {72, 0x34000048u},  {73, 0x940000F7u},  {74, 0xAA1303E0u},  {75, 0x2A1F03E1u},  {76, 0x940000B4u},
+      {77, 0x2A0003F4u},  {78, 0xAA1303E0u},  {79, 0x94000071u},  {80, 0x7100081Fu},  {81, 0x540001CBu},
+      {82, 0x320003F5u},  {83, 0xB94002C8u},  {84, 0x34000048u},  {85, 0x940000EBu},  {86, 0xAA1303E0u},
+      {87, 0x2A1503E1u},  {88, 0x940000A8u},  {89, 0x1B147C14u},  {90, 0xAA1303E0u},  {91, 0x110006B5u},
+      {92, 0x94000064u},  {93, 0x6B0002BFu},  {94, 0x54FFFEABu},  {95, 0x2A1403E0u},  {96, 0xA9427BFDu},
+      {97, 0xA9414FF4u},  {98, 0xA8C357F6u},  {99, 0xD65F03C0u},  {192, 0xB9401C00u}, {193, 0xD65F03C0u},
+      {256, 0xA9BE4FF4u}, {257, 0xA9017BFDu}, {258, 0x910043FDu}, {259, 0xB9401C08u}, {260, 0x6B01011Fu},
+      {261, 0x540000C9u}, {262, 0xF9401008u}, {263, 0xB861D900u}, {264, 0xA9417BFDu}, {265, 0xA8C24FF4u},
+      {266, 0xD65F03C0u}, {267, 0xD4200000u}, {320, 0xD65F03C0u}};
+  static uint32_t helper[VMM_PAGE_SIZE / 4];
+  for (uint32_t i = 0; i < VMM_PAGE_SIZE / 4; i++) helper[i] = 0xD4000001u;
+  for (uint32_t i = 0; i < sizeof(array_length) / sizeof(array_length[0]); i++)
+    helper[array_length[i].index] = array_length[i].word;
+  /* The array at DATA_GVA (rank 2 at +0x1c, lengths 16 x 16 at +0x100);
+   * the GOT slot at +0x330 points at a zero GC-poll flag at +0x400. */
+  const uint32_t rank = 2, lengths[2] = {16, 16}, flag = 0;
+  const uint64_t lengths_gva = DATA_GVA + 0x100u, flag_gva = DATA_GVA + 0x400u;
+  CHECK_OK(vmm_write_physical(vmm, DATA_PA + 0x1Cu, &rank, sizeof(rank)));
+  CHECK_OK(vmm_write_physical(vmm, DATA_PA + 0x20u, &lengths_gva, sizeof(lengths_gva)));
+  CHECK_OK(vmm_write_physical(vmm, DATA_PA + 0x100u, lengths, sizeof(lengths)));
+  CHECK_OK(vmm_write_physical(vmm, DATA_PA + 0x330u, &flag_gva, sizeof(flag_gva)));
+  CHECK_OK(vmm_write_physical(vmm, DATA_PA + 0x400u, &flag, sizeof(flag)));
+  bench(vmm, "array length helper", helper, VMM_PAGE_SIZE / 4, n / 8u);
 
   const Jit_Stats *stats = jit_stats();
   printf("[jit_bench] %llu regions compiled, %llu dispatcher entries, %llu interpreted blocks\n",
