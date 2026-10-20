@@ -114,6 +114,7 @@ typedef enum Sm_Op {
   /* control */
   SM_OP_BRA, SM_OP_SSY, SM_OP_SYNC, SM_OP_PBK, SM_OP_BRK, SM_OP_PCNT, SM_OP_CONT,
   SM_OP_CAL, SM_OP_RET, SM_OP_EXIT, SM_OP_KIL,
+  SM_OP_BRX, /* indirect: target = next + Ra + imm (Ra from a jump table) */
   SM_OP_COUNT
 } Sm_Op;
 
@@ -276,6 +277,8 @@ uint32_t sm_program_extent(const uint8_t *bytes, uint32_t size);
 
 /* FNV-1a over a byte range (program cache validation). */
 uint32_t sm_hash(const uint8_t *bytes, uint32_t size);
+/* BRX at word `index` with Ra = `ra`: the target word, -1 if misaligned. */
+int64_t sm_brx_target(const Sm_Insn *in, uint32_t index, uint32_t ra);
 
 /* Clears registers, predicates and flags for `lanes` lanes. Attribute
  * arrays are left to the caller. */

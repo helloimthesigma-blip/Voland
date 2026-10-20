@@ -64,6 +64,7 @@ static uint64_t SEL_R(uint32_t d, uint32_t a, uint32_t b, uint32_t p) { return o
 static uint64_t BRA(int32_t off, uint32_t p, bool negate) {
   return op_top(0xe240) | ((uint64_t)p << 16) | ((uint64_t)negate << 19) | branch(off) | 0xfull;
 }
+static uint64_t BRX(uint32_t a, int32_t off) { return op_top(0xe250) | GUARD | branch(off) | ra(a) | 0xfull; }
 static uint64_t SSY(int32_t off) { return op_top(0xe290) | branch(off); }
 static uint64_t SYNC(void) { return op_top(0xf0f8) | GUARD | 0xfull; }
 static uint64_t PBK(int32_t off) { return op_top(0xe2a0) | branch(off); }
@@ -401,6 +402,39 @@ static void test_divergence(void) {
   }
 }
 
+/* switch (n % 3) through a jump table: LDC loads each lane's target (an
+ * absolute byte offset, as NVN's compiler lays them out in a constant
+ * bank) and BRX subtracts its own next address. Lanes diverge three ways
+ * and reconverge at SYNC. */
+static void test_indirect_branch(void) {
+  Builder b;
+  begin(&b, SM_STAGE_VERTEX);
+  const uint32_t ssy_at = next_index(&b);
+  emit(&b, 0);
+  emit(&b, ALD(2, SM_ATTR_GENERIC, 1));  /* r2 = n % 3 */
+  emit(&b, SHL_I(2, 2, 2));              /* r2 = 4 * r2 */
+  emit(&b, LDC(4, 2, 0, 0x40));          /* r4 = table[r2] */
+  const uint32_t brx_at = next_index(&b);
+  emit(&b, BRX(4, -(int32_t)(brx_at + 1u) * 8));
+  uint32_t case_at[3];
+  for (uint32_t k = 0; k < 3; k++) {
+    case_at[k] = next_index(&b);
+    emit(&b, MOV32I(1, 10u * (k + 1u)));
+    emit(&b, SYNC());
+  }
+  const uint32_t join_at = next_index(&b);
+  emit(&b, EXIT());
+  const uint64_t w = SSY(offset_to(ssy_at, join_at));
+  memcpy(b.bytes + SM_SPH_BYTES + 8u * ssy_at, &w, 8);
+  for (uint32_t k = 0; k < 3; k++) put_cb(0, 0x40 + 4u * k, case_at[k] * 8u);
+  load(&b);
+  sm_thread_reset(&g_thread, SM_LANES);
+  for (uint32_t l = 0; l < SM_LANES; l++) g_thread.attr_in[SM_ATTR_GENERIC / 4u][l] = l % 3u;
+  CHECK(run(), "BRX program runs");
+  for (uint32_t l = 0; l < SM_LANES; l++)
+    CHECK(g_thread.r[1][l] == 10u * (l % 3u + 1u), "BRX lane %u: r1=%u", l, g_thread.r[1][l]);
+}
+
 /* Screen-space derivatives the way nouveau builds them: SHFL.BFLY to the
  * quad neighbour, then FSWZADD with QUADOP(SUB, SUBR, SUB, SUBR) for
  * dFdx and QUADOP(SUB, SUB, SUBR, SUBR) for dFdy; SHFL.IDX broadcasts a
@@ -569,6 +603,7 @@ int main(void) {
   test_kill_and_header();
   test_extent();
   test_divergence();
+  test_indirect_branch();
   test_derivatives();
   test_conditional_exit();
   test_half_precision();

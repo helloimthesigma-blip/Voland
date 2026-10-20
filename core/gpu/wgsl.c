@@ -70,6 +70,7 @@ typedef struct Tr {
   uint32_t cbuf_slots;
   uint32_t textures_used;
   bool uses_local;
+  bool indirect;    /* a reachable BRX: every word is a block (find_indirect_blocks) */
   bool straight;    /* no branches or flow stacks: blocks run in order, no dispatch loop */
   bool straight_live; /* straight: the blocks so far can fall through to the next */
   /* Implicit texture LODs need derivatives in uniform control flow: a
@@ -1753,7 +1754,7 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
 
 static bool is_control(uint16_t op) {
   switch ((Sm_Op)op) {
-  case SM_OP_BRA: case SM_OP_SYNC: case SM_OP_BRK: case SM_OP_CONT: case SM_OP_CAL: case SM_OP_RET:
+  case SM_OP_BRA: case SM_OP_BRX: case SM_OP_SYNC: case SM_OP_BRK: case SM_OP_CONT: case SM_OP_CAL: case SM_OP_RET:
   case SM_OP_EXIT: case SM_OP_KIL:
     return true;
   default:
@@ -1802,6 +1803,7 @@ static void find_blocks(Tr *t) {
         t->leader[targets[i]] = true;
         if (!t->reached[targets[i]] && top < SM_MAX_WORDS) work[top++] = targets[i];
       }
+      if (in->op == SM_OP_BRX) t->indirect = true;
       if (in->op == SM_OP_EXIT && in->pred == SM_PT) break; /* unconditional: nothing falls through */
       if (in->op == SM_OP_BRA && in->pred == SM_PT && (in->raw & 0x1fu) == 15u) break;
       pc = next;
@@ -1810,11 +1812,22 @@ static void find_blocks(Tr *t) {
   }
 }
 
+/* BRX targets come from a jump table in a constant buffer, unknown here:
+ * once one is reachable, every instruction word becomes a block. */
+static void find_indirect_blocks(Tr *t) {
+  if (!t->indirect) return;
+  for (uint32_t pc = 0; pc < t->p->word_count; pc++) {
+    if (pc % 4u == 0) continue; /* scheduling words */
+    t->leader[pc] = true;
+    t->reached[pc] = true;
+  }
+}
+
 /* The guard of a control instruction (predicate and, where tested, CC). */
 static Ex control_guard(const Sm_Insn *in) {
   const Ex p = pred(in->pred & 7u, in->pred & 8u);
   switch ((Sm_Op)in->op) {
-  case SM_OP_BRA: case SM_OP_EXIT: case SM_OP_KIL: case SM_OP_BRK: case SM_OP_CONT: case SM_OP_RET: {
+  case SM_OP_BRA: case SM_OP_BRX: case SM_OP_EXIT: case SM_OP_KIL: case SM_OP_BRK: case SM_OP_CONT: case SM_OP_RET: {
     const uint32_t cond = (uint32_t)(in->raw & 0x1fu);
     if (cond == 15u) return p;
     return ex("(%s && %s)", p.s, cc_test(cond).s);
@@ -1840,6 +1853,16 @@ static void emit_control(Tr *t, const Sm_Insn *in) {
     }
     EMIT("if (%s) { pc = %uu; } else { pc = %uu; } ", g.s, norm_pc((uint32_t)in->target), next);
     return;
+  case SM_OP_BRX: {
+    /* word = this + 1 + (Ra + imm) / 8 (sm_brx_target); a target that is
+     * not an instruction word faults through the switch's default. */
+    const uint32_t index = (uint32_t)(in - t->p->insns);
+    const Ex a = reg(t, (uint32_t)(in->raw >> 8));
+    EMIT("if (%s) { let bo = bitcast<i32>(%s) + %d; if ((bo & 7) != 0) { pc = %uu; } else { "
+         "pc = bitcast<u32>(%d + (bo >> 3)); } } else { pc = %uu; } ",
+         g.s, a.s, (int32_t)in->imm, PC_FAULT, (int32_t)index + 1, next);
+    return;
+  }
   case SM_OP_SYNC:
   case SM_OP_BRK:
   case SM_OP_CONT: {
@@ -1883,8 +1906,8 @@ static void emit_flow_push(Tr *t, const Sm_Insn *in) {
 
 static bool is_flow(uint16_t op) {
   switch ((Sm_Op)op) {
-  case SM_OP_BRA: case SM_OP_SSY: case SM_OP_SYNC: case SM_OP_PBK: case SM_OP_BRK: case SM_OP_PCNT: case SM_OP_CONT:
-  case SM_OP_CAL: case SM_OP_RET:
+  case SM_OP_BRA: case SM_OP_BRX: case SM_OP_SSY: case SM_OP_SYNC: case SM_OP_PBK: case SM_OP_BRK: case SM_OP_PCNT:
+  case SM_OP_CONT: case SM_OP_CAL: case SM_OP_RET:
     return true;
   default:
     return false;
@@ -2392,6 +2415,7 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   t->body.buf = buffer + half;
   t->body.cap = capacity - half;
   find_blocks(t);
+  find_indirect_blocks(t);
   t->straight = !t->compute; /* compute: the barrier phases need the dispatch loop */
   for (uint32_t pc = 0; pc < program->word_count; pc++)
     if (t->reached[pc] && is_flow(program->insns[pc].op)) t->straight = false;

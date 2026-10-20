@@ -3341,7 +3341,22 @@ typedef struct Gpu_Probe {
   uint32_t pc[GPU_MAX_PROBE_TEXTURES];
   uint32_t handle[GPU_MAX_PROBE_TEXTURES];
   bool vertex[GPU_MAX_PROBE_TEXTURES]; /* the GPU vertex stage's instruction (else the pixel program's) */
+  void *resolver; /* the draw's Tex_Resolver, for global reads */
 } Gpu_Probe;
+
+/* A probe run reads global memory like the draw would, and drops its
+ * writes: the real invocations make them. */
+static bool gpu_probe_global_read(void *user, uint64_t va, void *out, uint32_t size) {
+  return env_global_read(((Gpu_Probe *)user)->resolver, va, out, size);
+}
+
+static bool gpu_probe_global_write(void *user, uint64_t va, const void *src, uint32_t size) {
+  (void)user;
+  (void)va;
+  (void)src;
+  (void)size;
+  return true;
+}
 
 static void gpu_probe_texture(void *user, const Sm_Tex_Request *requests, Sm_Mask lanes, uint32_t (*out)[4]) {
   Gpu_Probe *p = (Gpu_Probe *)user;
@@ -3787,6 +3802,9 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
   Sm_Env env = ctx->env[1];
   env.texture = NULL;
   env.texture_batch = gpu_probe_texture;
+  env.global_read = gpu_probe_global_read;
+  env.global_write = gpu_probe_global_write;
+  probe.resolver = &ctx->resolver;
   env.user = &probe;
   (void)sm_run(ctx->ps, &env, t);
   ctx->r->gpu_stats.probe_runs++;

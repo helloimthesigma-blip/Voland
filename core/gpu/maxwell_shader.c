@@ -125,7 +125,7 @@ static const Op_Pattern k_patterns[] = {
     {0xff78, 0xdc38, SM_OP_TLD, R, 0}, {0xfff8, 0xde38, SM_OP_TXD, R, 0},
     {0xfc38, 0xc838, SM_OP_TLD4, R, 0}, {0xfe38, 0xc038, SM_OP_TEX, R, 0}, {0xfff8, 0xdeb8, SM_OP_TEX_B, R, 0},
     /* control */
-    {0xfff0, 0xe240, SM_OP_BRA, R, 0}, {0xfff0, 0xe290, SM_OP_SSY, R, 0}, {0xfff0, 0xe2a0, SM_OP_PBK, R, 0},
+    {0xfff0, 0xe240, SM_OP_BRA, R, 0}, {0xfff0, 0xe250, SM_OP_BRX, R, 0}, {0xfff0, 0xe290, SM_OP_SSY, R, 0}, {0xfff0, 0xe2a0, SM_OP_PBK, R, 0},
     {0xfff0, 0xe2b0, SM_OP_PCNT, R, 0}, {0xfff0, 0xe260, SM_OP_CAL, R, 0},
     {0xfff0, 0xe300, SM_OP_EXIT, R, 0}, {0xfff0, 0xe330, SM_OP_KIL, R, 0}, {0xfff0, 0xe320, SM_OP_RET, R, 0},
     {0xfff0, 0xe340, SM_OP_BRK, R, 0}, {0xfff0, 0xe350, SM_OP_CONT, R, 0}, {0xfff8, 0xf0f8, SM_OP_SYNC, R, 0},
@@ -155,7 +155,7 @@ static const char *const k_names[SM_OP_COUNT] = {
     [SM_OP_IPA] = "IPA", [SM_OP_LDC] = "LDC", [SM_OP_LD] = "LD", [SM_OP_ST] = "ST", [SM_OP_LDG] = "LDG",
     [SM_OP_STG] = "STG", [SM_OP_LDL] = "LDL", [SM_OP_STL] = "STL", [SM_OP_OUT] = "OUT", [SM_OP_TEX] = "TEX", [SM_OP_TEX_B] = "TEX.B",
     [SM_OP_TEXS] = "TEXS", [SM_OP_TLD] = "TLD", [SM_OP_TLDS] = "TLDS", [SM_OP_TLD4] = "TLD4", [SM_OP_TLD4S] = "TLD4S",
-    [SM_OP_TXQ] = "TXQ", [SM_OP_TMML] = "TMML", [SM_OP_TXD] = "TXD", [SM_OP_BRA] = "BRA", [SM_OP_SSY] = "SSY",
+    [SM_OP_TXQ] = "TXQ", [SM_OP_TMML] = "TMML", [SM_OP_TXD] = "TXD", [SM_OP_BRA] = "BRA", [SM_OP_BRX] = "BRX", [SM_OP_SSY] = "SSY",
     [SM_OP_SYNC] = "SYNC", [SM_OP_PBK] = "PBK", [SM_OP_BRK] = "BRK", [SM_OP_PCNT] = "PCNT", [SM_OP_CONT] = "CONT",
     [SM_OP_CAL] = "CAL", [SM_OP_RET] = "RET", [SM_OP_EXIT] = "EXIT", [SM_OP_KIL] = "KIL",
 };
@@ -237,6 +237,7 @@ static Sm_Insn decode_word(uint64_t w, uint32_t index) {
   }
   /* SSY/PBK/PCNT/CAL carry no predicate guard. */
   if (insn.op == SM_OP_SSY || insn.op == SM_OP_PBK || insn.op == SM_OP_PCNT || insn.op == SM_OP_CAL) insn.pred = SM_PT;
+  if (insn.op == SM_OP_BRX) insn.imm = (uint32_t)branch_offset(w);
   if (is_branchy((Sm_Op)insn.op)) {
     if (BIT(w, 5)) {
       insn.target = -1; /* constant-buffer target: unsupported */
@@ -245,6 +246,12 @@ static Sm_Insn decode_word(uint64_t w, uint32_t index) {
     }
   }
   return insn;
+}
+
+int64_t sm_brx_target(const Sm_Insn *in, uint32_t index, uint32_t ra) {
+  const int64_t offset = (int64_t)(int32_t)ra + (int64_t)(int32_t)in->imm;
+  if (offset % 8) return -1;
+  return (int64_t)index + 1 + offset / 8;
 }
 
 uint32_t sm_hash(const uint8_t *bytes, uint32_t size) {
@@ -410,7 +417,7 @@ static Sm_Mask cc_test(const Sm_Thread *t, uint32_t cond) {
 
 static bool is_cc_tested_control(uint8_t op) {
   switch ((Sm_Op)op) {
-  case SM_OP_BRA: case SM_OP_EXIT: case SM_OP_KIL: case SM_OP_BRK: case SM_OP_CONT: case SM_OP_RET:
+  case SM_OP_BRA: case SM_OP_BRX: case SM_OP_EXIT: case SM_OP_KIL: case SM_OP_BRK: case SM_OP_CONT: case SM_OP_RET:
     return true;
   default:
     return false;
@@ -2352,6 +2359,39 @@ static Sm_Group_Status run_warps(const Sm_Program *program, const Sm_Env *env, S
         if (!split(warps, &count, w, (Sm_Mask)(w->mask & ~guard))) { t->faulted = true; r->count = count; return SM_GROUP_FAULT; }
         w->pc = (uint32_t)in->target;
         break;
+      case SM_OP_BRX: {
+        /* Each lane jumps to word pc + 1 + (Ra + imm) / 8; lanes that agree
+         * share a warp. */
+        if (!guard) {
+          w->pc = in->next;
+          break;
+        }
+        if (!split(warps, &count, w, (Sm_Mask)(w->mask & ~guard))) { t->faulted = true; r->count = count; return SM_GROUP_FAULT; }
+        const Warp base = *w;
+        Sm_Mask left = base.mask;
+        bool first = true;
+        while (left) {
+          const uint32_t lane = (uint32_t)__builtin_ctzll((unsigned long long)left);
+          const int64_t target = sm_brx_target(in, base.pc, t->r[REG_A(in->raw)][lane]);
+          if (target < 0 || (uint64_t)target >= program->word_count) { t->faulted = true; r->count = count; return SM_GROUP_FAULT; }
+          Sm_Mask same = 0;
+          for (Sm_Mask m = left; m; m &= (Sm_Mask)(m - 1u)) {
+            const uint32_t l = (uint32_t)__builtin_ctzll((unsigned long long)m);
+            if (sm_brx_target(in, base.pc, t->r[REG_A(in->raw)][l]) == target) same |= (Sm_Mask)((Sm_Mask)1 << l);
+          }
+          left &= (Sm_Mask)~same;
+          Warp *dst = w;
+          if (!first) {
+            if (count >= MAX_WARPS) { t->faulted = true; r->count = count; return SM_GROUP_FAULT; }
+            dst = &warps[count++];
+            *dst = base;
+          }
+          dst->mask = same;
+          dst->pc = (uint32_t)target;
+          first = false;
+        }
+        break;
+      }
       case SM_OP_SSY:
       case SM_OP_PBK:
       case SM_OP_PCNT: {

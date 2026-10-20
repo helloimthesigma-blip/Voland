@@ -6,6 +6,7 @@
 #include <math.h>
 #include <string.h>
 
+#include "common/log.h"
 #include "gpu/astc.h"
 #include "gpu/bc7.h"
 #include "gpu/block_linear.h"
@@ -128,6 +129,9 @@ void tex_sampler_parse(const uint32_t words[8], Tex_Sampler *out) {
 #define FMT_ZF32 0x2fu
 #define FMT_ZF32_X24S8 0x30u
 #define FMT_Z16 0x3au
+
+#define ASTC_ERRORS_LOGGED 8u
+static uint32_t g_astc_errors; /* diagnostics only: racy counts are fine */
 
 typedef struct Format_Info {
   uint8_t format;
@@ -494,8 +498,18 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
       for (uint32_t bx = 0; bx < cols; bx++) {
         uint8_t px[ASTC_MAX_FOOTPRINT * ASTC_MAX_FOOTPRINT][4];
         const uint8_t *block = blocks + (uint64_t)by * row_bytes + (uint64_t)bx * f->bytes;
-        if (astc) (void)astc_decode_block(block, f->bw, f->bh, h->srgb, px);
-        else decode_bc_block(h->format, block, px);
+        if (astc) {
+          if (!astc_decode_block(block, f->bw, f->bh, h->srgb, px) && g_astc_errors < ASTC_ERRORS_LOGGED) {
+            g_astc_errors++;
+            log_warn("[gpu] ASTC %ux%u block at (%u,%u) of %ux%u decodes to the error colour: "
+                     "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
+                     f->bw, f->bh, bx, by, h->width, h->height, block[0], block[1], block[2], block[3], block[4],
+                     block[5], block[6], block[7], block[8], block[9], block[10], block[11], block[12], block[13],
+                     block[14], block[15]);
+          }
+        } else {
+          decode_bc_block(h->format, block, px);
+        }
         for (uint32_t i = 0; i < (uint32_t)f->bw * f->bh; i++) {
           const uint32_t x = bx * f->bw + i % f->bw, y = by * f->bh + i / f->bw;
           if (x >= h->width || y >= h->height) continue;
@@ -608,6 +622,15 @@ void tex_decode_texel(uint32_t format, const uint8_t data_type[4], bool srgb, co
   }
   const Format_Info *f = format_info(format);
   if (!f || f->bw != 1u) {
+    static uint32_t warned[8]; /* diagnostics: the first formats seen, racy is fine */
+    bool seen = false;
+    for (uint32_t i = 0; i < 8u && warned[i] && !seen; i++) seen = warned[i] == format + 1u;
+    for (uint32_t i = 0; i < 8u && !seen; i++)
+      if (!warned[i]) {
+        warned[i] = format + 1u;
+        log_warn("[gpu] texel format 0x%x unsupported: sampled as magenta", format);
+        break;
+      }
     out[0] = out[2] = u32f(1.0f); /* magenta: unsupported */
     return;
   }
