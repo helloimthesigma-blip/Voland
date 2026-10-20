@@ -149,5 +149,16 @@ void tex_texel(const Tex_Image *image, uint32_t x, uint32_t y, uint32_t layer, u
 
 /* One texel, unswizzled, as floats (or integer bits): R, G, B, A. */
 void tex_decode_texel(uint32_t format, const uint8_t data_type[4], bool srgb, const uint8_t *texel, uint32_t out[4]);
+/* A formatted surface store (SUST.P): the components `mask` selects of
+ * `in` (float bits for float/normalized types, integers otherwise)
+ * converted into one texel of `format` at `out`, with `write_mask` the
+ * bits to write (unselected components keep memory's). False for
+ * formats it cannot store (block-compressed, packed float, depth). */
+bool tex_encode_texel(uint32_t format, const uint8_t data_type[4], const uint32_t in[4], uint32_t mask, uint8_t *out,
+                      uint8_t *write_mask);
+/* Byte offset of level-0 texel (x, y, z) from the image's address - z is
+ * the slice of a 3D image or the layer of an array - and the texel size.
+ * False outside the image or for block-compressed formats. */
+bool tex_texel_address(const Tex_Header *h, uint32_t x, uint32_t y, uint32_t z, uint64_t *offset, uint32_t *bytes);
 
 #endif /* SWITCH_GPU_TEXTURE_H */

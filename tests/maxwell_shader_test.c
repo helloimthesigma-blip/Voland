@@ -435,6 +435,45 @@ static void test_indirect_branch(void) {
     CHECK(g_thread.r[1][l] == 10u * (l % 3u + 1u), "BRX lane %u: r1=%u", l, g_thread.r[1][l]);
 }
 
+/* SHF: the high word of (c:a) << s, the low (or .HI high) word of
+ * (c:a) >> s, for the 32-bit (clamped/wrapped) and 64-bit types, as
+ * 64-bit shifts compile on NVN. */
+static uint64_t SHF_I(bool left, uint32_t d, uint32_t a, uint32_t s, uint32_t c, uint32_t type, bool wrap, bool high) {
+  return op_top(left ? 0x36f8 : 0x38f8) | GUARD | ((uint64_t)wrap << 50) | ((uint64_t)high << 48) | rc(c) |
+         ((uint64_t)type << 37) | ((uint64_t)s << 20) | ra(a) | rd(d);
+}
+
+static void test_funnel_shift(void) {
+  static const struct {
+    bool left;
+    uint32_t s, type;
+    bool wrap, high;
+    uint32_t a, c, want;
+  } cases[] = {
+      {true, 4, 0, false, false, 0x80000001u, 0x00000001u, 0x00000018u},
+      {true, 36, 3, false, false, 0x80000001u, 0x00000001u, 0x00000010u},
+      {true, 40, 0, false, false, 0x80000001u, 0x00000001u, 0x80000001u}, /* 32-bit: clamped to 32 -> a */
+      {true, 36, 0, true, false, 0x80000001u, 0x00000001u, 0x00000018u},  /* .W: 36 & 31 = 4 */
+      {false, 4, 3, false, false, 0x80000001u, 0x00000001u, 0x18000000u},
+      {false, 4, 3, false, true, 0x80000001u, 0x00000001u, 0x00000000u},
+      {false, 4, 2, false, true, 0x00000000u, 0x80000000u, 0xf8000000u},  /* s64 .HI: arithmetic */
+      {false, 36, 2, false, false, 0x00000000u, 0x80000000u, 0xf8000000u},
+      {false, 64, 3, false, false, 0xffffffffu, 0xffffffffu, 0x00000000u},
+  };
+  for (uint32_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+    Builder b;
+    begin(&b, SM_STAGE_VERTEX);
+    emit(&b, MOV32I(1, cases[i].a));
+    emit(&b, MOV32I(2, cases[i].c));
+    emit(&b, SHF_I(cases[i].left, 3, 1, cases[i].s, 2, cases[i].type, cases[i].wrap, cases[i].high));
+    emit(&b, EXIT());
+    load(&b);
+    sm_thread_reset(&g_thread, 1);
+    CHECK(run(), "SHF case %u runs", i);
+    CHECK(g_thread.r[3][0] == cases[i].want, "SHF case %u: %08x, want %08x", i, g_thread.r[3][0], cases[i].want);
+  }
+}
+
 /* Screen-space derivatives the way nouveau builds them: SHFL.BFLY to the
  * quad neighbour, then FSWZADD with QUADOP(SUB, SUBR, SUB, SUBR) for
  * dFdx and QUADOP(SUB, SUB, SUBR, SUBR) for dFdy; SHFL.IDX broadcasts a
@@ -604,6 +643,7 @@ int main(void) {
   test_extent();
   test_divergence();
   test_indirect_branch();
+  test_funnel_shift();
   test_derivatives();
   test_conditional_exit();
   test_half_precision();

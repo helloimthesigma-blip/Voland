@@ -89,6 +89,8 @@ static const Op_Pattern k_patterns[] = {
     {0xfc00, 0x0400, SM_OP_LOP32I, L, 0},
     {0xfff8, 0x5be0, SM_OP_LOP3, R, 0}, {0xfe00, 0x0200, SM_OP_LOP3, C, 0}, {0xfe00, 0x3c00, SM_OP_LOP3, I, 0},
     {0xfff8, 0x5c48, SM_OP_SHL, R, 0}, {0xfff8, 0x4c48, SM_OP_SHL, C, 0}, {0xfef8, 0x3848, SM_OP_SHL, I, 0},
+    {0xfff8, 0x5bf8, SM_OP_SHF, R, 0}, {0xfff8, 0x5cf8, SM_OP_SHF, R, 0}, {0xfff8, 0x36f8, SM_OP_SHF, I, 0},
+    {0xfff8, 0x38f8, SM_OP_SHF, I, 0},
     {0xfff8, 0x5c28, SM_OP_SHR, R, 0}, {0xfff8, 0x4c28, SM_OP_SHR, C, 0}, {0xfef8, 0x3828, SM_OP_SHR, I, 0},
     {0xfff8, 0x5c00, SM_OP_BFE, R, 0}, {0xfff8, 0x4c00, SM_OP_BFE, C, 0}, {0xfef8, 0x3800, SM_OP_BFE, I, 0},
     {0xfff8, 0x5bf0, SM_OP_BFI, R, 0}, {0xfff8, 0x4bf0, SM_OP_BFI, C, 0}, {0xfef8, 0x36f0, SM_OP_BFI, I, 0},
@@ -112,6 +114,7 @@ static const Op_Pattern k_patterns[] = {
     /* memory */
     {0xfff8, 0xefd8, SM_OP_ALD, R, 0}, {0xfff8, 0xeff0, SM_OP_AST, R, 0}, {0xff00, 0xe000, SM_OP_IPA, R, 0},
     {0xfff8, 0xef90, SM_OP_LDC, R, 0},
+    {0xfff0, 0xeb20, SM_OP_SUST, R, 0},
     {0xfff8, 0xeed0, SM_OP_LDG, R, 0}, {0xfff8, 0xeed8, SM_OP_STG, R, 0},
     {0xfff8, 0xef40, SM_OP_LDL, R, 0}, {0xfff8, 0xef50, SM_OP_STL, R, 0},
     {0xfff8, 0xef48, SM_OP_LDL, R, 0}, {0xfff8, 0xef58, SM_OP_STL, R, 0}, /* LDS/STS: per-invocation */
@@ -155,7 +158,7 @@ static const char *const k_names[SM_OP_COUNT] = {
     [SM_OP_IPA] = "IPA", [SM_OP_LDC] = "LDC", [SM_OP_LD] = "LD", [SM_OP_ST] = "ST", [SM_OP_LDG] = "LDG",
     [SM_OP_STG] = "STG", [SM_OP_LDL] = "LDL", [SM_OP_STL] = "STL", [SM_OP_OUT] = "OUT", [SM_OP_TEX] = "TEX", [SM_OP_TEX_B] = "TEX.B",
     [SM_OP_TEXS] = "TEXS", [SM_OP_TLD] = "TLD", [SM_OP_TLDS] = "TLDS", [SM_OP_TLD4] = "TLD4", [SM_OP_TLD4S] = "TLD4S",
-    [SM_OP_TXQ] = "TXQ", [SM_OP_TMML] = "TMML", [SM_OP_TXD] = "TXD", [SM_OP_BRA] = "BRA", [SM_OP_BRX] = "BRX", [SM_OP_SSY] = "SSY",
+    [SM_OP_TXQ] = "TXQ", [SM_OP_TMML] = "TMML", [SM_OP_TXD] = "TXD", [SM_OP_BRA] = "BRA", [SM_OP_SUST] = "SUST", [SM_OP_SHF] = "SHF", [SM_OP_BRX] = "BRX", [SM_OP_SSY] = "SSY",
     [SM_OP_SYNC] = "SYNC", [SM_OP_PBK] = "PBK", [SM_OP_BRK] = "BRK", [SM_OP_PCNT] = "PCNT", [SM_OP_CONT] = "CONT",
     [SM_OP_CAL] = "CAL", [SM_OP_RET] = "RET", [SM_OP_EXIT] = "EXIT", [SM_OP_KIL] = "KIL",
 };
@@ -221,6 +224,9 @@ static Sm_Insn decode_word(uint64_t w, uint32_t index) {
   case SM_OP_LOP3:
     if (insn.form == SM_FORM_IMM) insn.imm = BITS(w, 20, 32);
     break;
+  case SM_OP_SHF: /* the generic 19-bit field would run into the type bits (37-38) */
+    if (insn.form == SM_FORM_IMM) insn.imm = BITS(w, 20, 17);
+    break;
   case SM_OP_HADD2:
   case SM_OP_HMUL2:
   case SM_OP_HFMA2:
@@ -246,6 +252,30 @@ static Sm_Insn decode_word(uint64_t w, uint32_t index) {
     }
   }
   return insn;
+}
+
+Sm_Shf sm_shf_fields(uint64_t w) {
+  const uint32_t top = (uint32_t)(w >> 48) & 0xfff8u;
+  Sm_Shf f;
+  f.left = top == 0x5bf8u || top == 0x36f8u;
+  f.wrap = BIT(w, 50) != 0;
+  f.high = BIT(w, 48) != 0;
+  f.wide = BITS(w, 37, 2) >= 2u;
+  f.is_signed = BITS(w, 37, 2) == 2u;
+  return f;
+}
+
+/* (c:a) shifted by s; SHF.L keeps the high word, SHF.R the low one (the
+ * high one with .HI). 32-bit types clamp (or wrap) s to 32, 64-bit to 64. */
+uint32_t sm_shf(Sm_Shf f, uint32_t a, uint32_t s, uint32_t c) {
+  const uint32_t limit = f.wide ? 64u : 32u;
+  s = f.wrap ? s & (limit - 1u) : (s > limit ? limit : s);
+  const uint64_t v = ((uint64_t)c << 32) | a;
+  if (f.left) return s >= 64u ? 0u : (uint32_t)((v << s) >> 32);
+  uint64_t r;
+  if (f.is_signed) r = (uint64_t)((int64_t)v >> (s > 63u ? 63u : s));
+  else r = s >= 64u ? 0u : v >> s;
+  return f.high ? (uint32_t)(r >> 32) : (uint32_t)r;
 }
 
 int64_t sm_brx_target(const Sm_Insn *in, uint32_t index, uint32_t ra) {
@@ -1934,6 +1964,13 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     }
     return;
   }
+  case SM_OP_SHF: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb), *c = t->r[REG_C(w)];
+    uint32_t *d = dst_row(t, REG_D(w));
+    const Sm_Shf shf = sm_shf_fields(w);
+    LANES_ASSIGN(m, d, sm_shf(shf, a[l], b[l], c[l]));
+    return;
+  }
   case SM_OP_BFE: {
     const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
     uint32_t *d = dst_row(t, REG_D(w));
@@ -2237,6 +2274,33 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
         regs_to_bytes(t, REG_D(w), size, buf, l);
         if (env->global_write) (void)env->global_write(env->user, addr, buf, n);
       }
+    }
+    return;
+  }
+  case SM_OP_SUST: {
+    if (!env->surface_store) return;
+    static const uint8_t coord_count[16] = {1, 0, 1, 0, 2, 0, 2, 0, 3, 0, 3, 0, 0, 0, 0, 0};
+    static const uint8_t raw_size[8] = {1, 1, 2, 2, 4, 8, 16, 0};
+    const uint32_t target = BITS(w, 32, 4), coords = coord_count[target] ? coord_count[target] : 1u;
+    const bool raw = BIT(w, 52) != 0, bound = BIT(w, 51) != 0;
+    const uint32_t mask = raw ? 0u : BITS(w, 20, 4), bytes = raw ? raw_size[BITS(w, 20, 3)] : 0u;
+    const uint32_t ra = REG_A(w), rd = REG_D(w);
+    FOR_LANES(m) {
+      uint32_t xyz[3] = {0, 0, 0}, data[4] = {0, 0, 0, 0};
+      for (uint32_t i = 0; i < coords; i++) xyz[i] = ra == SM_RZ ? 0u : t->r[(ra + i) & 0xffu][l];
+      if (target == 4u) { /* 1D array: x, layer */
+        xyz[2] = xyz[1];
+        xyz[1] = 0;
+      }
+      uint32_t n = 0;
+      if (raw) {
+        for (uint32_t i = 0; i < (bytes + 3u) / 4u; i++) data[i] = rd == SM_RZ ? 0u : t->r[(rd + i) & 0xffu][l];
+      } else {
+        for (uint32_t c = 0; c < 4u; c++)
+          if ((mask >> c) & 1u) data[c] = rd == SM_RZ ? 0u : t->r[(rd + n++) & 0xffu][l];
+      }
+      const uint32_t handle = bound ? cbuf_read(env, env->texture_cbuf_slot, BITS(w, 36, 13) * 4u) : t->r[BITS(w, 39, 8)][l];
+      env->surface_store(env->user, handle, target, xyz, data, mask, bytes);
     }
     return;
   }

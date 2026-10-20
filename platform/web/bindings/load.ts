@@ -116,6 +116,8 @@ export interface SystemFileInfo {
 }
 export const SYSTEM_FILES: readonly SystemFileInfo[] = [
   { id: "0100000000000802", name: "Mii model", neededBy: "games that draw Miis (Mario Kart 8 Deluxe, Mii Fighters in Smash)" },
+  { id: "0100000000000823", name: "NG word list 2", neededBy: "Animal Crossing: New Horizons (it checks names you type)" },
+  { id: "0100000000000806", name: "NG word list", neededBy: "games that filter names and messages" },
 ];
 export function systemFileName(id: string): string {
   return SYSTEM_FILES.find((f) => f.id === id)?.name ?? `system data ${id}`;

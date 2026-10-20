@@ -458,6 +458,16 @@ static const char *const k_prelude[] = {
     "  return r;\n"
     "}\n"
     "fn shl_(a: u32, s: u32) -> u32 { if (s >= 32u) { return 0u; } return a << s; }\n"
+    "fn shf_(a: u32, sh: u32, c: u32, left: bool, wrap: bool, wide: bool, sg: bool, hi: bool) -> u32 {\n"
+    "  let mx = select(32u, 64u, wide); let s = select(min(sh, mx), sh & (mx - 1u), wrap);\n"
+    "  if (left) { if (s >= 64u) { return 0u; } if (s >= 32u) { return a << (s - 32u); } if (s == 0u) { return c; }\n"
+    "    return (c << s) | (a >> (32u - s)); }\n"
+    "  let fill = select(0u, u32(i32(c) >> 31u), sg); var rl = a; var rh = c;\n"
+    "  if (s >= 64u) { rl = fill; rh = fill; }\n"
+    "  else if (s >= 32u) { rl = select(c >> (s - 32u), u32(i32(c) >> (s - 32u)), sg); rh = fill; }\n"
+    "  else if (s > 0u) { rl = (a >> s) | (c << (32u - s)); rh = select(c >> s, u32(i32(c) >> s), sg); }\n"
+    "  return select(rl, rh, hi);\n"
+    "}\n"
     "fn shr_(a: u32, s: u32, sg: bool) -> u32 {\n"
     "  if (sg) { return u32(i32(a) >> min(s, 31u)); }\n"
     "  if (s >= 32u) { return 0u; } return a >> s;\n"
@@ -1599,6 +1609,13 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
          BIT(w, 39) ? " & 31u" : "", BIT(w, 48) ? "true" : "false");
     return;
   }
+  case SM_OP_SHF: {
+    const Sm_Shf f = sm_shf_fields(w);
+    EMIT("%s = shf_(%s, %s, %s, %s, %s, %s, %s, %s); ", reg_dst(t, REG_D(w)).s, reg(t, REG_A(w)).s, op_b(t, in).s,
+         reg(t, REG_C(w)).s, f.left ? "true" : "false", f.wrap ? "true" : "false", f.wide ? "true" : "false",
+         f.is_signed ? "true" : "false", f.high ? "true" : "false");
+    return;
+  }
   case SM_OP_BFE: {
     EMIT("%s = bfe_(%s, %s, %s, %s); ", reg_dst(t, REG_D(w)).s, reg(t, REG_A(w)).s, op_b(t, in).s,
          BIT(w, 48) ? "true" : "false", BIT(w, 40) ? "true" : "false");
@@ -1738,6 +1755,9 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
     else fail(t, "AST in a pixel program");
     return;
   case SM_OP_LDG: if (t->compute) emit_gmem(t, in); else emit_ldg(t, in, pc); return;
+  case SM_OP_SUST:
+    fail(t, "surface store (SUST)"); /* the CPU path stores through texture headers */
+    return;
   case SM_OP_LD:
   case SM_OP_ST:
   case SM_OP_STG:

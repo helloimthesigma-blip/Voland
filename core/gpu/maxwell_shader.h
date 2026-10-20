@@ -114,6 +114,8 @@ typedef enum Sm_Op {
   /* control */
   SM_OP_BRA, SM_OP_SSY, SM_OP_SYNC, SM_OP_PBK, SM_OP_BRK, SM_OP_PCNT, SM_OP_CONT,
   SM_OP_CAL, SM_OP_RET, SM_OP_EXIT, SM_OP_KIL,
+  SM_OP_SUST, /* surface store: formatted (.P) or raw (.B) through Sm_Env.surface_store */
+  SM_OP_SHF, /* funnel shift of Rc:Ra (64-bit pairs) */
   SM_OP_BRX, /* indirect: target = next + Ra + imm (Ra from a jump table) */
   SM_OP_COUNT
 } Sm_Op;
@@ -228,6 +230,15 @@ typedef struct Sm_Env {
   void (*texture_batch)(void *user, const Sm_Tex_Request *requests, Sm_Mask lanes, uint32_t (*out)[4]);
   bool (*global_read)(void *user, uint64_t gpu_va, void *out, uint32_t size);
   bool (*global_write)(void *user, uint64_t gpu_va, const void *src, uint32_t size);
+  /* SUST, one lane: store to the surface (image) `handle` names, at texel
+   * coords (x, y, then the 3D slice or array layer). Formatted (.P):
+   * `data` holds the RGBA components `mask` selects, as the shader has
+   * them (floats for float/normalized formats, integers otherwise), for
+   * the surface's format to convert. Raw (.B): `raw_bytes` (1-16) bytes
+   * from `data`, little-endian. `target` is the instruction's field
+   * (0 1D, 2 buffer, 4 1D array, 6 2D, 8 2D array, 10 3D). Optional. */
+  void (*surface_store)(void *user, uint32_t handle, uint32_t target, const uint32_t coords[3], const uint32_t data[4],
+                        uint32_t mask, uint32_t raw_bytes);
   /* Compute: the block's shared memory (LDS/STS); NULL elsewhere, where
    * LDS/STS act per invocation as LDL/STL. */
   uint8_t *shared;
@@ -277,6 +288,11 @@ uint32_t sm_program_extent(const uint8_t *bytes, uint32_t size);
 
 /* FNV-1a over a byte range (program cache validation). */
 uint32_t sm_hash(const uint8_t *bytes, uint32_t size);
+typedef struct Sm_Shf {
+  bool left, wrap, high, wide, is_signed;
+} Sm_Shf;
+Sm_Shf sm_shf_fields(uint64_t raw);
+uint32_t sm_shf(Sm_Shf f, uint32_t a, uint32_t s, uint32_t c);
 /* BRX at word `index` with Ra = `ra`: the target word, -1 if misaligned. */
 int64_t sm_brx_target(const Sm_Insn *in, uint32_t index, uint32_t ra);
 

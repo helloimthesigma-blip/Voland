@@ -648,6 +648,103 @@ void tex_decode_texel(uint32_t format, const uint8_t data_type[4], bool srgb, co
   }
 }
 
+/* ---- texel stores (SUST) ------------------------------------------ */
+
+static uint32_t float_to_half(float f) {
+  uint32_t x;
+  memcpy(&x, &f, sizeof(x));
+  const uint32_t sign = (x >> 16) & 0x8000u;
+  const int32_t exp = (int32_t)((x >> 23) & 0xffu) - 127 + 15;
+  uint32_t mant = x & 0x7fffffu;
+  if (((x >> 23) & 0xffu) == 0xffu) return sign | 0x7c00u | (mant ? 0x200u : 0u); /* Inf, NaN */
+  if (exp >= 31) return sign | 0x7c00u;
+  if (exp <= 0) {
+    if (exp < -10) return sign;
+    mant |= 0x800000u;
+    const uint32_t shift = (uint32_t)(14 - exp);
+    uint32_t h = mant >> shift;
+    if ((mant >> (shift - 1u)) & 1u) h++; /* round half up */
+    return sign | h;
+  }
+  uint32_t h = sign | ((uint32_t)exp << 10) | (mant >> 13);
+  if (mant & 0x1000u) h++; /* round half up (carries into the exponent) */
+  return h;
+}
+
+static uint32_t encode_component(uint32_t v, uint32_t bits, uint32_t type) {
+  const uint32_t max = bits >= 32u ? 0xffffffffu : (1u << bits) - 1u;
+  switch (type) {
+  case TEX_DATA_FLOAT:
+    return bits == 32u ? v : bits == 16u ? float_to_half(f32(v)) : 0u;
+  case TEX_DATA_UNORM:
+  case TEX_DATA_UNORM_FORCE_FP16: {
+    float f = f32(v);
+    f = f != f ? 0.0f : f < 0.0f ? 0.0f : f > 1.0f ? 1.0f : f;
+    return (uint32_t)(f * (float)max + 0.5f);
+  }
+  case TEX_DATA_SNORM:
+  case TEX_DATA_SNORM_FORCE_FP16: {
+    float f = f32(v);
+    f = f != f ? 0.0f : f < -1.0f ? -1.0f : f > 1.0f ? 1.0f : f;
+    const float scale = (float)(max >> 1);
+    return (uint32_t)(int32_t)(f * scale + (f < 0.0f ? -0.5f : 0.5f)) & max;
+  }
+  case TEX_DATA_SINT: {
+    const int32_t lo = bits >= 32u ? INT32_MIN : -(int32_t)(1u << (bits - 1u)), hi = (int32_t)(max >> 1);
+    const int32_t i = (int32_t)v;
+    return (uint32_t)(i < lo ? lo : i > hi ? hi : i) & max;
+  }
+  default: /* UINT */
+    return v > max ? max : v;
+  }
+}
+
+bool tex_encode_texel(uint32_t format, const uint8_t data_type[4], const uint32_t in[4], uint32_t mask, uint8_t *out,
+                      uint8_t *write_mask) {
+  const Format_Info *f = format_info(format);
+  if (!f || f->bw != 1u || f->bytes > 16u) return false;
+  uint32_t bit = 0, defined = 0;
+  for (uint32_t c = 0; c < 4u; c++) defined += f->bits[c];
+  if (!defined) return false; /* packed float, shared-exponent and depth formats: not stored */
+  memset(out, 0, f->bytes);
+  memset(write_mask, 0, f->bytes);
+  for (uint32_t c = 0; c < 4u; c++) {
+    const uint32_t n = f->bits[c];
+    if (!n) continue;
+    if ((mask >> c) & 1u) {
+      const uint32_t v = encode_component(in[c], n, data_type[c]);
+      for (uint32_t b = 0; b < n; b++) {
+        const uint32_t at = bit + b;
+        out[at / 8u] |= (uint8_t)(((v >> b) & 1u) << (at % 8u));
+        write_mask[at / 8u] |= (uint8_t)(1u << (at % 8u));
+      }
+    }
+    bit += n;
+  }
+  return true;
+}
+
+bool tex_texel_address(const Tex_Header *h, uint32_t x, uint32_t y, uint32_t z, uint64_t *offset, uint32_t *bytes) {
+  const Format_Info *f = format_info(h->format);
+  if (!f || f->bw != 1u || x >= h->width || y >= h->height || z >= h->depth) return false;
+  *bytes = f->bytes;
+  const uint32_t row_bytes = h->width * f->bytes;
+  if (h->layout == TEX_LAYOUT_PITCH) {
+    *offset = (uint64_t)y * h->pitch + (uint64_t)x * f->bytes;
+    return true;
+  }
+  if (h->layout != TEX_LAYOUT_BLOCK_LINEAR) {
+    *offset = ((uint64_t)z * h->height + y) * row_bytes + (uint64_t)x * f->bytes;
+    return true;
+  }
+  if (h->type == TEX_TYPE_3D) {
+    *offset = bl3d_offset(x * f->bytes, y, z, row_bytes, h->height, h->block_height_log2, h->block_depth_log2);
+    return true;
+  }
+  *offset = (uint64_t)z * tex_layer_stride(h) + bl3d_offset(x * f->bytes, y, 0, row_bytes, h->height, h->block_height_log2, 0);
+  return true;
+}
+
 /* ---- sampling ----------------------------------------------------- */
 
 #define WRAP_REPEAT 0u

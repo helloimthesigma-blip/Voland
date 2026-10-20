@@ -7,6 +7,7 @@
 
 #include <math.h>
 #include <stddef.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "common/log.h"
@@ -814,6 +815,29 @@ void raster3d_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, ui
 
 /* ---- programs ----------------------------------------------------- */
 
+/* Names a program's undecoded words: each distinct opcode (top 16 bits)
+ * with its first full word, so one warning shows all that is missing. */
+#define UNKNOWN_OPS_LISTED 6u
+static void warn_unknown_ops(const char *kind, const Sm_Program *p) {
+  uint16_t tops[UNKNOWN_OPS_LISTED];
+  uint64_t first[UNKNOWN_OPS_LISTED];
+  uint32_t n = 0;
+  for (uint32_t i = 0; i < p->word_count && n < UNKNOWN_OPS_LISTED; i++) {
+    if (p->insns[i].op != SM_OP_INVALID) continue;
+    const uint16_t top = (uint16_t)(p->insns[i].raw >> 48);
+    bool seen = false;
+    for (uint32_t k = 0; k < n && !seen; k++) seen = tops[k] == top;
+    if (seen) continue;
+    tops[n] = top;
+    first[n++] = p->insns[i].raw;
+  }
+  char list[UNKNOWN_OPS_LISTED * 20u + 1u];
+  size_t at = 0;
+  for (uint32_t k = 0; k < n; k++) at += (size_t)snprintf(list + at, sizeof(list) - at, " %016llx", (unsigned long long)first[k]);
+  list[at] = '\0';
+  log_warn("[gpu] %s @%llx: %u undecoded instruction(s):%s", kind, (unsigned long long)p->address, p->unknown_ops, list);
+}
+
 static const Sm_Program *program_get(Raster3d *r, uint64_t address, const Gpu_Memory *mem) {
   Raster3d_Program *slot = NULL;
   r->tick++;
@@ -861,16 +885,7 @@ static const Sm_Program *program_get(Raster3d *r, uint64_t address, const Gpu_Me
   slot->validated = r->submission;
   slot->last_used = r->tick;
   r->stats.unknown_ops += slot->program.unknown_ops;
-  if (slot->program.unknown_ops) {
-    for (uint32_t i = 0; i < slot->program.word_count; i++) {
-      if (slot->program.insns[i].op == SM_OP_INVALID) {
-        log_warn("[gpu] shader @%llx: %u undecoded instruction(s), first %016llx at word %u",
-                 (unsigned long long)address, slot->program.unknown_ops,
-                 (unsigned long long)slot->program.insns[i].raw, i);
-        break;
-      }
-    }
-  }
+  if (slot->program.unknown_ops) warn_unknown_ops("shader", &slot->program);
   return &slot->program;
 }
 
@@ -4804,16 +4819,7 @@ static const Sm_Program *compute_program_get(Raster3d *r, uint64_t address, cons
   slot->validated = r->submission;
   slot->last_used = r->tick;
   r->stats.unknown_ops += slot->program.unknown_ops;
-  if (slot->program.unknown_ops) {
-    for (uint32_t i = 0; i < slot->program.word_count; i++) {
-      if (slot->program.insns[i].op == SM_OP_INVALID) {
-        log_warn("[gpu] compute program @%llx: %u undecoded instruction(s), first %016llx at word %u",
-                 (unsigned long long)address, slot->program.unknown_ops,
-                 (unsigned long long)slot->program.insns[i].raw, i);
-        break;
-      }
-    }
-  }
+  if (slot->program.unknown_ops) warn_unknown_ops("compute program", &slot->program);
   return &slot->program;
 }
 
@@ -4854,6 +4860,48 @@ static bool compute_global_write(void *user, uint64_t va, const void *src, uint3
   const bool ok = env_global_write(user, va, src, size);
   compute_note_write(va, va + size);
   return ok;
+}
+
+/* SUST from a compute program: the surface is a texture header in the
+ * pool (handle = its index); the texel is converted to the surface's
+ * format and written to guest memory, so textures over it re-validate
+ * like any compute output. Runs serially (program_samples_textures). */
+static void compute_surface_store(void *user, uint32_t handle, uint32_t target, const uint32_t coords[3],
+                                  const uint32_t data[4], uint32_t mask, uint32_t raw_bytes) {
+  (void)target;
+  const Draw_Context *ctx = ((const Tex_Resolver *)user)->ctx;
+  const uint64_t tic_pool = addr40(ctx->regs[REG_TEX_HEADER_POOL], ctx->regs[REG_TEX_HEADER_POOL + 1u]);
+  uint32_t words[8];
+  if (!tic_pool) return;
+  workers_lock(&ctx->r->workers);
+  if (ctx->mem->read(ctx->mem->user, tic_pool + (uint64_t)(handle & 0xfffffu) * TEX_HEADER_BYTES, words, sizeof(words))) {
+    Tex_Header h;
+    tex_header_parse(words, &h);
+    uint64_t offset = 0;
+    uint32_t bytes = 0;
+    uint8_t texel[16], keep[16];
+    if (tex_texel_address(&h, coords[0], coords[1], coords[2], &offset, &bytes)) {
+      const uint64_t va = h.address + offset;
+      bool ok = true;
+      if (raw_bytes) {
+        bytes = raw_bytes;
+        memcpy(texel, data, bytes);
+        memset(keep, 0xff, bytes);
+      } else {
+        ok = tex_encode_texel(h.format, h.data_type, data, mask, texel, keep);
+      }
+      if (ok && bytes <= sizeof(texel)) {
+        bool partial = false;
+        for (uint32_t i = 0; i < bytes; i++) partial = partial || keep[i] != 0xffu;
+        uint8_t old[16];
+        if (partial && ctx->mem->read(ctx->mem->user, va, old, bytes))
+          for (uint32_t i = 0; i < bytes; i++) texel[i] = (uint8_t)((texel[i] & keep[i]) | (old[i] & ~keep[i]));
+        (void)ctx->mem->write(ctx->mem->user, va, texel, bytes);
+        compute_note_write(va, va + bytes);
+      }
+    }
+  }
+  workers_unlock(&ctx->r->workers);
 }
 
 /* ---- compute blocks on the renderer's workers ---------------------- */
@@ -4899,7 +4947,7 @@ static bool compute_write_unlocked(void *user, uint64_t va, const void *src, uin
 static bool program_samples_textures(const Sm_Program *program) {
   for (uint32_t i = 0; i < program->word_count; i++) {
     const uint32_t op = program->insns[i].op;
-    if (op >= SM_OP_TEX && op <= SM_OP_TXD) return true;
+    if ((op >= SM_OP_TEX && op <= SM_OP_TXD) || op == SM_OP_SUST) return true;
   }
   return false;
 }
@@ -5246,6 +5294,7 @@ void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t 
   env_setup(&ctx, 0, program, &bindings, 0);
   Sm_Env *env = &ctx.env[0];
   env->global_write = compute_global_write;
+  env->surface_store = compute_surface_store;
   env->shared = shared;
   env->shared_bytes = launch->shared_bytes < sizeof(shared) ? launch->shared_bytes : (uint32_t)sizeof(shared);
   g_compute_writes.count = 0;

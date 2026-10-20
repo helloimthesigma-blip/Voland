@@ -94,6 +94,52 @@ int main(void) {
     }
     CHECK(differ == 0);
   }
+  /* SUST encoding: what tex_encode_texel stores, tex_decode_texel reads
+   * back (RGBA16F, RGBA8 UNORM, a masked write), and 3D block-linear
+   * addresses stay inside the image's bytes and never collide. */
+  {
+    static const uint8_t float4[4] = {TEX_DATA_FLOAT, TEX_DATA_FLOAT, TEX_DATA_FLOAT, TEX_DATA_FLOAT};
+    static const uint8_t unorm4[4] = {TEX_DATA_UNORM, TEX_DATA_UNORM, TEX_DATA_UNORM, TEX_DATA_UNORM};
+    const float in_f[4] = {0.25f, -2.0f, 1024.0f, 1.0f};
+    uint32_t in[4], back[4];
+    memcpy(in, in_f, sizeof(in));
+    uint8_t texel[16], keep[16];
+    CHECK(tex_encode_texel(0x03u /* R16G16B16A16 */, float4, in, 0xfu, texel, keep));
+    tex_decode_texel(0x03u, float4, false, texel, back);
+    CHECK(memcmp(back, in, sizeof(in)) == 0);
+    const float in8[4] = {0.0f, 0.5f, 1.5f, 1.0f};
+    memcpy(in, in8, sizeof(in));
+    CHECK(tex_encode_texel(0x08u /* A8B8G8R8 */, unorm4, in, 0x5u, texel, keep));
+    CHECK(texel[0] == 0u && texel[2] == 255u && keep[0] == 0xffu && keep[1] == 0u && keep[2] == 0xffu && keep[3] == 0u);
+    CHECK(!tex_encode_texel(0x40u /* ASTC */, unorm4, in, 0xfu, texel, keep));
+    Tex_Header h3;
+    memset(&h3, 0, sizeof(h3));
+    h3.format = 0x03u;
+    h3.type = TEX_TYPE_3D;
+    h3.layout = TEX_LAYOUT_BLOCK_LINEAR;
+    h3.width = h3.height = h3.depth = 16u;
+    h3.levels = 1;
+    h3.block_height_log2 = 1;
+    h3.block_depth_log2 = 1;
+    static uint8_t seen[16u * 16u * 16u * 8u];
+    memset(seen, 0, sizeof(seen));
+    uint32_t bad_address = 0;
+    for (uint32_t z = 0; z < 16u; z++)
+      for (uint32_t y = 0; y < 16u; y++)
+        for (uint32_t x = 0; x < 16u; x++) {
+          uint64_t off = 0;
+          uint32_t bytes = 0;
+          if (!tex_texel_address(&h3, x, y, z, &off, &bytes) || bytes != 8u || off + 8u > sizeof(seen) || seen[off]) {
+            bad_address++;
+            continue;
+          }
+          seen[off] = 1;
+        }
+    CHECK(bad_address == 0);
+    uint64_t off = 0;
+    uint32_t bytes = 0;
+    CHECK(!tex_texel_address(&h3, 16u, 0, 0, &off, &bytes));
+  }
   printf("[tex_sample_test] passed\n");
   return 0;
 }

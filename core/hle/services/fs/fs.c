@@ -257,8 +257,9 @@ static HLE_ServiceResult cmd_open_data_storage_by_id(HLE_Context *c, Service_Obj
     (void)ipc_response_push_object(res, &s->storage, FS_STORAGE_SYSTEM_DATA);
     return HLE_RESULT_SUCCESS;
   }
-  log_warn("[fs] OpenDataStorageByDataId(%016llx): system archives are not shipped (§1.6)",
-           (unsigned long long)data_id);
+  log_warn("[fs] OpenDataStorageByDataId(%016llx): system archives are not shipped (§1.6); add your console's "
+           "copy under \"System files\" (a pre-decrypted %016llx .nca)",
+           (unsigned long long)data_id, (unsigned long long)data_id);
   return FS_RESULT_TARGET_NOT_FOUND;
 }
 
