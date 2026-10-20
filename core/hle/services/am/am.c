@@ -280,6 +280,21 @@ static HLE_ServiceResult cmd_ensure_save_data(HLE_Context *c, Service_Object *se
   return service_cmd_out_u64_zero(c, self, req, res);
 }
 
+/* CreateCacheStorage(u16 index, s64 size, s64 journal) -> u32 target
+ * media (padded to 8), u64 required size. Saves (cache ones included)
+ * are created on first open, so this only reports success on NAND. */
+#define AM_CACHE_TARGET_NAND 1u
+
+static HLE_ServiceResult cmd_create_cache_storage(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                                  IPC_Response *res) {
+  (void)c;
+  (void)self;
+  (void)req;
+  (void)ipc_response_push_u64(res, AM_CACHE_TARGET_NAND);
+  (void)ipc_response_push_u64(res, 0);
+  return HLE_RESULT_SUCCESS;
+}
+
 /* ------------------------------------------------------------------ */
 /* Storages.                                                           */
 /* ------------------------------------------------------------------ */
@@ -964,6 +979,7 @@ static const Service_Command k_application_functions_commands[] = {
     {23, cmd_get_display_version, "GetDisplayVersion"},
     {25, service_cmd_out_zero128, "ExtendSaveData"},
     {26, cmd_get_save_data_size, "GetSaveDataSize"},
+    {27, cmd_create_cache_storage, "CreateCacheStorage"},
     {30, service_cmd_ok, "BeginBlockingHomeButtonShortAndLongPressed_stub"},
     {31, service_cmd_ok, "EndBlockingHomeButtonShortAndLongPressed_stub"},
     {32, service_cmd_ok, "BeginBlockingHomeButton_stub"},

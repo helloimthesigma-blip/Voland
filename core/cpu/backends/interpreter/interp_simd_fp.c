@@ -8,6 +8,7 @@
  * ARMv8.0: half precision exists only for FCVT (no FP16 arithmetic on the
  * Switch's Cortex-A57); ftype 11 elsewhere is undefined.
  */
+#include "cpu/backends/interpreter/crypto_ops.h"
 #include "cpu/backends/interpreter/interp_internal.h"
 #include "cpu/backends/interpreter/interp_simd.h"
 #include "cpu/backends/interpreter/softfloat.h"
@@ -259,7 +260,46 @@ static Interp_Status scalar_fp(Interp_State *s, uint32_t insn) {
   }
 }
 
+/* Cryptographic AES (0100 1110 0010 1000 0 opcode 10) and the two- and
+ * three-register SHA forms (0101 1110 ...), ARMv8.0's crypto extension:
+ * crypto_ops.c does the arithmetic. Returns INTERP_UNDEFINED for
+ * anything else so the caller keeps decoding. */
+#define A64_AES_MASK 0xFFFE0C00u
+#define A64_AES_VALUE 0x4E280800u
+#define A64_SHA2_MASK 0xFFFE0C00u
+#define A64_SHA2_VALUE 0x5E280800u
+#define A64_SHA3_MASK 0xFFE08C00u
+#define A64_SHA3_VALUE 0x5E000000u
+
+static Crypto_Vec crypto_read(const Interp_State *s, uint32_t r) { return (Crypto_Vec){{s->v[r].lo, s->v[r].hi}}; }
+
+static bool crypto(Interp_State *s, uint32_t insn, Interp_Status *status) {
+  const uint32_t rd = bits(insn, 4, 0), rn = bits(insn, 9, 5);
+  Crypto_Vec r;
+  if ((insn & A64_AES_MASK) == A64_AES_VALUE) {
+    const uint32_t opcode = bits(insn, 16, 12);
+    if (opcode < 4u || opcode > 7u) return false;
+    r = crypto_aes((Crypto_Aes_Op)(opcode - 4u), crypto_read(s, rd), crypto_read(s, rn));
+  } else if ((insn & A64_SHA2_MASK) == A64_SHA2_VALUE) {
+    const uint32_t opcode = bits(insn, 16, 12);
+    if (opcode > 2u) return false;
+    r = crypto_sha2((Crypto_Sha2_Op)opcode, crypto_read(s, rd), crypto_read(s, rn));
+  } else if ((insn & A64_SHA3_MASK) == A64_SHA3_VALUE) {
+    const uint32_t opcode = bits(insn, 14, 12);
+    if (opcode > 6u) return false;
+    r = crypto_sha3((Crypto_Sha3_Op)opcode, crypto_read(s, rd), crypto_read(s, rn), crypto_read(s, bits(insn, 20, 16)));
+  } else {
+    return false;
+  }
+  s->v[rd].lo = r.d[0];
+  s->v[rd].hi = r.d[1];
+  *status = advance(s);
+  return true;
+}
+
 Interp_Status interp_simd_fp(Interp_State *s, uint32_t insn) {
+  Interp_Status status;
+  if (crypto(s, insn, &status)) return status;
   if (bit(insn, 28)) {
     if (!bit(insn, 30)) {
       if (bits(insn, 28, 25) == 0xF && bits(insn, 28, 24) >= 0x1E) return scalar_fp(s, insn);

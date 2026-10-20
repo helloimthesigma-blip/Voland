@@ -11,6 +11,7 @@
  * flags (and QC) landing in FPSCR.
  */
 #include "cpu/backends/a32/a32_internal.h"
+#include "cpu/backends/interpreter/crypto_ops.h"
 #include "cpu/backends/interpreter/simd_lanes.h"
 
 #include <string.h>
@@ -23,9 +24,6 @@ static inline uint32_t b1(uint32_t insn, unsigned n) { return bit(insn, n); }
 #define Q_BITS 128u
 #define BYTE_BITS 8u
 #define WORD_BITS 32u
-#define AES_BYTES 16u
-#define AES_POLY 0x1Bu   /* x^8 = x^4 + x^3 + x + 1 in GF(2^8) */
-#define AES_AFFINE 0x63u /* SubBytes' affine constant */
 #define SHIFT_BYTE_MASK 0xFFu
 
 static uint32_t reg_d(uint32_t insn) { return (b1(insn, 22) << 4) | f(insn, 15, 12); }
@@ -117,6 +115,8 @@ static uint64_t poly_mul8(uint64_t x, uint64_t y) {
 }
 
 static Interp_Status sha3(A32_State *a, uint32_t insn);
+static Crypto_Vec cv(Vec v);
+static Vec vc(Crypto_Vec v);
 
 #define F32_EXP_MASK 0x7F800000u
 #define F32_FRAC_MASK 0x007FFFFFu
@@ -478,7 +478,11 @@ static Interp_Status three_different(A32_State *a, uint32_t insn) {
   const bool wide_n = op == 1u || op == 3u;          /* VADDW / VSUBW: Qn */
   if (narrow ? ((n | m) & 1u) : (d & 1u) || (wide_n && (n & 1u))) return INTERP_UNDEFINED;
   if ((op == 9u || op == 0xBu || op == 0xDu) && (U || size == 0u)) return INTERP_UNDEFINED;
-  if (op == 0xEu && (U || size != 0u)) return INTERP_UNDEFINED; /* VMULL.P8 (P64 is crypto) */
+  if (op == 0xEu && !U && size == 2u && !(d & 1u)) { /* VMULL.P64 (crypto) */
+    set_v(a, d, true, vc(crypto_pmull64(get_v(a, n, false).d[0], get_v(a, m, false).d[0])));
+    return INTERP_CONTINUE;
+  }
+  if (op == 0xEu && (U || size != 0u)) return INTERP_UNDEFINED; /* VMULL.P8 */
   if (op == 0xFu) return INTERP_UNDEFINED;
   const Vec vn = get_v(a, n, narrow || wide_n), vm = get_v(a, m, narrow), vd = get_v(a, d, !narrow);
   Vec r = {{0, 0}};
@@ -631,152 +635,26 @@ static Interp_Status two_scalar(A32_State *a, uint32_t insn) {
   return INTERP_CONTINUE;
 }
 
-/* ---- AES and SHA --------------------------------------------------------- */
+/* ---- AES and SHA (crypto_ops.c) ----------------------------------------- */
 
-static uint8_t g_sbox[256], g_inv_sbox[256];
-static bool g_sbox_ready;
+static Crypto_Vec cv(Vec v) { return (Crypto_Vec){{v.d[0], v.d[1]}}; }
+static Vec vc(Crypto_Vec v) { return (Vec){{v.d[0], v.d[1]}}; }
 
-static uint8_t gf_mul(uint8_t x, uint8_t y) {
-  uint8_t r = 0;
-  while (y) {
-    if (y & 1u) r ^= x;
-    x = (uint8_t)((x << 1) ^ ((x & 0x80u) ? AES_POLY : 0u));
-    y >>= 1;
-  }
-  return r;
-}
-
-static uint8_t rotl8(uint8_t x, unsigned n) { return (uint8_t)((x << n) | (x >> (BYTE_BITS - n))); }
-
-/* SubBytes from its definition: the GF(2^8) inverse, then the affine map. */
-static void build_sbox(void) {
-  for (unsigned x = 0; x < 256u; x++) {
-    uint8_t inv = 0;
-    if (x) {
-      uint8_t p = (uint8_t)x; /* x^254 = x^-1 */
-      inv = 1;
-      for (unsigned e = 254u; e; e >>= 1) {
-        if (e & 1u) inv = gf_mul(inv, p);
-        p = gf_mul(p, p);
-      }
-    }
-    const uint8_t s = (uint8_t)(inv ^ rotl8(inv, 1) ^ rotl8(inv, 2) ^ rotl8(inv, 3) ^ rotl8(inv, 4) ^ AES_AFFINE);
-    g_sbox[x] = s;
-    g_inv_sbox[s] = (uint8_t)x;
-  }
-  __atomic_store_n(&g_sbox_ready, true, __ATOMIC_RELEASE); /* cores may race to build it: same bytes */
-}
-
-static void vec_bytes(const Vec *v, uint8_t out[AES_BYTES]) { memcpy(out, v->d, AES_BYTES); }
-static Vec bytes_vec(const uint8_t in[AES_BYTES]) {
-  Vec v;
-  memcpy(v.d, in, AES_BYTES);
-  return v;
-}
-
-static void mix_column(uint8_t *c, bool inverse) {
-  const uint8_t a0 = c[0], a1 = c[1], a2 = c[2], a3 = c[3];
-  if (!inverse) {
-    c[0] = (uint8_t)(gf_mul(a0, 2) ^ gf_mul(a1, 3) ^ a2 ^ a3);
-    c[1] = (uint8_t)(a0 ^ gf_mul(a1, 2) ^ gf_mul(a2, 3) ^ a3);
-    c[2] = (uint8_t)(a0 ^ a1 ^ gf_mul(a2, 2) ^ gf_mul(a3, 3));
-    c[3] = (uint8_t)(gf_mul(a0, 3) ^ a1 ^ a2 ^ gf_mul(a3, 2));
-  } else {
-    c[0] = (uint8_t)(gf_mul(a0, 14) ^ gf_mul(a1, 11) ^ gf_mul(a2, 13) ^ gf_mul(a3, 9));
-    c[1] = (uint8_t)(gf_mul(a0, 9) ^ gf_mul(a1, 14) ^ gf_mul(a2, 11) ^ gf_mul(a3, 13));
-    c[2] = (uint8_t)(gf_mul(a0, 13) ^ gf_mul(a1, 9) ^ gf_mul(a2, 14) ^ gf_mul(a3, 11));
-    c[3] = (uint8_t)(gf_mul(a0, 11) ^ gf_mul(a1, 13) ^ gf_mul(a2, 9) ^ gf_mul(a3, 14));
-  }
-}
-
-/* AESE, AESD, AESMC, AESIMC (op = bits 7:6): the state is column-major,
- * byte 4c + r is row r of column c. */
+/* AESE, AESD, AESMC, AESIMC (op = bits 7:6). */
 static Interp_Status aes(A32_State *a, uint32_t insn) {
   const uint32_t op = f(insn, 7, 6), d = reg_d(insn), m = reg_m(insn);
   if (f(insn, 19, 18) != 0u || ((d | m) & 1u)) return INTERP_UNDEFINED;
-  if (!__atomic_load_n(&g_sbox_ready, __ATOMIC_ACQUIRE)) build_sbox();
-  uint8_t s[AES_BYTES], t[AES_BYTES];
-  const Vec vd = get_v(a, d, true), vm = get_v(a, m, true);
-  if (op < 2u) {
-    uint8_t x[AES_BYTES], y[AES_BYTES];
-    vec_bytes(&vd, x);
-    vec_bytes(&vm, y);
-    for (unsigned i = 0; i < AES_BYTES; i++) s[i] = (uint8_t)(x[i] ^ y[i]);
-    for (unsigned c = 0; c < 4u; c++)
-      for (unsigned r = 0; r < 4u; r++) {
-        if (op == 0u) t[4u * c + r] = g_sbox[s[4u * ((c + r) & 3u) + r]];         /* ShiftRows, SubBytes */
-        else t[4u * ((c + r) & 3u) + r] = g_inv_sbox[s[4u * c + r]];              /* InvShiftRows, InvSubBytes */
-      }
-  } else {
-    vec_bytes(&vm, t);
-    for (unsigned c = 0; c < 4u; c++) mix_column(&t[4u * c], op == 3u);
-  }
-  set_v(a, d, true, bytes_vec(t));
+  set_v(a, d, true, vc(crypto_aes((Crypto_Aes_Op)op, cv(get_v(a, d, true)), cv(get_v(a, m, true)))));
   return INTERP_CONTINUE;
 }
-
-static uint32_t rol32(uint32_t x, unsigned n) { return n ? (x << n) | (x >> (WORD_BITS - n)) : x; }
-static uint32_t ror32(uint32_t x, unsigned n) { return n ? (x >> n) | (x << (WORD_BITS - n)) : x; }
-static uint32_t w32(const Vec *v, unsigned i) { return (uint32_t)ue(v, i, WORD_BITS); }
 
 /* SHA1C/P/M/SU0 and SHA256H/H2/SU1: the 3-register SHA forms (Q only). */
 static Interp_Status sha3(A32_State *a, uint32_t insn) {
   const uint32_t U = b1(insn, 24), size = f(insn, 21, 20);
   const uint32_t d = reg_d(insn), n = reg_n(insn), m = reg_m(insn);
   if (!b1(insn, 6) || ((d | n | m) & 1u) || (U && size == 3u)) return INTERP_UNDEFINED;
-  const Vec vd = get_v(a, d, true), vn = get_v(a, n, true), vm = get_v(a, m, true);
-  Vec r = {{0, 0}};
-  if (!U && size == 3u) { /* SHA1SU0: Vn<63:0>:Vd<127:64> ^ Vd ^ Vm */
-    r.d[0] = vd.d[1] ^ vd.d[0] ^ vm.d[0];
-    r.d[1] = vn.d[0] ^ vd.d[1] ^ vm.d[1];
-  } else if (!U) { /* SHA1C / SHA1P / SHA1M */
-    uint32_t x[4] = {w32(&vd, 0), w32(&vd, 1), w32(&vd, 2), w32(&vd, 3)}, y = w32(&vn, 0);
-    for (unsigned e = 0; e < 4u; e++) {
-      uint32_t t;
-      if (size == 0u) t = (x[1] & x[2]) | (~x[1] & x[3]);
-      else if (size == 1u) t = x[1] ^ x[2] ^ x[3];
-      else t = (x[1] & x[2]) | (x[1] & x[3]) | (x[2] & x[3]);
-      y = y + rol32(x[0], 5) + t + w32(&vm, e);
-      x[1] = rol32(x[1], 30);
-      const uint32_t out = x[3]; /* (Y:X) rotated left by 32 */
-      x[3] = x[2];
-      x[2] = x[1];
-      x[1] = x[0];
-      x[0] = y;
-      y = out;
-    }
-    for (unsigned e = 0; e < 4u; e++) put(&r, e, WORD_BITS, x[e]);
-  } else if (size < 2u) { /* SHA256H (X = Vd, Y = Vn) / SHA256H2 (X = Vn, Y = Vd) */
-    const bool part1 = size == 0u;
-    const Vec *vx = part1 ? &vd : &vn, *vy = part1 ? &vn : &vd;
-    uint32_t x[4] = {w32(vx, 0), w32(vx, 1), w32(vx, 2), w32(vx, 3)};
-    uint32_t y[4] = {w32(vy, 0), w32(vy, 1), w32(vy, 2), w32(vy, 3)};
-    for (unsigned e = 0; e < 4u; e++) {
-      const uint32_t ch = (y[0] & y[1]) ^ (~y[0] & y[2]);
-      const uint32_t maj = (x[0] & x[1]) ^ (x[0] & x[2]) ^ (x[1] & x[2]);
-      const uint32_t sigma1 = ror32(y[0], 6) ^ ror32(y[0], 11) ^ ror32(y[0], 25);
-      const uint32_t sigma0 = ror32(x[0], 2) ^ ror32(x[0], 13) ^ ror32(x[0], 22);
-      const uint32_t t = y[3] + sigma1 + ch + w32(&vm, e);
-      x[3] += t;
-      y[3] = t + sigma0 + maj;
-      /* (Y:X) rotated left by 32 bits */
-      const uint32_t x3 = x[3], y3 = y[3];
-      x[3] = x[2]; x[2] = x[1]; x[1] = x[0]; x[0] = y3;
-      y[3] = y[2]; y[2] = y[1]; y[1] = y[0]; y[0] = x3;
-    }
-    const uint32_t *out = part1 ? x : y;
-    for (unsigned e = 0; e < 4u; e++) put(&r, e, WORD_BITS, out[e]);
-  } else { /* SHA256SU1 */
-    const uint32_t t0[4] = {w32(&vn, 1), w32(&vn, 2), w32(&vn, 3), w32(&vm, 0)};
-    uint32_t out[4];
-    for (unsigned e = 0; e < 4u; e++) {
-      const uint32_t src = e < 2u ? w32(&vm, e + 2u) : out[e - 2u];
-      const uint32_t s1 = ror32(src, 17) ^ ror32(src, 19) ^ (src >> 10);
-      out[e] = s1 + w32(&vd, e) + t0[e];
-    }
-    for (unsigned e = 0; e < 4u; e++) put(&r, e, WORD_BITS, out[e]);
-  }
-  set_v(a, d, true, r);
+  const Crypto_Sha3_Op op = (Crypto_Sha3_Op)(U ? CRYPTO_SHA256H + size : CRYPTO_SHA1C + size);
+  set_v(a, d, true, vc(crypto_sha3(op, cv(get_v(a, d, true)), cv(get_v(a, n, true)), cv(get_v(a, m, true)))));
   return INTERP_CONTINUE;
 }
 
@@ -856,23 +734,8 @@ static Interp_Status two_misc(A32_State *a, uint32_t insn) {
     }
     if (opc2 == 7u) { /* SHA1SU1 (bit 6 = 0), SHA256SU0 (bit 6 = 1) */
       if (size != 2u || ((d | m) & 1u)) return INTERP_UNDEFINED;
-      const Vec vd = get_v(a, d, true), vm = get_v(a, m, true);
-      Vec r = {{0, 0}};
-      if (!q) {
-        const uint32_t t[4] = {w32(&vd, 0) ^ w32(&vm, 1), w32(&vd, 1) ^ w32(&vm, 2), w32(&vd, 2) ^ w32(&vm, 3),
-                               w32(&vd, 3)};
-        put(&r, 0, WORD_BITS, rol32(t[0], 1));
-        put(&r, 1, WORD_BITS, rol32(t[1], 1));
-        put(&r, 2, WORD_BITS, rol32(t[2], 1));
-        put(&r, 3, WORD_BITS, rol32(t[3], 1) ^ rol32(t[0], 2));
-      } else {
-        const uint32_t t[4] = {w32(&vd, 1), w32(&vd, 2), w32(&vd, 3), w32(&vm, 0)};
-        for (unsigned e = 0; e < 4u; e++) {
-          const uint32_t s0 = ror32(t[e], 7) ^ ror32(t[e], 18) ^ (t[e] >> 3);
-          put(&r, e, WORD_BITS, s0 + w32(&vd, e));
-        }
-      }
-      set_v(a, d, true, r);
+      const Crypto_Sha2_Op op = q ? CRYPTO_SHA256SU0 : CRYPTO_SHA1SU1;
+      set_v(a, d, true, vc(crypto_sha2(op, cv(get_v(a, d, true)), cv(get_v(a, m, true)))));
       return INTERP_CONTINUE;
     }
     if (opc2 == 0xCu || opc2 == 0xEu) { /* VCVT.F16.F32 (Qm -> Dd), VCVT.F32.F16 (Dm -> Qd) */
@@ -952,8 +815,7 @@ static Interp_Status two_misc(A32_State *a, uint32_t insn) {
     const uint32_t kind = opc2 & 7u;
     if (opc2 == 5u) { /* SHA1H */
       if (!q || size != 2u || ((d | m) & 1u)) return INTERP_UNDEFINED;
-      put(&r, 0, WORD_BITS, rol32(w32(&vm, 0), 30));
-      set_v(a, d, true, r);
+      set_v(a, d, true, vc(crypto_sha2(CRYPTO_SHA1H, cv(vm), cv(vm))));
       return INTERP_CONTINUE;
     }
     if (size == 3u || kind == 5u || (is_float && size != 2u)) return INTERP_UNDEFINED;

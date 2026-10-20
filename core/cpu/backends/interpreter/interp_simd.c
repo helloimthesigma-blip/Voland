@@ -3,10 +3,12 @@
  * tables): vector and scalar forms of three-same, two-register misc,
  * across lanes, three different, shift by immediate, modified immediate,
  * copy, permute, extract, table lookup and by-element. FP lanes use
- * softfloat.c. Crypto (AES/SHA/PMULL.1Q) and every post-8.0 extension
- * (FP16, dot product, RDM, ...) decode as undefined.
+ * softfloat.c. PMULL.1Q is here; AES/SHA are in interp_simd_fp.c
+ * (crypto_ops.c). Every post-8.0 extension (FP16, dot product, RDM, ...)
+ * decodes as undefined.
  */
 #include "cpu/backends/interpreter/interp_simd.h"
+#include "cpu/backends/interpreter/crypto_ops.h"
 #include "cpu/backends/interpreter/simd_lanes.h"
 
 #include <string.h>
@@ -662,7 +664,12 @@ static Interp_Status vector_three_different(Interp_State *s, uint32_t insn) {
   const bool q = bit(insn, 30), u = bit(insn, 29);
   const uint32_t size = bits(insn, 23, 22), opcode = bits(insn, 15, 12);
   const uint32_t rm = bits(insn, 20, 16), rn = bits(insn, 9, 5), rd = bits(insn, 4, 0);
-  if (size == 3) return INTERP_UNDEFINED; /* PMULL .1Q is the crypto extension */
+  if (size == 3) { /* PMULL/PMULL2 .1Q, the crypto extension; nothing else is allocated */
+    if (u || opcode != 0xE) return INTERP_UNDEFINED;
+    const Crypto_Vec p = crypto_pmull64(q ? s->v[rn].hi : s->v[rn].lo, q ? s->v[rm].hi : s->v[rm].lo);
+    vwrite(s, rd, (Vec){{p.d[0], p.d[1]}}, true);
+    return advance(s);
+  }
   const unsigned esize = 8u << size, wide = esize * 2u, count = 64u / esize, part = q ? count : 0u;
   const Vec n = vread(s, rn), m = vread(s, rm), dv = vread(s, rd);
   Vec r = {{0, 0}};

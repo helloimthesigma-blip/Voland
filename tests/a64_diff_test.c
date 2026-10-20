@@ -531,7 +531,7 @@ static void make_simd_across(Case *c) {
   c->fp = opcode >= 12;
 }
 static void make_simd_three_different(Case *c) {
-  /* size 11 is PMULL.1Q (crypto) or unallocated: the host has crypto. */
+  /* size 11 is PMULL.1Q (crypto, the "crypto" template) or unallocated. */
   c->insn = 0x0E200000u | q_u() | (rnd_below(3) << 22) | (vreg() << 16) | (rbits(4) << 12) | (vreg() << 5) | vreg();
 }
 static void make_simd_shift_immediate(Case *c) {
@@ -652,6 +652,16 @@ typedef struct Template {
   Make_Fn make;
 } Template;
 
+/* ARMv8.0 crypto: AES, SHA-1/SHA-256 (two and three register), PMULL.1Q. */
+static void make_crypto(Case *c) {
+  switch (rnd_below(4)) {
+  case 0: c->insn = 0x4E280800u | ((4u + rbits(2)) << 12) | (vreg() << 5) | vreg(); break;
+  case 1: c->insn = 0x5E280800u | (rnd_below(3) << 12) | (vreg() << 5) | vreg(); break;
+  case 2: c->insn = 0x5E000000u | (vreg() << 16) | (rnd_below(7) << 12) | (vreg() << 5) | vreg(); break;
+  default: c->insn = 0x0EE0E000u | (rbits(1) << 30) | (vreg() << 16) | (vreg() << 5) | vreg(); break;
+  }
+}
+
 static const Template k_templates[] = {
     {"adr/adrp", make_adr},
     {"add/sub (immediate)", make_add_sub_imm},
@@ -706,6 +716,7 @@ static const Template k_templates[] = {
     {"simd scalar copy", make_simd_scalar_copy},
     {"simd ld/st multiple", make_simd_structure_multiple},
     {"simd ld/st single", make_simd_structure_single},
+    {"crypto (aes/sha/pmull.1q)", make_crypto},
 };
 
 /* ------------------------------------------------------------------ */

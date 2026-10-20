@@ -710,7 +710,13 @@ void hle_svc_get_info(HLE_Context *c, CPU_State *s) {
   case 16: value = p->npdm.system_resource_size; break;
   case 17: value = 0; break;
   case 18: value = p->npdm.program_id; break;
-  case 20: value = 0; break;         /* no user exception context */
+  case 20: /* user exception context: the SDK stores its handlers' state there */
+    if (!p->exception_context_gva && !error_is_ok(tls_allocate(&c->process->tls, &c->process->exception_context_gva))) {
+      r->x[0] = HLE_RESULT_OUT_OF_MEMORY;
+      return;
+    }
+    value = p->exception_context_gva;
+    break;
   case 23: value = 1; break;         /* IsApplication */
   case 24: value = SCHEDULER_MAX_THREADS; break;
   case 25: case 0xF0000002u: value = c->scheduler->ticks; break;

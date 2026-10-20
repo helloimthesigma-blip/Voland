@@ -149,6 +149,9 @@ typedef struct Process {
   uint32_t main_thread_handle;
   Address_Region main_thread_stack; /* mapped RW; SP starts at base + size */
   uint64_t main_thread_tls_gva;     /* first block from `tls` */
+  /* The user exception context (svcGetInfo 20): a TLS block of its own,
+   * allocated the first time a title asks for it; 0 until then. */
+  uint64_t exception_context_gva;
 
   /* TLS blocks for every thread of this process (tls.h). One block is
    * in use after bootstrap: the main thread's. */

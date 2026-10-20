@@ -575,6 +575,7 @@ static const Service_Command k_hid_commands[] = {
     {1001, cmd_get_communication_mode, "GetNpadCommunicationMode"},
     {1002, service_cmd_ok, "SetTouchScreenConfiguration_stub"},
     {1003, service_cmd_out_u8_false, "IsFirmwareUpdateNeededForNotification_stub"},
+    {1004, service_cmd_ok, "SetTouchScreenResolution_stub"},
 };
 
 static const Service_Command k_applet_resource_commands[] = {
