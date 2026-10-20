@@ -8,6 +8,8 @@
 #include "hle/kernel/svc_thread.h"
 
 #include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
 
 void hle_context_init(HLE_Context *context, const CPU_Backend *backend,
                       VMM_Context *vmm, Process *process, Page_Allocator *pages,
@@ -102,6 +104,29 @@ static const char *svc_name(uint32_t swi)
 }
 
 static void dispatch_svc(HLE_Context *context, CPU_State *cpu_state, uint32_t swi);
+
+/* Diagnostics: VOLAND_SVC_TRACE="FROM:TO" (virtual ticks) logs every SVC
+ * in that window - thread, number, the first arguments and the results. */
+static void svc_trace(const HLE_Context *c, uint32_t swi, uint64_t arg0, uint64_t arg1, const CPU_Register_File *r) {
+  static int configured;
+  static uint64_t from, to;
+  if (!configured) {
+    const char *spec = getenv("VOLAND_SVC_TRACE");
+    configured = 1;
+    if (spec) {
+      from = strtoull(spec, NULL, 0);
+      const char *colon = strchr(spec, ':');
+      to = colon ? strtoull(colon + 1, NULL, 0) : UINT64_MAX;
+      configured = 2;
+    }
+  }
+  if (configured != 2 || !c->scheduler || c->scheduler->ticks < from || c->scheduler->ticks > to) return;
+  const Sched_Thread *self = scheduler_current(c->scheduler);
+  log_info("[svc] h%x %llu %02x %s (%llx, %llx) -> %llx %llx pc %llx", self ? self->handle : 0u,
+           (unsigned long long)c->scheduler->ticks, swi, svc_name(swi), (unsigned long long)arg0,
+           (unsigned long long)arg1, (unsigned long long)r->x[0], (unsigned long long)r->x[1],
+           (unsigned long long)r->pc);
+}
 
 /* Every SVC runs under the scheduler's kernel lock (a no-op in serial
  * mode; docs/PARALLEL.md). */
@@ -236,6 +261,7 @@ static void dispatch_svc(HLE_Context *context, CPU_State *cpu_state, uint32_t sw
     regs->x[0] = HLE_RESULT_NOT_IMPLEMENTED;
     break;
   }
+  svc_trace(context, swi, arg0, arg1, regs);
   /* A bad handle is almost always an emulation gap (a kernel object or a
    * pseudo-handle not understood): say which call saw it. */
   if ((uint32_t)regs->x[0] == HLE_RESULT_INVALID_HANDLE)

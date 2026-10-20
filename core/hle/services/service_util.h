@@ -9,6 +9,7 @@
 #include <stdint.h>
 #include <string.h>
 
+#include "common/log.h"
 #include "common/vmm.h"
 #include "hle/hle.h"
 #include "hle/kernel/event.h"
@@ -117,6 +118,7 @@ static inline HLE_ServiceResult service_push_event(HLE_Context *c, IPC_Response 
       return HLE_RESULT_OUT_OF_HANDLES;
     }
   }
+  log_debug("[ipc] event handle 0x%x", handle); /* which command handed out a handle the guest later waits on */
   (void)ipc_response_push_copy_handle(res, handle);
   return HLE_RESULT_SUCCESS;
 }

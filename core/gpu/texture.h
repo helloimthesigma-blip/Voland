@@ -67,6 +67,7 @@ typedef struct Tex_Header {
   uint32_t block_depth_log2;
   uint32_t width, height, depth; /* depth: layers for arrays, slices for 3D */
   uint32_t levels;
+  uint32_t base_level;      /* the view's first level (RES_VIEW_MIN_MIP_LEVEL); 2D headers already start there */
   Tex_Type type;
   bool srgb;
   bool normalized;

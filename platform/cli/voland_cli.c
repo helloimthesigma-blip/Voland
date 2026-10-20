@@ -1654,12 +1654,25 @@ static int run(int argc, char **argv) {
             (unsigned long long)emu.nvdrv.captured_submissions, (unsigned long long)(emu.nvdrv.captured_bytes >> 20),
             (unsigned long long)emu.nvdrv.uncaptured_submissions, (unsigned long long)emu.nvdrv.stalls_for_latency);
   if (getenv("VOLAND_PEEK")) { /* debugging a stall: a guest word, and the GPU thread's state */
-    const uint64_t at = strtoull(getenv("VOLAND_PEEK"), NULL, 0);
+    /* VOLAND_PEEK=ADDR[:BYTES][,ADDR[:BYTES]...] */
+    const char *spec = getenv("VOLAND_PEEK");
+    for (;;) {
+    char *end = NULL;
+    const uint64_t at = strtoull(spec, &end, 0);
+    const uint64_t bytes = end && *end == ':' ? strtoull(end + 1, &end, 0) : 4u;
     uint32_t word = 0;
     const bool ok = error_is_ok(vmm_read32(emu.vmm, at, &word));
     fprintf(stderr, "voland-cli: peek 0x%llx = 0x%08x%s; gpu thread %s, busy %d, progress %u\n", (unsigned long long)at,
             word, ok ? "" : " (unmapped)", gpu_thread_async(&emu.gpu_thread) ? "async" : "sync",
             gpu_thread_busy(&emu.gpu_thread) ? 1 : 0, gpu_thread_progress(&emu.gpu_thread));
+    for (uint64_t off = 0; bytes > 4u && off < bytes && off < 0x1000u; off += 16u) {
+      uint32_t w[4] = {0, 0, 0, 0};
+      for (uint32_t k = 0; k < 4u; k++) (void)vmm_read32(emu.vmm, at + off + 4u * k, &w[k]);
+      fprintf(stderr, "  +%03llx %08x %08x %08x %08x\n", (unsigned long long)off, w[0], w[1], w[2], w[3]);
+    }
+    if (!end || *end != ',') break;
+    spec = end + 1;
+    }
   }
   /* Where every live guest thread is: module + offset, for stalls. */
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS && emu.program_loaded; i++) {

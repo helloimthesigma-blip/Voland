@@ -31,6 +31,8 @@ static uint32_t u32f(float f) {
   return v;
 }
 
+static void view_from_base_level(Tex_Header *h);
+
 void tex_header_parse(const uint32_t words[8], Tex_Header *out) {
   memset(out, 0, sizeof(*out));
   memcpy(out->words, words, sizeof(out->words));
@@ -72,6 +74,10 @@ void tex_header_parse(const uint32_t words[8], Tex_Header *out) {
   if (out->type == TEX_TYPE_1D || out->type == TEX_TYPE_1D_ARRAY || out->type == TEX_TYPE_1D_BUFFER) out->height = 1;
   if (out->type == TEX_TYPE_CUBE) out->depth = 6;
   if (out->type == TEX_TYPE_CUBE_ARRAY) out->depth *= 6u;
+  out->base_level = mw(words, 224, 4); /* RES_VIEW_MIN_MIP_LEVEL */
+  if (out->base_level && out->base_level < out->levels && out->layout == TEX_LAYOUT_BLOCK_LINEAR &&
+      (out->type == TEX_TYPE_2D || out->type == TEX_TYPE_2D_NO_MIPMAP) && out->depth == 1u)
+    view_from_base_level(out);
 }
 
 void tex_sampler_parse(const uint32_t words[8], Tex_Sampler *out) {
@@ -185,6 +191,24 @@ static uint64_t bl_level_bytes(const Tex_Header *h, const Format_Info *f, uint32
   const uint32_t gob_rows = (rows + BLOCK_LINEAR_GOB_HEIGHT - 1u) / BLOCK_LINEAR_GOB_HEIGHT;
   while (bh > 0 && (1u << (bh - 1u)) >= gob_rows) bh--;
   return block_linear_size(cols * f->bytes, rows, bh);
+}
+
+/* The view a texture header's minimum mip level selects (texture streaming:
+ * Unity points at the full chain while only the small levels are loaded,
+ * and the GPU never reads below the view): level `base_level` becomes
+ * level 0 - its address, size and (shrunk) GOB block height. */
+static void view_from_base_level(Tex_Header *h) {
+  const Format_Info *f = format_info(h->format);
+  if (!f) return;
+  uint64_t skip = 0;
+  for (uint32_t level = 0; level < h->base_level; level++) skip += bl_level_bytes(h, f, level);
+  h->address += skip;
+  h->width = h->width >> h->base_level ? h->width >> h->base_level : 1u;
+  h->height = h->height >> h->base_level ? h->height >> h->base_level : 1u;
+  h->levels -= h->base_level;
+  const uint32_t rows = (h->height + f->bh - 1u) / f->bh;
+  const uint32_t gob_rows = (rows + BLOCK_LINEAR_GOB_HEIGHT - 1u) / BLOCK_LINEAR_GOB_HEIGHT;
+  while (h->block_height_log2 > 0 && (1u << (h->block_height_log2 - 1u)) >= gob_rows) h->block_height_log2--;
 }
 
 uint64_t tex_level0_bytes(const Tex_Header *h) {
@@ -501,9 +525,9 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
         if (astc) {
           if (!astc_decode_block(block, f->bw, f->bh, h->srgb, px) && g_astc_errors < ASTC_ERRORS_LOGGED) {
             g_astc_errors++;
-            log_warn("[gpu] ASTC %ux%u block at (%u,%u) of %ux%u decodes to the error colour: "
+            log_warn("[gpu] ASTC %ux%u block at (%u,%u) of %ux%u (base level %u, TIC w7 %08x) decodes to the error colour: "
                      "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
-                     f->bw, f->bh, bx, by, h->width, h->height, block[0], block[1], block[2], block[3], block[4],
+                     f->bw, f->bh, bx, by, h->width, h->height, h->base_level, h->words[7], block[0], block[1], block[2], block[3], block[4],
                      block[5], block[6], block[7], block[8], block[9], block[10], block[11], block[12], block[13],
                      block[14], block[15]);
           }

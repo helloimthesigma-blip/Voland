@@ -16,6 +16,15 @@
 #define VOICE_IN_BYTES 0x170u
 #define VOICE_OUT_BYTES 0x10u
 #define EFFECT_OUT_BYTES 0x10u
+#define EFFECT_IN_ENABLED 0x02u     /* u8 in an effect's input (type, is_new, enabled, ...) */
+#define EFFECT_STATE_ENABLED 2u     /* out status usage state */
+#define EFFECT_STATE_DISABLED 3u
+#define EFFECT_TYPE_AUX 2u
+#define EFFECT_IN_SPECIFIC 0x20u        /* the type's parameters */
+#define AUX_SEND_INFO 0x40u             /* in Aux parameters: u64 send ring info address */
+#define AUX_RETURN_INFO 0x50u           /* u64 return ring info address */
+#define AUX_DSP_INFO_OFFSET 0x40u       /* a ring info: the CPU's half, then the DSP's */
+#define AUX_DSP_INFO_RESET_BYTES 0x10u  /* read and write offsets, lost and total counts */
 #define MIX_IN_BYTES 0x930u
 #define SINK_IN_BYTES 0x140u
 #define SINK_OUT_BYTES 0x20u
@@ -43,6 +52,7 @@
 #define VOICE_STARTED 0u
 #define VOICE_STOPPED 1u
 #define VOICE_PAUSED 2u
+#define VOICE_IN_FLUSH_COUNT 0x159u /* u8: queued buffers to drop from the head */
 
 #define PCM_INT8 1u
 #define PCM_INT16 2u
@@ -456,6 +466,22 @@ static void parse_voice(Audren_State *s, HLE_Context *c, const uint8_t *p) {
     v->ring = ring;
     v->buffer_started = false;
   }
+  /* A stopped voice gives back everything queued (the DSP drops it), as
+   * does an explicit flush of the queue's head: both count as consumed,
+   * which is what clients wait for before they reuse or free a voice
+   * (Animal Crossing's sound thread spins until its stopped voices drain). */
+  uint32_t flush = p[VOICE_IN_FLUSH_COUNT];
+  if (v->state == VOICE_STOPPED) {
+    flush = v->pending;
+    v->played = 0;
+  }
+  if (flush > v->pending) flush = v->pending;
+  for (uint32_t i = 0; i < flush; i++) {
+    v->consumed++;
+    v->pending--;
+    v->ring = (v->ring + 1u) & 3u;
+    v->buffer_started = false;
+  }
 }
 
 static void parse_mix(Audren_State *s, const uint8_t *p, uint32_t index, uint32_t *next_buffer) {
@@ -514,6 +540,11 @@ static uint32_t request_update(Audren_State *s, HLE_Context *c, uint32_t in_size
   const uint32_t mix_count = mixes_sz / MIX_IN_BYTES;
   const uint32_t sink_count = sinks_sz / SINK_IN_BYTES;
   const uint32_t effect_count = s->effect_count;
+  if (!s->logged_layout) {
+    s->logged_layout = true;
+    log_debug("[audren] update: revision %u, %u effects in %u bytes, %u voices, total %u (named %llu)",
+              revision_number(revision), effect_count, effects_sz, voice_count, total, (unsigned long long)named);
+  }
   uint32_t at = HEADER_BYTES + behavior_sz;
   /* Output layout. */
   uint8_t *out = s->out_buffer;
@@ -546,8 +577,31 @@ static uint32_t request_update(Audren_State *s, HLE_Context *c, uint32_t in_size
     wr32(out + o + 8u, v->consumed);
     v->consumed_reported = v->consumed;
   }
+  /* Effects: no DSP effect is applied, but each reports the usage state a
+   * renderer would - Enabled while the client enables it, Disabled once it
+   * does not - since clients free an effect's buffers only after seeing
+   * it Disabled (Animal Crossing waits on every effect it switches off). */
+  const uint32_t effect_in_bytes = effect_count ? effects_sz / effect_count : 0u;
+  for (uint32_t i = 0; i < effect_count; i++, o += EFFECT_OUT_BYTES) {
+    const uint64_t e = (uint64_t)at + (uint64_t)i * effect_in_bytes;
+    const bool enabled = effect_in_bytes > EFFECT_IN_ENABLED && e + EFFECT_IN_ENABLED < in_size && in[e + EFFECT_IN_ENABLED];
+    out[o] = enabled ? EFFECT_STATE_ENABLED : EFFECT_STATE_DISABLED;
+    /* A disabled Aux resets the DSP's half of its send and return ring
+     * infos (read/write offsets, lost and total counts), as the renderer
+     * does; the client's half is its own. */
+    if (!enabled && effect_in_bytes >= EFFECT_IN_SPECIFIC + AUX_RETURN_INFO + 8u && in[e] == EFFECT_TYPE_AUX) {
+      static const uint8_t zero[AUX_DSP_INFO_RESET_BYTES];
+      const uint64_t send_info = rd64(in + e + EFFECT_IN_SPECIFIC + AUX_SEND_INFO);
+      const uint64_t return_info = rd64(in + e + EFFECT_IN_SPECIFIC + AUX_RETURN_INFO);
+      if (send_info) (void)vmm_write_block(c->vmm, send_info + AUX_DSP_INFO_OFFSET, zero, sizeof(zero));
+      if (return_info) (void)vmm_write_block(c->vmm, return_info + AUX_DSP_INFO_OFFSET, zero, sizeof(zero));
+    }
+    if (i < AUDREN_MAX_EFFECT_LOG && e + 2u < in_size && (s->effect_log[i] != (uint8_t)(in[e] | (in[e + 2u] << 7)))) {
+      s->effect_log[i] = (uint8_t)(in[e] | (in[e + 2u] << 7));
+      log_debug("[audren] effect %u: type %u new %u enabled %u -> state %u", i, in[e], in[e + 1u], in[e + 2u], out[o]);
+    }
+  }
   at += effects_sz + splitters;
-  o += effect_count * EFFECT_OUT_BYTES;
   /* Mixes, then sinks. */
   uint32_t next_buffer = 0;
   /* The final mix owns the first buffers. */
@@ -784,10 +838,17 @@ static HLE_ServiceResult cmd_get_volume(HLE_Context *c, Service_Object *self, co
   return HLE_RESULT_SUCCESS;
 }
 
+/* The device events start signalled: the output device has just become
+ * active (Animal Crossing's audio worker resets the output event and
+ * waits for that first change before its main thread may go on). */
 static HLE_ServiceResult cmd_device_event(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                           IPC_Response *res) {
   (void)req;
-  return service_push_event(c, res, &state_of(self)->device_event);
+  Kernel_Event **slot = &state_of(self)->device_event;
+  const bool fresh = *slot == NULL;
+  const HLE_ServiceResult result = service_push_event(c, res, slot);
+  if (result == HLE_RESULT_SUCCESS && fresh) hle_signal_event(c, *slot);
+  return result;
 }
 
 static HLE_ServiceResult cmd_channel_count(HLE_Context *c, Service_Object *self, const IPC_Request *req,

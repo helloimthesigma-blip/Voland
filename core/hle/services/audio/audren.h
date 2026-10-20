@@ -114,12 +114,15 @@ typedef struct Audren_Sink {
   uint32_t write_offset;
 } Audren_Sink;
 
+#define AUDREN_MAX_EFFECT_LOG 64u
 typedef struct Audren_State {
   Service_Interface manager;
   Service_Interface renderer;
   Service_Interface device;
   bool open;
   bool started;
+  bool logged_layout;
+  uint8_t effect_log[64]; /* diagnostics: last logged type|enabled per effect */ /* diagnostics: the first update's layout was logged */
   uint32_t revision;
   uint32_t sample_rate;
   uint32_t sample_count;
