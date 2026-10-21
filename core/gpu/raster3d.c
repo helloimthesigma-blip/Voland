@@ -8,6 +8,7 @@
 #include <math.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "common/log.h"
@@ -5259,6 +5260,174 @@ static void compute_cpu_wrote(const Compute_Launch *launch, const Gpu_Memory *me
   prof->cpu_runs++;
 }
 
+/* ---- compute memo -------------------------------------------------------
+ * A CPU dispatch whose program reads only its constant buffers and
+ * statically bound textures (no global loads, clocks or bindless
+ * handles) computes the same output from the same inputs. Engines re-run
+ * some every frame unchanged - Unity bakes its colour-grading LUT that
+ * way (32^3 threads through the shader interpreter, every frame). The
+ * memo keys a dispatch on the program, the launch, every constant buffer
+ * it reads and the contents of the textures it samples, and remembers
+ * the ranges it wrote with their contents' hash: the same key with those
+ * ranges unchanged skips the dispatch. */
+#define COMPUTE_MEMOS 16u
+#define COMPUTE_MEMO_POSITIONS 16u
+#define TIC_INDEX_MASK 0xfffffu /* a texture handle's header index; the sampler sits above */
+#define COMPUTE_MEMO_CBUF_BYTES 0x10000u /* a constant buffer at most (indirect reads: the whole of it) */
+#define SR_CLOCK_FIRST 0x50u /* SR_CLOCKLO .. SR_GLOBALTIMERHI */
+#define SR_CLOCK_LAST 0x53u
+typedef struct Compute_Memo {
+  uint64_t program_address, key, out_hash, last_used;
+  uint64_t lo[COMPUTE_WRITE_RANGES], hi[COMPUTE_WRITE_RANGES];
+  uint32_t ranges;
+  uint32_t handles[RESOLVED_TEXTURES]; /* the texture handles the dispatch sampled */
+  uint32_t handle_count;
+  /* Where those handles' header indices sit in the constant buffers: a
+   * later dispatch's handles are rebuilt from the same words. */
+  uint8_t pos_slot[COMPUTE_MEMO_POSITIONS], pos_handle[COMPUTE_MEMO_POSITIONS];
+  uint16_t pos_word[COMPUTE_MEMO_POSITIONS];
+  uint32_t positions;
+  bool valid;
+} Compute_Memo;
+static Compute_Memo g_compute_memo[COMPUTE_MEMOS];
+static uint64_t g_compute_memo_tick;
+static int g_memo_verify = -1; /* VOLAND_COMPUTE_MEMO_VERIFY: run hits anyway and compare (diagnostics) */
+
+static bool compute_memoizable(const Sm_Program *p) {
+  if (p->unknown_ops) return false;
+  for (uint32_t pc = 0; pc < p->word_count; pc++) {
+    const Sm_Insn *in = &p->insns[pc];
+    if (in->op == SM_OP_LDG || in->op == SM_OP_LD) return false;
+    if (in->op == SM_OP_S2R || in->op == SM_OP_CS2R) {
+      const uint32_t id = (uint32_t)(in->raw >> 20) & 0xffu;
+      if (id >= SR_CLOCK_FIRST && id <= SR_CLOCK_LAST) return false;
+    }
+  }
+  return true;
+}
+
+/* The inputs' hash: the program, the launch, every constant buffer the
+ * program can read, and the textures behind `handles`. Texture handles
+ * come from constants and constant buffers only (no global loads), so
+ * equal buffers mean the dispatch samples those same handles again.
+ * False when a texture cannot be resolved. */
+/* With `record`, finds where m->handles' header indices sit in the
+ * constant buffers (m->pos_*); otherwise rebuilds the current handles
+ * from those words. Either way the key then counts each such word as
+ * "texture i" and each texture by its contents. */
+static bool compute_memo_key(Draw_Context *ctx, const Sm_Program *p, const Compute_Launch *launch, const Sm_Env *env,
+                             Compute_Memo *m, bool record, uint64_t *out) {
+  uint32_t handles[RESOLVED_TEXTURES];
+  memcpy(handles, m->handles, sizeof(uint32_t) * m->handle_count);
+  if (record) m->positions = 0;
+  for (uint32_t k = 0; !record && k < m->positions; k++) {
+    const uint32_t slot = m->pos_slot[k], at = 4u * m->pos_word[k];
+    uint32_t word = 0;
+    if (!env->cbuf[slot] || at + 4u > env->cbuf_size[slot]) return false;
+    memcpy(&word, env->cbuf[slot] + at, sizeof(word));
+    handles[m->pos_handle[k]] = (m->handles[m->pos_handle[k]] & ~TIC_INDEX_MASK) | (word & TIC_INDEX_MASK);
+  }
+  Content_Hash h;
+  content_hash_begin(&h, p->byte_size);
+  content_hash_update(&h, (const uint8_t *)&p->hash, sizeof(p->hash));
+  const uint32_t shape[8] = {launch->grid[0], launch->grid[1], launch->grid[2], launch->block[0],
+                             launch->block[1], launch->block[2], launch->shared_bytes, launch->local_bytes};
+  content_hash_update(&h, (const uint8_t *)shape, sizeof(shape));
+  /* The constant bytes the program can read (cbuf_extent). Engines sample
+   * a fresh copy of the same texture each frame (another handle, another
+   * address), so handle words count by position and textures by content. */
+  static uint32_t words[COMPUTE_MEMO_CBUF_BYTES / 4u];
+  for (uint32_t slot = 0; slot < SM_CBUF_SLOTS; slot++) {
+    if (!(p->cbuf_used & (1u << slot)) || !env->cbuf[slot]) continue;
+    uint32_t bytes = p->cbuf_extent[slot] < env->cbuf_size[slot] ? p->cbuf_extent[slot] : env->cbuf_size[slot];
+    if (bytes > sizeof(words)) bytes = sizeof(words);
+    memcpy(words, env->cbuf[slot], bytes);
+    if (record) {
+      for (uint32_t w = 0; w < bytes / 4u; w++)
+        for (uint32_t i = 0; i < m->handle_count; i++)
+          if (words[w] && (words[w] == handles[i] || words[w] == (handles[i] & TIC_INDEX_MASK))) {
+            if (m->positions >= COMPUTE_MEMO_POSITIONS) return false;
+            m->pos_slot[m->positions] = (uint8_t)slot;
+            m->pos_word[m->positions] = (uint16_t)w;
+            m->pos_handle[m->positions] = (uint8_t)i;
+            m->positions++;
+            break;
+          }
+    }
+    for (uint32_t k = 0; k < m->positions; k++)
+      if (m->pos_slot[k] == slot && 4u * m->pos_word[k] + 4u <= bytes) words[m->pos_word[k]] = m->pos_handle[k] + 1u;
+    content_hash_update(&h, (const uint8_t *)&slot, sizeof(slot));
+    content_hash_update(&h, (const uint8_t *)words, bytes);
+  }
+  for (uint32_t i = 0; i < m->handle_count; i++) {
+    Raster3d_Texture *t = NULL;
+    Tex_Sampler sampler;
+    if (!resolve_texture(&ctx->resolver, handles[i], &t, &sampler) || !t) return false;
+    const Tex_Header *th = &t->image.header;
+    const uint32_t shape_t[6] = {th->format, th->width, th->height, th->depth, th->levels, (uint32_t)th->type};
+    content_hash_update(&h, (const uint8_t *)shape_t, sizeof(shape_t));
+    content_hash_update(&h, (const uint8_t *)&t->raw_hash, sizeof(t->raw_hash));
+    content_hash_update(&h, (const uint8_t *)&sampler, sizeof(sampler));
+  }
+  *out = content_hash_end(&h);
+  return true;
+}
+
+static bool compute_ranges_hash(const Gpu_Memory *mem, const uint64_t *lo, const uint64_t *hi, uint32_t n, uint64_t *out) {
+  uint64_t acc = 0x9E3779B97F4A7C15ull;
+  for (uint32_t i = 0; i < n; i++) {
+    uint64_t one = 0;
+    if (!guest_hash(mem, lo[i], hi[i] - lo[i], &one)) return false;
+    acc = (acc ^ one) * 0x100000001B3ull;
+  }
+  *out = acc;
+  return true;
+}
+
+/* After a dispatch ran: what it read and what it wrote. */
+static void compute_memo_store(Draw_Context *ctx, uint64_t program_address, const Sm_Program *p,
+                               const Compute_Launch *launch, const Sm_Env *env, const Gpu_Memory *mem) {
+  static Compute_Memo fresh;
+  memset(&fresh, 0, sizeof(fresh));
+  Compute_Memo *m = &fresh;
+  const Tex_Resolver *res = &ctx->resolver;
+  if (res->count >= RESOLVED_TEXTURES) return; /* the resolver may have stopped recording handles */
+  if (!g_compute_writes.count || g_compute_writes.count > COMPUTE_WRITE_RANGES) return;
+  m->handle_count = res->count;
+  memcpy(m->handles, res->handle, sizeof(uint32_t) * res->count);
+  if (!compute_memo_key(ctx, p, launch, env, m, true, &m->key)) return;
+  m->ranges = g_compute_writes.count;
+  memcpy(m->lo, g_compute_writes.lo, sizeof(uint64_t) * m->ranges);
+  memcpy(m->hi, g_compute_writes.hi, sizeof(uint64_t) * m->ranges);
+  if (!compute_ranges_hash(mem, m->lo, m->hi, m->ranges, &m->out_hash)) return;
+  m->program_address = program_address;
+  m->last_used = ++g_compute_memo_tick;
+  m->valid = true;
+  /* Same program and inputs: refresh that entry; else the least recently used. */
+  Compute_Memo *slot = NULL;
+  for (uint32_t i = 0; i < COMPUTE_MEMOS && !slot; i++)
+    if (g_compute_memo[i].valid && g_compute_memo[i].program_address == program_address && g_compute_memo[i].key == m->key)
+      slot = &g_compute_memo[i];
+  for (uint32_t i = 0; i < COMPUTE_MEMOS && !slot; i++)
+    if (!g_compute_memo[i].valid) slot = &g_compute_memo[i];
+  if (!slot) {
+    slot = &g_compute_memo[0];
+    for (uint32_t i = 1; i < COMPUTE_MEMOS; i++)
+      if (g_compute_memo[i].last_used < slot->last_used) slot = &g_compute_memo[i];
+  }
+  *slot = *m;
+}
+
+/* Whether this dispatch would only rewrite what is already there. */
+static bool compute_memo_hit(Draw_Context *ctx, Compute_Memo *m, const Sm_Program *p, const Compute_Launch *launch,
+                             const Sm_Env *env, const Gpu_Memory *mem) {
+  uint64_t key = 0, now = 0;
+  if (!compute_memo_key(ctx, p, launch, env, m, false, &key) || key != m->key) return false;
+  if (!compute_ranges_hash(mem, m->lo, m->hi, m->ranges, &now) || now != m->out_hash) return false;
+  m->last_used = ++g_compute_memo_tick;
+  return true;
+}
+
 void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t *cregs, const Gpu_Memory *mem) {
   if (!r->ready) return;
   static uint32_t regs[COMPUTE_REGS];
@@ -5311,6 +5480,25 @@ void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t 
     r->stats.compute_dispatches++;
     return;
   }
+  /* The memo (compute_memo): a dispatch that would rewrite what it wrote last time is skipped. */
+  Compute_Memo *verify = NULL;
+  if (!r->no_compute_memo && compute_memoizable(program)) {
+    if (g_memo_verify < 0) g_memo_verify = getenv("VOLAND_COMPUTE_MEMO_VERIFY") ? 1 : 0;
+    for (uint32_t i = 0; i < COMPUTE_MEMOS; i++) {
+      Compute_Memo *memo = &g_compute_memo[i];
+      if (!memo->valid || memo->program_address != address) continue;
+      if (compute_memo_hit(&ctx, memo, program, launch, env, mem)) {
+        r->stats.compute_memo_hits++;
+        if (!g_memo_verify) {
+          r->stats.compute_dispatches++;
+          return;
+        }
+        verify = memo; /* diagnostics: run it anyway, then compare */
+        break;
+      }
+    }
+  }
+  ctx.resolver.count = 0; /* from here it records what the dispatch itself samples */
   Compute_Job job = {program, launch, env, &r->workers, threads, group_count, blocks, 0};
   bool faulted = false;
   if (r->workers.count > 1u && blocks > 1u && group_count <= COMPUTE_WORKER_GROUPS && !program_samples_textures(program)) {
@@ -5337,6 +5525,14 @@ void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t 
              launch->block[0], launch->block[1], launch->block[2], launch->shared_bytes, g_compute_writes.count,
              (unsigned long long)(g_compute_writes.count ? g_compute_writes.lo[0] : 0),
              (unsigned long long)(g_compute_writes.count ? g_compute_writes.hi[0] - g_compute_writes.lo[0] : 0));
+  if (verify) {
+    uint64_t now = 0;
+    const bool same = compute_ranges_hash(mem, verify->lo, verify->hi, verify->ranges, &now) && now == verify->out_hash &&
+                      g_compute_writes.count == verify->ranges;
+    if (!same) log_warn("[gpu] compute memo @%llx: the dispatch wrote something else than its memo", (unsigned long long)address);
+  } else if (!faulted && !r->no_compute_memo && compute_memoizable(program)) {
+    compute_memo_store(&ctx, address, program, launch, env, mem);
+  }
   if (r->gpu) compute_cpu_wrote(launch, mem, prof);
   for (uint32_t i = 0; i < g_compute_writes.count; i++) {
     compute_output_note(g_compute_writes.lo[i], g_compute_writes.hi[i]);

@@ -192,6 +192,7 @@ typedef struct Raster3d_Stats {
   uint64_t compute_dispatches; /* compute launches run (raster3d_compute) */
   uint64_t compute_threads;
   uint64_t compute_faults;
+  uint64_t compute_memo_hits; /* dispatches skipped: same inputs, output untouched (compute_memo) */
   uint64_t unknown_ops;     /* undecodable words seen in loaded programs */
   uint64_t texture_misses;  /* pool full / unreadable */
 } Raster3d_Stats;
@@ -267,6 +268,7 @@ typedef struct Raster3d {
   bool cpu_vertices;
   bool no_vertex_pull; /* GPU vertex stages take decoded inputs (the CPU fetches them) */
   bool no_gpu_compute; /* compute dispatches stay on the CPU (stream version 6 off; diagnostics) */
+  bool no_compute_memo;      /* run every CPU compute dispatch (diagnostics; compute_memo) */
 } Raster3d;
 
 /* Bytes of backing storage raster3d_init needs (one allocation). */

@@ -4354,7 +4354,7 @@ static void struct_writeback(Ctx *c, uint32_t n, uint32_t m, uint32_t bytes) {
 }
 
 static bool c_simd_struct(Ctx *c, uint32_t insn) {
-  if (bit(insn, 31) || bits(insn, 29, 24) != 0x0C) return false;
+  if (bit(insn, 31) || bits(insn, 29, 25) != 0x06) return false; /* 0011 0x: bit 24 = single structure */
   const bool q = bit(insn, 30), load = bit(insn, 22), post = bit(insn, 23);
   const uint32_t t = bits(insn, 4, 0), n = bits(insn, 9, 5), m = bits(insn, 20, 16);
   if (!post && m != 0) return false;
