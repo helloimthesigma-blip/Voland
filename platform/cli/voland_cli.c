@@ -1846,6 +1846,9 @@ static int run(int argc, char **argv) {
               (unsigned long long)g->clears, (unsigned long long)g->draws, (unsigned long long)g->skipped_draws,
               (unsigned long long)g->triangles, (unsigned long long)g->pixels, (unsigned long long)g->shader_faults,
               (unsigned long long)g->unknown_ops, (unsigned long long)g->texture_misses);
+    if (emu.nvdrv.mm_video.frames)
+      fprintf(stderr, "voland-cli: video %llu pictures decoded, %llu VIC conversions\n",
+              (unsigned long long)emu.nvdrv.mm_video.frames, (unsigned long long)emu.nvdrv.mm_video.conversions);
     if (g->compute_dispatches)
       fprintf(stderr, "voland-cli: compute %llu dispatches, %llu threads, %llu faulted, %llu memoized\n",
               (unsigned long long)g->compute_dispatches, (unsigned long long)g->compute_threads,

@@ -113,6 +113,9 @@ void mm_engine_submit(Mm_Engine *engine, const Mm_Context *context, const uint32
 void nvdec_h264_params(const uint8_t *setup, H264_Params *out);
 /* The bitstream's length per the picture setup. */
 uint32_t nvdec_h264_stream_length(const uint8_t *setup);
+/* The picture's surface index (CurrPicIdx): where it decodes when the
+ * display-buffer register is left unset. */
+uint32_t nvdec_h264_current_picture(const uint8_t *setup);
 
 /* VP8 (application 5): what nvdec_vp8_pic_s says about the frame, and
  * the header the stream had before the driver stripped it - the frame

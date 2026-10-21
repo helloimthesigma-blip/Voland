@@ -118,6 +118,19 @@ static void test_vp8_header(void) {
   CHECK(!p.key && h[0] == (0x90 | 0x01 | 0x02) && h[1] == 0x46 && h[2] == 0x02);
 }
 
+/* CurrPicIdx (FLAGS2 bits 2-8) beside weighted_bipred_idc (bits 0-1):
+ * Hollow Knight's intro decodes pictures 0, 1, 2 with bipred 2. */
+static void test_h264_current_picture(void) {
+  uint8_t s[NVDEC_PIC_SETUP_BYTES];
+  memset(s, 0, sizeof(s));
+  s[0xB4] = 0x02;
+  CHECK(nvdec_h264_current_picture(s) == 0u);
+  s[0xB4] = 0x06; s[0xB5] = 0x42;
+  CHECK(nvdec_h264_current_picture(s) == 1u);
+  s[0xB4] = 0x0A; s[0xB5] = 0x84;
+  CHECK(nvdec_h264_current_picture(s) == 2u);
+}
+
 static void test_stream_ring(void) {
   Video_Stream v;
   video_stream_init(&v, g_region, NULL, NULL);
@@ -209,6 +222,7 @@ static void test_no_consumer_never_blocks(void) {
 int main(void) {
   test_h264_params();
   test_vp8_header();
+  test_h264_current_picture();
   test_stream_ring();
   test_slots();
   test_no_consumer_never_blocks();

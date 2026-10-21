@@ -20,7 +20,8 @@
 #define NVDEC_BITSTREAM 0x408u
 #define NVDEC_PICTURE_INDEX 0x40Cu
 #define NVDEC_SLICE_OFFSETS 0x410u
-#define NVDEC_OUTPUT_LUMA 0x428u
+#define NVDEC_OUTPUT_LUMA 0x428u /* the display buffer; streams that leave it unset decode into their picture surface */
+#define NVDEC_SURFACE_LUMA 0x430u /* picture surfaces by index, 4 bytes apart (chroma follows from 0x474) */
 /* VP8 decodes into picture surface 3 (0x430-0x438 hold its references;
  * the display buffer register stays unset). */
 #define NVDEC_VP8_OUTPUT_LUMA 0x43Cu
@@ -68,6 +69,9 @@
 #define H264_TRANSFORM_8X8 0x88u
 #define H264_FLAGS 0xB0u   /* MbaffFrameFlag ... pic_order_cnt_type, pic_init_qp ... */
 #define H264_FLAGS2 0xB4u  /* weighted_bipred_idc, CurrPicIdx, ... */
+#define H264_CURR_PIC_SHIFT 2u /* CurrPicIdx: FLAGS2 bits 2-8 (Hollow Knight's intro: 0, 1, 2 ...) */
+#define H264_CURR_PIC_MASK 0x7Fu
+#define NVDEC_SURFACES 17u
 #define H264_DPB 0xC0u
 #define H264_DPB_ENTRIES 16u
 #define H264_DPB_ENTRY_BYTES 16u
@@ -278,6 +282,10 @@ void nvdec_h264_params(const uint8_t *s, H264_Params *p) {
 
 uint32_t nvdec_h264_stream_length(const uint8_t *setup) { return rd32(setup + H264_STREAM_LEN); }
 
+uint32_t nvdec_h264_current_picture(const uint8_t *setup) {
+  return (rd32(setup + H264_FLAGS2) >> H264_CURR_PIC_SHIFT) & H264_CURR_PIC_MASK;
+}
+
 /* DPB entries: index:7 col_idx:5 state:2 long_term:1 not_existing:1
  * is_field:1 top_marking:4 bottom_marking:4 ...; marked = a reference. */
 #define DPB_MARKING_SHIFT 17u
@@ -364,7 +372,10 @@ static void nvdec_h264(Mm_Engine *e, const Mm_Context *c) {
   v->frames++;
   if (!c->video) return;
   const uint32_t sequence = video_decode(c->video, idr, v->access_unit, (uint32_t)(sets + length));
-  remember_surface(v, e->regs[MM_REG(NVDEC_OUTPUT_LUMA)], sequence);
+  uint32_t luma = e->regs[MM_REG(NVDEC_OUTPUT_LUMA)];
+  const uint32_t current = nvdec_h264_current_picture(setup);
+  if (!luma && current < NVDEC_SURFACES) luma = e->regs[MM_REG(NVDEC_SURFACE_LUMA) + current];
+  remember_surface(v, luma, sequence);
 }
 
 uint32_t nvdec_vp8_header(const uint8_t *setup, uint8_t header[NVDEC_VP8_MAX_HEADER], Nvdec_Vp8_Picture *out) {
