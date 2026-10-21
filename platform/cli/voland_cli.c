@@ -353,7 +353,7 @@ static void dump_surfaces(void *user, const Raster3d *r) {
   if (!wanted) return;
   for (uint32_t i = 0; i < RASTER_SURFACES; i++) {
     const Raster3d_Surface *s = &r->surfaces[i];
-    if (!s->in_use || !s->loaded || s->depth || s->bytes_per_pixel != 4u) continue;
+    if (!s->in_use || s->depth || s->bytes_per_pixel != 4u) continue; /* drawn-over surfaces were never loaded */
     char path[1024];
     snprintf(path, sizeof(path), "%s/f%llu-%llx-%ux%u-fmt%02x.pam", d->dir, (unsigned long long)d->frame,
              (unsigned long long)s->address, s->width, s->height, s->format);
