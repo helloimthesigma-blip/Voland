@@ -1,8 +1,19 @@
 # Bringing up a new game
 
-Voland has been optimized and tested on Hollow Knight: Silksong, and
-Hollow Knight saves and plays too. Most other titles are untested. This
-page is the checklist for trying one, MK8DX or SSBU for example.
+Voland was built up on Hollow Knight: Silksong and has since been brought
+up on more titles. Where they stand (October 2026, browser, Chromium):
+
+| Game | State |
+|---|---|
+| Hollow Knight, Hollow Knight: Silksong | boot to gameplay at real speed, saves, video cutscenes |
+| Celeste | title, file select and gameplay; ~100 fps unpaced |
+| Super Smash Bros. Ultimate | matches with correct colours and saves, 18-22 fps in a fight; its VP9 movies are black |
+| Mario Kart 8 Deluxe (32-bit) | whole races, ~23 fps on three cores; occasional black tiles in multicore runs |
+| Nine Sols | title, file select and gameplay, ~22 fps; dialogue text shows magenta ASTC blocks (texture data zero past ~10 KB), the VP8 intro movie is black |
+| Animal Crossing: New Horizons | boots and presents, but stays behind its own black UI curtain; needs the NG word list 2 system file (0100000000000823) |
+| The Legend of Zelda: Tears of the Kingdom | boots (CLI to 1.5M slices) but presents black; uses VMNMX, which is not decoded |
+
+This page is the checklist for trying another one.
 
 ## 1. Run it and grab the report
 
@@ -29,21 +40,19 @@ environment variables help: `VOLAND_BACKTRACE=1` adds per-thread
 backtraces, and `VOLAND_EXCEPTION_SCAN=1` adds IL2CPP exceptions (Unity
 titles).
 
-## 2. Known gaps that affect big 3D games
+## 2. Known gaps
 
-- **Vertex shaders run on the CPU.** Pixel programs are translated to
-  WGSL; vertex work is done by the reference interpreter. Games with heavy
-  geometry (MK8DX, SSBU) will be slow until vertex programs move to the GPU.
-- **Compute dispatch is not implemented.** Only the compute engine's
-  inline-to-memory methods work. Titles that use compute shaders will
-  miss those results.
+- **Video:** NVDEC decodes H.264 only. VP8 (Nine Sols' intro) and VP9
+  (SSBU's movies) play black.
+- **Shader instructions not decoded:** VMNMX (video min/max), LEA.HI,
+  surface loads (SULD); the warning lists every distinct opcode a program
+  lacks. Global atomics in graphics stages are dropped on the GPU (compute
+  runs them on the CPU).
 - **Updates and DLC are not loaded.** Only the base program NCA runs.
   `OpenPatchDataStorageByCurrentProcess` serves the base RomFS.
-- **Runtime modules (`nn::ro`) are mapped, not verified.** NRR registration
-  is accepted without checks. SSBU loads its fighters this way. The mapping
-  is tested; real titles are not yet.
-- **32-bit (AArch32) games do not run.** Their address space is laid out,
-  but Voland has no 32-bit ARM CPU, so loading one says so plainly.
+- **System archives are not shipped** (§1.6). A game that mounts one
+  (MiiModel, the NG word lists) needs the user's own console copy under
+  "System files".
 - **Offline services answer "signed out"** (`prepo`, `friend`, `bcat`,
   `caps`, `nfp`, `pctl`, `nifm`). Online features stay empty by design
   (§1.6, §20).
@@ -57,3 +66,24 @@ titles).
 - Natively, `--snapshot-at SLICE --snapshot-dir DIR` keeps a forked
   snapshot to run jobs from. `--savestate-check N:M` proves a state
   restores bit-exactly.
+
+## 4. Native debugging aids
+
+All are environment variables of `voland-cli` (diagnostics only):
+
+- `VOLAND_SVC_TRACE=FROM:TO` logs every SVC in that virtual-tick window:
+  thread, number, arguments, results. Services also log each event handle
+  they hand out (`[ipc] event handle 0x...`), so a handle a thread waits on
+  can be traced back to the command that created it.
+- `VOLAND_PEEK=ADDR[:BYTES][,...]` dumps guest memory at exit (a resolved
+  GOT entry, an object a stalled thread polls).
+- `VOLAND_TRACE_CALLS=module+0xoff,...` logs calls to those addresses.
+- `VOLAND_TRACE_DRAWS=START:LENGTH` logs every draw in a slice window with
+  its target, blend state, textures and the pixel program's constants.
+- `VOLAND_DUMP_SURFACES=DIR:F1,F2,...` writes the software renderer's
+  surfaces at those frames; `--dump-shaders DIR` the decoded programs.
+- `VOLAND_COMPUTE_MEMO_VERIFY=1` runs every memoized compute dispatch
+  anyway and reports any difference.
+- With modules dumped (`VOLAND_DUMP_MODULES=DIR`), a PLT stub's import is
+  named by reading its GOT slot's relocation (the module's MOD0 dynamic
+  section): titles without symbols still call the SDK by name.

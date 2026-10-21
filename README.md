@@ -8,7 +8,7 @@ to install, and no keys or firmware.
 tab**: real commercial Switch games booting, running cutscenes and playing at
 full game speed, at a stable ~15 fps on a fast desktop.
 
-> **Status:** Phase 4 (First Boot). Silksong and Hollow Knight run at real speed (~22 fps in gameplay), and Silksong saves no longer crash. Super Smash Bros. Ultimate plays matches with correct colours and saves, now at 18-22 fps in a fight (was ~4): GPU work runs on its own thread beside the game, and its guest threads run serially by default. Its game speed still follows its frame rate (frame skip raises it). Mario Kart 8 Deluxe, a 32-bit game, runs on its own AArch32 JIT and plays whole races in the browser with correct rendering, at about 17 fps (20 on three cores), roughly a third of real speed. Not done yet: VP9 video and Opus audio (SSBU movies are black and silent); full task list in [DESIGN.md §25](docs/DESIGN.md#25-development-phases).
+> **Status:** Phase 4 (First Boot). Hollow Knight, Silksong, Celeste and Nine Sols play in the browser, Super Smash Bros. Ultimate plays matches at 18-22 fps, and Mario Kart 8 Deluxe, a 32-bit game on its own AArch32 JIT, plays whole races at about 23 fps on three cores; Animal Crossing and Tears of the Kingdom boot but stay on a black screen ([NEW_GAMES.md](docs/NEW_GAMES.md) has the per-game state). Not done yet: VP8/VP9 video (SSBU and Nine Sols movies are black) and Opus audio; full task list in [DESIGN.md §25](docs/DESIGN.md#25-development-phases).
 
 ### What works today
 
