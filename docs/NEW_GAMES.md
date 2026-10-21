@@ -42,6 +42,13 @@ titles).
 
 ## 2. Known gaps
 
+- **Parallel cores:** Mario Kart 8 Deluxe draws blocky black screen-space
+  tiles on three cores (serial is clean; a synchronous GPU makes them
+  worse), and Tears of the Kingdom corrupts its resource data there (hence
+  serial by default). One open multicore bug is suspected; ruled out: the
+  kernel's mutex words, barriers, same-core concurrency (affinity is now
+  enforced), LL/SC ABA (now checked), GPU semaphore acquires, the async GPU.
+
 - **Video:** NVDEC decodes H.264 and VP8 (through WebCodecs). VP9
   (SSBU's movies) plays black: its headers would have to be rebuilt from
   the picture setup and NVDEC's probability tables.
