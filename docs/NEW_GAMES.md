@@ -9,7 +9,7 @@ up on more titles. Where they stand (October 2026, browser, Chromium):
 | Celeste | title, file select and gameplay; ~100 fps unpaced |
 | Super Smash Bros. Ultimate | matches with correct colours and saves, 18-22 fps in a fight; its VP9 movies are black |
 | Mario Kart 8 Deluxe (32-bit) | whole races, ~23 fps on three cores; occasional black tiles in multicore runs |
-| Nine Sols | title, file select, the VP8 opening cinematic and gameplay, ~22 fps; the speech-bubble sprite atlas (ASTC 12x12) is only written for its first ~10.5 KB, so bubbles show magenta blocks - no copy engine writes it, the CPU does |
+| Nine Sols | title, file select, the VP8 opening cinematic and gameplay, ~22 fps; the speech-bubble sprite atlas (ASTC 12x12, 512x512, 10 mips) is written by the CPU as if each row were 23 blocks (276 texels) wide - every row goes bad at block column 23 - so bubbles show magenta; no copy engine touches it |
 | Animal Crossing: New Horizons | boots, presents and draws 3D (92M triangles by 2M slices), but its own UI fade stays at black (c3 = (0,0,0,1) on a white BC4 pane); needs the NG word list 2 system file (0100000000000823). Ruled out so far: controller applet result, focus messages, clock snapshot, preselected user, nfp, unimplemented commands |
 | The Legend of Zelda: Tears of the Kingdom | boots through its loading screen into the 3D opening cutscene (software renderer, ~5.5M slices with A presses); in the browser loading is slow - the JIT compiles ~1300 regions/s at ~0.7 ms per install |
 

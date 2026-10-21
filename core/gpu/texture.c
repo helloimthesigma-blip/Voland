@@ -4,6 +4,7 @@
 #include "gpu/texture.h"
 
 #include <math.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "common/log.h"
@@ -137,7 +138,10 @@ void tex_sampler_parse(const uint32_t words[8], Tex_Sampler *out) {
 #define FMT_Z16 0x3au
 
 #define ASTC_ERRORS_LOGGED 8u
+#define ASTC_SUMMARIES_LOGGED 16u /* textures with error blocks summarized */
+#define ASTC_SUMMARY_ROWS 8u      /* block rows whose first error column is listed */
 static uint32_t g_astc_errors; /* diagnostics only: racy counts are fine */
+static uint32_t g_astc_summaries;
 
 typedef struct Format_Info {
   uint8_t format;
@@ -515,6 +519,12 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
   /* Expand blocks to A8B8G8R8. */
   const uint32_t out_row = h->width * 4u;
   const bool astc = f->bytes == ASTC_BLOCK_BYTES && h->format >= 0x40u;
+  /* Error blocks per texture (diagnostics): how many, and where each of
+   * the first rows starts going bad - a partial upload stops at one
+   * offset, a wrong row width fails the same column on every row. */
+  uint32_t astc_bad = 0;
+  int32_t astc_first_bad[ASTC_SUMMARY_ROWS];
+  for (uint32_t r = 0; r < ASTC_SUMMARY_ROWS; r++) astc_first_bad[r] = -1;
   for (uint32_t layer = 0; layer < layers; layer++) {
     const uint8_t *blocks = linear + linear_layer * layer;
     uint8_t *texels = dst + (uint64_t)out_row * h->height * layer;
@@ -523,7 +533,12 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
         uint8_t px[ASTC_MAX_FOOTPRINT * ASTC_MAX_FOOTPRINT][4];
         const uint8_t *block = blocks + (uint64_t)by * row_bytes + (uint64_t)bx * f->bytes;
         if (astc) {
-          if (!astc_decode_block(block, f->bw, f->bh, h->srgb, px) && g_astc_errors < ASTC_ERRORS_LOGGED) {
+          const bool decoded = astc_decode_block(block, f->bw, f->bh, h->srgb, px);
+          if (!decoded) {
+            astc_bad++;
+            if (layer == 0 && by < ASTC_SUMMARY_ROWS && astc_first_bad[by] < 0) astc_first_bad[by] = (int32_t)bx;
+          }
+          if (!decoded && g_astc_errors < ASTC_ERRORS_LOGGED) {
             g_astc_errors++;
             log_warn("[gpu] ASTC %ux%u block at (%u,%u) of %ux%u @%llx (base level %u, TIC w7 %08x) decodes to the error colour: "
                      "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
@@ -541,6 +556,17 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
         }
       }
     }
+  }
+  if (astc_bad && g_astc_summaries < ASTC_SUMMARIES_LOGGED) {
+    g_astc_summaries++;
+    char rows_text[ASTC_SUMMARY_ROWS * 8u];
+    uint32_t at = 0;
+    for (uint32_t r = 0; r < ASTC_SUMMARY_ROWS && r < rows; r++)
+      at += (uint32_t)snprintf(rows_text + at, sizeof(rows_text) - at, " %d", astc_first_bad[r]);
+    log_warn("[gpu] ASTC %ux%u texture %ux%u @%llx: %u of %u blocks are errors; first bad column per row:%s "
+             "(TIC %08x %08x %08x %08x %08x %08x %08x %08x)",
+             f->bw, f->bh, h->width, h->height, (unsigned long long)h->address, astc_bad, rows * cols * layers, rows_text,
+             h->words[0], h->words[1], h->words[2], h->words[3], h->words[4], h->words[5], h->words[6], h->words[7]);
   }
   out->format = FMT_A8B8G8R8;
   out->header.data_type[0] = out->header.data_type[1] = out->header.data_type[2] = out->header.data_type[3] = TEX_DATA_UNORM;
