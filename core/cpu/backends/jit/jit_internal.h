@@ -36,7 +36,7 @@ typedef struct Jit_State {
   Interp_State interp;
   CPU_ExitReason exit_reason; /* valid after a block returned JIT_BLOCK_STOP */
   uint64_t cycle_budget;      /* this run()'s; compiled blocks chain while it lasts */
-  uint64_t scratch[4];        /* page-crossing accesses (up to a Q-register pair) */
+  uint64_t scratch[8];        /* page-crossing accesses (up to four Q registers: LD1/ST1) */
   /* The running host thread's compiled-block cache (&Jit_Entry[0]), set at
    * every run() entry: compiled code reads it here rather than baking an
    * address in, so a region compiles to the same bytes on every core and

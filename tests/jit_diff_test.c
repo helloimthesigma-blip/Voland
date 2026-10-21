@@ -248,8 +248,13 @@ static uint32_t gen_simd_inline(void) {
            (vreg() << 5) | vreg();
   case 5: /* SSHLL/USHLL(2) */
     return 0x0F00A400u | (q << 30) | (u << 29) | ((1u + pick(15)) << 19) | (pick(8) << 16) | (vreg() << 5) | vreg();
-  case 10: /* XTN(2), SHL (immediate), SHRN(2) */
-    switch (pick(3)) {
+  case 10: /* XTN(2), SHL (immediate), SHRN(2), SSHR/USHR/SSRA/USRA */
+    switch (pick(4)) {
+    case 3: {
+      const uint32_t size = pick(4), immhb = (8u << size) + pick(8u << size);
+      return 0x0F000400u | ((size == 3u ? 1u : q) << 30) | (u << 29) | (immhb << 16) | ((pick(2) ? 0x00u : 0x02u) << 11) |
+             (vreg() << 5) | vreg();
+    }
     case 0: return 0x0E212800u | (q << 30) | (pick(3) << 22) | (vreg() << 5) | vreg();
     case 1: {
       const uint32_t size = pick(4), immhb = (8u << size) + pick(8u << size);
@@ -305,7 +310,13 @@ static uint32_t gen_simd_fp(void) {
   }
   case 11: return 0x1E220000u | (pick(2) << 31) | (pick(2) << 22) | (pick(2) << 16) | (64u - 1u - pick(32)) << 10 |
                   (reg() << 5) | vreg();                                                    /* SCVTF (fixed) */
-  case 12: /* LD1/ST1 (multiple structures), offset or post-index */
+  case 12: /* LD1/ST1 (multiple structures), offset or post-index; single structures and LD1R */
+    if (pick(2)) {
+      const uint32_t post = pick(2);
+      return 0x0D000000u | (pick(2) << 30) | (post << 23) | (pick(2) << 22) | (pick(4) == 0 ? 1u << 21 : 0) |
+             ((post ? (pick(2) ? 31u : 24u + pick(4)) : 0u) << 16) | (pick(8) << 13) | (pick(2) << 12) |
+             (pick(4) << 10) | (base_reg() << 5) | vreg();
+    }
     return 0x0C000000u | (pick(2) << 30) | (pick(2) << 23) | (pick(2) << 22) | ((pick(2) ? 31u : 24u + pick(4)) << 16) |
            (pick(16) << 12) | (pick(4) << 10) | (base_reg() << 5) | vreg();
   case 13: { /* vector FP three same (FADD/FSUB/FMUL/FDIV/FMLA/FMLS & co.) and by element */

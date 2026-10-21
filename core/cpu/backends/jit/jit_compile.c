@@ -4030,8 +4030,147 @@ static bool c_simd_table(Ctx *c, uint32_t insn) {
   return true;
 }
 
+/* ---- integer vector arithmetic --------------------------------------
+ * Three-same (ADD/SUB, MUL/MLA/MLS, compares, CMTST, min/max, absolute
+ * differences), two-register misc (ABS/NEG, compares with zero, NOT,
+ * CNT) and shifts by immediate (SHL, SSHR/USHR, SSRA/USRA) map onto wasm
+ * SIMD one lane size at a time. 0 marks a size wasm has no instruction
+ * for; those, the saturating and halving forms, and reserved encodings
+ * (64-bit lanes in a 64-bit vector) stay with the interpreter. */
+enum {
+  IOP_EQ, IOP_GT_S, IOP_GT_U, IOP_GE_S, IOP_GE_U, IOP_LT_S, IOP_LE_S, IOP_ABS, IOP_NEG, IOP_SHL, IOP_SHR_S, IOP_SHR_U,
+  IOP_ADD, IOP_SUB, IOP_MUL, IOP_MIN_S, IOP_MIN_U, IOP_MAX_S, IOP_MAX_U, IOP_COUNT
+};
+static const uint8_t k_int_simd[IOP_COUNT][4] = {
+    [IOP_EQ] = {0x23, 0x2D, 0x37, 0xD6},    [IOP_GT_S] = {0x27, 0x31, 0x3B, 0xD9}, [IOP_GT_U] = {0x28, 0x32, 0x3C, 0},
+    [IOP_GE_S] = {0x2B, 0x35, 0x3F, 0xDB},  [IOP_GE_U] = {0x2C, 0x36, 0x40, 0},    [IOP_LT_S] = {0x25, 0x2F, 0x39, 0xD8},
+    [IOP_LE_S] = {0x29, 0x33, 0x3D, 0xDA},  [IOP_ABS] = {0x60, 0x80, 0xA0, 0xC0},  [IOP_NEG] = {0x61, 0x81, 0xA1, 0xC1},
+    [IOP_SHL] = {0x6B, 0x8B, 0xAB, 0xCB},   [IOP_SHR_S] = {0x6C, 0x8C, 0xAC, 0xCC}, [IOP_SHR_U] = {0x6D, 0x8D, 0xAD, 0xCD},
+    [IOP_ADD] = {0x6E, 0x8E, 0xAE, 0xCE},   [IOP_SUB] = {0x71, 0x91, 0xB1, 0xD1},  [IOP_MUL] = {0, 0x95, 0xB5, 0},
+    [IOP_MIN_S] = {0x76, 0x96, 0xB6, 0},    [IOP_MIN_U] = {0x77, 0x97, 0xB7, 0},   [IOP_MAX_S] = {0x78, 0x98, 0xB8, 0},
+    [IOP_MAX_U] = {0x79, 0x99, 0xB9, 0},
+};
+#define WASM_SIMD_I8X16_POPCNT 0x62u
+
+static bool int_op_ok(uint32_t iop, uint32_t size) { return k_int_simd[iop][size] != 0; }
+static void int_op(Ctx *c, uint32_t iop, uint32_t size) { simd(c, k_int_simd[iop][size]); }
+
+/* A lane-sized zero vector. */
+static void v128_zero(Ctx *c) { v128_const(c, 0, 0); }
+
+static bool c_vector_int_arith(Ctx *c, uint32_t insn) {
+  if (bit(insn, 31)) return false;
+  const bool q = bit(insn, 30), u = bit(insn, 29);
+  const uint32_t rn = bits(insn, 9, 5), rm = bits(insn, 20, 16), rd = bits(insn, 4, 0);
+  if (bits(insn, 28, 24) == 0x0F && !bit(insn, 23) && bits(insn, 22, 19) != 0 && bit(insn, 10)) {
+    /* Shift by immediate. */
+    const uint32_t immh = bits(insn, 22, 19), immhb = bits(insn, 22, 16), opcode = bits(insn, 15, 11);
+    uint32_t size = 3;
+    while (size > 0 && !((immh >> size) & 1u)) size--;
+    if (size == 3u && !q) return false;
+    const uint32_t esize = 8u << size;
+    const bool right = opcode == 0x00 || opcode == 0x02, accumulate = opcode == 0x02;
+    if (!right && !(opcode == 0x0A && !u)) return false;
+    uint32_t shift = right ? 2u * esize - immhb : immhb - esize;
+    if (right && shift >= esize && u) { /* by the whole lane: USHR gives 0 */
+      v128_zero(c);
+    } else {
+      load_v(c, rn);
+      if (right && shift >= esize) shift = esize - 1u; /* SSHR: the sign (wasm shifts modulo the lane) */
+      i32c(c, (int32_t)shift);
+      int_op(c, right ? (u ? IOP_SHR_U : IOP_SHR_S) : IOP_SHL, size);
+    }
+    if (accumulate) {
+      load_v(c, rd);
+      int_op(c, IOP_ADD, size);
+    }
+    lset(c, L_VR);
+    store_v(c, rd, L_VR, q);
+    return true;
+  }
+  if (bits(insn, 28, 24) != 0x0E || !bit(insn, 21)) return false;
+  const uint32_t size = bits(insn, 23, 22);
+  if (size == 3u && !q) return false;
+  if (bit(insn, 10)) { /* three same */
+    const uint32_t opcode = bits(insn, 15, 11);
+    uint32_t iop;
+    switch (opcode) {
+    case 0x06: iop = u ? IOP_GT_U : IOP_GT_S; break;
+    case 0x07: iop = u ? IOP_GE_U : IOP_GE_S; break;
+    case 0x0C: iop = u ? IOP_MAX_U : IOP_MAX_S; break;
+    case 0x0D: iop = u ? IOP_MIN_U : IOP_MIN_S; break;
+    case 0x0E: case 0x0F: iop = u ? IOP_MAX_U : IOP_MAX_S; break; /* (S|U)AB(D|A) */
+    case 0x10: iop = u ? IOP_SUB : IOP_ADD; break;
+    case 0x11: iop = IOP_EQ; break; /* CMTST (U0) / CMEQ (U1) */
+    case 0x12: case 0x13: iop = IOP_MUL; break; /* MLA/MLS, MUL (U0) */
+    default: return false;
+    }
+    if (opcode == 0x13 && u) return false; /* PMUL */
+    if (!int_op_ok(iop, size)) return false;
+    load_v(c, rn);
+    lset(c, L_VA);
+    load_v(c, rm);
+    lset(c, L_VB);
+    switch (opcode) {
+    case 0x0E: case 0x0F: /* |a - b| = max - min, modulo the lane */
+      lget(c, L_VA); lget(c, L_VB); int_op(c, iop, size);
+      lget(c, L_VA); lget(c, L_VB); int_op(c, u ? IOP_MIN_U : IOP_MIN_S, size);
+      int_op(c, IOP_SUB, size);
+      if (opcode == 0x0F) { load_v(c, rd); int_op(c, IOP_ADD, size); }
+      break;
+    case 0x11:
+      lget(c, L_VA); lget(c, L_VB);
+      if (!u) { /* CMTST: (a & b) != 0 */
+        simd(c, WASM_SIMD_V128_AND);
+        v128_zero(c);
+        int_op(c, IOP_EQ, size);
+        simd(c, WASM_SIMD_V128_NOT);
+      } else {
+        int_op(c, IOP_EQ, size);
+      }
+      break;
+    case 0x12: /* MLA / MLS */
+      load_v(c, rd);
+      lget(c, L_VA); lget(c, L_VB); int_op(c, IOP_MUL, size);
+      int_op(c, u ? IOP_SUB : IOP_ADD, size);
+      break;
+    default:
+      lget(c, L_VA); lget(c, L_VB); int_op(c, iop, size);
+      break;
+    }
+    lset(c, L_VR);
+    store_v(c, rd, L_VR, q);
+    return true;
+  }
+  if (bits(insn, 20, 17) != 0 || bits(insn, 11, 10) != 2) return false;
+  /* Two-register misc. */
+  const uint32_t key = (bits(insn, 16, 12) << 1) | (u ? 1u : 0u);
+  enum { CNT = 0x05u << 1, NOT = (0x05u << 1) | 1u, CMGT0 = 0x08u << 1, CMGE0 = (0x08u << 1) | 1u, CMEQ0 = 0x09u << 1,
+         CMLE0 = (0x09u << 1) | 1u, CMLT0 = 0x0Au << 1, ABS = 0x0Bu << 1, NEG = (0x0Bu << 1) | 1u };
+  if (((key == CNT || key == NOT) && size != 0) ||
+      !(key == CNT || key == NOT || key == CMGT0 || key == CMGE0 || key == CMEQ0 || key == CMLE0 || key == CMLT0 ||
+        key == ABS || key == NEG))
+    return false;
+  load_v(c, rn);
+  switch (key) {
+  case CNT: simd(c, WASM_SIMD_I8X16_POPCNT); break;
+  case NOT: simd(c, WASM_SIMD_V128_NOT); break;
+  case CMGT0: v128_zero(c); int_op(c, IOP_GT_S, size); break;
+  case CMGE0: v128_zero(c); int_op(c, IOP_GE_S, size); break;
+  case CMEQ0: v128_zero(c); int_op(c, IOP_EQ, size); break;
+  case CMLE0: v128_zero(c); int_op(c, IOP_LE_S, size); break;
+  case CMLT0: v128_zero(c); int_op(c, IOP_LT_S, size); break;
+  case ABS: int_op(c, IOP_ABS, size); break;
+  default: int_op(c, IOP_NEG, size); break;
+  }
+  lset(c, L_VR);
+  store_v(c, rd, L_VR, q);
+  return true;
+}
+
 static bool c_simd_fp(Ctx *c, uint32_t insn) {
-  if (c_scalar_fp_fast(c, insn) || c_vector_fp_fast(c, insn) || c_vector_int_fast(c, insn) || c_simd_copy(c, insn) ||
+  if (c_scalar_fp_fast(c, insn) || c_vector_fp_fast(c, insn) || c_vector_int_fast(c, insn) ||
+      c_vector_int_arith(c, insn) || c_simd_copy(c, insn) ||
       c_simd_misc_fp(c, insn) || c_simd_pairwise(c, insn) || c_simd_shift_long(c, insn) || c_simd_table(c, insn) ||
       c_simd_narrow_shift(c, insn))
     return true;
@@ -4136,6 +4275,171 @@ static void address_from_base(Ctx *c, uint32_t n, bool post, uint64_t offset) {
   lset(c, L_ADDR);
 }
 
+/* ---- LD1/ST1 and LD1R (Advanced SIMD structure transfers) -------------
+ * LD1/ST1 of one to four consecutive registers is a plain byte copy
+ * between memory and the register file; one lane, or LD1R's replicated
+ * element, is a single element. The access is checked as a whole (inline
+ * or through the scratch, all or nothing), then the base advances by the
+ * immediate (the bytes moved) or by Xm. LD2-LD4's interleaving stays
+ * with the interpreter. */
+#define STRUCT_MAX_BYTES 64u
+
+/* Stores `count` consecutive registers from t (wrapping at V31), `bytes`
+ * each, at L_ADDR; like emit_vector_store for one. */
+static void emit_vector_store_regs(Ctx *c, uint32_t bytes, uint32_t t, uint32_t count) {
+  const uint32_t total = bytes * count;
+  open_block(c); /* $done */
+  const uint32_t done = c->depth;
+  open_block(c); /* $slow */
+  emit_walk(c, total, VMM_PERM_W, c->depth);
+  for (uint32_t i = 0; i < count; i++) emit_vector_store_to(c, L_HOST, bytes, (uint64_t)i * bytes, (t + i) % 32u);
+  br(c, done);
+  end_(c);
+  lget(c, L_STATE);
+  i64c(c, OFF_SCRATCH);
+  op(c, WASM_OP_I64_ADD);
+  lset(c, L_HOST);
+  for (uint32_t i = 0; i < count; i++) emit_vector_store_to(c, L_HOST, bytes, (uint64_t)i * bytes, (t + i) % 32u);
+  lget(c, L_STATE);
+  lget(c, L_ADDR);
+  i32c(c, total);
+  op(c, WASM_OP_CALL);
+  wasm_uleb(c->b, FUNC_WRITE);
+  op(c, WASM_OP_I32_EQZ);
+  hint(c, false);
+  open_if(c, WASM_BLOCK_VOID);
+  leave_via_interpreter(c);
+  end_(c);
+  end_(c); /* $done */
+}
+
+/* One element (log2 size `lsize`) of v[t], lane `index`, to L_ADDR. */
+static void emit_lane_store(Ctx *c, uint32_t lsize, uint32_t t, uint32_t index) {
+  const uint32_t bytes = 1u << lsize;
+  const uint64_t lane = OFF_V(t) + (uint64_t)index * bytes;
+  open_block(c); /* $done */
+  const uint32_t done = c->depth;
+  open_block(c); /* $slow */
+  emit_walk(c, bytes, VMM_PERM_W, c->depth);
+  lget(c, L_HOST);
+  lget(c, L_STATE);
+  mem(c, k_element_load_u[lsize], ALIGN_1, lane);
+  mem(c, k_element_store[lsize], ALIGN_1, 0);
+  br(c, done);
+  end_(c);
+  lget(c, L_STATE);
+  lget(c, L_STATE);
+  mem(c, k_element_load_u[lsize], ALIGN_1, lane);
+  mem(c, k_element_store[lsize], ALIGN_1, OFF_SCRATCH);
+  lget(c, L_STATE);
+  lget(c, L_ADDR);
+  i32c(c, bytes);
+  op(c, WASM_OP_CALL);
+  wasm_uleb(c->b, FUNC_WRITE);
+  op(c, WASM_OP_I32_EQZ);
+  hint(c, false);
+  open_if(c, WASM_BLOCK_VOID);
+  leave_via_interpreter(c);
+  end_(c);
+  end_(c); /* $done */
+}
+
+/* The base writeback of a post-indexed structure transfer. */
+static void struct_writeback(Ctx *c, uint32_t n, uint32_t m, uint32_t bytes) {
+  lget(c, L_BASE);
+  if (m == 31u) i64c(c, bytes);
+  else get_x(c, m);
+  op(c, WASM_OP_I64_ADD);
+  set_xsp(c, n);
+}
+
+static bool c_simd_struct(Ctx *c, uint32_t insn) {
+  if (bit(insn, 31) || bits(insn, 29, 24) != 0x0C) return false;
+  const bool q = bit(insn, 30), load = bit(insn, 22), post = bit(insn, 23);
+  const uint32_t t = bits(insn, 4, 0), n = bits(insn, 9, 5), m = bits(insn, 20, 16);
+  if (!post && m != 0) return false;
+  const uint32_t reg_bytes = q ? 16u : 8u;
+  if (!bit(insn, 24)) { /* multiple structures */
+    if (bit(insn, 21)) return false;
+    uint32_t count;
+    switch (bits(insn, 15, 12)) {
+    case 0x7: count = 1; break;
+    case 0xA: count = 2; break;
+    case 0x6: count = 3; break;
+    case 0x2: count = 4; break;
+    default: return false; /* LD2-LD4 */
+    }
+    const uint32_t total = count * reg_bytes;
+    address_from_base(c, n, true, 0);
+    if (load) {
+      emit_load_address(c, total);
+      for (uint32_t i = 0; i < count; i++) emit_vector_load(c, reg_bytes, (uint64_t)i * reg_bytes, (t + i) % 32u);
+    } else {
+      emit_vector_store_regs(c, reg_bytes, t, count);
+    }
+    if (post) struct_writeback(c, n, m, total);
+    return true;
+  }
+  /* Single structure: LD1/ST1 (one lane) and LD1R. */
+  if (bit(insn, 21)) return false; /* LD2/LD4 & co. */
+  const uint32_t opcode = bits(insn, 15, 13), s_bit = bit(insn, 12), size = bits(insn, 11, 10);
+  if (opcode == 6u) { /* LD1R */
+    if (!load || s_bit) return false;
+    const uint32_t bytes = 1u << size;
+    static const uint64_t k_replicate[4] = {0x0101010101010101ull, 0x0001000100010001ull, 0x0000000100000001ull, 1};
+    address_from_base(c, n, true, 0);
+    emit_load_address(c, bytes);
+    lget(c, L_STATE);
+    lget(c, L_HOST);
+    mem(c, k_element_load_u[size], ALIGN_1, 0);
+    i64c(c, k_replicate[size]);
+    op(c, WASM_OP_I64_MUL);
+    lset(c, L_VAL);
+    lget(c, L_VAL);
+    mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_V(t));
+    lget(c, L_STATE);
+    if (q) lget(c, L_VAL);
+    else i64c(c, 0);
+    mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_V(t) + V_HIGH_HALF);
+    if (post) struct_writeback(c, n, m, bytes);
+    return true;
+  }
+  uint32_t lsize, index;
+  switch (opcode) {
+  case 0: lsize = 0; index = ((uint32_t)q << 3) | (s_bit << 2) | size; break;
+  case 2:
+    if (size & 1u) return false;
+    lsize = 1;
+    index = ((uint32_t)q << 2) | (s_bit << 1) | (size >> 1);
+    break;
+  case 4:
+    if (size == 0) {
+      lsize = 2;
+      index = ((uint32_t)q << 1) | s_bit;
+    } else if (size == 1 && !s_bit) {
+      lsize = 3;
+      index = q;
+    } else {
+      return false;
+    }
+    break;
+  default: return false; /* LD3 & co. */
+  }
+  const uint32_t bytes = 1u << lsize;
+  address_from_base(c, n, true, 0);
+  if (load) {
+    emit_load_address(c, bytes);
+    lget(c, L_STATE);
+    lget(c, L_HOST);
+    mem(c, k_element_load_u[lsize], ALIGN_1, 0);
+    mem(c, k_element_store[lsize], ALIGN_1, OFF_V(t) + (uint64_t)index * bytes);
+  } else {
+    emit_lane_store(c, lsize, t, index);
+  }
+  if (post) struct_writeback(c, n, m, bytes);
+  return true;
+}
+
 static bool c_vector_load_store(Ctx *c, uint32_t insn) {
   const uint32_t t = bits(insn, 4, 0), n = bits(insn, 9, 5);
   switch (bits(insn, 29, 28)) {
@@ -4193,8 +4497,9 @@ static bool c_vector_load_store(Ctx *c, uint32_t insn) {
     emit_vector_transfer(c, load, bytes, t, false, 0, n, false, 0);
     return true;
   }
-  default: { /* LD1-LD4 & co.: the interpreter's, called directly */
+  default: { /* LD1-LD4 & co.: LD1/ST1/LD1R inline, the rest the interpreter's, called directly */
     if (bit(insn, 31)) return false;
+    if (c_simd_struct(c, insn)) return true;
     Sync sync = {0};
     sync_xsp(&sync, n);
     sync_x(&sync, bits(insn, 20, 16));
