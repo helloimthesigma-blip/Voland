@@ -244,11 +244,15 @@ const DEFAULT_HOST_CORES = Math.max(
   1, Math.min(MAX_DEFAULT_HOST_CORES, (self.navigator.hardwareConcurrency || 4) - HOST_THREADS_RESERVED));
 /** Cores chosen with ?cores=N (set-host-cores); null = the default. */
 let requestedHostCores: number | null = null;
-/** Titles that run faster on the serial scheduler, where the default picks
- * it: their guest threads hand work to each other so tightly that, with
- * the GPU thread beside them, parallel cores mostly wait (Super Smash
- * Bros. Ultimate fight: 18-22 fps serial, 9.5 on three cores). */
-const SERIAL_TITLES: ReadonlySet<string> = new Set(["01006A800016E000"]);
+/** Titles the default runs on the serial scheduler:
+ * - Super Smash Bros. Ultimate: its guest threads hand work to each other
+ *   so tightly that, with the GPU thread beside them, parallel cores mostly
+ *   wait (fight: 18-22 fps serial, 9.5 on three cores).
+ * - Tears of the Kingdom: on parallel cores its opening cutscene stalls
+ *   (no subtitles, the camera never moves on), and runs sometimes crash or
+ *   exit ~15-18 s in - a race not found yet (docs/NEW_GAMES.md). Serial
+ *   plays the opening. */
+const SERIAL_TITLES: ReadonlySet<string> = new Set(["01006A800016E000", "0100F2C0115B6000"]);
 
 
 /** Poll coalescing (set-poll-coalescing; ?polls=0 turns it off). */

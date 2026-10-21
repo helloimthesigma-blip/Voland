@@ -11,7 +11,7 @@ up on more titles. Where they stand (October 2026, browser, Chromium):
 | Mario Kart 8 Deluxe (32-bit) | whole races, ~23 fps on three cores; occasional black tiles in multicore runs |
 | Nine Sols | title, file select, the VP8 opening cinematic and gameplay, ~22 fps; the speech-bubble sprite atlas (ASTC 12x12, 512x512, 10 mips) is written by the CPU as if each row were 23 blocks (276 texels) wide - every row goes bad at block column 23 - so bubbles show magenta; no copy engine touches it |
 | Animal Crossing: New Horizons | boots, presents and draws 3D (92M triangles by 2M slices), but its own UI fade stays at black (c3 = (0,0,0,1) on a white BC4 pane); needs the NG word list 2 system file (0100000000000823). Ruled out so far: controller applet result, focus messages, clock snapshot, preselected user, nfp, unimplemented commands |
-| The Legend of Zelda: Tears of the Kingdom | boots through its loading screen into the 3D opening cutscene (software renderer, ~5.5M slices with A presses); in the browser loading is slow - the JIT compiles ~1300 regions/s at ~0.7 ms per install |
+| The Legend of Zelda: Tears of the Kingdom | plays its opening in the browser: title cards, then the descent with Zelda's subtitles (WebGPU, serial scheduler, ~4-10 fps). It runs serial by default (`SERIAL_TITLES` in the CPU worker): on parallel cores the cutscene stalls (no subtitles) and runs sometimes crash or exit ~15-18 s in - a race not found yet (not the kernel's mutex words, which are CAS-updated, nor barriers; guest core affinity did not fix it). The JIT keeps at most 32768 regions installed per core, or the tab ran out of memory at ~200k |
 
 This page is the checklist for trying another one.
 
