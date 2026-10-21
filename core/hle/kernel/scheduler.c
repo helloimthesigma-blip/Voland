@@ -140,13 +140,13 @@ void scheduler_poll_sleep(Scheduler *sched, Sched_Thread *self, int64_t ns, uint
   if (!yield) scheduler_block(sched, self, WAIT_SLEEP, (uint64_t)ns);
   uint64_t event = SCHEDULER_WAIT_FOREVER;
   if (!scheduler_alone(sched, self, &event) || event == SCHEDULER_WAIT_FOREVER || event <= sched->ticks) return;
-  if (yield) { /* a lone yield: sleep to the next event (nothing else to rotate to) */
+  if (yield && self->spinning) { /* a lone polling yield: sleep to the next event (nothing else to rotate to) */
     scheduler_block(sched, self, WAIT_SLEEP, SCHEDULER_WAIT_FOREVER);
     self->wake_at = event;
     sched->lone_yields++;
     return;
   }
-  if (!self->spinning || event <= self->wake_at) return;
+  if (yield || !self->spinning || event <= self->wake_at) return; /* a working yield just rotates */
   if (self->work_epoch_seen != sched->work_epoch) return; /* work finished while it polled */
   self->poll_wake_at = self->wake_at; /* what it asked for, restored if a worker wakes */
   self->wake_at = event;

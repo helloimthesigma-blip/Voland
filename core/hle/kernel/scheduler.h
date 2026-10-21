@@ -153,8 +153,10 @@ void scheduler_wake(Scheduler *sched, Sched_Thread *thread, uint32_t result);
 
 /* Runs this short (in cycles) that end in a yield or a short sleep are
  * polls: the thread is waiting for work, not doing it (Unity's job
- * workers: ~2k cycles a turn, then SleepThread(25us)). */
-#define SCHEDULER_SPIN_RUN_CYCLES 16384u
+ * workers: ~2k cycles a turn, then SleepThread(25us)). Longer runs are
+ * work - Animal Crossing's parallel-for executors yield after every
+ * ~9.5k-cycle item. */
+#define SCHEDULER_SPIN_RUN_CYCLES 4096u
 /* The longest SleepThread treated as a poll interval. */
 #define SCHEDULER_POLL_SLEEP_MAX_NS 100000u
 
