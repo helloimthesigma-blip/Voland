@@ -120,6 +120,7 @@ typedef enum Sm_Op {
   SM_OP_SUST, /* surface store: formatted (.P) or raw (.B) through Sm_Env.surface_store */
   SM_OP_SHF, /* funnel shift of Rc:Ra (64-bit pairs) */
   SM_OP_BRX, /* indirect: target = next + Ra + imm (Ra from a jump table) */
+  SM_OP_VMNMX, /* video min/max of Ra, B, then a second min/max/merge with Rc */
   SM_OP_COUNT
 } Sm_Op;
 
@@ -302,6 +303,17 @@ enum { SM_ATOM_ADD = 0, SM_ATOM_MIN = 1, SM_ATOM_MAX = 2, SM_ATOM_INC = 3, SM_AT
 enum { SM_ATOM_U32 = 0, SM_ATOM_S32 = 1, SM_ATOM_U64 = 2, SM_ATOM_F32 = 3, SM_ATOM_S64 = 5 };
 /* The value an atomic leaves in memory, from the old value and the operand. */
 uint64_t sm_atomic(uint32_t op, uint32_t size, uint64_t old, uint64_t src);
+/* VMNMX fields: per source a lane (width 8/16/32 bits, the bit offset
+ * of the selected part) and a sign; MX picks max for the first step, op
+ * the second step with Rc (SM_VOP_*). */
+enum { SM_VOP_MRG_16H = 0, SM_VOP_MRG_16L = 1, SM_VOP_MRG_8B0 = 2, SM_VOP_MRG_8B2 = 3, SM_VOP_ACC = 4,
+       SM_VOP_MIN = 5, SM_VOP_MAX = 6 };
+typedef struct Sm_Vmnmx {
+  uint32_t a_bits, a_shift, b_bits, b_shift, op;
+  bool a_signed, b_signed, b_reg, mx;
+} Sm_Vmnmx;
+Sm_Vmnmx sm_vmnmx_fields(uint64_t raw);
+uint32_t sm_vmnmx(Sm_Vmnmx f, uint32_t a, uint32_t b, uint32_t c);
 /* BRX at word `index` with Ra = `ra`: the target word, -1 if misaligned. */
 int64_t sm_brx_target(const Sm_Insn *in, uint32_t index, uint32_t ra);
 

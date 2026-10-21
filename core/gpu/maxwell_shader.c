@@ -116,6 +116,7 @@ static const Op_Pattern k_patterns[] = {
     {0xfff8, 0xefd8, SM_OP_ALD, R, 0}, {0xfff8, 0xeff0, SM_OP_AST, R, 0}, {0xff00, 0xe000, SM_OP_IPA, R, 0},
     {0xfff8, 0xef90, SM_OP_LDC, R, 0},
     {0xfff0, 0xeb20, SM_OP_SUST, R, 0}, {0xfff8, 0xebf8, SM_OP_RED, R, 0}, {0xff00, 0xed00, SM_OP_ATOM, R, 0},
+    {0xfe00, 0x3a00, SM_OP_VMNMX, R, 0}, /* B is Rb with bit 50, else imm16 */
     {0xfff8, 0xeed0, SM_OP_LDG, R, 0}, {0xfff8, 0xeed8, SM_OP_STG, R, 0},
     {0xfff8, 0xef40, SM_OP_LDL, R, 0}, {0xfff8, 0xef50, SM_OP_STL, R, 0},
     {0xfff8, 0xef48, SM_OP_LDL, R, 0}, {0xfff8, 0xef58, SM_OP_STL, R, 0}, /* LDS/STS: per-invocation */
@@ -159,7 +160,7 @@ static const char *const k_names[SM_OP_COUNT] = {
     [SM_OP_IPA] = "IPA", [SM_OP_LDC] = "LDC", [SM_OP_LD] = "LD", [SM_OP_ST] = "ST", [SM_OP_LDG] = "LDG",
     [SM_OP_STG] = "STG", [SM_OP_LDL] = "LDL", [SM_OP_STL] = "STL", [SM_OP_OUT] = "OUT", [SM_OP_TEX] = "TEX", [SM_OP_TEX_B] = "TEX.B",
     [SM_OP_TEXS] = "TEXS", [SM_OP_TLD] = "TLD", [SM_OP_TLDS] = "TLDS", [SM_OP_TLD4] = "TLD4", [SM_OP_TLD4S] = "TLD4S",
-    [SM_OP_TXQ] = "TXQ", [SM_OP_TMML] = "TMML", [SM_OP_TXD] = "TXD", [SM_OP_BRA] = "BRA", [SM_OP_ATOM] = "ATOM", [SM_OP_RED] = "RED", [SM_OP_LEA] = "LEA", [SM_OP_SUST] = "SUST", [SM_OP_SHF] = "SHF", [SM_OP_BRX] = "BRX", [SM_OP_SSY] = "SSY",
+    [SM_OP_TXQ] = "TXQ", [SM_OP_TMML] = "TMML", [SM_OP_TXD] = "TXD", [SM_OP_BRA] = "BRA", [SM_OP_ATOM] = "ATOM", [SM_OP_RED] = "RED", [SM_OP_LEA] = "LEA", [SM_OP_SUST] = "SUST", [SM_OP_SHF] = "SHF", [SM_OP_BRX] = "BRX", [SM_OP_VMNMX] = "VMNMX", [SM_OP_SSY] = "SSY",
     [SM_OP_SYNC] = "SYNC", [SM_OP_PBK] = "PBK", [SM_OP_BRK] = "BRK", [SM_OP_PCNT] = "PCNT", [SM_OP_CONT] = "CONT",
     [SM_OP_CAL] = "CAL", [SM_OP_RET] = "RET", [SM_OP_EXIT] = "EXIT", [SM_OP_KIL] = "KIL",
 };
@@ -277,6 +278,57 @@ uint32_t sm_shf(Sm_Shf f, uint32_t a, uint32_t s, uint32_t c) {
   if (f.is_signed) r = (uint64_t)((int64_t)v >> (s > 63u ? 63u : s));
   else r = s >= 64u ? 0u : v >> s;
   return f.high ? (uint32_t)(r >> 32) : (uint32_t)r;
+}
+
+/* Source lanes: width at 37 (A) / 29 (B), 0 = byte, 2 = half, 3 = word;
+ * the part selector just below it (36 / 28); signs at 48 / 49. */
+static void video_lane(uint32_t width, uint32_t sel, uint32_t *bits, uint32_t *shift) {
+  *bits = width == 3u ? 32u : width == 2u ? 16u : 8u;
+  *shift = *bits == 32u ? 0u : sel * *bits;
+}
+
+Sm_Vmnmx sm_vmnmx_fields(uint64_t w) {
+  Sm_Vmnmx f;
+  video_lane(BITS(w, 37, 2), BIT(w, 36), &f.a_bits, &f.a_shift);
+  video_lane(BITS(w, 29, 2), BIT(w, 28), &f.b_bits, &f.b_shift);
+  f.a_signed = BIT(w, 48) != 0;
+  f.b_signed = BIT(w, 49) != 0;
+  f.b_reg = BIT(w, 50) != 0;
+  f.op = BITS(w, 51, 3);
+  f.mx = BIT(w, 56) != 0;
+  return f;
+}
+
+/* The selected part, sign-extended when signed. Comparisons are i32 if
+ * either source is signed, else u32 (exact unless a 32-bit source is
+ * unsigned against a signed one; WGSL has no i64 to do better). */
+static uint32_t video_value(uint32_t v, uint32_t bits, uint32_t shift, bool is_signed) {
+  if (bits == 32u) return v;
+  const uint32_t x = (v >> shift) & ((1u << bits) - 1u);
+  return is_signed ? (uint32_t)((int32_t)(x << (32u - bits)) >> (32u - bits)) : x;
+}
+
+static bool video_less(uint32_t x, uint32_t y, bool is_signed) {
+  return is_signed ? (int32_t)x < (int32_t)y : x < y;
+}
+
+uint32_t sm_vmnmx(Sm_Vmnmx f, uint32_t a, uint32_t b, uint32_t c) {
+  const uint32_t x = video_value(a, f.a_bits, f.a_shift, f.a_signed);
+  const uint32_t y = f.b_reg ? video_value(b, f.b_bits, f.b_shift, f.b_signed)
+                             : video_value(b, 16u, 0u, f.b_signed); /* imm16 */
+  const bool is_signed = f.a_signed || f.b_signed;
+  const uint32_t r = video_less(x, y, is_signed) != f.mx ? x : y;
+  const bool r_less = video_less(r, c, is_signed);
+  switch (f.op) {
+  case SM_VOP_MRG_16H: return (c & 0xffffu) | (r << 16);
+  case SM_VOP_MRG_16L: return (c & 0xffff0000u) | (r & 0xffffu);
+  case SM_VOP_MRG_8B0: return (c & ~0xffu) | (r & 0xffu);
+  case SM_VOP_MRG_8B2: return (c & ~0xff0000u) | ((r & 0xffu) << 16);
+  case SM_VOP_ACC: return r + c;
+  case SM_VOP_MIN: return r_less ? r : c;
+  case SM_VOP_MAX: return r_less ? c : r;
+  default: return r;
+  }
 }
 
 int64_t sm_brx_target(const Sm_Insn *in, uint32_t index, uint32_t ra) {
@@ -2012,6 +2064,13 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
       if (sum >> 32) carry |= (Sm_Mask)1 << l;
     }
     if (pd != SM_PT) set_pred(t, pd, m, carry);
+    return;
+  }
+  case SM_OP_VMNMX: {
+    const Sm_Vmnmx f = sm_vmnmx_fields(w);
+    const uint32_t *a = t->r[REG_A(w)], *b = t->r[BITS(w, 20, 8)], *c = t->r[REG_C(w)], imm = BITS(w, 20, 16);
+    uint32_t *d = dst_row(t, REG_D(w));
+    LANES_ASSIGN(m, d, sm_vmnmx(f, a[l], f.b_reg ? b[l] : imm, c[l]));
     return;
   }
   case SM_OP_SHF: {

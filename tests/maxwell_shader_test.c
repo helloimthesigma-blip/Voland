@@ -474,6 +474,50 @@ static void test_funnel_shift(void) {
   }
 }
 
+/* VMNMX: min/max of Ra and B, then MIN/MAX/ACC/merge with Rc. The two
+ * words decoded verbatim are TOTK's (VMNMX.U32.U32.MAX.MX). */
+static void test_vmnmx(void) {
+  const Sm_Vmnmx totk = sm_vmnmx_fields(0x3b3405e060670805ull);
+  CHECK(totk.mx && totk.op == SM_VOP_MAX && totk.b_reg && totk.a_bits == 32u && totk.b_bits == 32u &&
+            !totk.a_signed && !totk.b_signed,
+        "TOTK's VMNMX fields: .MX .MAX, 32-bit unsigned registers");
+  CHECK(sm_vmnmx(totk, 3, 9, 5) == 9u && sm_vmnmx(totk, 3, 4, 7) == 7u, "max(max(a, b), c)");
+  Sm_Vmnmx f = totk;
+  f.mx = false;
+  f.op = SM_VOP_MIN;
+  CHECK(sm_vmnmx(f, 3, 9, 1) == 1u && sm_vmnmx(f, 3, 9, 5) == 3u, "min(min(a, b), c)");
+  f.a_signed = true;
+  CHECK(sm_vmnmx(f, 0xffffffffu, 2, 7) == 0xffffffffu, "signed: -1 < 2");
+  f.op = SM_VOP_ACC;
+  CHECK(sm_vmnmx(f, 4, 9, 100) == 104u, ".ACC adds c");
+  f.op = SM_VOP_MRG_16H;
+  CHECK(sm_vmnmx(f, 4, 9, 0x12345678u) == 0x00045678u, ".MRG_16H puts the result in the high half");
+  f.a_bits = 16;
+  f.a_shift = 16;
+  f.a_signed = false;
+  f.op = SM_VOP_MAX + 1u; /* no second step */
+  CHECK(sm_vmnmx(f, 0x00070001u, 9, 0) == 7u, "H1 selects the high half");
+  f.b_reg = false;
+  f.b_signed = true;
+  f.mx = true;
+  CHECK(sm_vmnmx(f, 0x00070001u, 0xfffeu, 0) == 7u, "signed imm16 -2 < 7");
+
+  Builder b;
+  begin(&b, SM_STAGE_VERTEX);
+  emit(&b, MOV32I(8, 3));
+  emit(&b, MOV32I(6, 9));
+  emit(&b, MOV32I(11, 12));
+  emit(&b, 0x3b3405e060670805ull); /* R5 = max(max(R8, R6), R11) */
+  emit(&b, EXIT());
+  load(&b);
+  sm_thread_reset(&g_thread, 1);
+  bool decoded = false;
+  for (uint32_t i = 0; i < SM_MAX_WORDS; i++) decoded |= g_prog.insns[i].op == SM_OP_VMNMX;
+  CHECK(decoded && g_prog.unknown_ops == 0, "TOTK's VMNMX word decodes");
+  CHECK(run(), "VMNMX program runs");
+  CHECK(g_thread.r[5][0] == 12u, "VMNMX through the interpreter: %u", g_thread.r[5][0]);
+}
+
 /* LEA: Rd = (Ra << shift) + B (TOTK's index * 4 + base), with .NEG and the
  * carry out to a predicate. */
 static void test_lea(void) {
@@ -708,6 +752,7 @@ int main(void) {
   test_divergence();
   test_indirect_branch();
   test_funnel_shift();
+  test_vmnmx();
   test_lea();
   test_atomics();
   test_derivatives();

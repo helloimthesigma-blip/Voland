@@ -468,6 +468,21 @@ static const char *const k_prelude[] = {
     "  else if (s > 0u) { rl = (a >> s) | (c << (32u - s)); rh = select(c >> s, u32(i32(c) >> s), sg); }\n"
     "  return select(rl, rh, hi);\n"
     "}\n"
+    /* maxwell_shader.c sm_vmnmx: parts as (bits, shift); bits 32 = whole. */
+    "fn vpart_(v: u32, bits: u32, sh: u32, sg: bool) -> u32 {\n"
+    "  if (bits >= 32u) { return v; } let x = (v >> sh) & ((1u << bits) - 1u);\n"
+    "  return select(x, u32(i32(x << (32u - bits)) >> (32u - bits)), sg);\n"
+    "}\n"
+    "fn vless_(x: u32, y: u32, sg: bool) -> bool { return select(x < y, i32(x) < i32(y), sg); }\n"
+    "fn vmnmx_(x: u32, y: u32, c: u32, sg: bool, mx: bool, op: u32) -> u32 {\n"
+    "  let r = select(y, x, vless_(x, y, sg) != mx); let rl = vless_(r, c, sg);\n"
+    "  switch (op) {\n"
+    "    case 0u: { return (c & 0xffffu) | (r << 16u); } case 1u: { return (c & 0xffff0000u) | (r & 0xffffu); }\n"
+    "    case 2u: { return (c & ~0xffu) | (r & 0xffu); } case 3u: { return (c & ~0xff0000u) | ((r & 0xffu) << 16u); }\n"
+    "    case 4u: { return r + c; } case 5u: { return select(c, r, rl); } case 6u: { return select(r, c, rl); }\n"
+    "    default: { return r; }\n"
+    "  }\n"
+    "}\n"
     "fn shr_(a: u32, s: u32, sg: bool) -> u32 {\n"
     "  if (sg) { return u32(i32(a) >> min(s, 31u)); }\n"
     "  if (s >= 32u) { return 0u; } return a >> s;\n"
@@ -1615,6 +1630,17 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
          op_b(t, in).s);
     set_pred(t, pd, "s < x");
     EMIT("%s = s; } ", reg_dst(t, REG_D(w)).s);
+    return;
+  }
+  case SM_OP_VMNMX: {
+    const Sm_Vmnmx f = sm_vmnmx_fields(w);
+    const Ex a = reg(t, REG_A(w)), c = reg(t, REG_C(w));
+    const Ex y = f.b_reg ? ex("vpart_(%s, %uu, %uu, %s)", reg(t, BITS(w, 20, 8)).s, f.b_bits, f.b_shift,
+                              f.b_signed ? "true" : "false")
+                         : ex("vpart_(%uu, 16u, 0u, %s)", BITS(w, 20, 16), f.b_signed ? "true" : "false");
+    EMIT("%s = vmnmx_(vpart_(%s, %uu, %uu, %s), %s, %s, %s, %s, %uu); ", reg_dst(t, REG_D(w)).s, a.s, f.a_bits,
+         f.a_shift, f.a_signed ? "true" : "false", y.s, c.s, f.a_signed || f.b_signed ? "true" : "false",
+         f.mx ? "true" : "false", f.op);
     return;
   }
   case SM_OP_SHF: {
