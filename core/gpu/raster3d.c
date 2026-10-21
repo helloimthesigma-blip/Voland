@@ -4798,19 +4798,22 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
              t0->alpha_op, t0->color_src, t0->alpha_src, t0->color_dst, t0->alpha_dst, rs.depth_test, rs.depth_write,
              rs.depth_func, rs.cull, (unsigned long long)(r->stats.triangles - triangles_before),
              (unsigned long long)(r->stats.pixels - pixels_before));
-    for (uint32_t slot = 0; slot < SM_CBUF_SLOTS; slot++) { /* the pixel program's constants it reads */
-      const Sm_Env *pe = &ctx->env[1];
-      if (!(ctx->ps->cbuf_used & (1u << slot)) || !pe->cbuf[slot]) continue;
-      const uint32_t n = ctx->ps->cbuf_extent[slot] < pe->cbuf_size[slot] ? ctx->ps->cbuf_extent[slot] : pe->cbuf_size[slot];
-      char line[512];
+    for (uint32_t k = 0; k < 2u * SM_CBUF_SLOTS; k++) { /* the constants each program reads */
+      const uint32_t stage = k < SM_CBUF_SLOTS ? 1u : 0u, slot = k % SM_CBUF_SLOTS;
+      const Sm_Program *prog = stage ? ctx->ps : ctx->vs;
+      const Sm_Env *pe = &ctx->env[stage];
+      if (!(prog->cbuf_used & (1u << slot)) || !pe->cbuf[slot]) continue;
+      const uint32_t n = prog->cbuf_extent[slot] < pe->cbuf_size[slot] ? prog->cbuf_extent[slot] : pe->cbuf_size[slot];
+      char line[1536];
       size_t at = 0;
-      for (uint32_t o = 0; o + 4u <= n && o < 96u && at + 12u < sizeof(line); o += 4u) {
+      for (uint32_t o = 0; o + 4u <= n && o < 320u && at + 12u < sizeof(line); o += 4u) {
         float f;
         memcpy(&f, pe->cbuf[slot] + o, 4);
         at += (size_t)snprintf(line + at, sizeof(line) - at, " %g", (double)f);
       }
       line[at] = '\0';
-      log_info("[gpu]   ps c%u (%u bytes):%s", slot, n, line);
+      log_info("[gpu]   %s c%u @%llx (%u bytes):%s", stage ? "ps" : "vs", slot,
+               (unsigned long long)ctx->cbuf_address[stage][slot], n, line);
     }
     const Tex_Resolver *res = &g_band_state[0].resolver;
     for (uint32_t i = 0; i < res->count; i++) {
