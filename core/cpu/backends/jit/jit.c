@@ -794,7 +794,7 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
   const bool async = async_compile_possible();
   Jit_Entry *slot = victim(t, pc);
   if (async && slot->pc == pc && slot->pending) return; /* already on its way */
-  const Jit_Code_Source source = {source_page_code, source_peek64, source_entry_reg, (void *)(uintptr_t)s};
+  const Jit_Code_Source source = {source_page_code, source_peek64, source_entry_reg, (void *)(uintptr_t)s, s->fpcr};
   Jit_Link link;
   link.cache_address = (uint64_t)(uintptr_t)t->cache;
   /* The shared code generation, not this thread's view of it: another

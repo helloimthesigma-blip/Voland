@@ -651,6 +651,11 @@ shows it next to the backend name.
   generations. Under Node, CPU to the same slice: Nine Sols 345 -> 182 s
   (with raster3d's compute memo), Celeste 79 -> 57 s, Silksong 176 ->
   150 s.
+- **0.5.1** (2026-10-21) - flush-to-zero: a region compiled under FPCR =
+  FZ alone (TOTK) keeps the scalar and vector FP fast paths, guarded on
+  that FPCR and on no subnormal input or result. TOTK under Node: direct
+  SIMD&FP calls 751 M -> 77 M, 255 -> 211 s to the same slice.
+  Store-exclusives need the same address and size in every mode.
 
 ## What a region costs on V8
 

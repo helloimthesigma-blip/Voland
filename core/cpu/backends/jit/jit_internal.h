@@ -167,6 +167,9 @@ typedef struct Jit_Code_Source {
    * (predictions only, always guarded). NULL: none. */
   bool (*entry_reg)(void *context, uint32_t index, uint64_t *value);
   void *context;
+  /* FPCR when the region is compiled: FP fast paths specialize on it
+   * (always guarded - another FPCR takes the exact path). */
+  uint32_t fpcr;
 } Jit_Code_Source;
 
 /* Compiles the region at `pc` - the block there plus blocks it reaches by

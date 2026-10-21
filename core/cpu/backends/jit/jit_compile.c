@@ -273,6 +273,7 @@ typedef struct Ctx {
   uint32_t tlb_uses[2][31];
   uint8_t tlb_slot[2][31];
   bool a32;               /* the code is A32 (jit_compile_a32.inc) */
+  bool fz;                /* compiled under FPCR = FZ only: FZ-safe fast paths guard on that */
 } Ctx;
 
 /* ------------------------------------------------------------------ */
@@ -2316,9 +2317,50 @@ static void emit_fpcr_default(Ctx *c) {
   mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPCR);
   op(c, WASM_OP_I32_EQZ);
 }
+
+/* FZ alone (flush-to-zero; TOTK runs with it): a native result is the
+ * architectural one whenever no input and no result is subnormal - the
+ * only values FZ changes. Fast arms that check that (emit_not_subnormal)
+ * pass fz_safe, and a region compiled under FPCR = FZ guards on it
+ * instead of FPCR = 0. */
+#define FPCR_FZ_ONLY 0x01000000u
+
+/* i32: FPCR is what the fast arm assumes. */
+static void emit_fpcr_mode(Ctx *c, bool fz_safe) {
+  if (!fz_safe || !c->fz) {
+    emit_fpcr_default(c);
+    return;
+  }
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPCR);
+  i32c(c, (int32_t)FPCR_FZ_ONLY);
+  op(c, WASM_OP_I32_EQ);
+}
+
+/* Under FZ only: AND the i32 on the stack with "local is not subnormal"
+ * (zero, normal, infinite or NaN). Nothing when FZ is not compiled in. */
+static void and_not_subnormal(Ctx *c, uint32_t local, bool dbl) {
+  if (!c->fz) return;
+  lget(c, local);
+  op(c, dbl ? WASM_OP_F64_ABS : WASM_OP_F32_ABS);
+  if (dbl) f64c(c, FP_MIN_NORMAL_D);
+  else f32c(c, FP_MIN_NORMAL_S);
+  op(c, dbl ? WASM_OP_F64_LT : WASM_OP_F32_LT);
+  lget(c, local);
+  if (dbl) f64c(c, 0);
+  else f32c(c, 0);
+  op(c, dbl ? WASM_OP_F64_NE : WASM_OP_F32_NE);
+  op(c, WASM_OP_I32_AND);
+  op(c, WASM_OP_I32_EQZ);
+  op(c, WASM_OP_I32_AND);
+}
+
+static void emit_fp_env_ok_as(Ctx *c, bool fz_safe);
+static void emit_fp_env_ok_exact_as(Ctx *c, bool fz_safe);
 /* i32: FPCR == 0 and FPSR.IXC set. */
-static void emit_fp_env_ok(Ctx *c) {
-  emit_fpcr_default(c);
+static void emit_fp_env_ok(Ctx *c) { emit_fp_env_ok_as(c, false); }
+static void emit_fp_env_ok_as(Ctx *c, bool fz_safe) {
+  emit_fpcr_mode(c, fz_safe);
   lget(c, L_STATE);
   mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
   i32c(c, FPSR_IXC_BIT);
@@ -2334,8 +2376,9 @@ static void emit_fp_env_ok(Ctx *c) {
 /* i32: FPCR == 0 and (FPSR.IXC set, or L_EXACT known). With IXC clear an
  * exact result leaves the flags alone and an inexact one sets IXC in the
  * fast arm (fp_note_inexact): neither needs softfloat. */
-static void emit_fp_env_ok_exact(Ctx *c) {
-  emit_fpcr_default(c);
+static void emit_fp_env_ok_exact(Ctx *c) { emit_fp_env_ok_exact_as(c, false); }
+static void emit_fp_env_ok_exact_as(Ctx *c, bool fz_safe) {
+  emit_fpcr_mode(c, fz_safe);
   lget(c, L_STATE);
   mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
   i32c(c, FPSR_IXC_BIT);
@@ -2679,6 +2722,7 @@ static void emit_fp_arith_lane(Ctx *c, bool dbl, uint32_t opcode, bool two, uint
   lset(c, r);
   if (two && (opcode == 2u || opcode == 3u)) { /* FADD, FSUB: any finite result is exact or merely inexact */
     emit_result_finite(c, r, dbl);
+    and_not_subnormal(c, r, dbl); /* FZ would flush it */
   } else { /* normal, or an exact zero: x*0, 0/x, sqrt(+-0) */
     emit_result_normal(c, r, dbl);
     emit_is_zero(c, r, dbl);
@@ -2695,8 +2739,10 @@ static void emit_fp_arith_lane(Ctx *c, bool dbl, uint32_t opcode, bool two, uint
     }
     op(c, WASM_OP_I32_OR);
   }
+  and_not_subnormal(c, a, dbl);
+  if (two) and_not_subnormal(c, b, dbl);
   emit_arith_exact(c, dbl, opcode, two, a, b, r);
-  emit_fp_env_ok_exact(c);
+  emit_fp_env_ok_exact_as(c, true);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   store_fp_local(c, d, dbl, r);
@@ -2766,7 +2812,9 @@ static void emit_fp_min_max(Ctx *c, bool dbl, bool min, uint32_t n, uint32_t m, 
   lget(c, b);
   op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
   op(c, WASM_OP_I32_AND);
-  emit_fpcr_default(c);
+  and_not_subnormal(c, a, dbl);
+  and_not_subnormal(c, b, dbl);
+  emit_fpcr_mode(c, true);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   store_fp_local(c, d, dbl, r);
@@ -2796,7 +2844,9 @@ static void emit_fp_compare(Ctx *c, bool dbl, uint32_t n, uint32_t m, bool with_
   lget(c, b);
   op(c, eq);
   op(c, WASM_OP_I32_AND);
-  emit_fpcr_default(c);
+  and_not_subnormal(c, a, dbl);
+  and_not_subnormal(c, b, dbl);
+  emit_fpcr_mode(c, true);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   i32c(c, CPU_PSTATE_N);                  /* a < b: 1000 */
@@ -2846,8 +2896,9 @@ static void emit_int_to_fp(Ctx *c, bool sf, bool is_unsigned, bool dbl, uint32_t
     op(c, dbl ? WASM_OP_F64_MUL : WASM_OP_F32_MUL);
   }
   lset(c, r);
+  /* Never subnormal: |integer| * 2^-64 is still a normal f32 - FZ-safe. */
   if (dbl && !sf) { /* a 32-bit integer always fits a double exactly */
-    emit_fpcr_default(c);
+    emit_fpcr_mode(c, true);
     i32c(c, FP_EXACT);
     lset(c, L_EXACT);
   } else {
@@ -2878,7 +2929,7 @@ static void emit_int_to_fp(Ctx *c, bool sf, bool is_unsigned, bool dbl, uint32_t
     i64c(c, 64u - (dbl ? F64_FRACTION_BITS + 1u : F32_FRACTION_BITS + 1u));
     op(c, WASM_OP_I64_GE_S);
     set_exactness(c);
-    emit_fp_env_ok_exact(c);
+    emit_fp_env_ok_exact_as(c, true);
   }
   fp_fast_arm(c);
   store_fp_local(c, rd, dbl, r);
@@ -2926,7 +2977,8 @@ static void emit_fp_to_int(Ctx *c, bool sf, bool is_unsigned, bool dbl, uint32_t
   op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
   set_exactness(c);
   emit_truncation_in_range(c, a, dbl, sf, is_unsigned);
-  emit_fp_env_ok_exact(c);
+  if (!fbits) and_not_subnormal(c, a, dbl); /* FZ: a subnormal input is a flushed zero (IDC, not IXC) */
+  emit_fp_env_ok_exact_as(c, fbits == 0);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   fp_note_inexact(c);
@@ -3187,6 +3239,21 @@ static void emit_lane_normal(Ctx *c, uint32_t local, bool dbl) {
   simd(c, WASM_SIMD_V128_AND);
 }
 
+/* Under FZ only: AND the lane mask on the stack with "the lane of local
+ * is not subnormal" (|x| >= smallest normal, or zero; NaN lanes clear). */
+static void and_lanes_not_subnormal(Ctx *c, uint32_t local, bool dbl) {
+  if (!c->fz) return;
+  lget(c, local);
+  simd(c, dbl ? WASM_SIMD_F64X2_ABS : WASM_SIMD_F32X4_ABS);
+  if (dbl) f64c(c, FP_MIN_NORMAL_D);
+  else f32c(c, FP_MIN_NORMAL_S);
+  simd(c, dbl ? WASM_SIMD_F64X2_SPLAT : WASM_SIMD_F32X4_SPLAT);
+  simd(c, dbl ? WASM_SIMD_F64X2_GE : WASM_SIMD_F32X4_GE);
+  emit_lane_zero(c, local, dbl);
+  simd(c, WASM_SIMD_V128_OR);
+  simd(c, WASM_SIMD_V128_AND);
+}
+
 /* i32: no f64 lane of `local` non-zero and at most the smallest f32 normal. */
 static void emit_no_tiny_singles(Ctx *c, uint32_t local) {
   lget(c, local);
@@ -3304,8 +3371,10 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
       simd(c, dbl ? WASM_SIMD_F64X2_EQ : WASM_SIMD_F32X4_EQ);
     }
     simd(c, WASM_SIMD_V128_AND);
+    and_lanes_not_subnormal(c, L_VA, dbl);
+    and_lanes_not_subnormal(c, L_VB, dbl);
     emit_all_lanes(c, q);
-    emit_fpcr_default(c);
+    emit_fpcr_mode(c, true);
     op(c, WASM_OP_I32_AND);
     fp_fast_arm(c);
     store_v(c, d, L_VR, q);
@@ -3319,6 +3388,7 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
     lset(c, L_VR);
     if (vop == VFP_ADD || vop == VFP_SUB) {
       emit_lane_finite(c, L_VR, dbl);
+      and_lanes_not_subnormal(c, L_VR, dbl);
     } else { /* normal, or an exact zero: x*0, 0/x */
       emit_lane_normal(c, L_VR, dbl);
       emit_lane_zero(c, L_VR, dbl);
@@ -3330,9 +3400,11 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
       simd(c, WASM_SIMD_V128_AND);
       simd(c, WASM_SIMD_V128_OR);
     }
+    and_lanes_not_subnormal(c, L_VA, dbl);
+    and_lanes_not_subnormal(c, L_VB, dbl);
     emit_all_lanes(c, q);
   }
-  emit_fp_env_ok(c);
+  emit_fp_env_ok_as(c, vop != VFP_MLA && vop != VFP_MLS);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   store_v(c, d, L_VR, q);
@@ -3362,8 +3434,11 @@ static void emit_vector_fp_pairwise_add(Ctx *c, bool dbl, bool q, uint32_t n, ui
   simd(c, dbl ? WASM_SIMD_F64X2_ADD : WASM_SIMD_F32X4_ADD);
   lset(c, L_VR);
   emit_lane_finite(c, L_VR, dbl);
+  and_lanes_not_subnormal(c, L_VR, dbl);
+  and_lanes_not_subnormal(c, L_VA, dbl);
+  and_lanes_not_subnormal(c, L_VB, dbl);
   emit_all_lanes(c, q);
-  emit_fp_env_ok(c);
+  emit_fp_env_ok_as(c, true);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   store_v(c, d, L_VR, q);
@@ -5483,6 +5558,7 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     analysis.link = link;
     analysis.discover = true;
     analysis.a32 = link->aarch32;
+    analysis.fz = source->fpcr == FPCR_FZ_ONLY;
     analysis.source = source;
     analysis.max_blocks = max_blocks;
     analysis.max_block_insns = max_block_insns;
@@ -5504,6 +5580,7 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     c.b = &b;
     c.link = link;
     c.a32 = link->aarch32;
+    c.fz = analysis.fz;
     c.source = source;
     memcpy(c.pages, analysis.pages, sizeof(c.pages));
     c.page_count = analysis.page_count;
