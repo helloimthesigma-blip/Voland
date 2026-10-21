@@ -17,8 +17,10 @@
 #define VOICE_OUT_BYTES 0x10u
 #define EFFECT_OUT_BYTES 0x10u
 #define EFFECT_IN_ENABLED 0x02u     /* u8 in an effect's input (type, is_new, enabled, ...) */
-#define EFFECT_STATE_ENABLED 2u     /* out status usage state */
-#define EFFECT_STATE_DISABLED 3u
+/* Out status usage states, as the SDK reads them: nn::audio::Is*Removable
+ * accepts 1 (never reported) or 4 - the renderer's "disabled". */
+#define EFFECT_STATE_ENABLED 2u
+#define EFFECT_STATE_DISABLED 4u
 #define EFFECT_TYPE_AUX 2u
 #define EFFECT_IN_SPECIFIC 0x20u        /* the type's parameters */
 #define AUX_SEND_INFO 0x40u             /* in Aux parameters: u64 send ring info address */
