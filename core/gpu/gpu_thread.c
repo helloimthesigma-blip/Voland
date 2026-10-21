@@ -39,6 +39,8 @@ void gpu_thread_wait_until(Gpu_Thread *t, uint32_t calls) {
 }
 void gpu_thread_lock(Gpu_Thread *t) { (void)t; }
 void gpu_thread_unlock(Gpu_Thread *t) { (void)t; }
+uint64_t gpu_thread_lock_wait_ns(const Gpu_Thread *t) { (void)t; return 0; }
+uint64_t gpu_thread_lock_count(const Gpu_Thread *t) { (void)t; return 0; }
 
 #else
 
@@ -68,6 +70,7 @@ struct Gpu_Thread_Impl {
   pthread_cond_t work;     /* a record was queued (or quit) */
   pthread_cond_t progress; /* a record finished */
   pthread_mutex_t state;   /* gpu_thread_lock */
+  uint64_t lock_wait_ns, lock_count; /* gpu_thread_lock's (diagnostics) */
   uint64_t head, tail;     /* byte positions: tail = next write, head = next read */
   uint32_t finished;       /* records run */
   uint32_t queued;         /* records queued (finished trails it) */
@@ -238,8 +241,19 @@ void gpu_thread_wait(Gpu_Thread *t, uint32_t seen, uint64_t timeout_ns) {
 }
 
 void gpu_thread_lock(Gpu_Thread *t) {
-  if (t && t->impl) pthread_mutex_lock(&t->impl->state);
+  if (!t || !t->impl) return;
+  if (pthread_mutex_trylock(&t->impl->state) != 0) {
+    struct timespec a, b;
+    clock_gettime(CLOCK_MONOTONIC, &a);
+    pthread_mutex_lock(&t->impl->state);
+    clock_gettime(CLOCK_MONOTONIC, &b);
+    t->impl->lock_wait_ns += (uint64_t)(b.tv_sec - a.tv_sec) * 1000000000ull + (uint64_t)(b.tv_nsec - a.tv_nsec);
+  }
+  t->impl->lock_count++;
 }
+
+uint64_t gpu_thread_lock_wait_ns(const Gpu_Thread *t) { return t && t->impl ? t->impl->lock_wait_ns : 0; }
+uint64_t gpu_thread_lock_count(const Gpu_Thread *t) { return t && t->impl ? t->impl->lock_count : 0; }
 
 void gpu_thread_unlock(Gpu_Thread *t) {
   if (t && t->impl) pthread_mutex_unlock(&t->impl->state);

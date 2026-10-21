@@ -67,5 +67,9 @@ void gpu_thread_wait_until(Gpu_Thread *t, uint32_t calls);
  * in synchronous mode. */
 void gpu_thread_lock(Gpu_Thread *t);
 void gpu_thread_unlock(Gpu_Thread *t);
+/* Host time callers spent waiting in gpu_thread_lock, and how many locked
+ * (diagnostics: guest ioctls blocked behind command processing). */
+uint64_t gpu_thread_lock_wait_ns(const Gpu_Thread *t);
+uint64_t gpu_thread_lock_count(const Gpu_Thread *t);
 
 #endif /* SWITCH_GPU_GPU_THREAD_H */

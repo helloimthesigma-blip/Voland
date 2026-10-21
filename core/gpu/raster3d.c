@@ -3079,6 +3079,26 @@ static void gpu_surface_upload(Raster3d *r, Raster3d_Gpu_Surface *s, const Gpu_M
 
 #define SURFACE_DROP_LOG_LIMIT 16u /* "table full" warnings (a title cycling targets drops old ones steadily) */
 
+/* The address index over gpu_surfaces (Raster3d.gpu_surface_head). */
+#define SURFACE_HASH_MULTIPLIER 0x9E3779B97F4A7C15ull
+#define SURFACE_HASH_SHIFT 52u /* 64 - log2(RASTER_GPU_SURFACE_BUCKETS) */
+#define SURFACE_ADDRESS_GRAIN 8u /* targets start at least 256 bytes apart */
+static uint32_t surface_bucket(uint64_t address) {
+  return (uint32_t)(((address >> SURFACE_ADDRESS_GRAIN) * SURFACE_HASH_MULTIPLIER) >> SURFACE_HASH_SHIFT);
+}
+
+static void surface_index_add(Raster3d *r, uint32_t slot) {
+  const uint32_t b = surface_bucket(r->gpu_surfaces[slot].address);
+  r->gpu_surface_next[slot] = r->gpu_surface_head[b];
+  r->gpu_surface_head[b] = (uint16_t)(slot + 1u);
+}
+
+static void surface_index_remove(Raster3d *r, uint32_t slot) {
+  uint16_t *link = &r->gpu_surface_head[surface_bucket(r->gpu_surfaces[slot].address)];
+  while (*link && *link != slot + 1u) link = &r->gpu_surface_next[*link - 1u];
+  if (*link) *link = r->gpu_surface_next[slot];
+}
+
 /* The GPU surface for a render target, created on first use. `load`:
  * its current guest contents matter (not about to be fully overwritten). */
 static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d, const Gpu_Memory *mem, bool load) {
@@ -3088,8 +3108,10 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
    * (one that is the target samples it through gpu_surface_at). Forcing
    * a whole re-hash per bound target cost SSBU ~1.5 GB hashed per frame. */
   Raster3d_Gpu_Surface *victim = NULL;
-  for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
-    Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
+  for (uint32_t at = r->gpu_surface_head[surface_bucket(d->address)]; at;) {
+    Raster3d_Gpu_Surface *s = &r->gpu_surfaces[at - 1u];
+    const uint32_t slot = at - 1u;
+    at = r->gpu_surface_next[slot];
     if (!s->in_use || s->address != d->address) continue;
     if (s->width == d->width && s->height == d->height && s->format == d->format && s->depth == d->depth) {
       s->last_used = r->tick;
@@ -3098,6 +3120,7 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
       return s;
     }
     gpu_destroy(r, s->id); /* re-described */
+    surface_index_remove(r, slot);
     s->in_use = false;
   }
   for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
@@ -3108,17 +3131,20 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
     }
     if (!victim || s->last_used < victim->last_used) victim = s;
   }
+  const uint32_t victim_slot = (uint32_t)(victim - r->gpu_surfaces);
   if (victim->in_use) {
     static uint32_t dropped;
     if (dropped++ < SURFACE_DROP_LOG_LIMIT)
       log_warn("[gpu] GPU surface table full: dropping %ux%u @%llx (least recently used)", victim->width, victim->height,
                (unsigned long long)victim->address);
     gpu_destroy(r, victim->id);
+    surface_index_remove(r, victim_slot);
   }
   memset(victim, 0, sizeof(*victim));
   victim->in_use = true;
   victim->id = gpu_new_id(r);
   victim->address = d->address;
+  surface_index_add(r, victim_slot);
   victim->cpu_address = d->address;
   if (mem->translate && !mem->translate(mem->user, d->address, &victim->cpu_address)) victim->cpu_address = 0;
   victim->width = d->width;
@@ -3238,12 +3264,13 @@ static Raster3d_Gpu_Surface *gpu_surface_touch(Raster3d *r, Raster3d_Gpu_Surface
 }
 
 static Raster3d_Gpu_Surface *gpu_surface_at(Raster3d *r, uint64_t address, uint32_t width) {
-  for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
-    Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
+  const uint32_t head = r->gpu_surface_head[surface_bucket(address)];
+  for (uint32_t at = head; at; at = r->gpu_surface_next[at - 1u]) {
+    Raster3d_Gpu_Surface *s = &r->gpu_surfaces[at - 1u];
     if (s->in_use && s->address == address && (!width || s->width == width)) return gpu_surface_touch(r, s);
   }
-  for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) { /* a GOB-padded target */
-    Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
+  for (uint32_t at = head; at; at = r->gpu_surface_next[at - 1u]) { /* a GOB-padded target */
+    Raster3d_Gpu_Surface *s = &r->gpu_surfaces[at - 1u];
     if (s->in_use && s->address == address && surface_width_matches(s, width)) return gpu_surface_touch(r, s);
   }
   return NULL;
@@ -3586,7 +3613,12 @@ static uint64_t g_vs_cpu_globals;
 
 static bool gpu_plan_globals(Draw_Context *ctx, Gpu_Draw *g, uint64_t *words) {
   Wgsl_Globals found;
-  if (!wgsl_find_globals(ctx->vs, &found)) return false;
+  if (!wgsl_find_globals(ctx->vs, &found)) {
+    if (!g_vs_cpu_globals++)
+      log_warn("[gpu] vertices on the CPU: program %llx reads global memory through addresses not traced to a "
+               "constant buffer", (unsigned long long)ctx->vs->address);
+    return false;
+  }
   uint64_t total = 0;
   for (uint32_t k = 0; k < found.count; k++) {
     const uint64_t at = ctx->cbuf_address[0][found.slot[k]];
@@ -3597,8 +3629,9 @@ static bool gpu_plan_globals(Draw_Context *ctx, Gpu_Draw *g, uint64_t *words) {
     total += ((uint64_t)desc[2] + 7u) & ~(uint64_t)3u;
     if (!g->global_base[k] || !desc[2] || total > GPU_GLOBAL_BYTES) {
       if (!g_vs_cpu_globals++)
-        log_warn("[gpu] vertices on the CPU: global buffer of %u bytes at 0x%llx", desc[2],
-                 (unsigned long long)g->global_base[k]);
+        log_warn("[gpu] vertices on the CPU: program %llx: global buffer of %u bytes at 0x%llx (c%u[0x%x])",
+                 (unsigned long long)ctx->vs->address, desc[2], (unsigned long long)g->global_base[k], found.slot[k],
+                 found.offset[k]);
       return false;
     }
   }
@@ -3617,7 +3650,9 @@ static uint64_t g_vs_cpu_small;
 static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_t topology, uint32_t vertex_count) {
   Gpu_Draw *g = &g_gpu_draw;
   if (ctx->r->cpu_vertices) return;
+  Raster3d_Gpu_Stats *st = &ctx->r->gpu_stats;
   if (!vs_topology(topology)) {
+    st->cpu_vs_topology++;
     if (!g_vs_cpu_topology++) log_warn("[gpu] vertices on the CPU: topology %u", topology);
     return;
   }
@@ -3627,19 +3662,27 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
     if (ctx->env[0].cbuf[s]) words += ctx->env[0].cbuf_size[s] / 4u;
     if (ctx->env[1].cbuf[s]) words += ctx->env[1].cbuf_size[s] / 4u;
   }
-  if (ctx->vs->uses_bindless_textures) return; /* its handles need a shaded probe: the CPU path */
-  if (wgsl_reads_globals(ctx->vs) && !gpu_plan_globals(ctx, g, &words)) return;
+  if (ctx->vs->uses_bindless_textures) { /* its handles need a shaded probe: the CPU path */
+    st->cpu_vs_bindless++;
+    return;
+  }
+  if (wgsl_reads_globals(ctx->vs) && !gpu_plan_globals(ctx, g, &words)) {
+    st->cpu_vs_globals++;
+    return;
+  }
   uint64_t vs_words = 0;
   for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++)
     if (ctx->env[0].cbuf[s]) vs_words += cbuf_words_read(ctx->vs, &ctx->env[0], s);
   for (uint32_t k = 0; k < g->global_count; k++) vs_words += g->global_size[k] / 4u;
   if (vs_words * 4u > (uint64_t)vertex_count * GPU_VS_BYTES_PER_VERTEX) {
+    st->cpu_vs_small++;
     if (!g_vs_cpu_small++)
       log_warn("[gpu] vertices on the CPU: %u vertices, %llu bytes of vertex constants", vertex_count,
                (unsigned long long)vs_words * 4u);
     return;
   }
   if (words > GPU_DATA_WINDOW_WORDS) {
+    st->cpu_vs_window++;
     if (!g_vs_cpu_window++) log_warn("[gpu] vertices on the CPU: constant buffers of %llu words", (unsigned long long)words);
     return;
   }

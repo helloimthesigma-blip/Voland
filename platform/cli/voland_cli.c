@@ -1619,6 +1619,11 @@ static int run(int argc, char **argv) {
     fprintf(stderr, "voland-cli: GPU probe runs %llu (bindless pixel programs), bulk triangles %llu of %llu\n",
             (unsigned long long)gs->probe_runs, (unsigned long long)gs->bulk_triangles,
             (unsigned long long)gs->triangles);
+    fprintf(stderr, "voland-cli: GPU lock: %llu ioctls, %.2f s waiting for command processing\n",
+            (unsigned long long)gpu_thread_lock_count(&emu.gpu_thread), (double)gpu_thread_lock_wait_ns(&emu.gpu_thread) / 1e9);
+    fprintf(stderr, "voland-cli: GPU CPU-vertex draws: topology %llu, bindless %llu, globals %llu, small %llu, window %llu\n",
+            (unsigned long long)gs->cpu_vs_topology, (unsigned long long)gs->cpu_vs_bindless,
+            (unsigned long long)gs->cpu_vs_globals, (unsigned long long)gs->cpu_vs_small, (unsigned long long)gs->cpu_vs_window);
     fprintf(stderr, "voland-cli: GPU compute output read by draws: %llu vertex streams (%llu MB), %llu constant buffers\n",
             (unsigned long long)gs->compute_fed_streams, (unsigned long long)(gs->compute_fed_stream_bytes >> 20),
             (unsigned long long)gs->compute_fed_cbufs);

@@ -77,6 +77,7 @@ struct Gpu_Stream;
  * MK8DX keeps well over 64 (light-probe faces and their mips at 32x32
  * and below, plus the frame's 1080p targets). */
 #define RASTER_GPU_SURFACES 2048u
+#define RASTER_GPU_SURFACE_BUCKETS 4096u /* the address index over them (a power of two) */
 #define RASTER_GPU_SHADERS 1024u
 #define RASTER_GPU_GATHERS 8u /* 3D textures assembled from slice render targets */
 
@@ -180,6 +181,10 @@ typedef struct Raster3d_Gpu_Stats {
   /* Compute dispatches sent to the GPU (stream version 6), and pulled
    * streams read from GPU-written mirror pages. */
   uint64_t gpu_dispatches, resident_streams;
+  /* Draws whose vertices were shaded on the CPU, by reason: points or
+   * lines, bindless textures in the vertex program, unplannable global
+   * buffers, constants large for the vertex count, the data window. */
+  uint64_t cpu_vs_topology, cpu_vs_bindless, cpu_vs_globals, cpu_vs_small, cpu_vs_window;
 } Raster3d_Gpu_Stats;
 
 typedef struct Raster3d_Stats {
@@ -246,6 +251,10 @@ typedef struct Raster3d {
   struct Gpu_Stream *gpu;
   uint32_t gpu_next_id;
   Raster3d_Gpu_Surface gpu_surfaces[RASTER_GPU_SURFACES];
+  /* gpu_surfaces in use, by address: bucket heads and chains of slot + 1
+   * (0 ends a chain). Texture bindings look up every draw. */
+  uint16_t gpu_surface_head[RASTER_GPU_SURFACE_BUCKETS];
+  uint16_t gpu_surface_next[RASTER_GPU_SURFACES];
   /* A 3D texture whose slices the guest drew as separate render targets
    * (raster3d.c gpu_gather_slices): the slices copied into one layered
    * GPU texture before a draw samples it. */
