@@ -115,7 +115,7 @@ static const Op_Pattern k_patterns[] = {
     /* memory */
     {0xfff8, 0xefd8, SM_OP_ALD, R, 0}, {0xfff8, 0xeff0, SM_OP_AST, R, 0}, {0xff00, 0xe000, SM_OP_IPA, R, 0},
     {0xfff8, 0xef90, SM_OP_LDC, R, 0},
-    {0xfff0, 0xeb20, SM_OP_SUST, R, 0},
+    {0xfff0, 0xeb20, SM_OP_SUST, R, 0}, {0xfff8, 0xebf8, SM_OP_RED, R, 0}, {0xff00, 0xed00, SM_OP_ATOM, R, 0},
     {0xfff8, 0xeed0, SM_OP_LDG, R, 0}, {0xfff8, 0xeed8, SM_OP_STG, R, 0},
     {0xfff8, 0xef40, SM_OP_LDL, R, 0}, {0xfff8, 0xef50, SM_OP_STL, R, 0},
     {0xfff8, 0xef48, SM_OP_LDL, R, 0}, {0xfff8, 0xef58, SM_OP_STL, R, 0}, /* LDS/STS: per-invocation */
@@ -159,7 +159,7 @@ static const char *const k_names[SM_OP_COUNT] = {
     [SM_OP_IPA] = "IPA", [SM_OP_LDC] = "LDC", [SM_OP_LD] = "LD", [SM_OP_ST] = "ST", [SM_OP_LDG] = "LDG",
     [SM_OP_STG] = "STG", [SM_OP_LDL] = "LDL", [SM_OP_STL] = "STL", [SM_OP_OUT] = "OUT", [SM_OP_TEX] = "TEX", [SM_OP_TEX_B] = "TEX.B",
     [SM_OP_TEXS] = "TEXS", [SM_OP_TLD] = "TLD", [SM_OP_TLDS] = "TLDS", [SM_OP_TLD4] = "TLD4", [SM_OP_TLD4S] = "TLD4S",
-    [SM_OP_TXQ] = "TXQ", [SM_OP_TMML] = "TMML", [SM_OP_TXD] = "TXD", [SM_OP_BRA] = "BRA", [SM_OP_LEA] = "LEA", [SM_OP_SUST] = "SUST", [SM_OP_SHF] = "SHF", [SM_OP_BRX] = "BRX", [SM_OP_SSY] = "SSY",
+    [SM_OP_TXQ] = "TXQ", [SM_OP_TMML] = "TMML", [SM_OP_TXD] = "TXD", [SM_OP_BRA] = "BRA", [SM_OP_ATOM] = "ATOM", [SM_OP_RED] = "RED", [SM_OP_LEA] = "LEA", [SM_OP_SUST] = "SUST", [SM_OP_SHF] = "SHF", [SM_OP_BRX] = "BRX", [SM_OP_SSY] = "SSY",
     [SM_OP_SYNC] = "SYNC", [SM_OP_PBK] = "PBK", [SM_OP_BRK] = "BRK", [SM_OP_PCNT] = "PCNT", [SM_OP_CONT] = "CONT",
     [SM_OP_CAL] = "CAL", [SM_OP_RET] = "RET", [SM_OP_EXIT] = "EXIT", [SM_OP_KIL] = "KIL",
 };
@@ -283,6 +283,39 @@ int64_t sm_brx_target(const Sm_Insn *in, uint32_t index, uint32_t ra) {
   const int64_t offset = (int64_t)(int32_t)ra + (int64_t)(int32_t)in->imm;
   if (offset % 8) return -1;
   return (int64_t)index + 1 + offset / 8;
+}
+
+uint64_t sm_atomic(uint32_t op, uint32_t size, uint64_t old, uint64_t src) {
+  const bool wide = size == SM_ATOM_U64 || size == SM_ATOM_S64;
+  const bool is_signed = size == SM_ATOM_S32 || size == SM_ATOM_S64;
+  if (!wide) {
+    old &= 0xffffffffu;
+    src &= 0xffffffffu;
+  }
+  if (size == SM_ATOM_F32 && op == SM_ATOM_ADD) {
+    float a, b;
+    uint32_t ua = (uint32_t)old, ub = (uint32_t)src;
+    memcpy(&a, &ua, 4);
+    memcpy(&b, &ub, 4);
+    a += b;
+    memcpy(&ua, &a, 4);
+    return ua;
+  }
+  const int64_t so = wide ? (int64_t)old : (int64_t)(int32_t)old, ss = wide ? (int64_t)src : (int64_t)(int32_t)src;
+  uint64_t r;
+  switch (op) {
+  case SM_ATOM_ADD: r = old + src; break;
+  case SM_ATOM_MIN: r = is_signed ? (so < ss ? old : src) : (old < src ? old : src); break;
+  case SM_ATOM_MAX: r = is_signed ? (so > ss ? old : src) : (old > src ? old : src); break;
+  case SM_ATOM_INC: r = old >= src ? 0u : old + 1u; break;
+  case SM_ATOM_DEC: r = (old == 0u || old > src) ? src : old - 1u; break;
+  case SM_ATOM_AND: r = old & src; break;
+  case SM_ATOM_OR: r = old | src; break;
+  case SM_ATOM_XOR: r = old ^ src; break;
+  case SM_ATOM_EXCH: r = src; break;
+  default: r = old; break;
+  }
+  return wide ? r : r & 0xffffffffu;
 }
 
 uint32_t sm_hash(const uint8_t *bytes, uint32_t size) {
@@ -2290,6 +2323,34 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
       } else {
         regs_to_bytes(t, REG_D(w), size, buf, l);
         if (env->global_write) (void)env->global_write(env->user, addr, buf, n);
+      }
+    }
+    return;
+  }
+  case SM_OP_ATOM:
+  case SM_OP_RED: {
+    /* RED: value Rb at 0-7, size 20-22, op 23-25; ATOM: Rd at 0-7, Rb at
+     * 20-27, size 49-51, op 52-55. Both: address Ra (+ Ra+1 << 32 with
+     * .E, bit 48) + a signed 20-bit offset at 28. Lanes go one at a time,
+     * so a warp's own updates combine as on hardware. */
+    const bool red = in->op == SM_OP_RED;
+    const uint32_t ra = REG_A(w), rv = red ? REG_D(w) : BITS(w, 20, 8), rd = REG_D(w);
+    const uint32_t size = red ? BITS(w, 20, 3) : BITS(w, 49, 3), op = red ? BITS(w, 23, 3) : BITS(w, 52, 4);
+    const bool wide_addr = BIT(w, 48) != 0, wide = size == SM_ATOM_U64 || size == SM_ATOM_S64;
+    const int64_t off = (int64_t)((int32_t)(BITS(w, 28, 20) << 12) >> 12);
+    if (!env->global_read || !env->global_write) return;
+    FOR_LANES(m) {
+      uint64_t addr = ra == SM_RZ ? 0u : t->r[ra][l];
+      if (wide_addr && ra != SM_RZ) addr |= (uint64_t)t->r[(ra + 1u) & 0xffu][l] << 32;
+      addr += (uint64_t)off;
+      uint64_t old = 0, src = rv == SM_RZ ? 0u : t->r[rv][l];
+      if (wide && rv != SM_RZ) src |= (uint64_t)t->r[(rv + 1u) & 0xffu][l] << 32;
+      if (!env->global_read(env->user, addr, &old, wide ? 8u : 4u)) continue;
+      const uint64_t result = sm_atomic(op, size, old, src);
+      (void)env->global_write(env->user, addr, &result, wide ? 8u : 4u);
+      if (!red && rd != SM_RZ) {
+        t->r[rd][l] = (uint32_t)old;
+        if (wide) t->r[(rd + 1u) & 0xffu][l] = (uint32_t)(old >> 32);
       }
     }
     return;

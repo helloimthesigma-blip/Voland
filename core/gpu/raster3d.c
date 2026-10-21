@@ -4962,7 +4962,7 @@ static bool compute_write_unlocked(void *user, uint64_t va, const void *src, uin
 static bool program_samples_textures(const Sm_Program *program) {
   for (uint32_t i = 0; i < program->word_count; i++) {
     const uint32_t op = program->insns[i].op;
-    if ((op >= SM_OP_TEX && op <= SM_OP_TXD) || op == SM_OP_SUST) return true;
+    if ((op >= SM_OP_TEX && op <= SM_OP_TXD) || op == SM_OP_SUST || op == SM_OP_ATOM || op == SM_OP_RED) return true;
   }
   return false;
 }
@@ -5311,7 +5311,7 @@ static bool compute_memoizable(const Sm_Program *p) {
   if (p->unknown_ops) return false;
   for (uint32_t pc = 0; pc < p->word_count; pc++) {
     const Sm_Insn *in = &p->insns[pc];
-    if (in->op == SM_OP_LDG || in->op == SM_OP_LD) return false;
+    if (in->op == SM_OP_LDG || in->op == SM_OP_LD || in->op == SM_OP_ATOM || in->op == SM_OP_RED) return false;
     if (in->op == SM_OP_S2R || in->op == SM_OP_CS2R) {
       const uint32_t id = (uint32_t)(in->raw >> 20) & 0xffu;
       if (id >= SR_CLOCK_FIRST && id <= SR_CLOCK_LAST) return false;

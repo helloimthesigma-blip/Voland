@@ -1766,6 +1766,12 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
   case SM_OP_SUST:
     fail(t, "surface store (SUST)"); /* the CPU path stores through texture headers */
     return;
+  case SM_OP_ATOM:
+  case SM_OP_RED:
+    /* Compute: the CPU path runs them. Graphics stages have no global
+     * memory here; the update is dropped, as before they decoded. */
+    if (t->compute) fail(t, "global atomic (%s)", sm_op_name((Sm_Op)in->op));
+    return;
   case SM_OP_LD:
   case SM_OP_ST:
   case SM_OP_STG:

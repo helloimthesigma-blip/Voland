@@ -494,6 +494,50 @@ static void test_lea(void) {
   CHECK(g_thread.r[4][0] == 0x1000u - 0x30u, "LEA.NEG %08x", g_thread.r[4][0]);
 }
 
+/* ATOM / RED on global memory: each lane updates in turn (a warp's own
+ * adds accumulate), ATOM returns the old value, RED.MIN.S32 keeps the
+ * smallest signed value. */
+static uint8_t g_global[64];
+static bool global_read(void *user, uint64_t va, void *out, uint32_t size) {
+  (void)user;
+  if (va + size > sizeof(g_global)) return false;
+  memcpy(out, g_global + va, size);
+  return true;
+}
+static bool global_write(void *user, uint64_t va, const void *src, uint32_t size) {
+  (void)user;
+  if (va + size > sizeof(g_global)) return false;
+  memcpy(g_global + va, src, size);
+  return true;
+}
+
+static void test_atomics(void) {
+  memset(g_global, 0, sizeof(g_global));
+  const int32_t start = 10;
+  memcpy(g_global + 16, &start, 4);
+  Builder b;
+  begin(&b, SM_STAGE_VERTEX);
+  emit(&b, MOV32I(2, 0));                                                        /* address 0 */
+  emit(&b, MOV32I(5, 3));                                                        /* operand */
+  emit(&b, op_top(0xed00) | GUARD | ((uint64_t)5 << 20) | ra(2) | rd(6));        /* ATOM.ADD.U32 R6, [R2], R5 */
+  emit(&b, MOV32I(7, (uint32_t)-4));
+  emit(&b, op_top(0xebf8) | GUARD | (1ull << 20) | (1ull << 23) | ((uint64_t)16 << 28) | ra(2) | rd(7)); /* RED.MIN.S32 [R2+16], R7 */
+  emit(&b, EXIT());
+  load(&b);
+  sm_thread_reset(&g_thread, 4);
+  Sm_Env env = make_env();
+  env.global_read = global_read;
+  env.global_write = global_write;
+  CHECK(sm_run(&g_prog, &env, &g_thread), "atomics program runs");
+  uint32_t sum = 0;
+  int32_t minimum = 0;
+  memcpy(&sum, g_global, 4);
+  memcpy(&minimum, g_global + 16, 4);
+  CHECK(sum == 12u, "ATOM.ADD over 4 lanes: %u", sum);
+  for (uint32_t l = 0; l < 4u; l++) CHECK(g_thread.r[6][l] == 3u * l, "ATOM lane %u old %u", l, g_thread.r[6][l]);
+  CHECK(minimum == -4, "RED.MIN.S32: %d", minimum);
+}
+
 /* Screen-space derivatives the way nouveau builds them: SHFL.BFLY to the
  * quad neighbour, then FSWZADD with QUADOP(SUB, SUBR, SUB, SUBR) for
  * dFdx and QUADOP(SUB, SUB, SUBR, SUBR) for dFdy; SHFL.IDX broadcasts a
@@ -665,6 +709,7 @@ int main(void) {
   test_indirect_branch();
   test_funnel_shift();
   test_lea();
+  test_atomics();
   test_derivatives();
   test_conditional_exit();
   test_half_precision();

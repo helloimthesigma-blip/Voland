@@ -114,6 +114,8 @@ typedef enum Sm_Op {
   /* control */
   SM_OP_BRA, SM_OP_SSY, SM_OP_SYNC, SM_OP_PBK, SM_OP_BRK, SM_OP_PCNT, SM_OP_CONT,
   SM_OP_CAL, SM_OP_RET, SM_OP_EXIT, SM_OP_KIL,
+  SM_OP_ATOM, /* global atomic: Rd = old, memory = op(old, Rb) */
+  SM_OP_RED, /* global reduction: memory = op(old, Rb), nothing returned */
   SM_OP_LEA, /* Rd = (Ra << shift) + B, carry to a predicate */
   SM_OP_SUST, /* surface store: formatted (.P) or raw (.B) through Sm_Env.surface_store */
   SM_OP_SHF, /* funnel shift of Rc:Ra (64-bit pairs) */
@@ -294,6 +296,12 @@ typedef struct Sm_Shf {
 } Sm_Shf;
 Sm_Shf sm_shf_fields(uint64_t raw);
 uint32_t sm_shf(Sm_Shf f, uint32_t a, uint32_t s, uint32_t c);
+/* Global atomics (ATOM, RED): the operation and the operand size fields. */
+enum { SM_ATOM_ADD = 0, SM_ATOM_MIN = 1, SM_ATOM_MAX = 2, SM_ATOM_INC = 3, SM_ATOM_DEC = 4, SM_ATOM_AND = 5,
+       SM_ATOM_OR = 6, SM_ATOM_XOR = 7, SM_ATOM_EXCH = 8 };
+enum { SM_ATOM_U32 = 0, SM_ATOM_S32 = 1, SM_ATOM_U64 = 2, SM_ATOM_F32 = 3, SM_ATOM_S64 = 5 };
+/* The value an atomic leaves in memory, from the old value and the operand. */
+uint64_t sm_atomic(uint32_t op, uint32_t size, uint64_t old, uint64_t src);
 /* BRX at word `index` with Ra = `ra`: the target word, -1 if misaligned. */
 int64_t sm_brx_target(const Sm_Insn *in, uint32_t index, uint32_t ra);
 
