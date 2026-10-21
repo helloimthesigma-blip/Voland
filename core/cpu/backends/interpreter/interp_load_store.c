@@ -316,9 +316,13 @@ bool interp_compare_and_swap(uint8_t *host, const void *expected, const void *de
  * still holds what the load-exclusive read - a host compare-and-swap, so
  * a racing store by another host thread makes it fail instead of being
  * lost. (ABA-tolerant, as every CAS-based monitor is.) */
+uint32_t interp_exclusive_seq[INTERP_EXCLUSIVE_SEQ_SLOTS];
+
 static Interp_Status store_exclusive_shared(Interp_State *s, uint64_t address, uint32_t total, uint32_t element,
                                             bool pair, uint32_t t, uint32_t t2, uint32_t rs) {
-  bool pass = s->exclusive_valid && s->exclusive_address == address && s->exclusive_size == total;
+  uint32_t *seq = interp_exclusive_seq_slot(address);
+  bool pass = s->exclusive_valid && s->exclusive_address == address && s->exclusive_size == total &&
+              __atomic_load_n(seq, __ATOMIC_ACQUIRE) == s->exclusive_seq;
   VMM_Fault fault;
   if (pass) {
     /* Aligned to `total` (checked by the caller), so within one page. */
@@ -331,6 +335,7 @@ static Interp_Status store_exclusive_shared(Interp_State *s, uint64_t address, u
     store_le(data, xreg(s, t), element);
     if (pair) store_le(data + element, xreg(s, t2), element);
     pass = interp_compare_and_swap(host, s->exclusive_value, data, total);
+    if (pass) __atomic_fetch_add(seq, 1u, __ATOMIC_RELEASE);
   } else {
     /* Hardware still checks translation on a failing store-exclusive. */
     uint8_t probe;
@@ -384,6 +389,7 @@ static Interp_Status exclusive(Interp_State *s, uint32_t insn) {
     s->exclusive_address = address;
     s->exclusive_size = total;
     memcpy(s->exclusive_value, data, total);
+    s->exclusive_seq = __atomic_load_n(interp_exclusive_seq_slot(address), __ATOMIC_ACQUIRE);
     set_xreg(s, t, load_le(data, element));
     if (o1) set_xreg(s, t2, load_le(data + element, element));
     if (o0 && cpu_multicore()) __atomic_thread_fence(__ATOMIC_SEQ_CST); /* LDAXR: acquire */

@@ -59,6 +59,10 @@ typedef struct Interp_State {
    * mode the store-exclusive is a host compare-and-swap against it. */
   uint64_t exclusive_value[2];
   uint32_t exclusive_size;
+  /* The reserved granule's sequence (interp_exclusive_seq) at the
+   * load-exclusive: in multicore mode a store-exclusive also fails if
+   * another one succeeded on the granule since. */
+  uint32_t exclusive_seq;
 
   uint64_t fault_address;
   uint64_t cycles_consumed;    /* by the last run()/step() */
@@ -223,6 +227,20 @@ static inline void interp_maybe_trace_call(Interp_State *s, uint64_t target) {
 }
 static inline void interp_maybe_trace_return(Interp_State *s, uint64_t target) {
   if (g_interp_trace_count) interp_trace_return(s, target);
+}
+
+/* Multicore load/store-exclusive (docs/PARALLEL.md): the store is a
+ * compare-and-swap against what the load read, which alone passes an ABA
+ * - another core popping and re-pushing a lock-free list head between the
+ * two - that real LL/SC fails (the head's monitor was written). Every
+ * successful store-exclusive bumps its granule's sequence (hashed into
+ * INTERP_EXCLUSIVE_SEQ_SLOTS; a collision only fails a store that retries),
+ * and a store-exclusive also needs the sequence its load saw. */
+#define INTERP_EXCLUSIVE_SEQ_SLOTS 4096u
+#define INTERP_EXCLUSIVE_GRANULE_BITS 6u
+extern uint32_t interp_exclusive_seq[INTERP_EXCLUSIVE_SEQ_SLOTS];
+static inline uint32_t *interp_exclusive_seq_slot(uint64_t address) {
+  return &interp_exclusive_seq[(address >> INTERP_EXCLUSIVE_GRANULE_BITS) & (INTERP_EXCLUSIVE_SEQ_SLOTS - 1u)];
 }
 
 #endif /* SWITCH_CPU_BACKENDS_INTERPRETER_INTERP_INTERNAL_H */

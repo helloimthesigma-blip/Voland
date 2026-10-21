@@ -352,7 +352,9 @@ static Interp_Status load_store_extra(A32_State *a, uint32_t insn) {
  * makes it fail. Exclusives are aligned here (an alignment fault
  * otherwise, as on hardware). */
 static Interp_Status store_exclusive_shared(A32_State *a, uint32_t address, uint32_t size, uint32_t rd, uint32_t rt) {
-  bool pass = a->s.exclusive_valid && a->s.exclusive_address == address && a->s.exclusive_size == size;
+  uint32_t *seq = interp_exclusive_seq_slot(address); /* the ABA check (interp_internal.h) */
+  bool pass = a->s.exclusive_valid && a->s.exclusive_address == address && a->s.exclusive_size == size &&
+              __atomic_load_n(seq, __ATOMIC_ACQUIRE) == a->s.exclusive_seq;
   if (pass) {
     VMM_Fault fault;
     uint8_t *host = vmm_translate_inline(a->s.l1, address, VMM_PERM_W, &fault);
@@ -362,6 +364,7 @@ static Interp_Status store_exclusive_shared(A32_State *a, uint32_t address, uint
     }
     const uint32_t v[2] = {a32_reg(a, rt), size == 8u ? a32_reg(a, rt + 1u) : 0u};
     pass = interp_compare_and_swap(host, a->s.exclusive_value, v, size);
+    if (pass) __atomic_fetch_add(seq, 1u, __ATOMIC_RELEASE);
   }
   a->s.exclusive_valid = false;
   a32_set_reg(a, rd, pass ? 0u : 1u);
@@ -406,6 +409,7 @@ static Interp_Status synchronization(A32_State *a, uint32_t insn) {
     a->s.exclusive_address = address;
     a->s.exclusive_size = size;
     memcpy(a->s.exclusive_value, v, sizeof(v)); /* for the multicore compare-and-swap */
+    a->s.exclusive_seq = __atomic_load_n(interp_exclusive_seq_slot(address), __ATOMIC_ACQUIRE);
     a32_set_reg(a, rd, v[0]);
     if (size == 8u) a32_set_reg(a, rd + 1u, v[1]);
     if (multicore && ordered == 2u) __atomic_thread_fence(__ATOMIC_SEQ_CST); /* LDAEX: acquire */

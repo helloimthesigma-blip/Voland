@@ -175,6 +175,7 @@ _Static_assert(OFF_SP == OFF_X(31), "spill/reload move x30 and SP as one pair");
 #define OFF_EXCLUSIVE_ADDRESS STATE_OFFSET(interp.exclusive_address)
 #define OFF_EXCLUSIVE_SIZE STATE_OFFSET(interp.exclusive_size)
 #define OFF_EXCLUSIVE_VALUE STATE_OFFSET(interp.exclusive_value)
+#define OFF_EXCLUSIVE_SEQ STATE_OFFSET(interp.exclusive_seq)
 #define OFF_V(t) (STATE_OFFSET(interp.v) + (uint64_t)(t) * sizeof(CPU_Vector_Register))
 #define V_HIGH_HALF 8u /* CPU_Vector_Register.hi */
 
@@ -4667,6 +4668,31 @@ static uint32_t cmpxchg_opcode(uint32_t size) {
 
 static uint32_t log2_size(uint32_t size) { return size == 8u ? 3u : size == 4u ? 2u : size == 2u ? 1u : 0u; }
 
+/* i32.atomic.load / i32.atomic.rmw.add (threads proposal, 0xFE prefix). */
+#define WASM_ATOMIC_I32_LOAD 0x10u
+#define WASM_ATOMIC_I32_RMW_ADD 0x1Eu
+
+/* i64 on the stack: the address of L_ADDR's granule sequence
+ * (interp_exclusive_seq_slot). */
+static void emit_exclusive_seq_address(Ctx *c) {
+  lget(c, L_ADDR);
+  i64c(c, INTERP_EXCLUSIVE_GRANULE_BITS);
+  op(c, WASM_OP_I64_SHR_U);
+  i64c(c, INTERP_EXCLUSIVE_SEQ_SLOTS - 1u);
+  op(c, WASM_OP_I64_AND);
+  i64c(c, sizeof(uint32_t));
+  op(c, WASM_OP_I64_MUL);
+  i64c(c, (uint64_t)(uintptr_t)interp_exclusive_seq);
+  op(c, WASM_OP_I64_ADD);
+}
+
+static void emit_atomic_i32(Ctx *c, uint32_t opcode) {
+  op(c, WASM_ATOMIC_PREFIX);
+  wasm_uleb(c->b, opcode);
+  wasm_uleb(c->b, ALIGN_4);
+  wasm_uleb(c->b, 0);
+}
+
 /* Multicore STXR / STLXR of one register (the interpreter's
  * store_exclusive_shared, inline): it passes iff this thread's monitor is
  * set on this address and size and memory still holds what the LDXR read
@@ -4684,6 +4710,12 @@ static void emit_store_exclusive_shared(Ctx *c, uint32_t element, uint32_t t, ui
   lget(c, L_STATE);
   mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_EXCLUSIVE_SIZE);
   i32c(c, element);
+  op(c, WASM_OP_I32_EQ);
+  op(c, WASM_OP_I32_AND);
+  emit_exclusive_seq_address(c); /* no store-exclusive succeeded on the granule since the load */
+  emit_atomic_i32(c, WASM_ATOMIC_I32_LOAD);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_EXCLUSIVE_SEQ);
   op(c, WASM_OP_I32_EQ);
   op(c, WASM_OP_I32_AND);
   hint(c, true);
@@ -4704,7 +4736,13 @@ static void emit_store_exclusive_shared(Ctx *c, uint32_t element, uint32_t t, ui
     lget(c, L_STATE);
     mem(c, load_opcode(ACCESS_LOAD_ZERO, element), ALIGN_1, OFF_EXCLUSIVE_VALUE);
     op(c, WASM_OP_I64_EQ);
-    lset(c, L_PASS);
+    ltee(c, L_PASS);
+    open_if(c, WASM_BLOCK_VOID); /* stored: bump the granule's sequence */
+    emit_exclusive_seq_address(c);
+    i32c(c, 1);
+    emit_atomic_i32(c, WASM_ATOMIC_I32_RMW_ADD);
+    op(c, WASM_OP_DROP);
+    end_(c);
     br(c, done);
     end_(c); /* $slow */
     leave_via_interpreter(c);
@@ -4771,6 +4809,12 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
     lget(c, L_STATE);
     lget(c, L_VAL);
     mem(c, store_opcode(element), ALIGN_1, OFF_EXCLUSIVE_VALUE);
+    if (cpu_multicore()) { /* the granule's sequence, for the store-exclusive's ABA check */
+      lget(c, L_STATE);
+      emit_exclusive_seq_address(c);
+      emit_atomic_i32(c, WASM_ATOMIC_I32_LOAD);
+      mem(c, WASM_OP_I32_STORE, ALIGN_4, OFF_EXCLUSIVE_SEQ);
+    }
     lget(c, L_VAL);
     set_x(c, t);
     if (o0) emit_multicore_fence(c); /* LDAXR: acquire */
