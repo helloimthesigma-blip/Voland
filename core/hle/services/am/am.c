@@ -164,7 +164,7 @@ static HLE_ServiceResult cmd_exit(HLE_Context *c, Service_Object *self, const IP
   (void)self;
   (void)req;
   (void)res;
-  log_info("[am] ISelfController::Exit");
+  log_warn("[am] ISelfController::Exit");
   if (c->scheduler) c->scheduler->process_exited = true;
   return HLE_RESULT_SUCCESS;
 }

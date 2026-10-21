@@ -335,9 +335,10 @@ function runBurst(): void {
       const detail = finished === "crashed"
         ? `stopped at pc=0x${core._emulator_crash_pc_ffi().toString(16)}`
         : `virtual time ${ticks} ticks`;
-      if (finished !== "exited") {
-        /* The core's own recent warnings/errors (e.g. svcBreak's reason),
-         * which otherwise only reach the developer console. */
+      {
+        /* The core's own recent warnings/errors (e.g. svcBreak's reason,
+         * or what led a title to exit), which otherwise only reach the
+         * developer console. */
         const recent = readCString((coreMemory as WebAssembly.Memory).buffer, Number(core._emulator_recent_problems_ffi()), RECENT_PROBLEMS_MAX_BYTES);
         for (const line of recent.split("\n").filter((l) => l.length > 0)) log("warn", `core: ${line}`);
       }

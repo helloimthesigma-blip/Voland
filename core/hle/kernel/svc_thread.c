@@ -38,7 +38,7 @@ static bool is_alive(const Sched_Thread *t) { return t->state != THREAD_STATE_FR
 
 void hle_svc_exit_process(HLE_Context *c, CPU_State *s) {
   (void)s;
-  log_info("[hle] ExitProcess");
+  log_warn("[hle] ExitProcess");
   c->scheduler->process_exited = true;
 }
 
@@ -104,7 +104,10 @@ void hle_svc_exit_thread(HLE_Context *c, CPU_State *s) {
   scheduler_exit_thread(c->scheduler, t, c->cpu_backend);
   bool any_alive = false;
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) any_alive |= is_alive(&c->scheduler->threads[i]);
-  if (!any_alive) c->scheduler->process_exited = true;
+  if (!any_alive) {
+    log_warn("[hle] the last thread exited");
+    c->scheduler->process_exited = true;
+  }
 }
 
 void hle_svc_sleep_thread(HLE_Context *c, CPU_State *s) {
