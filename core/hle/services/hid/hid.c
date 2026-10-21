@@ -321,6 +321,7 @@ static HLE_ServiceResult cmd_set_supported_style_set(HLE_Context *c, Service_Obj
   (void)res;
   uint32_t styles = 0;
   if (!error_is_ok(ipc_request_read_u32(req, 0, &styles))) return IPC_RESULT_SF_INVALID_IN_HEADER;
+  log_debug("[hid] supported npad styles 0x%x", styles);
   state_of(self)->supported_styles = styles;
   return HLE_RESULT_SUCCESS;
 }
@@ -349,6 +350,7 @@ static HLE_ServiceResult cmd_set_supported_npad_id_type(HLE_Context *c, Service_
     else if (id == HID_NPAD_ID_HANDHELD) ids |= HID_ID_BIT_HANDHELD;
     else if (id == HID_NPAD_ID_OTHER) ids |= HID_ID_BIT_OTHER;
   }
+  log_debug("[hid] supported npad ids: index mask 0x%x", ids);
   s->supported_ids = ids;
   return HLE_RESULT_SUCCESS;
 }

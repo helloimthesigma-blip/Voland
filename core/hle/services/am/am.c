@@ -684,7 +684,7 @@ static HLE_ServiceResult cmd_applet_start(HLE_Context *c, Service_Object *self, 
     start_swkbd(s, c, applet, (uint32_t)self->state);
     return HLE_RESULT_SUCCESS; /* completes when the host answers */
   case AM_APPLET_CONTROLLER: {
-    for (uint32_t k = 0; k < applet->in_count && k < 2u; k++) {
+    for (uint32_t k = 0; k < applet->in_count && k < 3u; k++) {
       uint8_t head[16] = {0};
       (void)storage_read(c, &s->storages[applet->in[k]], 0, head, sizeof(head));
       log_debug("[am] controller applet in[%u] size %u: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x", k,
