@@ -115,14 +115,15 @@ typedef struct Audren_Sink {
 } Audren_Sink;
 
 #define AUDREN_MAX_EFFECT_LOG 64u
-typedef struct Audren_State {
-  Service_Interface manager;
-  Service_Interface renderer;
-  Service_Interface device;
+#define AUDREN_MAX_RENDERERS 2u /* open at once: a game's mixer plus a movie player's (Hollow Knight) */
+
+/* One IAudioRenderer session: its own voices, mixes, sinks and clock. */
+typedef struct Audren_Renderer {
   bool open;
   bool started;
-  bool logged_layout;
-  uint8_t effect_log[64]; /* diagnostics: last logged type|enabled per effect */ /* diagnostics: the first update's layout was logged */
+  bool logged_layout;     /* diagnostics: the first update's layout was logged */
+  bool device_output;     /* the frame just rendered fed a device sink (output holds it) */
+  uint8_t effect_log[64]; /* diagnostics: last logged type|enabled per effect */
   uint32_t revision;
   uint32_t sample_rate;
   uint32_t sample_count;
@@ -132,7 +133,6 @@ typedef struct Audren_State {
   uint32_t effect_count;
   uint32_t rendering_time_limit;
   Kernel_Event *system_event;
-  Kernel_Event *device_event;
   uint64_t last_ticks;
   uint64_t tick_remainder;
   uint64_t frames_rendered;
@@ -143,7 +143,16 @@ typedef struct Audren_State {
   Audren_Sink sinks[AUDREN_MAX_SINKS];
   float mix_buffers[AUDREN_MAX_MIX_BUFFERS][AUDREN_FRAME_SAMPLES];
   float output[AUDREN_FRAME_SAMPLES * 2u];
-  uint8_t in_buffer[AUDREN_IO_BYTES];
+} Audren_Renderer;
+
+typedef struct Audren_State {
+  Service_Interface manager;
+  Service_Interface renderer; /* objects carry their index into renderers */
+  Service_Interface device;
+  Kernel_Event *device_event;
+  Audren_Renderer renderers[AUDREN_MAX_RENDERERS];
+  float device_mix[AUDREN_MAX_FRAMES_PER_UPDATE][AUDREN_FRAME_SAMPLES * 2u]; /* the renderers' device frames, summed */
+  uint8_t in_buffer[AUDREN_IO_BYTES]; /* RequestUpdate's buffers (one update at a time) */
   uint8_t out_buffer[AUDREN_IO_BYTES];
 } Audren_State;
 

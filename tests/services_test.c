@@ -1327,7 +1327,7 @@ static void test_audren(void) {
   (void)call(renderer, 5, NULL, 0, NULL); /* Start */
   const uint64_t t0 = g_emu.scheduler.ticks;
   audren_update(g_emu.audren, &g_emu.hle, t0 + 2u * AUDREN_TICKS_PER_FRAME);
-  CHECK(event->signaled && g_emu.audren->frames_rendered == 2);
+  CHECK(event->signaled && g_emu.audren->renderers[0].frames_rendered == 2);
   static float ring[FRAMES * 2];
   CHECK(audio_ring_drain(ring, FRAMES) == FRAMES);
   CHECK(ring[2 * 100] == 5000.0f / 32768.0f && ring[2 * 100 + 1] == 2500.0f / 32768.0f);
@@ -1355,10 +1355,49 @@ static void test_audren(void) {
   CHECK_OK(vmm_write_block(g_emu.vmm, SCRATCH(0x10000), dirty, sizeof(dirty)));
   m.sends[0].size = sizeof(dirty);
   (void)call(renderer, 4, NULL, 0, &m);
-  CHECK(g_emu.audren->mix_count == 1 && g_emu.audren->mixes[0].used && g_emu.audren->mixes[0].buffer_count == 2);
-  CHECK(g_emu.audren->sink_count == 1 && g_emu.audren->sinks[0].type == 1 && g_emu.audren->sinks[0].input_count == 2);
+  CHECK(g_emu.audren->renderers[0].mix_count == 1 && g_emu.audren->renderers[0].mixes[0].used && g_emu.audren->renderers[0].mixes[0].buffer_count == 2);
+  CHECK(g_emu.audren->renderers[0].sink_count == 1 && g_emu.audren->renderers[0].sinks[0].type == 1 && g_emu.audren->renderers[0].sinks[0].input_count == 2);
   (void)call(renderer, 6, NULL, 0, NULL);
   CHECK(audren_next_wake(g_emu.audren) == UINT64_MAX);
+  close_handle(renderer);
+}
+
+/* Two renderers at once (a game's mixer and a movie player's, as in
+ * Hollow Knight): each keeps its own parameters, a third open fails, and
+ * closing one frees its session. */
+static uint32_t open_renderer(uint32_t manager, uint32_t sample_count, uint32_t expect, Test_Ipc_Reply *reply) {
+  uint8_t param[0x48];
+  memset(param, 0, sizeof(param));
+  put32(param + 0x00, 48000);
+  put32(param + 0x04, sample_count);
+  put32(param + 0x08, 2);
+  put32(param + 0x10, 2);
+  put32(param + 0x14, 1);
+  put32(param + 0x30, 0x34564552u); /* REV4 */
+  *reply = call_ex(manager, 0, param, sizeof(param), NULL, expect);
+  return reply->move_count == 1 ? reply->move_handles[0] : 0u;
+}
+
+static void test_audren_sessions(void) {
+  const uint32_t manager = service("audren:u");
+  Test_Ipc_Reply r;
+  const uint32_t a = open_renderer(manager, 240, 0, &r);
+  const uint32_t b = open_renderer(manager, 480, 0, &r);
+  CHECK(a && b);
+  r = call(a, 1, NULL, 0, NULL);
+  CHECK(test_le32(r.data) == 240);
+  r = call(b, 1, NULL, 0, NULL);
+  CHECK(test_le32(r.data) == 480);
+  CHECK(open_renderer(manager, 120, HLE_RESULT_RESOURCE_EXHAUSTED, &r) == 0u);
+  close_handle(a);
+  const uint32_t c = open_renderer(manager, 120, 0, &r);
+  CHECK(c != 0u);
+  r = call(c, 1, NULL, 0, NULL);
+  CHECK(test_le32(r.data) == 120);
+  r = call(b, 1, NULL, 0, NULL);
+  CHECK(test_le32(r.data) == 480);
+  close_handle(b);
+  close_handle(c);
 }
 
 static void test_audout(void) {
@@ -1479,6 +1518,7 @@ int main(void) {
   test_set_apm_am();
   test_audout();
   test_audren();
+  test_audren_sessions();
   test_sd_manifest();
   test_system_queries();
   test_pctl();

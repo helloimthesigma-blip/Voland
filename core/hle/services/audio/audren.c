@@ -89,6 +89,11 @@ static const char *const k_device_names[] = {"AudioTvOutput", "AudioStereoJackOu
 
 static Audren_State *state_of(Service_Object *self) { return (Audren_State *)self->interface->service_state; }
 
+/* An IAudioRenderer object's session (its object state is the index). */
+static Audren_Renderer *renderer_of(Service_Object *self) {
+  return &state_of(self)->renderers[self->state < AUDREN_MAX_RENDERERS ? self->state : 0u];
+}
+
 static uint32_t rd32(const uint8_t *p) {
   uint32_t v;
   memcpy(&v, p, 4);
@@ -299,13 +304,13 @@ static void pull_frame(Audren_Voice *v, HLE_Context *c, float out[AUDREN_VOICE_C
 /* Mixing.                                                             */
 /* ------------------------------------------------------------------ */
 
-static const Audren_Mix *find_mix(const Audren_State *s, uint32_t mix_id) {
+static const Audren_Mix *find_mix(const Audren_Renderer *s, uint32_t mix_id) {
   for (uint32_t i = 0; i < s->mix_count; i++)
     if (s->mixes[i].used && s->mixes[i].mix_id == mix_id) return &s->mixes[i];
   return NULL;
 }
 
-static void render_voice(Audren_State *s, HLE_Context *c, Audren_Voice *v) {
+static void render_voice(Audren_Renderer *s, HLE_Context *c, Audren_Voice *v) {
   const Audren_Mix *dest = find_mix(s, v->dest_mix_id == UNUSED_MIX_ID ? FINAL_MIX_ID : v->dest_mix_id);
   if (!dest) return;
   const float ratio = (float)v->sample_rate * (v->pitch > 0.0f ? v->pitch : 1.0f) / (float)AUDREN_SAMPLE_RATE;
@@ -336,8 +341,9 @@ static void render_voice(Audren_State *s, HLE_Context *c, Audren_Voice *v) {
   }
 }
 
-static void render_frame(Audren_State *s, HLE_Context *c) {
+static void render_frame(Audren_Renderer *s, HLE_Context *c) {
   const uint32_t n = s->sample_count < AUDREN_FRAME_SAMPLES ? s->sample_count : AUDREN_FRAME_SAMPLES;
+  s->device_output = false;
   memset(s->mix_buffers, 0, sizeof(s->mix_buffers));
   for (uint32_t i = 0; i < s->voice_count && i < AUDREN_MAX_VOICES; i++) {
     Audren_Voice *v = &s->voices[i];
@@ -384,7 +390,7 @@ static void render_frame(Audren_State *s, HLE_Context *c) {
         s->output[i * 2u] = l > 1.0f ? 1.0f : (l < -1.0f ? -1.0f : l);
         s->output[i * 2u + 1u] = r > 1.0f ? 1.0f : (r < -1.0f ? -1.0f : r);
       }
-      (void)audio_ring_write(s->output, n);
+      s->device_output = true;
       device_written = true;
     } else if (sink->type == SINK_CIRCULAR && sink->buffer && sink->buffer_size) {
       for (uint32_t i = 0; i < n; i++) {
@@ -402,30 +408,56 @@ static void render_frame(Audren_State *s, HLE_Context *c) {
   s->frames_rendered++;
 }
 
-void audren_update(Audren_State *s, HLE_Context *c, uint64_t now_ticks) {
+/* Renders one session's frames due by now; their device output is added
+ * into `mix` frame by frame. Returns how many frames were rendered. */
+static uint64_t update_renderer(Audren_Renderer *s, HLE_Context *c, uint64_t now_ticks,
+                                float mix[AUDREN_MAX_FRAMES_PER_UPDATE][AUDREN_FRAME_SAMPLES * 2u], uint64_t *mixed) {
   if (!s->open || !s->started) {
     s->last_ticks = now_ticks;
-    return;
+    return 0;
   }
   const uint64_t elapsed = now_ticks - s->last_ticks + s->tick_remainder;
   s->last_ticks = now_ticks;
   uint64_t frames = elapsed / AUDREN_TICKS_PER_FRAME;
   s->tick_remainder = elapsed % AUDREN_TICKS_PER_FRAME;
   if (frames > AUDREN_MAX_FRAMES_PER_UPDATE) frames = AUDREN_MAX_FRAMES_PER_UPDATE;
-  for (uint64_t f = 0; f < frames; f++) render_frame(s, c);
+  for (uint64_t f = 0; f < frames; f++) {
+    render_frame(s, c);
+    if (!s->device_output) continue;
+    for (uint32_t i = 0; i < AUDREN_FRAME_SAMPLES * 2u; i++) mix[f][i] += s->output[i];
+    if (f + 1u > *mixed) *mixed = f + 1u;
+  }
   if (frames && s->system_event) hle_signal_event(c, s->system_event);
+  return frames;
+}
+
+void audren_update(Audren_State *s, HLE_Context *c, uint64_t now_ticks) {
+  memset(s->device_mix, 0, sizeof(s->device_mix));
+  uint64_t mixed = 0;
+  for (uint32_t r = 0; r < AUDREN_MAX_RENDERERS; r++) (void)update_renderer(&s->renderers[r], c, now_ticks, s->device_mix, &mixed);
+  for (uint64_t f = 0; f < mixed; f++) {
+    float *frame = s->device_mix[f];
+    for (uint32_t i = 0; i < AUDREN_FRAME_SAMPLES * 2u; i++) frame[i] = frame[i] > 1.0f ? 1.0f : (frame[i] < -1.0f ? -1.0f : frame[i]);
+    (void)audio_ring_write(frame, AUDREN_FRAME_SAMPLES);
+  }
 }
 
 uint64_t audren_next_wake(const Audren_State *s) {
-  if (!s || !s->open || !s->started) return UINT64_MAX;
-  return s->last_ticks + (AUDREN_TICKS_PER_FRAME - s->tick_remainder);
+  uint64_t next = UINT64_MAX;
+  for (uint32_t r = 0; r < AUDREN_MAX_RENDERERS; r++) {
+    const Audren_Renderer *x = &s->renderers[r];
+    if (!x->open || !x->started) continue;
+    const uint64_t at = x->last_ticks + (AUDREN_TICKS_PER_FRAME - x->tick_remainder);
+    if (at < next) next = at;
+  }
+  return next;
 }
 
 /* ------------------------------------------------------------------ */
 /* RequestUpdate.                                                      */
 /* ------------------------------------------------------------------ */
 
-static void parse_voice(Audren_State *s, HLE_Context *c, const uint8_t *p) {
+static void parse_voice(Audren_Renderer *s, HLE_Context *c, const uint8_t *p) {
   const uint32_t id = rd32(p);
   if (id >= AUDREN_MAX_VOICES) return;
   Audren_Voice *v = &s->voices[id];
@@ -491,7 +523,7 @@ static void parse_voice(Audren_State *s, HLE_Context *c, const uint8_t *p) {
   }
 }
 
-static void parse_mix(Audren_State *s, const uint8_t *p, uint32_t index) {
+static void parse_mix(Audren_Renderer *s, const uint8_t *p, uint32_t index) {
   if (index >= AUDREN_MAX_MIXES) return;
   Audren_Mix *m = &s->mixes[index];
   m->volume = rdf(p);
@@ -506,7 +538,7 @@ static void parse_mix(Audren_State *s, const uint8_t *p, uint32_t index) {
 
 /* Mix buffers: the final mix owns the first ones, then each used sub-mix
  * in slot order. */
-static void assign_mix_buffers(Audren_State *s) {
+static void assign_mix_buffers(Audren_Renderer *s) {
   uint32_t next = 0;
   for (uint32_t i = 0; i < s->mix_count; i++)
     if (s->mixes[i].used && s->mixes[i].mix_id == FINAL_MIX_ID) next = s->mixes[i].buffer_count;
@@ -521,7 +553,7 @@ static void assign_mix_buffers(Audren_State *s) {
   }
 }
 
-static void parse_sink(Audren_State *s, const uint8_t *p, uint32_t index) {
+static void parse_sink(Audren_Renderer *s, const uint8_t *p, uint32_t index) {
   if (index >= AUDREN_MAX_SINKS) return;
   Audren_Sink *k = &s->sinks[index];
   const uint32_t type = p[0];
@@ -542,8 +574,7 @@ static void parse_sink(Audren_State *s, const uint8_t *p, uint32_t index) {
 
 /* Parses the input update buffer and writes the output one. Returns the
  * output size, or 0 for a malformed input. */
-static uint32_t request_update(Audren_State *s, HLE_Context *c, uint32_t in_size) {
-  const uint8_t *in = s->in_buffer;
+static uint32_t request_update(Audren_Renderer *s, HLE_Context *c, const uint8_t *in, uint32_t in_size, uint8_t *out) {
   if (in_size < HEADER_BYTES) return 0;
   const uint32_t revision = rd32(in + H_REVISION);
   const uint32_t behavior_sz = rd32(in + H_BEHAVIOR), mempools_sz = rd32(in + H_MEMPOOLS);
@@ -568,7 +599,6 @@ static uint32_t request_update(Audren_State *s, HLE_Context *c, uint32_t in_size
   }
   uint32_t at = HEADER_BYTES + behavior_sz;
   /* Output layout. */
-  uint8_t *out = s->out_buffer;
   memset(out, 0, AUDREN_IO_BYTES);
   const bool render_info = revision_number(revision) >= REVISION_WITH_RENDER_INFO;
   const uint64_t out_total = (uint64_t)HEADER_BYTES + (uint64_t)mempool_count * MEMPOOL_OUT_BYTES +
@@ -683,7 +713,11 @@ static uint64_t work_buffer_size(const IPC_Request *req) {
 
 static HLE_ServiceResult cmd_open(HLE_Context *c, Service_Object *self, const IPC_Request *req, IPC_Response *res) {
   (void)c;
-  Audren_State *s = state_of(self);
+  Audren_State *state = state_of(self);
+  uint32_t index = 0;
+  while (index < AUDREN_MAX_RENDERERS && state->renderers[index].open) index++;
+  if (index == AUDREN_MAX_RENDERERS) return HLE_RESULT_RESOURCE_EXHAUSTED;
+  Audren_Renderer *s = &state->renderers[index];
   uint32_t rate = 0, count = 0, mix_buffers = 0, voices = 0, sinks = 0, effects = 0, revision = 0;
   (void)ipc_request_read_u32(req, 0x00, &rate);
   (void)ipc_request_read_u32(req, 0x04, &count);
@@ -708,7 +742,7 @@ static HLE_ServiceResult cmd_open(HLE_Context *c, Service_Object *self, const IP
   memset(s->sinks, 0, sizeof(s->sinks));
   memset(s->channel_mix, 0, sizeof(s->channel_mix));
   s->mix_count = 0;
-  (void)ipc_response_push_object(res, &s->renderer, 0);
+  (void)ipc_response_push_object(res, &state->renderer, index);
   return HLE_RESULT_SUCCESS;
 }
 
@@ -735,7 +769,7 @@ static HLE_ServiceResult cmd_sample_rate(HLE_Context *c, Service_Object *self, c
                                          IPC_Response *res) {
   (void)c;
   (void)req;
-  (void)ipc_response_push_u32(res, state_of(self)->sample_rate);
+  (void)ipc_response_push_u32(res, renderer_of(self)->sample_rate);
   return HLE_RESULT_SUCCESS;
 }
 
@@ -743,7 +777,7 @@ static HLE_ServiceResult cmd_sample_count(HLE_Context *c, Service_Object *self, 
                                           IPC_Response *res) {
   (void)c;
   (void)req;
-  (void)ipc_response_push_u32(res, state_of(self)->sample_count);
+  (void)ipc_response_push_u32(res, renderer_of(self)->sample_count);
   return HLE_RESULT_SUCCESS;
 }
 
@@ -751,31 +785,31 @@ static HLE_ServiceResult cmd_mix_buffer_count(HLE_Context *c, Service_Object *se
                                               IPC_Response *res) {
   (void)c;
   (void)req;
-  (void)ipc_response_push_u32(res, state_of(self)->mix_buffer_count);
+  (void)ipc_response_push_u32(res, renderer_of(self)->mix_buffer_count);
   return HLE_RESULT_SUCCESS;
 }
 
 static HLE_ServiceResult cmd_state(HLE_Context *c, Service_Object *self, const IPC_Request *req, IPC_Response *res) {
   (void)c;
   (void)req;
-  (void)ipc_response_push_u32(res, state_of(self)->started ? RENDERER_STATE_STARTED : RENDERER_STATE_STOPPED);
+  (void)ipc_response_push_u32(res, renderer_of(self)->started ? RENDERER_STATE_STARTED : RENDERER_STATE_STOPPED);
   return HLE_RESULT_SUCCESS;
 }
 
 static HLE_ServiceResult cmd_update(HLE_Context *c, Service_Object *self, const IPC_Request *req, IPC_Response *res) {
   (void)res;
-  Audren_State *s = state_of(self);
-  const uint64_t n = service_read_in(c, req, 0, s->in_buffer, AUDREN_IO_BYTES);
-  const uint32_t out = request_update(s, c, (uint32_t)n);
+  Audren_State *state = state_of(self);
+  const uint64_t n = service_read_in(c, req, 0, state->in_buffer, AUDREN_IO_BYTES);
+  const uint32_t out = request_update(renderer_of(self), c, state->in_buffer, (uint32_t)n, state->out_buffer);
   if (!out) return HLE_RESULT_INVALID_ENUM_VALUE;
-  (void)service_write_out(c, req, 0, s->out_buffer, out);
+  (void)service_write_out(c, req, 0, state->out_buffer, out);
   return HLE_RESULT_SUCCESS;
 }
 
 static HLE_ServiceResult cmd_start(HLE_Context *c, Service_Object *self, const IPC_Request *req, IPC_Response *res) {
   (void)req;
   (void)res;
-  Audren_State *s = state_of(self);
+  Audren_Renderer *s = renderer_of(self);
   if (!s->started) {
     s->started = true;
     s->last_ticks = c->scheduler ? c->scheduler->ticks : 0;
@@ -788,14 +822,14 @@ static HLE_ServiceResult cmd_stop(HLE_Context *c, Service_Object *self, const IP
   (void)c;
   (void)req;
   (void)res;
-  state_of(self)->started = false;
+  renderer_of(self)->started = false;
   return HLE_RESULT_SUCCESS;
 }
 
 static HLE_ServiceResult cmd_system_event(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                           IPC_Response *res) {
   (void)req;
-  return service_push_event(c, res, &state_of(self)->system_event);
+  return service_push_event(c, res, &renderer_of(self)->system_event);
 }
 
 static HLE_ServiceResult cmd_set_time_limit(HLE_Context *c, Service_Object *self, const IPC_Request *req,
@@ -804,7 +838,7 @@ static HLE_ServiceResult cmd_set_time_limit(HLE_Context *c, Service_Object *self
   (void)res;
   uint32_t limit = 0;
   (void)ipc_request_read_u32(req, 0, &limit);
-  state_of(self)->rendering_time_limit = limit;
+  renderer_of(self)->rendering_time_limit = limit;
   return HLE_RESULT_SUCCESS;
 }
 
@@ -812,7 +846,7 @@ static HLE_ServiceResult cmd_get_time_limit(HLE_Context *c, Service_Object *self
                                             IPC_Response *res) {
   (void)c;
   (void)req;
-  (void)ipc_response_push_u32(res, state_of(self)->rendering_time_limit);
+  (void)ipc_response_push_u32(res, renderer_of(self)->rendering_time_limit);
   return HLE_RESULT_SUCCESS;
 }
 
@@ -925,10 +959,19 @@ static const Service_Command k_device_commands[] = {
     {14, cmd_list_devices, "ListAudioOutputDeviceName"},
 };
 
+/* A closed IAudioRenderer frees its session for the next OpenAudioRenderer. */
+static void renderer_closed(void *service_state, uint64_t index) {
+  Audren_State *s = (Audren_State *)service_state;
+  if (index >= AUDREN_MAX_RENDERERS) return;
+  s->renderers[index].open = false;
+  s->renderers[index].started = false;
+}
+
 void audren_init(Audren_State *s) {
   memset(s, 0, sizeof(*s));
   s->manager = SERVICE_INTERFACE("audren:u", k_manager_commands, 0, s);
   s->renderer = SERVICE_INTERFACE("IAudioRenderer", k_renderer_commands, 0, s);
+  s->renderer.on_close = renderer_closed;
   s->device = SERVICE_INTERFACE("IAudioDevice", k_device_commands, 0, s);
 }
 
