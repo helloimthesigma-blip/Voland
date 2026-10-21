@@ -9,9 +9,9 @@ up on more titles. Where they stand (October 2026, browser, Chromium):
 | Celeste | title, file select and gameplay; ~100 fps unpaced |
 | Super Smash Bros. Ultimate | matches with correct colours and saves, 18-22 fps in a fight; its VP9 movies are black |
 | Mario Kart 8 Deluxe (32-bit) | whole races, ~23 fps on three cores; occasional black tiles in multicore runs |
-| Nine Sols | title, file select and gameplay, ~22 fps; dialogue text shows magenta ASTC blocks (texture data zero past ~10 KB), the VP8 intro movie is black |
-| Animal Crossing: New Horizons | boots and presents, but stays behind its own black UI curtain; needs the NG word list 2 system file (0100000000000823) |
-| The Legend of Zelda: Tears of the Kingdom | boots (CLI to 1.5M slices) but presents black; uses VMNMX, which is not decoded |
+| Nine Sols | title, file select, the VP8 opening cinematic and gameplay, ~22 fps; the speech-bubble sprite atlas (ASTC 12x12) is only written for its first ~10.5 KB, so bubbles show magenta blocks - no copy engine writes it, the CPU does |
+| Animal Crossing: New Horizons | boots, presents and draws 3D (92M triangles by 2M slices), but its own UI fade stays at black (c3 = (0,0,0,1) on a white BC4 pane); needs the NG word list 2 system file (0100000000000823). Ruled out so far: controller applet result, focus messages, clock snapshot, preselected user, nfp, unimplemented commands |
+| The Legend of Zelda: Tears of the Kingdom | boots through its loading screen into the 3D opening cutscene (software renderer, ~5.5M slices with A presses); in the browser loading is slow - the JIT compiles ~1300 regions/s at ~0.7 ms per install |
 
 This page is the checklist for trying another one.
 
@@ -42,10 +42,10 @@ titles).
 
 ## 2. Known gaps
 
-- **Video:** NVDEC decodes H.264 only. VP8 (Nine Sols' intro) and VP9
-  (SSBU's movies) play black.
-- **Shader instructions not decoded:** VMNMX (video min/max), LEA.HI,
-  surface loads (SULD); the warning lists every distinct opcode a program
+- **Video:** NVDEC decodes H.264 and VP8 (through WebCodecs). VP9
+  (SSBU's movies) plays black: its headers would have to be rebuilt from
+  the picture setup and NVDEC's probability tables.
+- **Shader instructions not decoded:** LEA.HI, surface loads (SULD); the warning lists every distinct opcode a program
   lacks. Global atomics in graphics stages are dropped on the GPU (compute
   runs them on the CPU).
 - **Updates and DLC are not loaded.** Only the base program NCA runs.

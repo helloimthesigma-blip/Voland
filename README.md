@@ -8,7 +8,7 @@ to install, and no keys or firmware.
 tab**: real commercial Switch games booting, running cutscenes and playing at
 full game speed, at a stable ~15 fps on a fast desktop.
 
-> **Status:** Phase 4 (First Boot). Hollow Knight, Silksong, Celeste and Nine Sols play in the browser, Super Smash Bros. Ultimate plays matches at 18-22 fps, and Mario Kart 8 Deluxe, a 32-bit game on its own AArch32 JIT, plays whole races at about 23 fps on three cores; Animal Crossing and Tears of the Kingdom boot but stay on a black screen ([NEW_GAMES.md](docs/NEW_GAMES.md) has the per-game state). Not done yet: VP8/VP9 video (SSBU and Nine Sols movies are black) and Opus audio; full task list in [DESIGN.md §25](docs/DESIGN.md#25-development-phases).
+> **Status:** Phase 4 (First Boot). Hollow Knight, Silksong, Celeste and Nine Sols (now with its VP8 intro) play in the browser, Super Smash Bros. Ultimate fights run at about 40 fps, and Mario Kart 8 Deluxe, a 32-bit game on its own AArch32 JIT, plays whole races at about 23 fps on three cores; Tears of the Kingdom reaches its 3D opening (slowly) and Animal Crossing boots but stays behind a black fade ([NEW_GAMES.md](docs/NEW_GAMES.md) has the per-game state). Not done yet: VP9 video (SSBU's movie is black) and Opus audio; full task list in [DESIGN.md §25](docs/DESIGN.md#25-development-phases).
 
 ### What works today
 
