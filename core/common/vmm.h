@@ -329,15 +329,22 @@ static inline uint8_t *vmm_translate_inline(const uint64_t *l1, uint64_t gva,
   return (uint8_t *)(uintptr_t)((pte & VMM_PTE_HOST_MASK) | (gva & VMM_PAGE_OFFSET_MASK));
 }
 
-/* The page-table generation: changes whenever any mapping or permission
- * changes (and when a context is created). Decoded-code caches compare it
- * to know their blocks still describe mapped, executable memory. */
-/* The code generation: moves on every mapping or permission change and on
- * every code flush (vmm_bump_generation). One shared word, so compiled
- * code on any host thread can check it directly (docs/PARALLEL.md). */
+/* The code generation: moves when an executable page is unmapped or loses
+ * a permission, and on every code flush (vmm_bump_generation) - not on new
+ * mappings, added permissions or data pages, which no decoded block covers. One shared word, so
+ * compiled code on any host thread can check it directly (docs/PARALLEL.md). */
 extern uint64_t g_vmm_generation; /* vmm.c; read through vmm_generation() */
 static inline uint64_t vmm_generation(void) { return __atomic_load_n(&g_vmm_generation, __ATOMIC_ACQUIRE); }
 static inline void vmm_bump_generation(void) { (void)__atomic_fetch_add(&g_vmm_generation, 1u, __ATOMIC_RELEASE); }
+
+/* The translation generation: moves on every unmap and every permission a
+ * page loses, executable or not - what caches of guest-to-host
+ * translations (the JIT's carried TLB) compare. The code generation only
+ * moves for executable pages, so data churn (svcUnmapPhysicalMemory frees
+ * page by page) does not send every compiled region to revalidate. */
+extern uint64_t g_vmm_map_generation; /* vmm.c */
+static inline uint64_t vmm_map_generation(void) { return __atomic_load_n(&g_vmm_map_generation, __ATOMIC_ACQUIRE); }
+static inline void vmm_bump_map_generation(void) { (void)__atomic_fetch_add(&g_vmm_map_generation, 1u, __ATOMIC_RELEASE); }
 
 /* The raw PTE for `gva` (0 if unmapped): permissions in the low bits. */
 static inline uint64_t vmm_pte_inline(const uint64_t *l1, uint64_t gva) {

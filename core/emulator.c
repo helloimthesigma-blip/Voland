@@ -1543,6 +1543,7 @@ Error emulator_savestate_finish_restore(Emulator* emulator, bool applied) {
    * predecoded blocks against memory. */
   if (emulator->cpu_state) b->clear_cache(emulator->cpu_state);
   vmm_bump_generation();
+  vmm_bump_map_generation();
   emulator->scheduler.current = -1;
   savestate_resume(emulator);
   log_info("[emulator] save state restored (virtual time %.1f s)",

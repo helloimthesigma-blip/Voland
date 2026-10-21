@@ -525,9 +525,9 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
         if (astc) {
           if (!astc_decode_block(block, f->bw, f->bh, h->srgb, px) && g_astc_errors < ASTC_ERRORS_LOGGED) {
             g_astc_errors++;
-            log_warn("[gpu] ASTC %ux%u block at (%u,%u) of %ux%u (base level %u, TIC w7 %08x) decodes to the error colour: "
+            log_warn("[gpu] ASTC %ux%u block at (%u,%u) of %ux%u @%llx (base level %u, TIC w7 %08x) decodes to the error colour: "
                      "%02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x %02x%02x%02x%02x",
-                     f->bw, f->bh, bx, by, h->width, h->height, h->base_level, h->words[7], block[0], block[1], block[2], block[3], block[4],
+                     f->bw, f->bh, bx, by, h->width, h->height, (unsigned long long)h->address, h->base_level, h->words[7], block[0], block[1], block[2], block[3], block[4],
                      block[5], block[6], block[7], block[8], block[9], block[10], block[11], block[12], block[13],
                      block[14], block[15]);
           }

@@ -73,6 +73,7 @@ static int g_vmm_live = 0;
 /* Bumped by every change to the page tables (and at create): code caches
  * keyed on it drop their decoded blocks (interpreter predecode, §11). */
 uint64_t g_vmm_generation = 1;
+uint64_t g_vmm_map_generation = 1;
 
 /* ------------------------------------------------------------------ */
 /* Small helpers.                                                      */
@@ -245,6 +246,7 @@ VMM_Context *vmm_create(void) {
 
   g_vmm_live = 1;
   vmm_bump_generation();
+  vmm_bump_map_generation();
 
   log_info("[vmm] created: %llu-bit VA, %llu L1 entries, up to %llu L2 tables (%llu MiB arena)",
            (unsigned long long)VMM_ADDRESS_BITS,
@@ -317,8 +319,9 @@ Error vmm_map(VMM_Context *ctx, uint64_t gva, uint64_t guest_pa, uint64_t size,
   debug_assert_no_live_borrow_overlaps(ctx, gva, size);
 #endif
 
-  /* Commit. */
-  vmm_bump_generation();
+  /* Commit. No generation bump: every page was unmapped, so no cached
+   * translation or decoded block can describe it - a new mapping leaves
+   * all of them valid (unmap and losing permissions are what move it). */
   for (uint64_t i = 0; i < page_count; i++) {
     const uint64_t vpn = first_vpn + i;
     const uint64_t l1_index = vpn >> VMM_L2_INDEX_BITS;
@@ -354,9 +357,12 @@ Error vmm_unmap(VMM_Context *ctx, uint64_t gva, uint64_t size) {
   debug_assert_no_live_borrow_overlaps(ctx, gva, size);
 #endif
 
-  vmm_bump_generation();
   const uint64_t first_vpn = gva >> VMM_PAGE_BITS;
   const uint64_t page_count = size >> VMM_PAGE_BITS;
+  bool executable = false;
+  for (uint64_t i = 0; i < page_count && !executable; i++) executable = (pte_load(ctx, first_vpn + i) & VMM_PERM_X) != 0;
+  vmm_bump_map_generation();
+  if (executable) vmm_bump_generation();
   for (uint64_t i = 0; i < page_count; i++) {
     const uint64_t vpn = first_vpn + i;
     const uint64_t l1_index = vpn >> VMM_L2_INDEX_BITS;
@@ -382,9 +388,20 @@ Error vmm_reprotect(VMM_Context *ctx, uint64_t gva, uint64_t size, uint32_t perm
   debug_assert_no_live_borrow_overlaps(ctx, gva, size);
 #endif
 
-  vmm_bump_generation();
   const uint64_t first_vpn = gva >> VMM_PAGE_BITS;
   const uint64_t page_count = size >> VMM_PAGE_BITS;
+  /* Only a page losing a permission can make a cached translation or a
+   * decoded block wrong; added permissions leave them all valid. */
+  bool loses = false, code = false;
+  for (uint64_t i = 0; i < page_count; i++) {
+    const uint64_t pte = pte_load(ctx, first_vpn + i);
+    if ((pte & VMM_PTE_PERM_MASK & ~((uint64_t)perms & VMM_PTE_PERM_MASK)) != 0) {
+      loses = true;
+      code = code || (pte & VMM_PERM_X) != 0;
+    }
+  }
+  if (loses) vmm_bump_map_generation();
+  if (code) vmm_bump_generation();
   for (uint64_t i = 0; i < page_count; i++) {
     const uint64_t vpn = first_vpn + i;
     const uint64_t pte = pte_load(ctx, vpn);

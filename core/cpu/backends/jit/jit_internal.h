@@ -105,6 +105,7 @@ static inline uint64_t jit_cache_set(uint64_t pc) {
 typedef struct Jit_Link {
   uint64_t cache_address;      /* &Jit_Entry[0] */
   uint64_t generation_address; /* the uint64_t generation chained blocks must carry */
+  uint64_t map_generation_address; /* the translation generation the carried TLB is checked against */
   bool count_entries;          /* chained entries increment the `entries` of the entry they enter */
   bool span_calls;             /* regions follow BL/RET and predicted PLT branches */
   bool aarch32;                /* the code is A32 (the A32 front end, jit_compile_a32.inc) */

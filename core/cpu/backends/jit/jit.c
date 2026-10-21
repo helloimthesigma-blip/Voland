@@ -800,6 +800,7 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
   /* The shared code generation, not this thread's view of it: another
    * core's mapping change must stop chaining here at once (vmm.h). */
   link.generation_address = (uint64_t)(uintptr_t)&g_vmm_generation;
+  link.map_generation_address = (uint64_t)(uintptr_t)&g_vmm_map_generation;
   link.count_entries = g_hot_profile;
   link.span_calls = g_span_calls;
   link.aarch32 = ((const Jit_State *)s)->isa == JIT_ISA_A32;

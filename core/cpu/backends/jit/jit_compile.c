@@ -1697,9 +1697,9 @@ static bool shared_walk(void) {
 /* The full walk (below) behind a one-entry translation cache per
  * permission, in locals: an access within the page last translated for
  * the same permission is `host = gva + delta`. The cache goes from region
- * to region through the state (Jit_State.tlb_*) while the vmm generation
- * - bumped by every mapping or permission change - is the one it was
- * filled in; each region's prologue checks (emit_tlb_load).
+ * to region through the state (Jit_State.tlb_*) while the translation
+ * generation (vmm_map_generation: every unmap and lost permission) is the
+ * one it was filled in; each region's prologue checks (emit_tlb_load).
  *
  * Serially that is exact: mappings change only in SVCs, which leave
  * compiled code. With guest threads on several host threads another core
@@ -5072,9 +5072,9 @@ static void emit_tlb_load(Ctx *c) {
     }
     return;
   }
-  i64c(c, c->link->generation_address);
+  i64c(c, c->link->map_generation_address);
   mem(c, WASM_OP_I64_LOAD, ALIGN_8, 0);
-  lset(c, L_T0); /* the current generation */
+  lset(c, L_T0); /* the current translation generation */
   state_load64(c, OFF_TLB_GENERATION);
   lget(c, L_T0);
   op(c, WASM_OP_I64_EQ);
