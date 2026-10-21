@@ -125,9 +125,17 @@ interpreter, and edges into region blocks that may read the flags
 before writing them.
 
 **Loads and stores.** The softmmu walk of `vmm_translate_inline()`
-(DESIGN.md §5) is emitted inline against the same page tables: the L1
-index, the L2 entry, the permission bits, the host offset. No pointer
-arithmetic into guest RAM happens beyond what that walk produces.
+(DESIGN.md §5) runs against the same page tables: the L1 index, the L2
+entry, the permission bits, the host offset. No pointer arithmetic into
+guest RAM happens beyond what that walk produces. The walk is a function
+of each module (`FUNC_WALK`), called by every access that misses its
+translation cache; inlining it at each access (`JIT_INLINE_WALK=1`)
+made modules 22% larger, and on Silksong's load under Node the shared
+walk took CPU from 167 to 150 s and wall time from 68 to 65.5 s (Celeste
+60 to 57 s, Nine Sols 192 to 182 s), although memory-heavy loops that
+miss the cache are slower in `tests/jit_bench.c` (V8 does not inline the
+call). The walk requires every permission bit asked for, so the SP
+entry's read-and-write walk is the same function.
 
 - In front of the walk sits a one-entry translation cache per
   permission, in locals: an access within the page last translated for
@@ -142,9 +150,16 @@ arithmetic into guest RAM happens beyond what that walk produces.
     and refill it on a miss: a loop reading two buffers keeps both pages.
   - A region loads and stores only the carried entries it uses.
   - The cache goes from region to region through the state
-    (`Jit_State.tlb_*`). A region's prologue takes it only if the vmm
-    generation, which every mapping or permission change bumps, is the
-    one the cache was filled in; otherwise it starts empty.
+    (`Jit_State.tlb_*`). A region's prologue takes it only if the
+    translation generation (`vmm_map_generation`, bumped by every unmap
+    and every permission a page loses) is the one the cache was filled
+    in; otherwise it starts empty. New mappings bump nothing: no cache
+    can describe a page that was unmapped. The code generation that
+    compiled regions and predecoded blocks are checked against moves only
+    when an executable page is unmapped or loses a permission, and on
+    code flushes; Silksong's load used to move it 1831 times in 300k
+    slices (svcUnmapPhysicalMemory frees page by page), sending every
+    region back to rehash its pages, and now moves it once.
   - Mappings only change in SVCs, which leave compiled code, so this is
     exact in serial mode.
   - With guest threads on several host threads, another core may remap
@@ -176,8 +191,19 @@ retires it.
 
 **SIMD and floating point.**
 
-- Integer Advanced SIMD bitwise operations and permutes are compiled
-  inline to SIMD128. Instructions whose result depends only on the
+- Integer Advanced SIMD is compiled inline to SIMD128: bitwise operations
+  and permutes, three-same arithmetic (ADD/SUB, MUL/MLA/MLS, the
+  compares and CMTST, S/U MAX/MIN, S/U ABD/ABA), two-register misc
+  (ABS, NEG, compares with zero, NOT, CNT) and shifts by immediate (SHL,
+  SSHR/USHR with the architecture's whole-lane shifts, SSRA/USRA), each
+  for the lane sizes wasm has an instruction for. LD1/ST1 of one to four
+  registers, one-lane LD1/ST1 and LD1R are inline too, checked as one
+  access (the state's scratch holds four Q registers for page-crossing
+  ones); LD2-LD4 still go to the interpreter. A fallback profile
+  (`--jit-fallbacks`) of Nine Sols' load (Unity IL2CPP) had 80 M direct
+  calls in 250k slices, 48 M of them structure transfers and 11 M a
+  plain ADD.4S; with these inline, 15 M remain, and its load took 16%
+  less CPU (Celeste 21%). Instructions whose result depends only on the
   destination (MOVI, MVNI, ORR/BIC immediate, FMOV immediate) are
   evaluated at compile time by running the interpreter on two scratch
   states.
@@ -619,6 +645,34 @@ shows it next to the backend name.
 - **0.4.0** (2026-10-19) - load speed (Celeste): direct forward branches,
   branch hints, small callers spanned, an SP translation entry and
   per-register slots.
+- **0.5.0** (2026-10-21) - Unity titles (Nine Sols, Silksong): integer
+  SIMD and LD1/ST1/LD1R inline, the shared softmmu walk by default,
+  registers spilled and reloaded in pairs, separate code and translation
+  generations. Under Node, CPU to the same slice: Nine Sols 345 -> 182 s
+  (with raster3d's compute memo), Celeste 79 -> 57 s, Silksong 176 ->
+  150 s.
+
+## What a region costs on V8
+
+From V8's arm64 output (`node --no-liftoff --no-wasm-lazy-compilation
+--print-wasm-code` on a module `--jit-dump` wrote):
+
+- Straight-line guest code compiles to about five host instructions per
+  guest instruction: a byte-scanning loop's `add`, `tst`, `b.eq`,
+  `ldrb`, `cbz` became ~26, counting the per-block budget check, the
+  flags materialized at block ends, the translation-cache check and V8's
+  own bounds check.
+- Every access to the state (a guest register in a prologue or an
+  epilogue, a TLB entry, the cycle counters) costs ~7 instructions: the
+  memory64 bounds check builds a different 34-bit constant per offset
+  (movz/movk/movk), compares and branches before the add and the load.
+  Registers move in pairs for that reason, but measured gains were small
+  (~1%): the checks predict well.
+- A region's machine code is large (tens of KB for a few hundred guest
+  instructions), mostly out-of-line paths. Silksong's load enters a
+  region every ~30 guest instructions (289 M entries in 300k slices, 8.8
+  G instructions), and each entry pays the prologue (~19 state loads on
+  average), stack spills and the 4-way chain probe.
 
 ## Limits and next steps
 

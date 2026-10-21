@@ -1609,6 +1609,14 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
          BIT(w, 39) ? " & 31u" : "", BIT(w, 48) ? "true" : "false");
     return;
   }
+  case SM_OP_LEA: {
+    const uint32_t shift = BITS(w, 39, 5), pd = BITS(w, 48, 3);
+    EMIT("{ var x = %s << %uu; %s let s = x + %s; ", reg(t, REG_A(w)).s, shift, BIT(w, 45) ? "x = 0u - x;" : "",
+         op_b(t, in).s);
+    set_pred(t, pd, "s < x");
+    EMIT("%s = s; } ", reg_dst(t, REG_D(w)).s);
+    return;
+  }
   case SM_OP_SHF: {
     const Sm_Shf f = sm_shf_fields(w);
     EMIT("%s = shf_(%s, %s, %s, %s, %s, %s, %s, %s); ", reg_dst(t, REG_D(w)).s, reg(t, REG_A(w)).s, op_b(t, in).s,

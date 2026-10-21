@@ -89,6 +89,7 @@ static const Op_Pattern k_patterns[] = {
     {0xfc00, 0x0400, SM_OP_LOP32I, L, 0},
     {0xfff8, 0x5be0, SM_OP_LOP3, R, 0}, {0xfe00, 0x0200, SM_OP_LOP3, C, 0}, {0xfe00, 0x3c00, SM_OP_LOP3, I, 0},
     {0xfff8, 0x5c48, SM_OP_SHL, R, 0}, {0xfff8, 0x4c48, SM_OP_SHL, C, 0}, {0xfef8, 0x3848, SM_OP_SHL, I, 0},
+    {0xfff8, 0x5bd0, SM_OP_LEA, R, 0}, {0xfff8, 0x4bd0, SM_OP_LEA, C, 0}, {0xfff8, 0x36d0, SM_OP_LEA, I, 0},
     {0xfff8, 0x5bf8, SM_OP_SHF, R, 0}, {0xfff8, 0x5cf8, SM_OP_SHF, R, 0}, {0xfff8, 0x36f8, SM_OP_SHF, I, 0},
     {0xfff8, 0x38f8, SM_OP_SHF, I, 0},
     {0xfff8, 0x5c28, SM_OP_SHR, R, 0}, {0xfff8, 0x4c28, SM_OP_SHR, C, 0}, {0xfef8, 0x3828, SM_OP_SHR, I, 0},
@@ -158,7 +159,7 @@ static const char *const k_names[SM_OP_COUNT] = {
     [SM_OP_IPA] = "IPA", [SM_OP_LDC] = "LDC", [SM_OP_LD] = "LD", [SM_OP_ST] = "ST", [SM_OP_LDG] = "LDG",
     [SM_OP_STG] = "STG", [SM_OP_LDL] = "LDL", [SM_OP_STL] = "STL", [SM_OP_OUT] = "OUT", [SM_OP_TEX] = "TEX", [SM_OP_TEX_B] = "TEX.B",
     [SM_OP_TEXS] = "TEXS", [SM_OP_TLD] = "TLD", [SM_OP_TLDS] = "TLDS", [SM_OP_TLD4] = "TLD4", [SM_OP_TLD4S] = "TLD4S",
-    [SM_OP_TXQ] = "TXQ", [SM_OP_TMML] = "TMML", [SM_OP_TXD] = "TXD", [SM_OP_BRA] = "BRA", [SM_OP_SUST] = "SUST", [SM_OP_SHF] = "SHF", [SM_OP_BRX] = "BRX", [SM_OP_SSY] = "SSY",
+    [SM_OP_TXQ] = "TXQ", [SM_OP_TMML] = "TMML", [SM_OP_TXD] = "TXD", [SM_OP_BRA] = "BRA", [SM_OP_LEA] = "LEA", [SM_OP_SUST] = "SUST", [SM_OP_SHF] = "SHF", [SM_OP_BRX] = "BRX", [SM_OP_SSY] = "SSY",
     [SM_OP_SYNC] = "SYNC", [SM_OP_PBK] = "PBK", [SM_OP_BRK] = "BRK", [SM_OP_PCNT] = "PCNT", [SM_OP_CONT] = "CONT",
     [SM_OP_CAL] = "CAL", [SM_OP_RET] = "RET", [SM_OP_EXIT] = "EXIT", [SM_OP_KIL] = "KIL",
 };
@@ -1962,6 +1963,22 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
       if (is_signed) d[l] = s >= 32u ? (uint32_t)((int32_t)a[l] >> 31) : (uint32_t)((int32_t)a[l] >> s);
       else d[l] = s >= 32u ? 0u : a[l] >> s;
     }
+    return;
+  }
+  case SM_OP_LEA: {
+    const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
+    uint32_t *d = dst_row(t, REG_D(w));
+    const uint32_t shift = BITS(w, 39, 5), pd = BITS(w, 48, 3);
+    const bool neg = BIT(w, 45) != 0;
+    Sm_Mask carry = 0;
+    FOR_LANES(m) {
+      uint32_t x = a[l] << shift;
+      if (neg) x = 0u - x;
+      const uint64_t sum = (uint64_t)x + b[l];
+      d[l] = (uint32_t)sum;
+      if (sum >> 32) carry |= (Sm_Mask)1 << l;
+    }
+    if (pd != SM_PT) set_pred(t, pd, m, carry);
     return;
   }
   case SM_OP_SHF: {

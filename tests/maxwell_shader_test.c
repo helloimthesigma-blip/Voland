@@ -474,6 +474,26 @@ static void test_funnel_shift(void) {
   }
 }
 
+/* LEA: Rd = (Ra << shift) + B (TOTK's index * 4 + base), with .NEG and the
+ * carry out to a predicate. */
+static void test_lea(void) {
+  Builder b;
+  begin(&b, SM_STAGE_VERTEX);
+  emit(&b, MOV32I(1, 0x40000003u));
+  emit(&b, op_top(0x36d0) | GUARD | (2ull << 39) | (7ull << 48) | ((uint64_t)0x100 << 20) | ra(1) | rd(2)); /* LEA R2 = (R1 << 2) + 0x100 */
+  emit(&b, MOV32I(5, 0xfffffff8u));
+  emit(&b, op_top(0x5bd0) | GUARD | (2ull << 39) | (0ull << 48) | rb(5) | ra(1) | rd(3)); /* LEA R3, P0 = (R1 << 2) + R5 */
+  emit(&b, op_top(0x36d0) | GUARD | (1ull << 45) | (4ull << 39) | (7ull << 48) | ((uint64_t)0x1000 << 20) | ra(1) | rd(4)); /* LEA.NEG */
+  emit(&b, EXIT());
+  load(&b);
+  sm_thread_reset(&g_thread, 1);
+  CHECK(run(), "LEA program runs");
+  CHECK(g_thread.r[2][0] == 0x0000010cu, "LEA %08x", g_thread.r[2][0]);
+  CHECK(g_thread.r[3][0] == 0x00000004u, "LEA %08x", g_thread.r[3][0]);
+  CHECK((g_thread.p[0] & 1u) != 0, "LEA carry out");
+  CHECK(g_thread.r[4][0] == 0x1000u - 0x30u, "LEA.NEG %08x", g_thread.r[4][0]);
+}
+
 /* Screen-space derivatives the way nouveau builds them: SHFL.BFLY to the
  * quad neighbour, then FSWZADD with QUADOP(SUB, SUBR, SUB, SUBR) for
  * dFdx and QUADOP(SUB, SUB, SUBR, SUBR) for dFdy; SHFL.IDX broadcasts a
@@ -644,6 +664,7 @@ int main(void) {
   test_divergence();
   test_indirect_branch();
   test_funnel_shift();
+  test_lea();
   test_derivatives();
   test_conditional_exit();
   test_half_precision();

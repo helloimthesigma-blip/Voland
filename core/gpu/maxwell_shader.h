@@ -114,6 +114,7 @@ typedef enum Sm_Op {
   /* control */
   SM_OP_BRA, SM_OP_SSY, SM_OP_SYNC, SM_OP_PBK, SM_OP_BRK, SM_OP_PCNT, SM_OP_CONT,
   SM_OP_CAL, SM_OP_RET, SM_OP_EXIT, SM_OP_KIL,
+  SM_OP_LEA, /* Rd = (Ra << shift) + B, carry to a predicate */
   SM_OP_SUST, /* surface store: formatted (.P) or raw (.B) through Sm_Env.surface_store */
   SM_OP_SHF, /* funnel shift of Rc:Ra (64-bit pairs) */
   SM_OP_BRX, /* indirect: target = next + Ra + imm (Ra from a jump table) */
