@@ -4560,8 +4560,6 @@ static bool c_vector_load_store(Ctx *c, uint32_t insn) {
 /* Exclusive and acquire/release (interp_load_store.c, exclusive()).   */
 /* ------------------------------------------------------------------ */
 
-#define EXCLUSIVE_GRANULE_MASK (~(uint64_t)(INTERP_EXCLUSIVE_GRANULE - 1u))
-
 /* atomic.fence (threads proposal: 0xFE prefix, opcode 0x03, flags 0). */
 #define WASM_ATOMIC_PREFIX 0xFEu
 #define WASM_ATOMIC_FENCE 0x03u
@@ -4707,17 +4705,20 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
     emit_store_exclusive_shared(c, element, t, rs);
     return true;
   }
-  /* STXR / STLXR: stores iff the monitor holds this granule; the status
-   * register and the monitor's clearing happen either way. A failing
-   * store still checks translation (a 1-byte read probe). */
+  /* STXR / STLXR: stores iff the monitor holds this address and size
+   * (the interpreter's rule); the status register and the monitor's
+   * clearing happen either way. A failing store still checks translation
+   * (a 1-byte read probe). */
   lget(c, L_STATE);
   mem(c, WASM_OP_I32_LOAD8_U, ALIGN_1, OFF_EXCLUSIVE_VALID);
   state_load64(c, OFF_EXCLUSIVE_ADDRESS);
   lget(c, L_ADDR);
-  op(c, WASM_OP_I64_XOR);
-  i64c(c, EXCLUSIVE_GRANULE_MASK);
-  op(c, WASM_OP_I64_AND);
-  op(c, WASM_OP_I64_EQZ);
+  op(c, WASM_OP_I64_EQ);
+  op(c, WASM_OP_I32_AND);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_EXCLUSIVE_SIZE);
+  i32c(c, element);
+  op(c, WASM_OP_I32_EQ);
   op(c, WASM_OP_I32_AND);
   ltee(c, L_PASS);
   open_if(c, WASM_BLOCK_VOID);

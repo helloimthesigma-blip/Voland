@@ -32,10 +32,6 @@ typedef enum Interp_Status {
   INTERP_FAULT,     /* memory fault; state unchanged; fault_address set */
 } Interp_Status;
 
-/* Bytes the exclusive monitor covers (an aligned 64-byte granule is the
- * architectural maximum; Cortex-A57's ERG is 64 bytes). */
-#define INTERP_EXCLUSIVE_GRANULE 64u
-
 /* Instructions the run loop keeps executing past the budget while an
  * exclusive monitor is held, so LDXR/STXR loops complete (§7). */
 #define INTERP_EXCLUSIVE_GRACE_INSTRUCTIONS 64u
@@ -55,7 +51,8 @@ typedef struct Interp_State {
   uint64_t tpidrro_el0;
 
   /* Local exclusive monitor (§7: per-thread, cleared at run() entry; the
-   * run loop never yields while it is held, up to a grace cap). */
+   * run loop never yields while it is held, up to a grace cap). A
+   * store-exclusive passes only on the same address and size. */
   bool exclusive_valid;
   uint64_t exclusive_address;
   /* What the load-exclusive read (`exclusive_size` bytes): in multicore

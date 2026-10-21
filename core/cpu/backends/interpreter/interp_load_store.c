@@ -264,10 +264,6 @@ static Interp_Status pair(Interp_State *s, uint32_t insn) {
 /* Exclusive and acquire/release (ARMv8.0 subset).                     */
 /* ------------------------------------------------------------------ */
 
-static uint64_t granule_of(uint64_t address) {
-  return address & ~(uint64_t)(INTERP_EXCLUSIVE_GRANULE - 1u);
-}
-
 /* Compare-and-swap of `size` bytes at `host`: true if it held `expected`
  * and now holds `desired` (both little-endian byte images). */
 bool interp_compare_and_swap(uint8_t *host, const void *expected, const void *desired, uint32_t size) {
@@ -396,9 +392,12 @@ static Interp_Status exclusive(Interp_State *s, uint32_t insn) {
   if (cpu_multicore()) return store_exclusive_shared(s, address, total, element, o1, t, t2, rs);
 
   /* Store-exclusive: succeeds iff this thread's monitor is set on the
-   * same granule. The status register is written in either case, and the
-   * monitor is cleared either way. A failing store writes no memory. */
-  const bool pass = s->exclusive_valid && granule_of(s->exclusive_address) == granule_of(address);
+   * same address and size (another address in the granule, or another
+   * size, is CONSTRAINED UNPREDICTABLE; failing matches the multicore
+   * compare-and-swap, so the two modes cannot be told apart). The status
+   * register is written in either case, and the monitor is cleared
+   * either way. A failing store writes no memory. */
+  const bool pass = s->exclusive_valid && s->exclusive_address == address && s->exclusive_size == total;
   if (pass) {
     store_le(data, xreg(s, t), element);
     if (o1) store_le(data + element, xreg(s, t2), element);
