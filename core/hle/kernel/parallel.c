@@ -318,6 +318,13 @@ static void run_free_on_core(Parallel *p, Core *core) {
     scheduler_expire_timeouts(sched);
     const int32_t index = scheduler_pick_for_core(sched, core->index);
     if (index < 0) {
+      if (scheduler_pick(sched) >= 0) {
+        /* Runnable, but only on another core (affinity): make sure that
+         * one is looking, then wait. */
+        pthread_cond_broadcast(&p->core_cv);
+        wait_core_cv(p, &core->time.idle_ns);
+        continue;
+      }
       if (p->busy == 0 && p->free_status == SCHEDULER_RAN) {
         /* Nothing runnable anywhere: the serial idle step, then devices. */
         const uint64_t before = sched->ticks;
@@ -421,6 +428,7 @@ Parallel *parallel_create(Scheduler *sched, const CPU_Backend *backend, uint32_t
     return NULL;
   }
   sched->parallel = p;
+  sched->host_cores = p->core_count;
   g_parallel = p;
   log_info("[parallel] %u guest core thread(s)", p->core_count);
   return p;
@@ -433,7 +441,10 @@ void parallel_destroy(Parallel *p) {
   pthread_cond_broadcast(&p->core_cv);
   pthread_mutex_unlock(&p->kernel);
   for (uint32_t i = 0; i < p->core_count; i++) pthread_join(p->cores[i].thread, NULL);
-  if (p->sched && p->sched->parallel == p) p->sched->parallel = NULL;
+  if (p->sched && p->sched->parallel == p) {
+    p->sched->parallel = NULL;
+    p->sched->host_cores = 0;
+  }
   if (g_parallel == p) g_parallel = NULL;
   pthread_cond_destroy(&p->channel_cv);
   pthread_mutex_destroy(&p->channel);

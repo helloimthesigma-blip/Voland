@@ -208,11 +208,37 @@ static bool better(const Sched_Thread *t, const Sched_Thread *b, bool affine, ui
   return t->last_run < b->last_run;
 }
 
+/* The guest cores in a thread's affinity (all of them if it names none). */
+static uint64_t guest_cores_of(const Sched_Thread *t) {
+  const uint64_t all = ((uint64_t)1 << THREAD_CORE_COUNT) - 1u;
+  const uint64_t mask = t->core_mask & all;
+  return mask ? mask : all;
+}
+
+bool scheduler_runs_on(const Scheduler *sched, const Sched_Thread *t, uint32_t core) {
+  if (sched->host_cores <= 1u) return true;
+  const uint64_t mask = guest_cores_of(t);
+  for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++)
+    if (((mask >> g) & 1u) && g % sched->host_cores == core) return true;
+  return false;
+}
+
+uint32_t scheduler_guest_core(const Scheduler *sched, const Sched_Thread *t) {
+  if (sched->host_cores <= 1u || !t->on_core) return t->thread.preferred_core;
+  const uint64_t mask = guest_cores_of(t);
+  if (((mask >> t->thread.preferred_core) & 1u) && t->thread.preferred_core % sched->host_cores == t->last_core)
+    return t->thread.preferred_core;
+  for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++)
+    if (((mask >> g) & 1u) && g % sched->host_cores == t->last_core) return g;
+  return t->thread.preferred_core;
+}
+
 static int32_t pick(Scheduler *sched, bool affine, uint32_t core) {
   int32_t best = -1;
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     const Sched_Thread *t = &sched->threads[i];
     if (t->state != THREAD_STATE_RUNNABLE || t->paused || t->on_core) continue;
+    if (affine && !scheduler_runs_on(sched, t, core)) continue;
     if (best < 0 || better(t, &sched->threads[best], affine, core)) best = (int32_t)i;
   }
   return best;

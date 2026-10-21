@@ -175,7 +175,7 @@ void hle_svc_set_thread_core_mask(HLE_Context *c, CPU_State *s) {
 
 void hle_svc_get_current_processor_number(HLE_Context *c, CPU_State *s) {
   Sched_Thread *t = current(c, s);
-  regs(c, s)->x[0] = t ? t->thread.preferred_core : 0;
+  regs(c, s)->x[0] = t ? scheduler_guest_core(c->scheduler, t) : 0;
 }
 
 /* ------------------------------------------------------------------ */

@@ -69,7 +69,7 @@ typedef struct Sched_Thread {
   uint32_t wait_handle_count;
   bool cancel_pending;      /* CancelSynchronization before the wait */
   uint64_t wait_sequence;   /* FIFO order among waiters of equal priority */
-  uint64_t core_mask;       /* affinity mask (recorded; §7 runs one worker) */
+  uint64_t core_mask;       /* affinity mask (guest cores; honoured with parallel cores) */
   bool paused;              /* svcSetThreadActivity(Paused): never picked until resumed */
   bool on_core;             /* inside backend->run on some host thread (parallel mode, docs/PARALLEL.md) */
   uint32_t last_core;       /* parallel mode: the core it last ran on (affinity) */
@@ -115,6 +115,12 @@ typedef struct Scheduler {
    * names the thread whose SVC holds the kernel lock (scheduler_kernel_enter). */
   int32_t current;
   Parallel *parallel;       /* NULL: serial (the default); see parallel.h */
+  /* Host cores running guest threads (parallel.c); 0 = serial. Guest core
+   * g maps to host core g % host_cores, and a host core only runs threads
+   * whose affinity includes a guest core mapped to it - so threads pinned
+   * to one guest core never run at once, as on the Switch (games keep
+   * per-core data without locks). */
+  uint32_t host_cores;
   bool process_exited;
   bool process_crashed;     /* svcBreak or an unhandled fault */
   uint64_t crash_pc;
@@ -216,6 +222,13 @@ int32_t scheduler_pick(Scheduler *sched);
  * prefers one that last ran on this core (its code is in this core's JIT
  * cache, docs/PARALLEL.md "Affinity"), then round-robin order. */
 int32_t scheduler_pick_for_core(Scheduler *sched, uint32_t core);
+
+/* Whether host core `core` may run `t` (always, when serial). */
+bool scheduler_runs_on(const Scheduler *sched, const Sched_Thread *t, uint32_t core);
+
+/* The guest core `t` reports (GetCurrentProcessorNumber): the one its host
+ * core stands for while it runs on one, else its ideal core. */
+uint32_t scheduler_guest_core(const Scheduler *sched, const Sched_Thread *t);
 /* Nothing runnable: advance time to the next wake (IDLE), or report
  * EXITED / DEADLOCK - scheduler_tick's no-thread path. */
 Scheduler_Status scheduler_idle(Scheduler *sched);
