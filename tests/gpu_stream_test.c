@@ -16,7 +16,7 @@
 #define RECORDS 2000u
 #define TYPE_DATA 7u
 
-static uint8_t g_header[GPU_STREAM_HEADER_BYTES];
+static _Alignas(64) uint8_t g_header[GPU_STREAM_HEADER_BYTES]; /* atomics: an unaligned header faults on ARM64 */
 static uint64_t g_ring_storage[RING_BYTES / 8u];
 static uint32_t g_next_expected;
 

@@ -640,7 +640,7 @@ static void test_worker_count_invariance(Raster3d *r) {
 #define SEEN_INDICES 12u
 #define TOPOLOGY_STRIP_TEST 5u /* Maxwell TRIANGLE_STRIP */
 
-static uint8_t g_stream_header[GPU_STREAM_HEADER_BYTES];
+static _Alignas(64) uint8_t g_stream_header[GPU_STREAM_HEADER_BYTES]; /* atomics: an unaligned header faults on ARM64 */
 static uint64_t g_stream_ring[GPU_RING_BYTES / 8u];
 
 typedef struct Seen_Draw {
