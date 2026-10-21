@@ -87,10 +87,12 @@ bool interp_decode_bit_masks(uint32_t n, uint32_t imms, uint32_t immr, bool imme
 
 uint64_t g_interp_watch_host, g_interp_watch_bytes;
 static Interp_Read_Hook g_interp_watch_hook;
+static bool g_interp_watch_writes;
 
-void interp_set_read_watch(uint64_t host, uint64_t bytes, Interp_Read_Hook hook) {
+void interp_set_read_watch(uint64_t host, uint64_t bytes, Interp_Read_Hook hook, bool writes) {
   g_interp_watch_host = host;
   g_interp_watch_hook = hook;
+  g_interp_watch_writes = writes;
   g_interp_watch_bytes = hook ? bytes : 0;
 }
 
@@ -102,7 +104,7 @@ bool interp_read(Interp_State *s, uint64_t address, void *out, uint32_t size) {
     const uint8_t *host = vmm_translate_inline(s->l1, address, VMM_PERM_R, &fault);
     if (host) {
       memcpy(out, host, size);
-      if (interp_watched(host)) g_interp_watch_hook(s->regs.pc, address, size, out);
+      if (interp_watched(host) && !g_interp_watch_writes) g_interp_watch_hook(s->regs.pc, s->regs.x[30], address, size, out, false);
       return true;
     }
   }
@@ -118,6 +120,7 @@ bool interp_write(Interp_State *s, uint64_t address, const void *data, uint32_t 
     uint8_t *host = vmm_translate_inline(s->l1, address, VMM_PERM_W, &fault);
     if (host) {
       memcpy(host, data, size);
+      if (interp_watched(host) && g_interp_watch_writes) g_interp_watch_hook(s->regs.pc, s->regs.x[30], address, size, data, true);
       return true;
     }
   }

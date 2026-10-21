@@ -581,13 +581,29 @@ typedef struct Watch_Read {
 } Watch_Read;
 static Watch_Read g_watch[WATCH_RING];
 static uint64_t g_watch_count, g_watch_base_gva;
-static void watch_read(uint64_t pc, uint64_t address, uint32_t size, const void *data) {
+static void watch_read(uint64_t pc, uint64_t lr, uint64_t address, uint32_t size, const void *data, bool write) {
+  (void)lr;
+  (void)write;
   Watch_Read *w = &g_watch[g_watch_count++ % WATCH_RING];
   w->pc = pc;
   w->address = address;
   w->size = size < 16u ? size : 16u;
   memcpy(w->data, data, w->size);
   if (!g_watch_base_gva) g_watch_base_gva = address & ~0xfffull;
+}
+
+/* VOLAND_WATCH_GPU=GPUVA:BYTES (diagnostics, interpreter): once the GPU
+ * address is mapped, every guest store into those bytes (host-contiguous
+ * from the translation) is printed - the first WATCH_GPU_LOGGED in full,
+ * then a count - to find who writes a texture. */
+#define WATCH_GPU_LOGGED 64u
+static uint64_t g_watch_gpu_stores;
+static void watch_gpu_store(uint64_t pc, uint64_t lr, uint64_t address, uint32_t size, const void *data, bool write) {
+  (void)data;
+  if (!write) return;
+  if (g_watch_gpu_stores++ < WATCH_GPU_LOGGED)
+    fprintf(stderr, "voland-cli: watched store pc %llx lr %llx address %llx size %u\n", (unsigned long long)pc,
+            (unsigned long long)lr, (unsigned long long)address, size);
 }
 
 /* VOLAND_EXCEPTION_SCAN=1 (diagnostics): after a run, look on each thread's
@@ -1390,6 +1406,13 @@ static int run(int argc, char **argv) {
   const uint64_t pc_profile_from = getenv("VOLAND_PC_PROFILE_FROM") ? strtoull(getenv("VOLAND_PC_PROFILE_FROM"), NULL, 0) : 0;
   /* VOLAND_PROGRESS=N: a "slice N" line every N slices (long runs). */
   const uint64_t progress_every = getenv("VOLAND_PROGRESS") ? strtoull(getenv("VOLAND_PROGRESS"), NULL, 0) : 0;
+  uint64_t watch_gpu_va = 0, watch_gpu_bytes = 0;
+  bool watch_gpu_set = false;
+  if (getenv("VOLAND_WATCH_GPU")) {
+    char *end = NULL;
+    watch_gpu_va = strtoull(getenv("VOLAND_WATCH_GPU"), &end, 0);
+    watch_gpu_bytes = (end && *end == ':') ? strtoull(end + 1, NULL, 0) : 4096u;
+  }
   /* VOLAND_TRACE_DRAWS=START:LENGTH logs every draw in that slice window. */
   uint64_t trace_start = UINT64_MAX, trace_length = 0;
   if (getenv("VOLAND_TRACE_DRAWS")) {
@@ -1531,10 +1554,23 @@ static int run(int argc, char **argv) {
     }
     framebuffer_consume_all(); /* the CLI "displays" every frame at once */
     if (g_gpu_file && !gpu_thread_async(&emu.gpu_thread)) gpu_stream_drain(); /* else the GPU thread drains as it writes */
+    if (watch_gpu_va && !watch_gpu_set) {
+      uint64_t gva = 0, run = 0;
+      VMM_Fault fault;
+      const uint8_t *host = NULL;
+      if (nvdrv_gpu_translate(&emu.nvdrv, watch_gpu_va, &gva, &run) &&
+          (host = vmm_translate_inline(vmm_page_table_l1(emu.vmm), gva, VMM_PERM_R, &fault)) != NULL) {
+        interp_set_read_watch((uint64_t)(uintptr_t)host, watch_gpu_bytes, watch_gpu_store, true);
+        watch_gpu_set = true;
+        fprintf(stderr, "voland-cli: watching stores to GPU %llx (guest %llx, %llu bytes) from slice %llu\n",
+                (unsigned long long)watch_gpu_va, (unsigned long long)gva, (unsigned long long)watch_gpu_bytes,
+                (unsigned long long)slices);
+      }
+    }
     if (getenv("VOLAND_WATCH_TIME") && slices == strtoull(getenv("VOLAND_WATCH_TIME"), NULL, 0) &&
         emu.time.shared_memory) {
       const uint64_t host = layout_get()->guest_ram_base + emu.time.shared_memory->guest_pa;
-      interp_set_read_watch(host, TIME_SHARED_MEMORY_BYTES, watch_read);
+      interp_set_read_watch(host, TIME_SHARED_MEMORY_BYTES, watch_read, false);
       fprintf(stderr, "voland-cli: watching the time shared memory from slice %llu\n", (unsigned long long)slices);
     }
     if (gpu_stats_from && slices == gpu_stats_from) {
