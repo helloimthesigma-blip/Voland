@@ -53,6 +53,12 @@
  * 256 for the same guest speed, and module compilation is the JIT's
  * largest overhead while games load. */
 #define JIT_DEFAULT_HOT_THRESHOLD 256u
+/* Installed regions per host thread. Each holds an engine module and its
+ * machine code until it is removed; TOTK compiles ~70k distinct regions
+ * per core in its first minutes and the browser tab died at ~200k live
+ * ones. Over the cap, regions not entered since the hand last passed are
+ * removed until 7/8 of it remain. */
+#define JIT_MAX_LIVE_REGIONS 32768u
 #define JIT_MODULE_BYTES (512u * 1024u)
 #define JIT_RECENT_BLOCKS 64u
 
@@ -141,6 +147,10 @@ typedef struct Jit_Thread {
    * block entry made its cache line bounce between cores (and raced).
    * jit_stats() sums the threads. */
   Jit_Stats stats;
+  /* Installed regions, and the hand that trims them back under
+   * JIT_MAX_LIVE_REGIONS (whole-cache second chance). */
+  uint32_t live;
+  uint32_t sweep;
 } Jit_Thread;
 
 #define JIT_RECENT_COMPILED (1ull << 63)
@@ -707,11 +717,35 @@ static Jit_Pending g_pending[JIT_PENDING_SLOTS];
 static uint32_t g_next_pending_id = 1;
 
 /* Fills `e` with a compiled region for `pc`. */
+/* Removes regions not entered since the hand last passed until the live
+ * count is back under the cap (the cache's own sets only evict on a
+ * conflict, so nothing else bounds it). */
+static void trim_live(Jit_Thread *t) {
+  if (t->live <= JIT_MAX_LIVE_REGIONS) return;
+  const uint32_t target = JIT_MAX_LIVE_REGIONS - JIT_MAX_LIVE_REGIONS / 8u;
+  for (uint32_t scanned = 0; t->live > target && scanned < 2u * JIT_CACHE_ENTRIES; scanned++) {
+    Jit_Entry *e = &t->cache[t->sweep++ % JIT_CACHE_ENTRIES];
+    if (!e->function || e->pending) continue;
+    if (e->referenced) {
+      e->referenced = 0;
+      continue;
+    }
+    uninstall(e->function);
+    e->function = 0;
+    e->pc = 0;
+    t->live--;
+    t->stats.evictions++;
+    t->stats.trimmed++;
+  }
+}
+
 static void install_entry(Jit_Thread *t, Jit_Entry *e, uint64_t pc, uint64_t generation, uint64_t function,
                           const Jit_Compiled *compiled, uint64_t hash, bool multicore) {
   if (e->function) {
     uninstall(e->function);
     t->stats.evictions++;
+  } else {
+    t->live++;
   }
   e->pc = pc;
   e->generation = generation;
@@ -723,9 +757,11 @@ static void install_entry(Jit_Thread *t, Jit_Entry *e, uint64_t pc, uint64_t gen
   e->multicore = multicore;
   e->code_hash = hash;
   e->pending = 0;
+  e->referenced = 1; /* the trim below must not take it straight back */
   t->stats.blocks_compiled++;
   t->stats.region_blocks += compiled->blocks;
   t->stats.module_bytes += compiled->module_bytes;
+  trim_live(t);
 }
 
 /* Installs asynchronous compilations that have finished, if the code they
@@ -841,6 +877,7 @@ static void compile(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64_t 
       if (slot->function) {
         uninstall(slot->function);
         t->stats.evictions++;
+        t->live--;
       }
       slot->function = 0;
       slot->pc = pc;
@@ -883,6 +920,7 @@ static Jit_Entry *find(Jit_Thread *t, const Interp_State *s, uint64_t pc, uint64
 stale:
   t->stats.stale++;
   uninstall(e->function);
+  t->live--;
   e->function = 0;
   e->pc = 0;
   return NULL;

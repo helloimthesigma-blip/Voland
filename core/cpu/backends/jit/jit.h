@@ -49,6 +49,7 @@ typedef struct Jit_Stats {
   uint64_t compile_lock_ns;    /* ...waiting for another thread's codegen */
   uint64_t sync_installs;      /* modules compiled and instantiated synchronously */
   uint64_t sync_install_ns;    /* ...and the host time that took (cores always; async is the CPU worker's) */
+  uint64_t trimmed;            /* regions removed to stay under the live cap (also in evictions) */
 } Jit_Stats;
 const Jit_Stats *jit_stats(void);
 

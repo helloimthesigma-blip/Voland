@@ -1813,11 +1813,11 @@ static int run(int argc, char **argv) {
   if (backend == &CPU_BACKEND_JIT) {
     const Jit_Stats *j = jit_stats();
     fprintf(stderr,
-            "voland-cli: jit %llu regions compiled (%llu blocks; %llu failed, %llu evicted, %llu KB of modules), "
+            "voland-cli: jit %llu regions compiled (%llu blocks; %llu failed, %llu evicted (%llu over the live cap), %llu KB of modules), "
             "%llu compiled / %llu interpreted block runs, %llu code generations (%llu blocks kept, %llu stale)\n",
             (unsigned long long)j->blocks_compiled, (unsigned long long)j->region_blocks,
             (unsigned long long)j->compile_failures,
-            (unsigned long long)j->evictions, (unsigned long long)(j->module_bytes / 1024u),
+            (unsigned long long)j->evictions, (unsigned long long)j->trimmed, (unsigned long long)(j->module_bytes / 1024u),
             (unsigned long long)j->block_entries, (unsigned long long)j->interpreted_blocks,
             (unsigned long long)j->generations, (unsigned long long)j->revalidations, (unsigned long long)j->stale);
     fprintf(stderr, "voland-cli: jit time: codegen %.2f s, synchronous installs %.2f s (%llu)\n", (double)j->codegen_ns / 1e9,
