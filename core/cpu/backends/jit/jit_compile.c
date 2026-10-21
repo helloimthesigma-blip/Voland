@@ -151,6 +151,7 @@ enum {
 #define STATE_OFFSET(field) ((uint64_t)offsetof(Jit_State, field))
 #define OFF_X(r) (STATE_OFFSET(interp.regs.x) + (uint64_t)(r) * sizeof(uint64_t))
 #define OFF_SP STATE_OFFSET(interp.regs.sp)
+_Static_assert(OFF_SP == OFF_X(31), "spill/reload move x30 and SP as one pair");
 #define OFF_PC STATE_OFFSET(interp.regs.pc)
 #define OFF_PSTATE STATE_OFFSET(interp.regs.pstate)
 #define OFF_FPCR STATE_OFFSET(interp.fpcr)
@@ -443,11 +444,36 @@ static void store_flags(Ctx *c) {
 /* Spill / reload / exits.                                             */
 /* ------------------------------------------------------------------ */
 
+/* x0..x30 and SP sit in the state as 32 consecutive u64s, so registers
+ * 2k and 2k+1 move as one v128 when both are needed: every memory64 access
+ * in V8 pays a bounds check (about five instructions), and region
+ * prologues and epilogues are most of what a short region does. */
+#define REG_PAIRS 16u
+static void simd(Ctx *c, uint32_t opcode);
+static uint32_t pair_local(uint32_t r) { return r == REG_ZR ? L_SP : L_X0 + r; }
+static bool reg_in(uint64_t mask, uint32_t r) { return r == REG_ZR ? (mask & MASK_SP) != 0 : (mask & ((uint64_t)1 << r)) != 0; }
+
 static void spill(Ctx *c) {
-  for (uint32_t r = 0; r < REG_ZR; r++) {
-    if (c->all_written & ((uint64_t)1 << r)) state_store64_local(c, OFF_X(r), L_X0 + r);
+  for (uint32_t k = 0; k < REG_PAIRS; k++) {
+    const uint32_t a = 2u * k, b = a + 1u;
+    const bool wa = reg_in(c->all_written, a), wb = reg_in(c->all_written, b);
+    if (!wa && !wb) continue;
+    /* A partner that is only read still holds the state's value: storing it back is harmless. */
+    if ((wa || reg_in(c->all_used, a)) && (wb || reg_in(c->all_used, b))) {
+      lget(c, L_STATE);
+      lget(c, pair_local(a));
+      simd(c, WASM_SIMD_I64X2_SPLAT);
+      lget(c, pair_local(b));
+      simd(c, WASM_SIMD_I64X2_REPLACE_LANE);
+      wasm_u8(c->b, 1);
+      simd(c, WASM_SIMD_V128_STORE);
+      wasm_uleb(c->b, ALIGN_8);
+      wasm_uleb(c->b, OFF_X(a));
+      continue;
+    }
+    if (wa) state_store64_local(c, a == REG_ZR ? OFF_SP : OFF_X(a), pair_local(a));
+    if (wb) state_store64_local(c, b == REG_ZR ? OFF_SP : OFF_X(b), pair_local(b));
   }
-  if (c->all_written & MASK_SP) state_store64_local(c, OFF_SP, L_SP);
   if (c->all_written & MASK_NZCV) {
     lget(c, L_STATE);
     lget(c, L_NZCV);
@@ -456,15 +482,32 @@ static void spill(Ctx *c) {
 }
 
 static void reload(Ctx *c) {
-  for (uint32_t r = 0; r < REG_ZR; r++) {
-    if (c->all_used & ((uint64_t)1 << r)) {
-      state_load64(c, OFF_X(r));
-      lset(c, L_X0 + r);
+  for (uint32_t k = 0; k < REG_PAIRS; k++) {
+    const uint32_t a = 2u * k, b = a + 1u;
+    const bool ua = reg_in(c->all_used, a), ub = reg_in(c->all_used, b);
+    if (ua && ub) {
+      lget(c, L_STATE);
+      simd(c, WASM_SIMD_V128_LOAD);
+      wasm_uleb(c->b, ALIGN_8);
+      wasm_uleb(c->b, OFF_X(a));
+      ltee(c, L_VA);
+      simd(c, WASM_SIMD_I64X2_EXTRACT_LANE);
+      wasm_u8(c->b, 0);
+      lset(c, pair_local(a));
+      lget(c, L_VA);
+      simd(c, WASM_SIMD_I64X2_EXTRACT_LANE);
+      wasm_u8(c->b, 1);
+      lset(c, pair_local(b));
+      continue;
     }
-  }
-  if (c->all_used & MASK_SP) {
-    state_load64(c, OFF_SP);
-    lset(c, L_SP);
+    if (ua) {
+      state_load64(c, OFF_X(a));
+      lset(c, pair_local(a));
+    }
+    if (ub) {
+      state_load64(c, b == REG_ZR ? OFF_SP : OFF_X(b));
+      lset(c, pair_local(b));
+    }
   }
   if (c->all_used & MASK_NZCV) {
     lget(c, L_STATE);
@@ -1667,7 +1710,8 @@ static void emit_walk_function(Wasm_Buf *b) {
   ltee(&w, W_HOST);
   lget(&w, W_PERM);
   op(&w, WASM_OP_I64_AND);
-  op(&w, WASM_OP_I64_EQZ);
+  lget(&w, W_PERM);
+  op(&w, WASM_OP_I64_NE); /* every bit of perm (the SP entry asks for read and write) */
   br_if(&w, 1);
   lget(&w, W_HOST);
   i64c(&w, VMM_PTE_HOST_MASK);
@@ -1684,13 +1728,16 @@ static void emit_walk_function(Wasm_Buf *b) {
   wasm_bytes(b, scratch, body.length);
 }
 
-/* The shared walk shrinks modules (~55 bytes less per access) but V8 does
- * not inline the call: memory-heavy loops ran 20-90% slower in
- * tests/jit_bench.c. Inline by default; JIT_SHARED_WALK set in the
- * environment selects the call, for experiments. */
+/* The shared walk shrinks modules (~55 bytes less per access; Silksong's
+ * load compiles 22% fewer module bytes) but V8 does not inline the call,
+ * so a TLB miss costs a call: memory-heavy loops that miss ran 20-90%
+ * slower in tests/jit_bench.c. Real loads won anyway - Silksong to slice
+ * 300k under Node: 10% less CPU, 3.5% less wall time - because engines
+ * compile and cache less code. Shared by default; JIT_INLINE_WALK set in
+ * the environment inlines it. */
 static bool shared_walk(void) {
   static int choice = -1;
-  if (choice < 0) choice = getenv("JIT_SHARED_WALK") != NULL;
+  if (choice < 0) choice = getenv("JIT_INLINE_WALK") == NULL;
   return choice != 0;
 }
 
@@ -1736,7 +1783,7 @@ static void tlb_entry(Ctx *c, uint32_t perm, uint32_t *base, uint32_t *delta, bo
   *base = write ? L_TLB_WBASE : L_TLB_RBASE;
   *delta = write ? L_TLB_WDELTA : L_TLB_RDELTA;
   *refill_shared = false;
-  if (c->mem_base == REG_SP_BASE && !shared_walk()) {
+  if (c->mem_base == REG_SP_BASE) {
     *base = L_TLB_SBASE;
     *delta = L_TLB_SDELTA;
   } else if (c->mem_base < REG_SP_BASE) {
@@ -5470,6 +5517,10 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     assign_tlb_slots(&c, &analysis);
     c.all_used = analysis.used | analysis.written;
     c.all_written = analysis.written;
+    /* reload's paired loads go through L_VA, which the analysis pass (it
+     * spills and reloads nothing yet) never saw. */
+    for (uint32_t k = 0; k < REG_PAIRS; k++)
+      if (reg_in(c.all_used, 2u * k) && reg_in(c.all_used, 2u * k + 1u) && c.declared_local < L_VA) c.declared_local = L_VA;
     emit_function(&c);
     wasm_patch_size(&b, body);
     emit_walk_function(&b);
