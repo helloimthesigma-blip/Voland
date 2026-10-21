@@ -1341,6 +1341,22 @@ static void test_audren(void) {
   CHECK(test_le64(out + voice_out) == FRAMES && test_le32(out + voice_out + 8) == 1);
   r = call(renderer, 3, NULL, 0, NULL);
   CHECK(test_le32(r.data) == 0); /* started */
+
+  /* REV7+ dirty-only mixes (Animal Crossing): a 0x20-byte header naming no
+   * dirty mix, then the sinks - the final mix from the first update stays,
+   * and the sink after the short section still parses. */
+  static uint8_t dirty[sizeof(in) - 0x930 + 0x20];
+  const uint32_t mixes_at = 0x40 + 0x10 + MEMPOOLS * 0x20 + VOICES * 0x70 + VOICES * 0x170;
+  memcpy(dirty, in, mixes_at);
+  memset(dirty + mixes_at, 0, 0x20);
+  memcpy(dirty + mixes_at + 0x20, in + mixes_at + 0x930, sizeof(in) - mixes_at - 0x930);
+  put32(dirty + 0x18, 0x20);
+  put32(dirty + 0x3C, sizeof(dirty));
+  CHECK_OK(vmm_write_block(g_emu.vmm, SCRATCH(0x10000), dirty, sizeof(dirty)));
+  m.sends[0].size = sizeof(dirty);
+  (void)call(renderer, 4, NULL, 0, &m);
+  CHECK(g_emu.audren->mix_count == 1 && g_emu.audren->mixes[0].used && g_emu.audren->mixes[0].buffer_count == 2);
+  CHECK(g_emu.audren->sink_count == 1 && g_emu.audren->sinks[0].type == 1 && g_emu.audren->sinks[0].input_count == 2);
   (void)call(renderer, 6, NULL, 0, NULL);
   CHECK(audren_next_wake(g_emu.audren) == UINT64_MAX);
 }

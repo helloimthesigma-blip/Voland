@@ -28,6 +28,10 @@
 #define AUX_DSP_INFO_OFFSET 0x40u       /* a ring info: the CPU's half, then the DSP's */
 #define AUX_DSP_INFO_RESET_BYTES 0x10u  /* read and write offsets, lost and total counts */
 #define MIX_IN_BYTES 0x930u
+/* REV7+ "dirty-only" mix updates: a header (u32 magic, s32 count, 0x18
+ * reserved), then only the mixes that changed - each names its slot by
+ * mix_id. Animal Crossing sends its mixes once, then empty headers. */
+#define MIX_DIRTY_HEADER_BYTES 0x20u
 #define SINK_IN_BYTES 0x140u
 #define SINK_OUT_BYTES 0x20u
 #define PERF_OUT_BYTES 0x10u
@@ -43,6 +47,7 @@
 #define H_MIXES 0x18u
 #define H_SINKS 0x1Cu
 #define H_PERF 0x20u
+#define H_SPLITTERS 0x24u
 #define H_RENDER_INFO 0x28u
 #define H_TOTAL 0x3Cu
 
@@ -486,7 +491,7 @@ static void parse_voice(Audren_State *s, HLE_Context *c, const uint8_t *p) {
   }
 }
 
-static void parse_mix(Audren_State *s, const uint8_t *p, uint32_t index, uint32_t *next_buffer) {
+static void parse_mix(Audren_State *s, const uint8_t *p, uint32_t index) {
   if (index >= AUDREN_MAX_MIXES) return;
   Audren_Mix *m = &s->mixes[index];
   m->volume = rdf(p);
@@ -497,8 +502,23 @@ static void parse_mix(Audren_State *s, const uint8_t *p, uint32_t index, uint32_
     for (uint32_t b = 0; b < AUDREN_MIX_VOLUMES; b++) m->matrix[a][b] = rdf(p + 0x24u + 4u * (a * AUDREN_MIX_VOLUMES + b));
   m->dest_mix_id = rd32(p + 0x924);
   if (m->buffer_count > AUDREN_MIX_VOLUMES) m->buffer_count = AUDREN_MIX_VOLUMES;
-  m->buffer_offset = *next_buffer;
-  if (m->used) *next_buffer += m->buffer_count;
+}
+
+/* Mix buffers: the final mix owns the first ones, then each used sub-mix
+ * in slot order. */
+static void assign_mix_buffers(Audren_State *s) {
+  uint32_t next = 0;
+  for (uint32_t i = 0; i < s->mix_count; i++)
+    if (s->mixes[i].used && s->mixes[i].mix_id == FINAL_MIX_ID) next = s->mixes[i].buffer_count;
+  for (uint32_t i = 0; i < s->mix_count; i++) {
+    Audren_Mix *m = &s->mixes[i];
+    if (m->mix_id == FINAL_MIX_ID) {
+      m->buffer_offset = 0;
+    } else {
+      m->buffer_offset = next;
+      if (m->used) next += m->buffer_count;
+    }
+  }
 }
 
 static void parse_sink(Audren_State *s, const uint8_t *p, uint32_t index) {
@@ -534,12 +554,11 @@ static uint32_t request_update(Audren_State *s, HLE_Context *c, uint32_t in_size
                          mixes_sz + sinks_sz + perf_sz;
   uint32_t total = rd32(in + H_TOTAL);
   if (total > in_size) total = in_size;
-  if (named > in_size) return 0;
-  const uint32_t splitters = total > named ? (uint32_t)(total - named) : 0u; /* skipped */
+  if (named + rd32(in + H_SPLITTERS) > in_size) return 0;
+  const uint32_t splitters = rd32(in + H_SPLITTERS); /* skipped */
   const uint32_t mempool_count = mempools_sz / MEMPOOL_IN_BYTES;
   const uint32_t voice_count = voices_sz / VOICE_IN_BYTES;
   const uint32_t channel_count = channels_sz / CHANNEL_IN_BYTES;
-  const uint32_t mix_count = mixes_sz / MIX_IN_BYTES;
   const uint32_t sink_count = sinks_sz / SINK_IN_BYTES;
   const uint32_t effect_count = s->effect_count;
   if (!s->logged_layout) {
@@ -604,18 +623,20 @@ static uint32_t request_update(Audren_State *s, HLE_Context *c, uint32_t in_size
     }
   }
   at += effects_sz + splitters;
-  /* Mixes, then sinks. */
-  uint32_t next_buffer = 0;
-  /* The final mix owns the first buffers. */
-  for (uint32_t i = 0; i < mix_count; i++)
-    if (rd32(in + at + i * MIX_IN_BYTES + 0x10) == FINAL_MIX_ID && in[at + i * MIX_IN_BYTES + 0x0C])
-      next_buffer = rd32(in + at + i * MIX_IN_BYTES + 0x08);
-  s->mix_count = mix_count < AUDREN_MAX_MIXES ? mix_count : AUDREN_MAX_MIXES;
-  for (uint32_t i = 0; i < mix_count; i++, at += MIX_IN_BYTES) {
-    const bool final_mix = rd32(in + at + 0x10) == FINAL_MIX_ID;
-    uint32_t zero = 0;
-    parse_mix(s, in + at, i, final_mix ? &zero : &next_buffer);
+  /* Mixes (all of them, or only the dirty ones by slot), then sinks. */
+  const bool dirty_only = mixes_sz % MIX_IN_BYTES == MIX_DIRTY_HEADER_BYTES;
+  const uint32_t mix_records = (mixes_sz - (dirty_only ? MIX_DIRTY_HEADER_BYTES : 0u)) / MIX_IN_BYTES;
+  const uint32_t first_mix = at + (dirty_only ? MIX_DIRTY_HEADER_BYTES : 0u);
+  if (!dirty_only) s->mix_count = mix_records < AUDREN_MAX_MIXES ? mix_records : AUDREN_MAX_MIXES;
+  for (uint32_t i = 0; i < mix_records; i++) {
+    const uint8_t *p = in + first_mix + i * MIX_IN_BYTES;
+    const uint32_t slot = dirty_only ? rd32(p + 0x10) : i;
+    if (slot >= AUDREN_MAX_MIXES) continue;
+    parse_mix(s, p, slot);
+    if (slot >= s->mix_count) s->mix_count = slot + 1u;
   }
+  assign_mix_buffers(s);
+  at += mixes_sz;
   for (uint32_t i = 0; i < sink_count; i++, at += SINK_IN_BYTES, o += SINK_OUT_BYTES) {
     parse_sink(s, in + at, i);
     if (i < AUDREN_MAX_SINKS) wr32(out + o, s->sinks[i].write_offset);
