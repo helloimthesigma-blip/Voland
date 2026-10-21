@@ -74,9 +74,14 @@ typedef struct Mm_Engine {
 typedef void (*Mm_Written)(void *user, uint32_t handle, uint64_t offset, uint64_t bytes);
 
 /* The decode state shared by NVDEC and VIC. */
+/* The codec the platform decoder is configured for (a switch reconfigures). */
+typedef enum Mm_Codec { MM_CODEC_NONE, MM_CODEC_H264, MM_CODEC_VP8 } Mm_Codec;
+
 typedef struct Mm_Video {
+  Mm_Codec codec;
   H264_Params params;  /* the stream's parameter sets (a change reconfigures) */
   bool configured;
+  uint32_t vp8_width, vp8_height; /* the VP8 stream's frame size (a change reconfigures) */
   uint32_t references; /* the most references the guest's DPB has held (sizes max_num_ref_frames) */
   uint32_t surface_iova[MM_MAX_SURFACES];
   uint32_t surface_sequence[MM_MAX_SURFACES];
@@ -108,6 +113,18 @@ void mm_engine_submit(Mm_Engine *engine, const Mm_Context *context, const uint32
 void nvdec_h264_params(const uint8_t *setup, H264_Params *out);
 /* The bitstream's length per the picture setup. */
 uint32_t nvdec_h264_stream_length(const uint8_t *setup);
+
+/* VP8 (application 5): what nvdec_vp8_pic_s says about the frame, and
+ * the header the stream had before the driver stripped it - the frame
+ * tag, plus start code and size on key frames (RFC 6386 9.1) - into
+ * `header` (NVDEC_VP8_MAX_HEADER bytes). Returns the header's bytes. */
+#define NVDEC_VP8_MAX_HEADER 10u
+typedef struct Nvdec_Vp8_Picture {
+  uint32_t width, height;
+  uint32_t length; /* the bitstream's bytes */
+  bool key;
+} Nvdec_Vp8_Picture;
+uint32_t nvdec_vp8_header(const uint8_t *setup, uint8_t header[NVDEC_VP8_MAX_HEADER], Nvdec_Vp8_Picture *out);
 /* Reference frames in the picture's DPB. */
 uint32_t nvdec_h264_references(const uint8_t *setup);
 

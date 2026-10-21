@@ -96,6 +96,28 @@ static void log_decode(void *user, uint32_t generation, uint32_t sequence, bool 
   log->last_bytes = bytes;
 }
 
+/* VP8: the frame tag and key-frame header rebuilt from nvdec_vp8_pic_s. */
+static void test_vp8_header(void) {
+  uint8_t s[NVDEC_PIC_SETUP_BYTES], h[NVDEC_VP8_MAX_HEADER];
+  memset(s, 0, sizeof(s));
+  s[0x38] = 0x80; s[0x39] = 0x07; /* 1920 */
+  s[0x3A] = 0x38; s[0x3B] = 0x04; /* 1080 */
+  s[0x3C] = 1;                    /* key frame */
+  s[0x40] = 0x34; s[0x41] = 0x12; /* first partition 0x1234 bytes */
+  s[0x48] = 0x00; s[0x49] = 0x40; /* 0x4000 bytes of bitstream */
+  Nvdec_Vp8_Picture p;
+  CHECK(nvdec_vp8_header(s, h, &p) == 10u);
+  CHECK(p.width == 1920u && p.height == 1080u && p.key && p.length == 0x4000u);
+  /* tag: key (bit 0 clear), version 0, show_frame, size << 5 = 0x24690 | 0x10 */
+  CHECK(h[0] == 0x90 && h[1] == 0x46 && h[2] == 0x02);
+  CHECK(h[3] == 0x9D && h[4] == 0x01 && h[5] == 0x2A);
+  CHECK(h[6] == 0x80 && h[7] == 0x07 && h[8] == 0x38 && h[9] == 0x04);
+  s[0x3C] = 0; /* inter frame: the tag alone */
+  s[0x3D] = 1; /* version 1 */
+  CHECK(nvdec_vp8_header(s, h, &p) == 3u);
+  CHECK(!p.key && h[0] == (0x90 | 0x01 | 0x02) && h[1] == 0x46 && h[2] == 0x02);
+}
+
 static void test_stream_ring(void) {
   Video_Stream v;
   video_stream_init(&v, g_region, NULL, NULL);
@@ -186,6 +208,7 @@ static void test_no_consumer_never_blocks(void) {
 
 int main(void) {
   test_h264_params();
+  test_vp8_header();
   test_stream_ring();
   test_slots();
   test_no_consumer_never_blocks();

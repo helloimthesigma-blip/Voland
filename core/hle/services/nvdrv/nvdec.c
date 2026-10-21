@@ -21,7 +21,11 @@
 #define NVDEC_PICTURE_INDEX 0x40Cu
 #define NVDEC_SLICE_OFFSETS 0x410u
 #define NVDEC_OUTPUT_LUMA 0x428u
+/* VP8 decodes into picture surface 3 (0x430-0x438 hold its references;
+ * the display buffer register stays unset). */
+#define NVDEC_VP8_OUTPUT_LUMA 0x43Cu
 #define NVDEC_APP_H264 3u
+#define NVDEC_APP_VP8 5u
 
 /* VIC methods. */
 #define VIC_SLOT0_LUMA 0x400u
@@ -69,6 +73,29 @@
 #define H264_DPB_ENTRY_BYTES 16u
 #define H264_WEIGHT_SCALE (H264_DPB + H264_DPB_ENTRIES * H264_DPB_ENTRY_BYTES)
 #define H264_WEIGHT_SCALE_8X8 (H264_WEIGHT_SCALE + 96u)
+
+/* nvdec_vp8_pic_s, offsets in bytes (checked against Nine Sols' intro:
+ * 1920x1088, a 0xde3-byte first partition in 0xded bytes): the frame
+ * header fields the driver parsed out of the stream. */
+#define VP8_FRAME_WIDTH 0x38u   /* u16 (macroblock-aligned) */
+#define VP8_FRAME_HEIGHT 0x3Au  /* u16 */
+#define VP8_KEY_FRAME 0x3Cu     /* u8 */
+#define VP8_VERSION 0x3Du       /* u8 */
+#define VP8_FIRST_PART_SIZE 0x40u
+#define VP8_VLD_BUFFER_SIZE 0x48u /* the bitstream's bytes */
+#define VP8_SIZE_MASK 0x3FFFu     /* 14-bit dimensions (the top two bits are scaling) */
+/* RFC 6386 9.1: the frame tag (3 bytes) and, on key frames, the start
+ * code and dimensions (7 more) - NVDEC gets the stream without them. */
+#define VP8_TAG_BYTES 3u
+#define VP8_TAG_INTER 1u          /* bit 0: 0 = key frame */
+#define VP8_TAG_VERSION_SHIFT 1u
+#define VP8_TAG_SHOW 0x10u        /* show_frame */
+#define VP8_TAG_PART_SHIFT 5u
+#define VP8_TAG_VERSION_MASK 7u
+#define VP8_START_0 0x9Du
+#define VP8_START_1 0x01u
+#define VP8_START_2 0x2Au
+#define VP8_CODEC "vp8"
 
 #define NAL_TYPE_MASK 0x1Fu
 #define NAL_IDR 5u
@@ -140,8 +167,10 @@ void mm_engine_init(Mm_Engine *engine, uint32_t class_id) {
 }
 
 void mm_video_init(Mm_Video *video) {
+  video->codec = MM_CODEC_NONE;
   memset(&video->params, 0, sizeof(video->params));
   video->configured = false;
+  video->vp8_width = video->vp8_height = 0;
   video->references = 0;
   memset(video->surface_iova, 0, sizeof(video->surface_iova));
   memset(video->surface_sequence, 0, sizeof(video->surface_sequence));
@@ -313,7 +342,8 @@ static void nvdec_h264(Mm_Engine *e, const Mm_Context *c) {
   const uint32_t peek = length < sizeof(head) ? length : (uint32_t)sizeof(head);
   const bool idr = read_buffer(c, e->regs[MM_REG(NVDEC_BITSTREAM)], 0, head, peek) && has_idr(head, peek);
   if (v->configured && !idr) params.max_num_ref_frames = v->params.max_num_ref_frames;
-  if (!v->configured || !h264_params_equal(&params, &v->params)) {
+  if (!v->configured || v->codec != MM_CODEC_H264 || !h264_params_equal(&params, &v->params)) {
+    v->codec = MM_CODEC_H264;
     v->params = params;
     v->configured = true;
     char codec[16];
@@ -335,6 +365,59 @@ static void nvdec_h264(Mm_Engine *e, const Mm_Context *c) {
   if (!c->video) return;
   const uint32_t sequence = video_decode(c->video, idr, v->access_unit, (uint32_t)(sets + length));
   remember_surface(v, e->regs[MM_REG(NVDEC_OUTPUT_LUMA)], sequence);
+}
+
+uint32_t nvdec_vp8_header(const uint8_t *setup, uint8_t header[NVDEC_VP8_MAX_HEADER], Nvdec_Vp8_Picture *out) {
+  out->width = (setup[VP8_FRAME_WIDTH] | (uint32_t)setup[VP8_FRAME_WIDTH + 1u] << 8) & VP8_SIZE_MASK;
+  out->height = (setup[VP8_FRAME_HEIGHT] | (uint32_t)setup[VP8_FRAME_HEIGHT + 1u] << 8) & VP8_SIZE_MASK;
+  out->key = setup[VP8_KEY_FRAME] != 0;
+  out->length = rd32(setup + VP8_VLD_BUFFER_SIZE);
+  const uint32_t version = setup[VP8_VERSION] & VP8_TAG_VERSION_MASK;
+  const uint32_t tag = (out->key ? 0u : VP8_TAG_INTER) | version << VP8_TAG_VERSION_SHIFT | VP8_TAG_SHOW |
+                       rd32(setup + VP8_FIRST_PART_SIZE) << VP8_TAG_PART_SHIFT;
+  header[0] = (uint8_t)tag;
+  header[1] = (uint8_t)(tag >> 8);
+  header[2] = (uint8_t)(tag >> 16);
+  if (!out->key) return VP8_TAG_BYTES;
+  header[3] = VP8_START_0;
+  header[4] = VP8_START_1;
+  header[5] = VP8_START_2;
+  header[6] = (uint8_t)out->width;
+  header[7] = (uint8_t)(out->width >> 8);
+  header[8] = (uint8_t)out->height;
+  header[9] = (uint8_t)(out->height >> 8);
+  return NVDEC_VP8_MAX_HEADER;
+}
+
+/* VP8: the rebuilt header, then NVDEC's bitstream, to the platform
+ * decoder ("vp8": WebCodecs in the browser). */
+static void nvdec_vp8(Mm_Engine *e, const Mm_Context *c) {
+  static uint8_t setup[NVDEC_PIC_SETUP_BYTES];
+  Mm_Video *v = c->state;
+  if (!read_buffer(c, e->regs[MM_REG(NVDEC_PIC_SETUP)], 0, setup, sizeof(setup))) return;
+  if (e->executes <= DISCOVERY_DUMPS) hexdump("nvdec vp8 picture setup", setup, sizeof(setup) / 2u);
+  Nvdec_Vp8_Picture pic;
+  uint8_t *f = v->access_unit;
+  const uint32_t header = nvdec_vp8_header(setup, f, &pic);
+  if (!pic.width || !pic.height || pic.width > VIDEO_MAX_WIDTH || pic.height > VIDEO_MAX_HEIGHT ||
+      pic.length > sizeof(v->access_unit) - header) {
+    log_warn("[video] VP8 picture %ux%u of %u bytes dropped", pic.width, pic.height, pic.length);
+    return;
+  }
+  if (pic.key && (v->codec != MM_CODEC_VP8 || pic.width != v->vp8_width || pic.height != v->vp8_height)) {
+    v->codec = MM_CODEC_VP8;
+    v->configured = false; /* an H.264 stream after this starts over */
+    v->vp8_width = pic.width;
+    v->vp8_height = pic.height;
+    log_info("[video] VP8 %ux%u", pic.width, pic.height);
+    if (c->video) video_configure(c->video, pic.width, pic.height, VP8_CODEC);
+  }
+  if (v->codec != MM_CODEC_VP8) return; /* no key frame yet */
+  if (!read_buffer(c, e->regs[MM_REG(NVDEC_BITSTREAM)], 0, f + header, pic.length)) return;
+  v->frames++;
+  if (!c->video) return;
+  const uint32_t sequence = video_decode(c->video, pic.key, f, header + pic.length);
+  remember_surface(v, e->regs[MM_REG(NVDEC_VP8_OUTPUT_LUMA)], sequence);
 }
 
 /* ---- VIC ------------------------------------------------------------ */
@@ -434,6 +517,8 @@ static void execute(Mm_Engine *e, const Mm_Context *c) {
   if (e->class_id == HOST1X_CLASS_NVDEC) {
     if (e->regs[MM_REG(NVDEC_APPLICATION_ID)] == NVDEC_APP_H264) {
       nvdec_h264(e, c);
+    } else if (e->regs[MM_REG(NVDEC_APPLICATION_ID)] == NVDEC_APP_VP8) {
+      nvdec_vp8(e, c);
     } else if (e->executes <= DISCOVERY_DUMPS) {
       log_warn("[video] NVDEC application %u not decoded", e->regs[MM_REG(NVDEC_APPLICATION_ID)]);
     }
