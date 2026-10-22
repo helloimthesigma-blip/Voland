@@ -457,16 +457,23 @@ uint64_t audren_next_wake(const Audren_State *s) {
 /* RequestUpdate.                                                      */
 /* ------------------------------------------------------------------ */
 
-static void parse_voice(Audren_Renderer *s, HLE_Context *c, const uint8_t *p) {
+/* The voice entry at `index` of an update. An entry not in use stops the
+ * voice in its own slot: its id may be anything, often 0 in a slot the
+ * client never set up (Hollow Knight's movie renderer sends voice 0, then
+ * an all-zero entry that would otherwise stop voice 0 again). */
+static void parse_voice(Audren_Renderer *s, HLE_Context *c, const uint8_t *p, uint32_t index) {
+  if (p[0x09] == 0) {
+    if (index < AUDREN_MAX_VOICES) {
+      s->voices[index].used = false;
+      s->voices[index].state = VOICE_STOPPED;
+    }
+    return;
+  }
   const uint32_t id = rd32(p);
   if (id >= AUDREN_MAX_VOICES) return;
   Audren_Voice *v = &s->voices[id];
   const bool is_new = p[0x08] != 0;
-  v->used = p[0x09] != 0;
-  if (!v->used) {
-    v->state = VOICE_STOPPED;
-    return;
-  }
+  v->used = true;
   const uint32_t head = (uint32_t)(int16_t)(p[0x40] | (p[0x41] << 8)) & 3u;
   if (is_new) reset_voice_progress(v, head);
   v->state = p[0x0A];
@@ -620,7 +627,7 @@ static uint32_t request_update(Audren_Renderer *s, HLE_Context *c, const uint8_t
     for (uint32_t b = 0; b < AUDREN_MIX_VOLUMES; b++) s->channel_mix[id][b] = rdf(in + at + 4u + 4u * b);
   }
   /* Voices. */
-  for (uint32_t i = 0; i < voice_count; i++, at += VOICE_IN_BYTES) parse_voice(s, c, in + at);
+  for (uint32_t i = 0; i < voice_count; i++, at += VOICE_IN_BYTES) parse_voice(s, c, in + at, i);
   for (uint32_t i = 0; i < voice_count; i++, o += VOICE_OUT_BYTES) {
     if (i >= AUDREN_MAX_VOICES) continue;
     Audren_Voice *v = &s->voices[i];

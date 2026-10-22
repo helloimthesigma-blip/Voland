@@ -1288,7 +1288,8 @@ static void test_audren(void) {
   put32(voice + 0x70, 0);
   put32(voice + 0x74, FRAMES);
   put32(voice + 0x140, 0);  /* channel resource 0 */
-  put32(voice + 0x170, 1);  /* voice 1: unused */
+  /* voice 1: unused and all zero - its id reads 0, as in Hollow Knight's
+   * movie renderer, and must not stop voice 0 */
   p += VOICES * 0x170;
   putf(p + 0x00, 1.0f);
   put32(p + 0x04, 48000);
