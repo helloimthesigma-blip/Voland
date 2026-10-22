@@ -292,8 +292,13 @@ static void note_thread(void *ctx) {
 /* A host call made from a core runs on the driver: hook it into an SVC
  * by way of the debug-output callback, which runs inside
  * svcOutputDebugString on a core thread. */
+static uint32_t g_host_call_delay_ms; /* before the host call, still inside the SVC */
 static void proxy_output(void *userdata, const char *text, size_t length) {
   Guest_Run *run = (Guest_Run *)userdata;
+  if (g_host_call_delay_ms) {
+    const struct timespec delay = {0, (long)g_host_call_delay_ms * 1000000L};
+    nanosleep(&delay, NULL);
+  }
   if (parallel_on_core_thread()) parallel_on_driver(note_thread, NULL);
   if (run->output_length + length + 1 < sizeof(run->output)) {
     memcpy(run->output + run->output_length, text, length);
@@ -314,6 +319,25 @@ static void test_host_calls(void) {
   CHECK(g_ran_on_driver);
   guest_shutdown(&g_run);
   printf("[parallel_test] host calls from a core run on the driver\n");
+
+  /* Free-running: the call comes from inside an SVC (kernel lock held)
+   * after the burst's deadline, while the driver pauses the cores - the
+   * driver must keep serving calls rather than block on the kernel lock. */
+  g_ran_on_driver = false;
+  g_host_call_delay_ms = 2u * FREE_BURST_MS;
+  guest_boot(&g_run, TEST_BACKEND, k_guest_threads, sizeof(k_guest_threads));
+  CHECK(emulator_set_host_cores(&g_run.emu, 2) == 2);
+  emulator_set_free_running(&g_run.emu, true);
+  emulator_set_debug_output(&g_run.emu, proxy_output, &g_run);
+  Emulator_Status status = EMULATOR_RUNNING;
+  for (uint32_t bursts = 0; (status == EMULATOR_RUNNING || status == EMULATOR_IDLE) && bursts < FREE_MAX_BURSTS; bursts++)
+    status = emulator_run_for(&g_run.emu, FREE_BURST_MS, 997);
+  CHECK(status == EMULATOR_EXITED);
+  CHECK(strstr(g_run.output, "counter 2000") != NULL);
+  CHECK(g_ran_on_driver);
+  g_host_call_delay_ms = 0;
+  guest_shutdown(&g_run);
+  printf("[parallel_test] free-running: a host call from inside an SVC across a burst's end\n");
 }
 
 /* scheduler_gpu_begin releases the kernel lock (another thread's SVC

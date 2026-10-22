@@ -96,6 +96,7 @@ bool parallel_on_core_thread(void) { return false; }
 #else
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -606,6 +607,25 @@ static void drive_until(Parallel *p, bool (*done)(const Parallel *p), uint64_t d
   pthread_mutex_unlock(&p->channel);
 }
 
+/* The kernel lock, for the driver while cores may be running: a core in
+ * an SVC can hold it while waiting for the driver to serve a host call
+ * (the web's game-file reads), so the driver keeps serving calls until the
+ * lock is free instead of blocking on it. */
+static void lock_kernel_serving(Parallel *p) {
+  while (pthread_mutex_trylock(&p->kernel) != 0) {
+    pthread_mutex_lock(&p->channel);
+    Host_Call *call = p->call;
+    if (call) {
+      call->fn(call->ctx);
+      call->done = true;
+      p->call = NULL;
+      pthread_cond_broadcast(&p->channel_cv);
+    }
+    pthread_mutex_unlock(&p->channel);
+    if (!call) sched_yield();
+  }
+}
+
 static bool free_run_stopped(const Parallel *p) {
   return __atomic_load_n(&p->free_status, __ATOMIC_ACQUIRE) != SCHEDULER_RAN;
 }
@@ -633,7 +653,7 @@ Scheduler_Status parallel_run_for(Parallel *p, uint64_t host_ns, uint64_t budget
 
   /* Pause: every core finishes its run (<= budget) and parks; host calls
    * are still served meanwhile (a core may be in an SVC that needs one). */
-  pthread_mutex_lock(&p->kernel);
+  lock_kernel_serving(p);
   p->free_running = false;
   pthread_cond_broadcast(&p->core_cv);
   pthread_mutex_unlock(&p->kernel);

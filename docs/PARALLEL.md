@@ -279,6 +279,11 @@ The slice mode stays the default for the CLI, the tests and the goldens
   every pick. A device event is handled by the first core to see time
   pass it, so it lands at most one run (≤ budget cycles) late in virtual
   time, as in slice mode, where it waits for the next slice.
+- **The pause takes the kernel lock while serving host calls.** A core
+  can be inside an SVC, holding the kernel lock, while it waits for the
+  driver to serve a host call (on the web, every game-file read). So the
+  driver tries the lock and serves pending calls until it gets it; a plain
+  lock deadlocked the browser at boot, where reads are frequent.
 - **Everything else is unchanged:** poll coalescing, its revert-before-pick
   and work epoch, the exclusive monitor, SVCs under the kernel lock, and
   affinity.
@@ -292,6 +297,11 @@ CLI `--free-running`. Before it can become a default:
   exclusive-monitor stress, 20+ rounds;
 - a long browser gameplay session with no gaps in presents or ticks;
 - an interleaved browser A/B showing a clear win.
+
+Measured 2026-10-22 (Silksong, 3 cores, `?pacing=0`, 30 s): gameplay from
+a save state 7.92 M ticks/s, 24.7 fps sliced vs 9.49 M, 29.6 fps free
+(+20%); the title load from 8 s virtual 7.92 M, 21.1 fps vs 8.75 M,
+24.0 fps (+10%).
 
 ## Memory model
 
