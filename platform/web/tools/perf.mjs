@@ -35,6 +35,9 @@
  *   --press 3000000:z:3000 --press 3100000:z:3000 --press 3200000:z:3000
  *   with --warmup-slices 4800000. Presses land within ~250 ms of their
  *   slice, so a browser run is close to, not identical with, the CLI's.
+ * - The page runs in scheduler slices (?free=0) unless --url-params sets
+ *   free= itself, since free-running cores (the page's default) count a
+ *   whole burst as one slice.
  * - --clock slices|ticks|presents picks the unit of --warmup-slices and
  *   --press points (default slices). With wall-clock pacing on (the web
  *   default), slices and virtual ticks follow the wall clock rather than
@@ -379,7 +382,10 @@ async function main() {
       if (/\[parallel\] /.test(m.text())) console.log(`  ${m.text().replace(/^\[INFO \] /, "")}`);
       if (opts.logMatch && new RegExp(opts.logMatch).test(m.text())) console.log(`  log: ${m.text()}`);
     });
-    const pageUrl = opts.urlParams ? `${baseUrl}?${opts.urlParams}` : baseUrl;
+    /* Slices are the recipes' clock, and free-running cores (the page's
+     * default) count a burst as one: slices unless --url-params says free=. */
+    const params = /(^|&)free=/.test(opts.urlParams) ? opts.urlParams : [opts.urlParams, "free=0"].filter(Boolean).join("&");
+    const pageUrl = `${baseUrl}?${params}`;
     await page.goto(pageUrl);
     await page.getByTestId("load-panel").waitFor({ timeout: 30_000 });
     if (opts.restoreSaves) {

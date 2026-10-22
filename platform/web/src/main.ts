@@ -365,11 +365,11 @@ async function boot(): Promise<BootResult | null> {
         if (new URLSearchParams(location.search).get("pacing") === "0") {
           cpuWorker.postMessage({ type: "set-pacing", on: false } satisfies MainToCPUMessage);
         }
-        /* ?free=N: free-running guest cores (prototype) from scheduler
-         * slice N on (1 = from the start); slice-counted warm-ups and input
-         * recipes then still mean what they did. */
+        /* ?free=N: free-running guest cores (the default, from the start)
+         * from scheduler slice N on instead, so slice-counted warm-ups and
+         * input recipes still mean what they did; ?free=0: slices only. */
         const free = new URLSearchParams(location.search).get("free");
-        if (free !== null && /^[0-9]+$/.test(free) && Number(free) > 0) {
+        if (free !== null && /^[0-9]+$/.test(free)) {
           cpuWorker.postMessage({ type: "set-free-running", fromSlice: Number(free) } satisfies MainToCPUMessage);
         }
         gpuSlot = "ready";

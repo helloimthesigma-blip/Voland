@@ -258,8 +258,9 @@ const SERIAL_TITLES: ReadonlySet<string> = new Set(["01006A800016E000", "0100F2C
 /** Poll coalescing (set-poll-coalescing; ?polls=0 turns it off). */
 let pollCoalescing = true;
 /** Free-running guest cores (set-free-running; ?free=N): from slice N on,
- * one run_for call per burst instead of a loop of slices. 0 = off. */
-let freeFromSlice = 0;
+ * one run_for call per burst instead of a loop of slices. 0 = off; on from
+ * the start by default (docs/PARALLEL.md). */
+let freeFromSlice = 1;
 /** Wall-clock pacing (set-pacing; ?pacing=0 turns it off): the game runs at
  * real speed with fewer frames instead of in slow motion. */
 let pacing = true;
@@ -868,6 +869,14 @@ async function loadState(id: string): Promise<CPUToMainMessage> {
     if (!now) return { type: "state-loaded", ok: false, error: coreErrorMessage() };
     const mismatch = planMismatch(stored, now);
     if (mismatch) {
+      /* Which range moved, for the developer console. */
+      stored.ranges.forEach((a, i) => {
+        const b = now.ranges[i];
+        if (!b || a.kind !== b.kind || a.address !== b.address || a.capacity !== b.capacity || a.bytes > b.capacity) {
+          log("warn", `save state range ${i} (kind ${a.kind}): stored 0x${a.address.toString(16)}+${a.bytes}/${a.capacity}, ` +
+                      (b ? `now 0x${b.address.toString(16)}+${b.bytes}/${b.capacity} (kind ${b.kind})` : "now absent"));
+        }
+      });
       core._emulator_savestate_finish_restore_ffi(0);
       return { type: "state-loaded", ok: false, error: `This state cannot be loaded: ${mismatch}.` };
     }

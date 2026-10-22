@@ -231,14 +231,16 @@ makes virtual time keep up with wall time.
 - **Deterministic runs.** The core default, the CLI and the tests stay
   unpaced, so they remain deterministic and the goldens are unchanged.
 
-## Free-running mode (prototype)
+## Free-running mode (the web default)
 
 The slice mode above pays a handoff on every slice: about 110 us to wake
 the cores and 50 us for the driver to notice the end, at ~1,100 slices/s
 in Silksong gameplay - about 18% of host time, the cores' "park" share.
 Free-running mode removes the per-slice barrier and keeps everything else.
-The slice mode stays the default for the CLI, the tests and the goldens
-(it is deterministic); free-running is opt-in.
+The browser runs free from the start (`?free=0` for slices; `?free=N`
+from slice N on). The slice mode stays the default for the CLI, the tests,
+the goldens and `tools/perf.mjs` recipes, which count slices (it is
+deterministic).
 
 ### Shape
 
@@ -290,8 +292,9 @@ The slice mode stays the default for the CLI, the tests and the goldens
 
 ### Status
 
-A prototype behind `emulator_set_free_running`, the web `?free=1` and the
-CLI `--free-running`. Before it can become a default:
+`emulator_set_free_running`; on by default in the browser since
+2026-10-22, the CLI's `--free-running-from N` opts in. What was asked of it
+before it became the default:
 
 - `parallel_test` on 2–3 cores, including polls and the
   exclusive-monitor stress, 20+ rounds;
@@ -301,7 +304,11 @@ CLI `--free-running`. Before it can become a default:
 Measured 2026-10-22 (Silksong, 3 cores, `?pacing=0`, 30 s): gameplay from
 a save state 7.92 M ticks/s, 24.7 fps sliced vs 9.49 M, 29.6 fps free
 (+20%); the title load from 8 s virtual 7.92 M, 21.1 fps vs 8.75 M,
-24.0 fps (+10%).
+24.0 fps (+10%). From boot to 20 s virtual, then 30 s: Hollow Knight
+40.5 -> 48.3 fps, Nine Sols 19.3 -> 24.4, Celeste 29.5 -> 30.4, SSBU
+54.4 -> 53.7 (noise); an MK8 race 23.4 both, its multicore tiles no
+worse. 60 s of Silksong at the default pacing: steady 40-45 fps, no gaps.
+Save states load across sessions in either mode.
 
 ## Memory model
 
