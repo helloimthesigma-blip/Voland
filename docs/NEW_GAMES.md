@@ -6,7 +6,7 @@ up on more titles. Where they stand (October 2026, browser, Chromium):
 | Game | State |
 |---|---|
 | Hollow Knight: Silksong | boot to gameplay at real speed, saves, video cutscenes |
-| Hollow Knight | title, menus and saved games play at real speed; a NEW game stops in its intro movie: after 13 decoded pictures every movie thread (demuxer, AAC and H.264 decoders, worker) sits idle and the screen stays black. Not a recent regression (a 2026-10-19 build does the same); ruled out: presses during the movie, the NVDEC status buffer, condvar/cancel semantics |
+| Hollow Knight | title, menus, saved games and new games (through the intro movie into King's Pass) play at real speed. The new-game intro used to stall after 13 pictures: an all-zero unused voice entry stopped the movie audio's voice 0, so its buffers never drained (fixed 2026-10-22) |
 | Celeste | title, file select and gameplay; ~100 fps unpaced |
 | Super Smash Bros. Ultimate | matches with correct colours and saves, 18-22 fps in a fight; its VP9 movies are black |
 | Mario Kart 8 Deluxe (32-bit) | whole races, ~23 fps on three cores; occasional black tiles in multicore runs |
