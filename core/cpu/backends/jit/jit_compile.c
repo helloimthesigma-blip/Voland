@@ -5538,12 +5538,13 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
   wasm_patch_size(b, size);
 }
 
-/* JIT_NAMES set in the environment: a "name" section calls the region
- * function j<pc>, so engine profiles tell regions apart (diagnostics). */
+/* A "name" section calls the region function j<pc>, so engine profiles
+ * (DevTools, --perf-basic-prof) tell regions apart; a dozen bytes a
+ * module. JIT_NO_NAMES set in the environment leaves it out. */
 #define NAME_SUBSECTION_FUNCTIONS 1u
 static void emit_name_section(Wasm_Buf *b, uint64_t pc) {
   static int enabled = -1;
-  if (enabled < 0) enabled = getenv("JIT_NAMES") != NULL;
+  if (enabled < 0) enabled = getenv("JIT_NO_NAMES") == NULL;
   if (!enabled) return;
   char text[24];
   snprintf(text, sizeof(text), "j%llx", (unsigned long long)pc);

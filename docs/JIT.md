@@ -294,9 +294,10 @@ the section by default (Chrome 155 no longer has the flag); Node 24 needs
 `--experimental-wasm-branch-hinting`. Celeste's load to slice 200k under
 Node: 53.0 s without, 42.2 s with; in Chromium its main load phase went
 from 62.5 to 49.2 s of worker time together with the changes above.
-`JIT_NO_HINTS` in the environment leaves the section out. `JIT_NAMES`
-adds a `name` section calling the region function `j<pc>`, so engine
-profiles (`node --cpu-prof`, `--perf-basic-prof`) tell regions apart.
+`JIT_NO_HINTS` in the environment leaves the section out. A `name`
+section calls the region function `j<pc>`, so engine profiles (DevTools,
+`node --cpu-prof`, `--perf-basic-prof`) tell regions apart; `JIT_NO_NAMES`
+leaves it out.
 
 What joins a region:
 
