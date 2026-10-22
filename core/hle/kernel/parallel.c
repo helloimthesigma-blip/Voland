@@ -479,6 +479,29 @@ static void wait_on_channel(Parallel *p) {
 static void wait_on_channel(Parallel *p) { pthread_cond_wait(&p->channel_cv, &p->channel); }
 #endif
 
+/* wait_on_channel, but back by `deadline` (now_ns; 0 = none): nothing
+ * signals the channel when a free-running burst's time is up. */
+static void wait_on_channel_until(Parallel *p, uint64_t deadline) {
+#ifdef __EMSCRIPTEN__
+  (void)deadline; /* the wait is in short steps already */
+  wait_on_channel(p);
+#else
+  if (!deadline) {
+    wait_on_channel(p);
+    return;
+  }
+  const uint64_t now = now_ns();
+  if (now >= deadline) return;
+  const uint64_t left = deadline - now;
+  struct timespec until;
+  clock_gettime(CLOCK_REALTIME, &until);
+  const uint64_t ns = (uint64_t)until.tv_nsec + left % 1000000000ull;
+  until.tv_sec += (time_t)(left / 1000000000ull + ns / 1000000000ull);
+  until.tv_nsec = (long)(ns % 1000000000ull);
+  (void)pthread_cond_timedwait(&p->channel_cv, &p->channel, &until);
+#endif
+}
+
 static uint32_t percent(uint64_t part, uint64_t whole) { return whole ? (uint32_t)(part * 100u / whole) : 0u; }
 
 /* Every PARALLEL_REPORT_NS, one log line: per core, the share of host time
@@ -602,15 +625,16 @@ static void drive_until(Parallel *p, bool (*done)(const Parallel *p), uint64_t d
       pthread_cond_broadcast(&p->channel_cv);
       continue;
     }
-    wait_on_channel(p);
+    wait_on_channel_until(p, deadline);
   }
   pthread_mutex_unlock(&p->channel);
 }
 
 /* The kernel lock, for the driver while cores may be running: a core in
  * an SVC can hold it while waiting for the driver to serve a host call
- * (the web's game-file reads), so the driver keeps serving calls until the
- * lock is free instead of blocking on it. */
+ * (the web's game-file reads) or a proxied syscall (a log line's write on
+ * the web), so the driver keeps serving both until the lock is free
+ * instead of blocking on it. */
 static void lock_kernel_serving(Parallel *p) {
   while (pthread_mutex_trylock(&p->kernel) != 0) {
     pthread_mutex_lock(&p->channel);
@@ -622,6 +646,9 @@ static void lock_kernel_serving(Parallel *p) {
       pthread_cond_broadcast(&p->channel_cv);
     }
     pthread_mutex_unlock(&p->channel);
+#ifdef __EMSCRIPTEN__
+    emscripten_current_thread_process_queued_calls();
+#endif
     if (!call) sched_yield();
   }
 }

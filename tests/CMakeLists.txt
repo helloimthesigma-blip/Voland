@@ -202,6 +202,11 @@ add_executable(parallel_test parallel_test.c)
 target_link_libraries(parallel_test PRIVATE switch_core guest_fixture loader_fixtures)
 add_test(NAME parallel_test COMMAND parallel_test)
 
+add_executable(savestate_test savestate_test.c)
+target_link_libraries(savestate_test PRIVATE switch_core guest_fixture loader_fixtures)
+add_test(NAME savestate_test COMMAND savestate_test)
+set_tests_properties(savestate_test PROPERTIES TIMEOUT 60) # the bug it guards against hangs
+
 # Homebrew NRO (§12): the committed demo NRO loads and runs end to end.
 add_executable(nro_test nro_test.c)
 target_link_libraries(nro_test PRIVATE switch_core)

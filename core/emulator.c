@@ -1494,6 +1494,9 @@ Error emulator_savestate_finish_restore(Emulator* emulator, bool applied) {
   emulator->frame_skip = before->frame_skip;
   emulator->pacing = before->pacing;
   emulator->pacing_origin_ns = 0; /* re-anchored at the next slice */
+  /* The latency ring counts this session's GPU thread calls: a state from
+   * a longer session would wait for calls this one never makes. */
+  emulator->nvdrv.submit_head = emulator->nvdrv.submit_tail;
   emulator->shared_font = before->shared_font;
   emulator->shared_font_size = before->shared_font_size;
   memcpy(&emulator->renderer, &before->renderer, sizeof(Raster3d));
