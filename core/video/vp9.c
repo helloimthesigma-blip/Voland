@@ -308,6 +308,21 @@ size_t vp9_write_frame_headers(const Vp9_Frame_Header *h, const Vp9_Probs *probs
 
 /* ---- contexts (spec 7.2 setup_past_independence, refresh_probs) ----- */
 
+uint32_t vp9_closest_context(const Vp9_Contexts *c, const Vp9_Probs *probs) {
+  if (!c->valid) return 0;
+  uint32_t best = 0, best_diff = UINT32_MAX;
+  for (uint32_t i = 0; i < VP9_CONTEXTS; i++) {
+    const uint8_t *a = (const uint8_t *)&c->saved[i], *b = (const uint8_t *)probs;
+    uint32_t diff = 0;
+    for (size_t k = 0; k < sizeof(Vp9_Probs); k++) diff += a[k] != b[k];
+    if (diff < best_diff) {
+      best_diff = diff;
+      best = i;
+    }
+  }
+  return best;
+}
+
 void vp9_contexts_begin(Vp9_Contexts *c, const Vp9_Frame_Header *h, const Vp9_Probs *defaults, Vp9_Probs *base) {
   if (!c->valid) {
     for (uint32_t i = 0; i < VP9_CONTEXTS; i++) c->saved[i] = *defaults;
@@ -325,8 +340,41 @@ void vp9_contexts_begin(Vp9_Contexts *c, const Vp9_Frame_Header *h, const Vp9_Pr
   *base = c->saved[idx];
 }
 
-void vp9_contexts_end(Vp9_Contexts *c, const Vp9_Frame_Header *h, const Vp9_Probs *probs) {
+void vp9_conveyed_probs(const Vp9_Frame_Header *h, const Vp9_Probs *p, const Vp9_Probs *base, Vp9_Probs *out) {
+  *out = *base;
+  const uint32_t tx_mode = vp9_lossless(h) ? VP9_ONLY_4X4 : h->tx_mode;
+  if (tx_mode == VP9_TX_MODE_SELECT) {
+    memcpy(out->tx8, p->tx8, sizeof(out->tx8));
+    memcpy(out->tx16, p->tx16, sizeof(out->tx16));
+    memcpy(out->tx32, p->tx32, sizeof(out->tx32));
+  }
+  for (uint32_t tx = 0; tx <= k_biggest_tx[tx_mode]; tx++) memcpy(out->coef[tx], p->coef[tx], sizeof(out->coef[tx]));
+  memcpy(out->skip, p->skip, sizeof(out->skip));
+  if (vp9_frame_is_intra(h)) return;
+  memcpy(out->inter_mode, p->inter_mode, sizeof(out->inter_mode));
+  if (h->interp_filter == VP9_SWITCHABLE) memcpy(out->interp_filter, p->interp_filter, sizeof(out->interp_filter));
+  memcpy(out->is_inter, p->is_inter, sizeof(out->is_inter));
+  const uint32_t mode = compound_allowed(h) ? h->reference_mode : VP9_SINGLE_REFERENCE;
+  if (mode == VP9_REFERENCE_MODE_SELECT) memcpy(out->comp_mode, p->comp_mode, sizeof(out->comp_mode));
+  if (mode != VP9_COMPOUND_REFERENCE) memcpy(out->single_ref, p->single_ref, sizeof(out->single_ref));
+  if (mode != VP9_SINGLE_REFERENCE) memcpy(out->comp_ref, p->comp_ref, sizeof(out->comp_ref));
+  memcpy(out->y_mode, p->y_mode, sizeof(out->y_mode));
+  memcpy(out->partition, p->partition, sizeof(out->partition));
+  memcpy(out->mv_joints, p->mv_joints, sizeof(out->mv_joints));
+  memcpy(out->mv_sign, p->mv_sign, sizeof(out->mv_sign));
+  memcpy(out->mv_classes, p->mv_classes, sizeof(out->mv_classes));
+  memcpy(out->mv_class0, p->mv_class0, sizeof(out->mv_class0));
+  memcpy(out->mv_bits, p->mv_bits, sizeof(out->mv_bits));
+  memcpy(out->mv_class0_fr, p->mv_class0_fr, sizeof(out->mv_class0_fr));
+  memcpy(out->mv_fr, p->mv_fr, sizeof(out->mv_fr));
+  if (h->allow_high_precision_mv) {
+    memcpy(out->mv_class0_hp, p->mv_class0_hp, sizeof(out->mv_class0_hp));
+    memcpy(out->mv_hp, p->mv_hp, sizeof(out->mv_hp));
+  }
+}
+
+void vp9_contexts_end(Vp9_Contexts *c, const Vp9_Frame_Header *h, const Vp9_Probs *probs, const Vp9_Probs *base) {
   if (h->show_existing_frame || h->error_resilient || !h->refresh_frame_context) return;
   const uint32_t idx = (vp9_frame_is_intra(h) || h->error_resilient) ? 0u : h->frame_context_idx;
-  c->saved[idx] = *probs;
+  vp9_conveyed_probs(h, probs, base, &c->saved[idx]);
 }

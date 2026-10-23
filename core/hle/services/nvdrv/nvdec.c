@@ -29,6 +29,10 @@
 #define NVDEC_VP8_OUTPUT_LUMA 0x43Cu
 #define NVDEC_APP_H264 3u
 #define NVDEC_APP_VP8 5u
+#define NVDEC_APP_VP9 9u
+#define NVDEC_VP9_ENTROPY 0x5C0u   /* the frame's probability tables (video/nvdec_vp9.h) */
+#define NVDEC_VP9_OUTPUT_LUMA 0x43Cu /* the picture surface the frame decodes into */
+#define VP9_CODEC "vp09.00.10.08" /* profile 0, level 1.0, 8-bit */
 
 /* VIC methods. */
 #define VIC_SLOT0_LUMA 0x400u
@@ -433,6 +437,71 @@ static void nvdec_vp8(Mm_Engine *e, const Mm_Context *c) {
   remember_surface(v, e->regs[MM_REG(NVDEC_VP8_OUTPUT_LUMA)], sequence);
 }
 
+/* VP9 (video/nvdec_vp9.h): each submission goes to the stream, which
+ * hands back a chunk (one picture: a frame, or a superframe of hidden
+ * frames plus a shown one) a submission later. */
+static void note_hidden_surface(Mm_Video *v, uint32_t surface, bool hidden) {
+  uint32_t free_slot = MM_MAX_SURFACES;
+  for (uint32_t i = 0; i < MM_MAX_SURFACES; i++) {
+    if (v->vp9_hidden_surface[i] == surface) {
+      if (!hidden) v->vp9_hidden_surface[i] = 0;
+      return;
+    }
+    if (!v->vp9_hidden_surface[i] && free_slot == MM_MAX_SURFACES) free_slot = i;
+  }
+  if (hidden && free_slot < MM_MAX_SURFACES) v->vp9_hidden_surface[free_slot] = surface;
+}
+
+static void nvdec_vp9(Mm_Engine *e, const Mm_Context *c) {
+  static uint8_t setup[NVDEC_VP9_SETUP_BYTES], entropy[NVDEC_VP9_ENTROPY_BYTES];
+  Mm_Video *v = c->state;
+  if (!read_buffer(c, e->regs[MM_REG(NVDEC_PIC_SETUP)], 0, setup, sizeof(setup))) return;
+  const uint32_t tiles = nvdec_vp9_bitstream_bytes(setup);
+  if (tiles > sizeof(v->access_unit) ||
+      !read_buffer(c, e->regs[MM_REG(NVDEC_VP9_ENTROPY)], 0, entropy, sizeof(entropy)) ||
+      !read_buffer(c, e->regs[MM_REG(NVDEC_BITSTREAM)], 0, v->access_unit, tiles)) {
+    log_warn("[video] VP9 picture of %u bytes dropped", tiles);
+    return;
+  }
+  static const uint32_t surface_methods[NVDEC_VP9_SURFACES] = {0x430u, 0x434u, 0x438u, NVDEC_VP9_OUTPUT_LUMA};
+  uint32_t surfaces[NVDEC_VP9_SURFACES];
+  for (uint32_t i = 0; i < NVDEC_VP9_SURFACES; i++) surfaces[i] = e->regs[MM_REG(surface_methods[i])];
+  if (v->codec != MM_CODEC_VP9 && nvdec_vp9_key_frame(setup)) {
+    nvdec_vp9_stream_init(&v->vp9);
+    memset(v->vp9_hidden_surface, 0, sizeof(v->vp9_hidden_surface));
+  }
+  /* The previous frame, now that this setup says whether it was shown. */
+  const uint32_t previous = v->vp9.pending ? v->vp9.surfaces[NVDEC_VP9_OUTPUT] : 0;
+  const bool previous_shown = nvdec_vp9_previous_shown(setup);
+  Nvdec_Vp9_Chunk chunk;
+  const int got = nvdec_vp9_push(&v->vp9, setup, entropy, surfaces, v->access_unit, tiles, &chunk);
+  if (previous) note_hidden_surface(v, previous, !previous_shown);
+  if (got < 0) log_warn("[video] VP9 frame not rebuilt (segmentation, or a reference never decoded)");
+  if (got <= 0) return;
+  if (chunk.new_stream) {
+    v->codec = MM_CODEC_VP9;
+    v->configured = false; /* an H.264 stream after this starts over */
+    log_info("[video] VP9 %ux%u", chunk.width, chunk.height);
+    if (c->video) video_configure(c->video, chunk.width, chunk.height, VP9_CODEC);
+  }
+  v->frames++;
+  if (c->video) remember_surface(v, chunk.surface, video_decode(c->video, chunk.key, chunk.data, chunk.bytes));
+}
+
+/* VIC is showing a surface whose newest picture was a hidden VP9 frame
+ * (the stream said show_existing_frame, which never reaches NVDEC): a
+ * one-byte show_existing_frame chunk makes the decoder output it. The
+ * picture arrives later; this VIC pass misses it. */
+static void vp9_show_existing(Mm_Video *v, const Mm_Context *c, uint32_t surface) {
+  if (v->codec != MM_CODEC_VP9 || !c->video || !surface) return;
+  bool hidden = false;
+  for (uint32_t i = 0; i < MM_MAX_SURFACES; i++) hidden |= v->vp9_hidden_surface[i] == surface;
+  uint8_t byte = 0;
+  if (!hidden || !nvdec_vp9_show_existing(&v->vp9, surface, &byte)) return;
+  note_hidden_surface(v, surface, false);
+  remember_surface(v, surface, video_decode(c->video, false, &byte, 1u));
+}
+
 /* ---- VIC ------------------------------------------------------------ */
 
 typedef struct Vic_Output {
@@ -477,17 +546,21 @@ static bool write_plane(const Mm_Context *c, uint32_t value, const uint8_t *src,
 
 #define VIC_SCRATCH_BYTES ((uint64_t)VIDEO_MAX_WIDTH * 4u * (VIDEO_MAX_HEIGHT + 128u))
 
+static void vic_dump(const Mm_Engine *e);
+
 static void vic_execute(Mm_Engine *e, const Mm_Context *c) {
   static uint8_t config[VIC_CONFIG_BYTES];
   static uint8_t scratch[VIC_SCRATCH_BYTES];
   static uint8_t rgba[(uint64_t)VIDEO_MAX_WIDTH * VIDEO_MAX_HEIGHT * 4u];
   Mm_Video *v = c->state;
+  vic_dump(e);
   if (!read_buffer(c, e->regs[MM_REG(VIC_CONFIG)], 0, config, sizeof(config))) return;
   if (e->executes <= DISCOVERY_DUMPS) hexdump("vic config", config, sizeof(config));
   uint32_t sequence = 0;
   Video_Frame frame;
   if (!c->video || !surface_sequence(v, e->regs[MM_REG(VIC_SLOT0_LUMA)], &sequence) ||
       !video_frame_for(c->video, sequence, &frame)) {
+    vp9_show_existing(v, c, e->regs[MM_REG(VIC_SLOT0_LUMA)]);
     v->missing++;
     return;
   }
@@ -528,6 +601,7 @@ static void vic_execute(Mm_Engine *e, const Mm_Context *c) {
 #define NVDEC_DUMP_BYTES 0x4000u
 #define NVDEC_DUMP_SIZE_OFFSET 0x30u
 #define NVDEC_DUMP_MAX_BITSTREAM (4u << 20)
+#ifndef __EMSCRIPTEN__
 static bool dump_buffer(const Mm_Context *c, const char *dir, uint32_t frame, uint32_t method, uint32_t value, uint64_t want) {
   static uint8_t bytes[NVDEC_DUMP_MAX_BITSTREAM];
   uint64_t guest = 0, remaining = 0;
@@ -542,13 +616,34 @@ static bool dump_buffer(const Mm_Context *c, const char *dir, uint32_t frame, ui
   fclose(f);
   return true;
 }
+#endif
+
+#ifndef __EMSCRIPTEN__
+static uint32_t g_nvdec_dump_frames;
+#endif
+
+/* VIC under VOLAND_DUMP_NVDEC: which surface it reads after which frame. */
+static void vic_dump(const Mm_Engine *e) {
+#ifndef __EMSCRIPTEN__
+  const char *dir = getenv("VOLAND_DUMP_NVDEC");
+  if (!dir || !g_nvdec_dump_frames || g_nvdec_dump_frames > NVDEC_DUMP_FRAMES) return;
+  char path[512];
+  snprintf(path, sizeof(path), "%s/vic.txt", dir);
+  FILE *f = fopen(path, "a");
+  if (!f) return;
+  fprintf(f, "after %u: slot0 luma 0x%08x\n", g_nvdec_dump_frames - 1u, e->regs[MM_REG(VIC_SLOT0_LUMA)]);
+  fclose(f);
+#else
+  (void)e;
+#endif
+}
 
 static void nvdec_dump_unknown(Mm_Engine *e, const Mm_Context *c) {
 #ifdef __EMSCRIPTEN__
   (void)e;
   (void)c;
 #else
-  static uint32_t frames;
+  uint32_t frames = g_nvdec_dump_frames;
   const char *dir = getenv("VOLAND_DUMP_NVDEC");
   if (!dir || frames >= NVDEC_DUMP_FRAMES) return;
   char path[512];
@@ -570,7 +665,7 @@ static void nvdec_dump_unknown(Mm_Engine *e, const Mm_Context *c) {
     (void)dump_buffer(c, dir, frames, NVDEC_BITSTREAM, e->regs[MM_REG(NVDEC_BITSTREAM)], bitstream_bytes);
   for (uint32_t method = 0x500u; method < 0x600u; method += 4u)
     if (e->regs[MM_REG(method)]) (void)dump_buffer(c, dir, frames, method, e->regs[MM_REG(method)], NVDEC_DUMP_BYTES);
-  frames++;
+  g_nvdec_dump_frames = frames + 1u;
 #endif
 }
 
@@ -588,6 +683,9 @@ static void execute(Mm_Engine *e, const Mm_Context *c) {
       nvdec_h264(e, c);
     } else if (e->regs[MM_REG(NVDEC_APPLICATION_ID)] == NVDEC_APP_VP8) {
       nvdec_vp8(e, c);
+    } else if (e->regs[MM_REG(NVDEC_APPLICATION_ID)] == NVDEC_APP_VP9) {
+      nvdec_dump_unknown(e, c);
+      nvdec_vp9(e, c);
     } else {
       nvdec_dump_unknown(e, c);
       if (e->executes <= DISCOVERY_DUMPS)

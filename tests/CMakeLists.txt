@@ -302,3 +302,5 @@ add_test(NAME vp9_write_test COMMAND vp9_write_test)
 # VP9 header round trip against ffmpeg (a developer tool: tests/vp9_roundtrip.sh).
 add_executable(vp9_roundtrip vp9_roundtrip.c)
 target_link_libraries(vp9_roundtrip PRIVATE switch_core)
+add_executable(nvdec_vp9_replay nvdec_vp9_replay.c)
+target_link_libraries(nvdec_vp9_replay PRIVATE switch_core)

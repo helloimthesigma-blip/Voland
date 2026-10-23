@@ -132,10 +132,24 @@ typedef struct Vp9_Contexts {
   bool valid;
 } Vp9_Contexts;
 
+/* The saved context closest to `probs` (fewest differing bytes): an
+ * inter frame starts from it, which recovers the original stream's own
+ * context choice (NVDEC is not told frame_context_idx) - needed because
+ * MV probability updates can only reach odd values. */
+uint32_t vp9_closest_context(const Vp9_Contexts *c, const Vp9_Probs *probs);
+
 /* The probabilities the decoder starts frame `h` from (after its header's
  * resets), into `base`; `defaults` is the specification's default set. */
 void vp9_contexts_begin(Vp9_Contexts *c, const Vp9_Frame_Header *h, const Vp9_Probs *defaults, Vp9_Probs *base);
-/* After frame `h` with tables `probs`: what the decoder saves. */
-void vp9_contexts_end(Vp9_Contexts *c, const Vp9_Frame_Header *h, const Vp9_Probs *probs);
+/* After frame `h`, written with tables `probs` over `base`: what the
+ * decoder saves - only the tables the frame's compressed header could
+ * update (vp9_conveyed_probs) change. */
+void vp9_contexts_end(Vp9_Contexts *c, const Vp9_Frame_Header *h, const Vp9_Probs *probs, const Vp9_Probs *base);
+
+/* The probabilities a decoder holds after reading frame h's compressed
+ * header: `probs` where the header can update them (coefficients up to
+ * the tx mode's largest size, tx probabilities in select mode, the inter
+ * tables on inter frames, by reference mode and filter), `base` elsewhere. */
+void vp9_conveyed_probs(const Vp9_Frame_Header *h, const Vp9_Probs *probs, const Vp9_Probs *base, Vp9_Probs *out);
 
 #endif /* SWITCH_VIDEO_VP9_H */

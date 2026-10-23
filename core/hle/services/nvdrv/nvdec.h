@@ -33,6 +33,7 @@
 #include "common/vmm.h"
 #include "video/h264.h"
 #include "video/video_stream.h"
+#include "video/nvdec_vp9.h"
 
 #define MM_ENGINE_REGS 0x400u /* methods 0..0xFFC */
 #define MM_MAX_IOVA_MAPS 256u
@@ -75,13 +76,18 @@ typedef void (*Mm_Written)(void *user, uint32_t handle, uint64_t offset, uint64_
 
 /* The decode state shared by NVDEC and VIC. */
 /* The codec the platform decoder is configured for (a switch reconfigures). */
-typedef enum Mm_Codec { MM_CODEC_NONE, MM_CODEC_H264, MM_CODEC_VP8 } Mm_Codec;
+typedef enum Mm_Codec { MM_CODEC_NONE, MM_CODEC_H264, MM_CODEC_VP8, MM_CODEC_VP9 } Mm_Codec;
 
 typedef struct Mm_Video {
   Mm_Codec codec;
   H264_Params params;  /* the stream's parameter sets (a change reconfigures) */
   bool configured;
   uint32_t vp8_width, vp8_height; /* the VP8 stream's frame size (a change reconfigures) */
+  /* VP9 (video/nvdec_vp9.h): the stream's rebuild state; surfaces whose
+   * newest picture was a hidden frame (VIC showing one gets a
+   * show_existing_frame chunk). */
+  Nvdec_Vp9_Stream vp9;
+  uint32_t vp9_hidden_surface[MM_MAX_SURFACES];
   uint32_t references; /* the most references the guest's DPB has held (sizes max_num_ref_frames) */
   uint32_t surface_iova[MM_MAX_SURFACES];
   uint32_t surface_sequence[MM_MAX_SURFACES];

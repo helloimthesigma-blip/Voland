@@ -363,8 +363,9 @@ static size_t rebuild(const uint8_t *in, size_t size, uint8_t *out, size_t capac
   }
   const size_t head = (b.pos + 7u) >> 3;
   /* The decoder's side: probabilities as NVDEC's client hands them over. */
-  Vp9_Probs probs;
+  Vp9_Probs probs, in_base;
   vp9_contexts_begin(&g_in_ctx, &h, &g_defaults, &probs);
+  in_base = probs;
   Bools r;
   memset(&r, 0, sizeof(r));
   r.bits = (Bits){in + head, header_size, 0};
@@ -387,7 +388,7 @@ static size_t rebuild(const uint8_t *in, size_t size, uint8_t *out, size_t capac
             h.ref_frame_idx[1], h.ref_frame_idx[2], h.ref_sign_bias[0], h.ref_sign_bias[1], h.ref_sign_bias[2],
             h.allow_high_precision_mv, h.interp_filter, h.refresh_frame_context, h.frame_parallel, h.frame_context_idx,
             h.tx_mode, h.reference_mode, h.base_q_idx, h.lf_level, h.seg_enabled, header_size, h.tile_cols_log2, h.tile_rows_log2);
-  vp9_contexts_end(&g_in_ctx, &h, &probs);
+  vp9_contexts_end(&g_in_ctx, &h, &probs, &in_base);
   for (uint32_t i = 0; i < VP9_REF_SLOTS; i++)
     if (h.refresh_frame_flags & (1u << i)) g_ref_size[i] = (Ref_Size){h.width, h.height};
   /* Rebuild. */
@@ -434,7 +435,7 @@ static size_t rebuild(const uint8_t *in, size_t size, uint8_t *out, size_t capac
               k < sizeof(p2) ? y[k] : 0, head2, hs2, n);
     }
   }
-  vp9_contexts_end(&g_out_ctx, &h, &probs);
+  vp9_contexts_end(&g_out_ctx, &h, &probs, &base);
   const size_t tiles = size - head - header_size;
   if (!n || n + tiles > capacity) return 0;
   {

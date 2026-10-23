@@ -82,6 +82,7 @@ set(SWITCH_CORE_SOURCES
   video/vp9_write.c
   video/vp9.c
   video/vp9_defaults.c
+  video/nvdec_vp9.c
   video/video_stream.c
   video/vic_convert.c
   hle/loader/byte_source.c
