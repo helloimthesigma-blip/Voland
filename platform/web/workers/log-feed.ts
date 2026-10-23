@@ -56,6 +56,25 @@ const RULES: readonly Rule[] = [
     more: "more kinds of draws were skipped",
   },
   {
+    match: /\[video\] no decoded pictures for (\d+) movie frames \(([^;]+);/,
+    family: () => "video-missing",
+    level: "warn",
+    explain: (m) => `video: a movie is playing but no pictures reach it yet (${m[2]}) - it may show black`,
+  },
+  {
+    match: /\[video\] (VP9|VP8|H\.264)? ?frame not rebuilt|VP9 frame not rebuilt/,
+    family: () => "video-rebuild",
+    level: "warn",
+    explain: () => "video: a movie frame uses something Voland cannot decode yet - the movie may glitch",
+    more: "more movie frames could not be decoded",
+  },
+  {
+    match: /\[nvdrv\] host1x MAP_BUFFER: no IOVA left/,
+    family: () => "iova",
+    level: "warn",
+    explain: () => "video: the video engines ran out of buffer address space - movies may show black",
+  },
+  {
     match: /\[ipc\] (\w+):(\w+) failed: 0x202$/,
     family: () => "file-not-found",
     level: "info",

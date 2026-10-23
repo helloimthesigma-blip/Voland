@@ -889,11 +889,18 @@ static uint32_t channel_common_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint
     for (uint32_t i = 0; i < count; i++) {
       const uint32_t handle = rd32(d + 12 + i * 8u);
       Nvmap_Handle *h = nvmap_of(s, handle);
-      wr32(d + 12 + i * 8u + 4u, h && h->allocated ? mm_iova_map(&s->iova, handle, h->address, h->size) : 0u);
+      const uint32_t mapped = h && h->allocated ? mm_iova_map(&s->iova, handle, h->address, h->size) : 0u;
+      if (!mapped && h && h->allocated) log_warn("[nvdrv] host1x MAP_BUFFER: no IOVA left for handle %u", handle);
+      wr32(d + 12 + i * 8u + 4u, mapped);
     }
     return NV_SUCCESS;
   }
-  case 0x0A: return NV_SUCCESS; /* UNMAP_BUFFER */
+  case 0x0A: { /* UNMAP_BUFFER: MAP_BUFFER's layout; the IOVA slots free up (games map per frame) */
+    const uint32_t count = rd32(d);
+    if (MAP_BUFFER_HEADER_BYTES + (uint64_t)count * 8u > size) return NV_BAD_PARAMETER;
+    for (uint32_t i = 0; i < count; i++) mm_iova_unmap(&s->iova, rd32(d + 12 + i * 8u));
+    return NV_SUCCESS;
+  }
   default: return NV_NOT_IMPLEMENTED;
   }
 }
