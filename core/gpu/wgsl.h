@@ -103,7 +103,9 @@
 #define WGSL_MAX_GLOBALS 4u
 #define WGSL_GLOBAL_WORDS 4u
 #define WGSL_DRAW_GLOBALS (WGSL_DRAW_VS_INSTANCE + 2u)
-#define WGSL_DRAW_CONSTANT_WORDS (WGSL_DRAW_GLOBALS + WGSL_GLOBAL_WORDS * WGSL_MAX_GLOBALS)
+/* The pixel program's global memory, the same four words per buffer. */
+#define WGSL_DRAW_PS_GLOBALS (WGSL_DRAW_GLOBALS + WGSL_GLOBAL_WORDS * WGSL_MAX_GLOBALS)
+#define WGSL_DRAW_CONSTANT_WORDS (WGSL_DRAW_PS_GLOBALS + WGSL_GLOBAL_WORDS * WGSL_MAX_GLOBALS)
 /* Compute programs (desc->stage SM_STAGE_COMPUTE): global memory is a few
  * windows of GPU virtual memory, window k bound at
  * WGSL_CS_WINDOW_BINDING_BASE + k as a read-write array<u32>. Words
@@ -211,6 +213,10 @@ typedef struct Wgsl_Globals {
   uint8_t buffer_of[SM_MAX_WORDS];
 } Wgsl_Globals;
 bool wgsl_find_globals(const Sm_Program *program, Wgsl_Globals *out);
+/* Pixel programs: as wgsl_find_globals, but STG is allowed - a pixel
+ * program's global stores are dropped in WGSL (like its ATOM / RED), so
+ * the draw renders; generic LD / ST still refuse. */
+bool wgsl_find_pixel_globals(const Sm_Program *program, Wgsl_Globals *out);
 bool wgsl_reads_globals(const Sm_Program *program);
 
 /* The vertex-pulling decoder's WGSL (vword, vconv, vfetch over a global

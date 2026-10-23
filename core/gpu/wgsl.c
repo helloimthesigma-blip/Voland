@@ -1798,9 +1798,14 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
      * memory here; the update is dropped, as before they decoded. */
     if (t->compute) fail(t, "global atomic (%s)", sm_op_name((Sm_Op)in->op));
     return;
+  case SM_OP_STG:
+    /* A pixel program's global stores are dropped, as its ATOM / RED:
+     * the draw renders (wgsl_find_pixel_globals). */
+    if (t->compute) emit_gmem(t, in);
+    else if (t->vertex) fail(t, "global memory (STG)");
+    return;
   case SM_OP_LD:
   case SM_OP_ST:
-  case SM_OP_STG:
     if (t->compute) emit_gmem(t, in);
     else fail(t, "global memory (%s)", sm_op_name((Sm_Op)in->op));
     return;
@@ -2204,7 +2209,13 @@ bool wgsl_reads_globals(const Sm_Program *program) {
   return false;
 }
 
-bool wgsl_find_globals(const Sm_Program *program, Wgsl_Globals *out) {
+static bool find_globals(const Sm_Program *program, bool allow_stg, Wgsl_Globals *out);
+
+bool wgsl_find_globals(const Sm_Program *program, Wgsl_Globals *out) { return find_globals(program, false, out); }
+
+bool wgsl_find_pixel_globals(const Sm_Program *program, Wgsl_Globals *out) { return find_globals(program, true, out); }
+
+static bool find_globals(const Sm_Program *program, bool allow_stg, Wgsl_Globals *out) {
   memset(out, 0, sizeof(*out));
   memset(out->buffer_of, 0xff, sizeof(out->buffer_of));
   static _Thread_local bool targeted[SM_MAX_WORDS + 1u];
@@ -2215,7 +2226,7 @@ bool wgsl_find_globals(const Sm_Program *program, Wgsl_Globals *out) {
   }
   for (uint32_t pc = 0; pc < program->word_count; pc++) {
     const Sm_Insn *in = &program->insns[pc];
-    if (in->op == SM_OP_STG || in->op == SM_OP_LD || in->op == SM_OP_ST) return false;
+    if ((in->op == SM_OP_STG && !allow_stg) || in->op == SM_OP_LD || in->op == SM_OP_ST) return false;
     if (in->op != SM_OP_LDG) continue;
     const uint64_t w = in->raw;
     const uint32_t ra = REG_A(w);
@@ -2246,12 +2257,13 @@ bool wgsl_find_globals(const Sm_Program *program, Wgsl_Globals *out) {
 static void emit_ldg(Tr *t, const Sm_Insn *in, uint32_t pc) {
   const uint64_t w = in->raw;
   const uint32_t k = t->globals.buffer_of[pc];
-  if (!t->vertex || k == 0xffu) {
+  if (k == 0xffu) {
     fail(t, "global memory (LDG)");
     return;
   }
   t->uses_globals = true;
-  const uint32_t size = BITS(w, 48, 3), n = access_bytes(size), gb = WGSL_DRAW_GLOBALS + WGSL_GLOBAL_WORDS * k;
+  const uint32_t size = BITS(w, 48, 3), n = access_bytes(size),
+                 gb = (t->vertex ? WGSL_DRAW_GLOBALS : WGSL_DRAW_PS_GLOBALS) + WGSL_GLOBAL_WORDS * k;
   const int32_t off = (int32_t)(BITS(w, 20, 24) << 8) >> 8;
   const uint32_t ra = REG_A(w), dr = REG_D(w);
   EMIT("{ let a0 = %s; let ga = a0 + 0x%xu; let gh = %s %s; ", reg(t, ra).s, (uint32_t)off, reg(t, (ra + 1u) & 0xffu).s,
@@ -2429,6 +2441,8 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   memset(t->globals.buffer_of, 0xff, sizeof(t->globals.buffer_of));
   if (t->vertex && wgsl_reads_globals(program) && !wgsl_find_globals(program, &t->globals))
     memset(t->globals.buffer_of, 0xff, sizeof(t->globals.buffer_of)); /* its LDGs stay untranslated */
+  if (!t->vertex && !t->compute && wgsl_reads_globals(program) && !wgsl_find_pixel_globals(program, &t->globals))
+    memset(t->globals.buffer_of, 0xff, sizeof(t->globals.buffer_of));
   const uint8_t want_stage = t->compute ? SM_STAGE_COMPUTE : t->vertex ? SM_STAGE_VERTEX : SM_STAGE_PIXEL;
   if (program->header.stage != want_stage)
     fail(t, t->compute ? "not a compute program" : t->vertex ? "not a vertex program" : "not a pixel program");

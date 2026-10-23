@@ -144,7 +144,7 @@ export type CPUToMainMessage =
   | { readonly type: "error"; readonly message: string }
   | { readonly type: "game-loaded"; readonly titleId: string; readonly entryPoint: bigint }
   /* Mods applied at the last load, and its cheats (§19). */
-  | { readonly type: "cheats"; readonly titleId: string; readonly mods: readonly string[]; readonly cheats: readonly CheatInfo[] }
+  | { readonly type: "cheats"; readonly titleId: string; readonly buildId: string; readonly mods: readonly string[]; readonly cheats: readonly CheatInfo[] }
   | { readonly type: "load-failed"; readonly failure: LoadFailure }
   | { readonly type: "sd-files-added"; readonly added: readonly string[]; readonly failed: readonly string[] }
   | { readonly type: "system-file-added"; readonly outcome: SystemFileOutcome }

@@ -182,7 +182,12 @@ function cheatsMessage(titleId: string): CPUToMainMessage {
                     enabled: (flags & 1) !== 0, master: (flags & 2) !== 0 });
     }
   }
-  return { type: "cheats", titleId, mods: modNames, cheats };
+  let buildId = "";
+  if (core && coreMemory) {
+    const at = Number(core._emulator_main_build_id_ffi());
+    if (at) buildId = Array.from(new Uint8Array(coreMemory.buffer, at, 32), (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  return { type: "cheats", titleId, buildId, mods: modNames, cheats };
 }
 
 const readGameFile: GameFileReadHook = (offset, destination, size) => {

@@ -8,6 +8,8 @@ import type { CheatInfo, CPUToMainMessage } from "@bindings/protocol";
 
 export interface RunningMods {
   readonly titleId: string;
+  /** The main executable's build id (hex), for matching patches. */
+  readonly buildId: string;
   readonly mods: readonly string[];
   readonly cheats: readonly CheatInfo[];
 }
@@ -23,7 +25,7 @@ export function registerModsWorker(cpuWorker: Worker): void {
 /** The CPU worker's "cheats" report; true if `msg` was one. */
 export function handleModsMessage(msg: CPUToMainMessage): boolean {
   if (msg.type !== "cheats") return false;
-  current = { titleId: msg.titleId, mods: msg.mods, cheats: msg.cheats };
+  current = { titleId: msg.titleId, buildId: msg.buildId, mods: msg.mods, cheats: msg.cheats };
   for (const listener of listeners) listener(current);
   return true;
 }

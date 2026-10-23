@@ -162,7 +162,7 @@ static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); 
 #define GPU_GLOBAL_BYTES (256u << 10)
 #define GPU_DATA_STORAGE                                                                                           \
   (((size_t)WGSL_DRAW_CONSTANT_WORDS + (size_t)2u * SM_CBUF_SLOTS * (CBUF_SLOT_BYTES / 4u) + 2u) * 4u +            \
-   GPU_GLOBAL_BYTES + 4u * WGSL_MAX_GLOBALS * 4u)
+   GPU_GLOBAL_BYTES + 2u * 4u * WGSL_MAX_GLOBALS * 4u)
 #define STORAGE_BYTES (GPU_DATA_OFFSET + GPU_DATA_STORAGE + 64u)
 
 size_t raster3d_storage_bytes(void) { return STORAGE_BYTES; }
@@ -3460,6 +3460,10 @@ typedef struct Gpu_Draw {
   uint32_t global_count;
   uint64_t global_base[WGSL_MAX_GLOBALS];
   uint32_t global_size[WGSL_MAX_GLOBALS];
+  /* The pixel program's (wgsl_find_pixel_globals), the same way. */
+  uint32_t ps_global_count;
+  uint64_t ps_global_base[WGSL_MAX_GLOBALS];
+  uint32_t ps_global_size[WGSL_MAX_GLOBALS];
   Wgsl_Program_Desc desc;
   Wgsl_Program_Desc vs_desc;
 } Gpu_Draw;
@@ -3640,6 +3644,56 @@ static bool gpu_plan_globals(Draw_Context *ctx, Gpu_Draw *g, uint64_t *words) {
   return true;
 }
 
+/* The pixel program's storage buffers, as gpu_plan_globals; they share
+ * GPU_GLOBAL_BYTES with the vertex program's. False keeps the draw
+ * untranslated (the reason is logged once per program). */
+static uint64_t g_ps_globals_refused;
+
+static bool gpu_plan_pixel_globals(Draw_Context *ctx, Gpu_Draw *g) {
+  g->ps_global_count = 0;
+  Wgsl_Globals found;
+  if (!wgsl_find_pixel_globals(ctx->ps, &found)) return true; /* the translation reports it */
+  uint64_t total = 0;
+  for (uint32_t k = 0; k < g->global_count; k++) total += ((uint64_t)g->global_size[k] + 7u) & ~(uint64_t)3u;
+  for (uint32_t k = 0; k < found.count; k++) {
+    const uint64_t at = ctx->cbuf_address[1][found.slot[k]];
+    uint32_t desc[3];
+    if (!at || !ctx->mem->read(ctx->mem->user, at + found.offset[k], desc, sizeof(desc))) return false;
+    g->ps_global_base[k] = (uint64_t)desc[0] | (uint64_t)desc[1] << 32;
+    g->ps_global_size[k] = desc[2];
+    total += ((uint64_t)desc[2] + 7u) & ~(uint64_t)3u;
+    if (!g->ps_global_base[k] || !desc[2] || total > GPU_GLOBAL_BYTES) {
+      if (!g_ps_globals_refused++)
+        log_warn("[gpu] pixel program %llx not drawn: its global buffer of %u bytes at 0x%llx (c%u[0x%x]) does not fit",
+                 (unsigned long long)ctx->ps->address, desc[2], (unsigned long long)g->ps_global_base[k], found.slot[k],
+                 found.offset[k]);
+      return false;
+    }
+  }
+  g->ps_global_count = found.count;
+  return true;
+}
+
+/* Copies global buffers into the draw's data at `*words`, filling their
+ * descriptor words at `table` (WGSL_DRAW_GLOBALS / _PS_GLOBALS): each
+ * buffer's bytes and a word of slack (gword reads two words at an
+ * unaligned address). */
+static void gpu_copy_globals(Draw_Context *ctx, uint32_t *data, uint32_t *words, uint32_t table, uint32_t count,
+                             const uint64_t *base, const uint32_t *size) {
+  for (uint32_t k = 0; k < count; k++) {
+    uint32_t *at = data + table + WGSL_GLOBAL_WORDS * k;
+    at[0] = (uint32_t)base[k];
+    at[1] = (uint32_t)(base[k] >> 32);
+    at[2] = size[k];
+    at[3] = *words * 4u;
+    const uint32_t n = (size[k] + 3u) / 4u + 1u;
+    memset(data + *words, 0, (size_t)n * 4u);
+    if (!ctx->mem->read(ctx->mem->user, base[k], data + *words, size[k]))
+      memset(data + *words, 0, (size_t)n * 4u); /* unreadable: the loads read zeros */
+    *words += n;
+  }
+}
+
 /* A vertex program whose constants (or global memory) are large costs a
  * copy per draw on the GPU; below one vertex per this many bytes of them
  * shading on the CPU is cheaper (2-triangle quads of a program indexing a
@@ -3681,6 +3735,8 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
                (unsigned long long)vs_words * 4u);
     return;
   }
+  /* Room for the pixel program's global buffers (planned later). */
+  if (wgsl_reads_globals(ctx->ps)) words += GPU_GLOBAL_BYTES / 4u;
   if (words > GPU_DATA_WINDOW_WORDS) {
     st->cpu_vs_window++;
     if (!g_vs_cpu_window++) log_warn("[gpu] vertices on the CPU: constant buffers of %llu words", (unsigned long long)words);
@@ -4033,6 +4089,8 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
     }
   }
   desc->mrt = rs->mrt;
+  /* Its global memory, copied with the draw's data. */
+  if (wgsl_reads_globals(ctx->ps) && !gpu_plan_pixel_globals(ctx, g)) return false;
   /* The shader. */
   g->shader_id = gpu_shader_for(r, ctx->ps, desc);
   if (g->shader_id == GPU_SHADER_FAILED) return false;
@@ -4064,20 +4122,7 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
       data[WGSL_DRAW_VS_CBUF_TABLE + 2u * s + 1u] = n;
       words += n;
     }
-    /* Global memory: each buffer's bytes and a word of slack (gword reads
-     * two words at an unaligned address). */
-    for (uint32_t k = 0; k < g->global_count; k++) {
-      uint32_t *at = data + WGSL_DRAW_GLOBALS + WGSL_GLOBAL_WORDS * k;
-      at[0] = (uint32_t)g->global_base[k];
-      at[1] = (uint32_t)(g->global_base[k] >> 32);
-      at[2] = g->global_size[k];
-      at[3] = words * 4u;
-      const uint32_t n = (g->global_size[k] + 3u) / 4u + 1u;
-      memset(data + words, 0, (size_t)n * 4u);
-      if (!ctx->mem->read(ctx->mem->user, g->global_base[k], data + words, g->global_size[k]))
-        memset(data + words, 0, (size_t)n * 4u); /* unreadable: the loads read zeros */
-      words += n;
-    }
+    gpu_copy_globals(ctx, data, &words, WGSL_DRAW_GLOBALS, g->global_count, g->global_base, g->global_size);
     uint32_t *vp = data + WGSL_DRAW_VIEWPORT;
     for (uint32_t c = 0; c < 3u; c++) {
       vp[WGSL_VP_SCALE + c] = u32f(rs->vp_scale[c]);
@@ -4088,6 +4133,7 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
     vp[WGSL_VP_FLAGS] = rs->viewport_transform ? WGSL_VP_TRANSFORM : 0u;
     vp[WGSL_VP_SWIZZLE] = rs->viewport_swizzle;
   }
+  gpu_copy_globals(ctx, data, &words, WGSL_DRAW_PS_GLOBALS, g->ps_global_count, g->ps_global_base, g->ps_global_size);
   if (words & 1u) data[words++] = 0; /* records stay 8-aligned */
   g->data_words = words;
   return true;

@@ -39,6 +39,7 @@ static int g_failures;
 #define PS_DERIV_OFFSET 0x1800u
 #define VS_TEX_OFFSET 0x3000u /* a vertex program that samples a texture */
 #define VS_LDG_OFFSET 0x3800u /* a vertex program that reads a storage buffer */
+#define PS_LDG_OFFSET 0x2800u /* a pixel program that reads (and writes) a storage buffer */
 #define SSBO_DESC 0x110u      /* the storage buffer's descriptor in c[0] (NVN) */
 #define SSBO (GPU_BASE + 0xC000u)
 #define VERTICES (GPU_BASE + 0x4000u)
@@ -174,6 +175,12 @@ static void build_programs(void) {
                           SHFL_BFLY(7, 4, 2), FSWZADD(1, 4, 7, QUAD_DFDY), SHFL_BFLY(8, 5, 2),
                           FSWZADD(2, 5, 8, QUAD_DFDY), MOV32I(3, one), EXIT()};
   write_program(PS_DERIV_OFFSET, ps_sph, psd, 10);
+  /* PS: colour = the storage buffer's first four words; then a store to
+   * it (STG.E.32), which the GPU translation drops. */
+  const uint64_t stg_e32 = (0xeed8ull << 48) | (4ull << 48) | (1ull << 45) | GUARD | (4ull << 8) | 0u;
+  const uint64_t psg[] = {MOV32I(12, 0), IADD_C_CC(4, 12, SSBO_DESC), IADD_C_X(5, SSBO_DESC + 4u), LDG_E128(0, 4),
+                          stg_e32, EXIT()};
+  write_program(PS_LDG_OFFSET, ps_sph, psg, 6);
 }
 
 /* ---- register state ----------------------------------------------- */
@@ -718,13 +725,14 @@ static Seen_Draw gpu_draw_once(Raster3d *r, uint32_t front_face_reg) {
   return gpu_draw_topology(r, front_face_reg, 4, 3);
 }
 static bool g_gpu_textured; /* gpu_draw_topology: the texturing pixel program */
+static uint32_t g_ps_override; /* gpu_draw_topology: this pixel program instead (0: none) */
 static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_t topology, uint32_t count) {
   static Gpu_Stream stream;
   Seen_Draw seen;
   memset(&seen, 0, sizeof(seen));
   gpu_stream_init(&stream, g_stream_header, (uint8_t *)g_stream_ring, GPU_RING_BYTES, stream_wait, &seen);
   raster3d_set_gpu(r, &stream);
-  base_state(RT, false, g_gpu_textured ? PS_TEX_OFFSET : PS_OFFSET);
+  base_state(RT, false, g_ps_override ? g_ps_override : g_gpu_textured ? PS_TEX_OFFSET : PS_OFFSET);
   if (g_gpu_textured) texture_state();
   g_regs[REG_CULL_ENABLE_TEST] = 1;
   g_regs[REG_CULL_FACE_TEST] = CULL_BACK_REG;
@@ -862,7 +870,20 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   const Seen_Draw vs_ldg_cpu = gpu_draw_once(r, FRONT_CW_REG);
   CHECK(vs_ldg_cpu.count == 1 && vs_ldg_cpu.last.vs_shader_id == 0, "an empty buffer: CPU vertices (vs %u)",
         vs_ldg_cpu.last.vs_shader_id);
+  /* A pixel program that reads a storage buffer is translated too, its
+   * buffer copied at WGSL_DRAW_PS_GLOBALS; its store is dropped. */
+  put32(CBUF + SSBO_DESC + 8u, sizeof(ssbo));
   g_vs_offset = VS_OFFSET;
+  g_ps_override = PS_LDG_OFFSET;
+  const Seen_Draw ps_ldg = gpu_draw_once(r, FRONT_CW_REG);
+  memcpy(gdesc, g_seen_data + 4u * WGSL_DRAW_PS_GLOBALS, sizeof(gdesc));
+  memset(copied, 0, sizeof(copied));
+  if (gdesc[3] + sizeof(copied) <= ps_ldg.data_bytes) memcpy(copied, g_seen_data + gdesc[3], sizeof(copied));
+  CHECK(ps_ldg.count == 1 && ps_ldg.last.shader_id != 0 && gdesc[0] == (uint32_t)SSBO && gdesc[2] == sizeof(ssbo) &&
+            copied[1] == 0.5f,
+        "storage-buffer pixel program on the GPU: %u draws, shader %u, buffer 0x%x (%u bytes)", ps_ldg.count,
+        ps_ldg.last.shader_id, gdesc[0], gdesc[2]);
+  g_ps_override = 0;
   g_gpu_textured = false;
 }
 

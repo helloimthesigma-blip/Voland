@@ -68,10 +68,26 @@ win). If `DIR` itself contains `romfs/`, `exefs/`, `cheats/` or
 
 ## Mod repositories
 
-DESIGN.md §19 specifies an add-a-repository mechanism (a manifest of
-hash-verified downloads from CORS-enabled hosts the user adds). Voland
-will ship it with no repositories listed. It is not built yet: install
-mods from folders or zips for now.
+You can add a mod repository by URL (DESIGN.md §19): **Mods → Mod
+repositories → Add**, or open Voland with `?add-repo=<url>` (the "Add to
+Voland" links a repository's site can offer). Voland ships with none.
+
+- A repository is a `repository.json` (schema in DESIGN.md §19) on a site
+  that allows cross-origin requests. GitHub Pages and releases do. Voland
+  never fetches through a proxy, so a repository without CORS can't be
+  used. Its error message says so.
+- For the chosen game, the panel lists the repository's mods with their
+  version, type and size. **Install** downloads the archive and checks its
+  SHA-256 against the repository's before unpacking it (zip only). It
+  records where the mod came from, so newer versions show **Update**.
+- Executable patches and cheats name the build id they were made for.
+  Until the game has been loaded in this session, they are listed as "load
+  the game once to check". If the build id doesn't match, they can't be
+  installed.
+- Adding or removing a repository never touches installed mods. Adding is
+  refused when Voland is shown inside another site's frame.
+- Only guest-side mod types exist (`romfs`, `exefs-patch`, `cheats`,
+  `guest-nro`). There is no type for code that runs in the browser page.
 
 ## How it works
 

@@ -38,6 +38,7 @@ EXPORT int emulator_create_ffi(void);
 EXPORT void emulator_mods_clear_ffi(void);
 EXPORT int emulator_mods_add_ffi(const char *mod_name, const char *path, uint64_t title_id, uint64_t size, uint32_t id);
 EXPORT uint32_t emulator_cheat_count_ffi(void);
+EXPORT uint64_t emulator_main_build_id_ffi(void);
 EXPORT uint64_t emulator_cheat_name_ffi(uint32_t index);
 EXPORT uint32_t emulator_cheat_flags_ffi(uint32_t index);
 EXPORT void emulator_cheat_set_enabled_ffi(uint32_t index, int enabled);
@@ -255,6 +256,18 @@ EXPORT int emulator_mods_add_ffi(const char *mod_name, const char *path, uint64_
   const uint32_t before = g_emulator.mods.count;
   const Error err = emulator_mods_add(&g_emulator, normalized, size, id);
   return error_is_ok(err) && g_emulator.mods.count > before ? 1 : 0;
+}
+
+/* The main NSO's module (build) id, 32 bytes, for matching repository
+ * patches (§19); 0 when nothing is loaded. */
+EXPORT uint64_t emulator_main_build_id_ffi(void)
+{
+  if (!g_initialised || !g_emulator.program_loaded)
+    return 0;
+  for (uint32_t m = 0; m < g_emulator.process.module_count; m++)
+    if (strcmp(g_emulator.process.modules[m].name, "main") == 0)
+      return (uint64_t)(uintptr_t)g_emulator.process.modules[m].module_id;
+  return 0;
 }
 
 /* The loaded program's cheats, for the toggles in the mods panel. */

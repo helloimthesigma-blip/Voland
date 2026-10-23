@@ -19,11 +19,20 @@ export interface ModInfo {
   readonly enabled: boolean;
   readonly files: number;
   readonly bytes: number;
+  readonly source: ModSource | null;
+}
+
+/** Where a mod installed from a repository came from (§19 provenance). */
+export interface ModSource {
+  readonly repo: string;
+  readonly modId: string;
+  readonly version: string;
 }
 
 interface ModConfig {
   readonly order: readonly string[];
   readonly disabled: readonly string[];
+  readonly sources?: Readonly<Record<string, ModSource>>;
 }
 
 const EMPTY_CONFIG: ModConfig = { order: [], disabled: [] };
@@ -111,7 +120,7 @@ export async function listMods(titleId: string): Promise<readonly ModInfo[]> {
       files++;
       bytes += (await handle.getFile()).size;
     });
-    result.push({ name, enabled: !config.disabled.includes(name), files, bytes });
+    result.push({ name, enabled: !config.disabled.includes(name), files, bytes, source: config.sources?.[name] ?? null });
   }
   return result;
 }
@@ -121,7 +130,7 @@ export async function setModEnabled(titleId: string, name: string, enabled: bool
   if (!dir) return;
   const config = await readConfig(dir);
   const disabled = config.disabled.filter((n) => n !== name);
-  await writeConfig(dir, { order: config.order, disabled: enabled ? disabled : [...disabled, name] });
+  await writeConfig(dir, { ...config, disabled: enabled ? disabled : [...disabled, name] });
 }
 
 /** Moves `name` one place up (delta -1) or down (+1) in priority. */
@@ -136,7 +145,7 @@ export async function moveMod(titleId: string, name: string, delta: number): Pro
   const next = order.slice();
   next.splice(at, 1);
   next.splice(to, 0, name);
-  await writeConfig(dir, { order: next, disabled: config.disabled });
+  await writeConfig(dir, { ...config, order: next });
 }
 
 export async function removeMod(titleId: string, name: string): Promise<void> {
@@ -144,7 +153,17 @@ export async function removeMod(titleId: string, name: string): Promise<void> {
   if (!dir) return;
   await dir.removeEntry(name, { recursive: true }).catch(() => undefined);
   const config = await readConfig(dir);
-  await writeConfig(dir, { order: config.order.filter((n) => n !== name), disabled: config.disabled.filter((n) => n !== name) });
+  const sources = { ...config.sources };
+  delete sources[name];
+  await writeConfig(dir, { order: config.order.filter((n) => n !== name), disabled: config.disabled.filter((n) => n !== name), sources });
+}
+
+/** Records that mod `name` came from a repository entry. */
+export async function recordModSource(titleId: string, name: string, source: ModSource): Promise<void> {
+  const dir = await titleDirectory(titleId, true);
+  if (!dir) return;
+  const config = await readConfig(dir);
+  await writeConfig(dir, { ...config, sources: { ...config.sources, [name]: source } });
 }
 
 /** A folder or archive name made safe as one OPFS component. Pure. */
