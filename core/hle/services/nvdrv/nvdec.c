@@ -519,11 +519,30 @@ static void vic_execute(Mm_Engine *e, const Mm_Context *c) {
 }
 
 /* VOLAND_DUMP_NVDEC=DIR (native diagnostics): an undecoded codec's
- * submissions - every non-zero buffer register's value and the first
- * NVDEC_DUMP_BYTES behind it - as DIR/<n>-<method>.bin plus DIR/<n>.txt,
- * for the first NVDEC_DUMP_FRAMES frames. */
-#define NVDEC_DUMP_FRAMES 40u
-#define NVDEC_DUMP_BYTES 0x10000u
+ * submissions, for the first NVDEC_DUMP_FRAMES frames: DIR/<n>.txt lists
+ * every non-zero register; DIR/<n>-<method>.bin holds what the buffer
+ * registers point at - the picture setup and the 0x5xx buffers
+ * (NVDEC_DUMP_BYTES each), and the bitstream in full (its size is the
+ * setup's word at NVDEC_DUMP_SIZE_OFFSET). */
+#define NVDEC_DUMP_FRAMES 600u
+#define NVDEC_DUMP_BYTES 0x4000u
+#define NVDEC_DUMP_SIZE_OFFSET 0x30u
+#define NVDEC_DUMP_MAX_BITSTREAM (4u << 20)
+static bool dump_buffer(const Mm_Context *c, const char *dir, uint32_t frame, uint32_t method, uint32_t value, uint64_t want) {
+  static uint8_t bytes[NVDEC_DUMP_MAX_BITSTREAM];
+  uint64_t guest = 0, remaining = 0;
+  if (!mm_iova_translate(c->iova, (uint64_t)value << MM_BUFFER_SHIFT, &guest, &remaining)) return false;
+  const uint64_t n = remaining < want ? remaining : want;
+  if (!error_is_ok(vmm_read_block(c->vmm, guest, bytes, n))) return false;
+  char path[512];
+  snprintf(path, sizeof(path), "%s/%03u-%03x.bin", dir, frame, method);
+  FILE *f = fopen(path, "wb");
+  if (!f) return false;
+  fwrite(bytes, 1, (size_t)n, f);
+  fclose(f);
+  return true;
+}
+
 static void nvdec_dump_unknown(Mm_Engine *e, const Mm_Context *c) {
 #ifdef __EMSCRIPTEN__
   (void)e;
@@ -536,24 +555,21 @@ static void nvdec_dump_unknown(Mm_Engine *e, const Mm_Context *c) {
   snprintf(path, sizeof(path), "%s/%03u.txt", dir, frames);
   FILE *index = fopen(path, "w");
   if (!index) return;
-  static uint8_t bytes[NVDEC_DUMP_BYTES];
   for (uint32_t method = 0x200u; method < 0x800u; method += 4u) {
     const uint32_t value = e->regs[MM_REG(method)];
-    if (!value) continue;
-    fprintf(index, "0x%03x = 0x%08x\n", method, value);
-    if (method < 0x400u) continue;
-    uint64_t guest = 0, remaining = 0;
-    if (!mm_iova_translate(c->iova, (uint64_t)value << MM_BUFFER_SHIFT, &guest, &remaining)) continue;
-    const uint64_t n = remaining < NVDEC_DUMP_BYTES ? remaining : NVDEC_DUMP_BYTES;
-    if (!error_is_ok(vmm_read_block(c->vmm, guest, bytes, n))) continue;
-    snprintf(path, sizeof(path), "%s/%03u-%03x.bin", dir, frames, method);
-    FILE *f = fopen(path, "wb");
-    if (f) {
-      fwrite(bytes, 1, (size_t)n, f);
-      fclose(f);
-    }
+    if (value) fprintf(index, "0x%03x = 0x%08x\n", method, value);
   }
   fclose(index);
+  uint8_t setup[NVDEC_PIC_SETUP_BYTES];
+  uint32_t bitstream_bytes = 0;
+  if (read_buffer(c, e->regs[MM_REG(NVDEC_PIC_SETUP)], 0, setup, sizeof(setup))) {
+    (void)dump_buffer(c, dir, frames, NVDEC_PIC_SETUP, e->regs[MM_REG(NVDEC_PIC_SETUP)], sizeof(setup));
+    bitstream_bytes = rd32(setup + NVDEC_DUMP_SIZE_OFFSET);
+  }
+  if (bitstream_bytes && bitstream_bytes <= NVDEC_DUMP_MAX_BITSTREAM)
+    (void)dump_buffer(c, dir, frames, NVDEC_BITSTREAM, e->regs[MM_REG(NVDEC_BITSTREAM)], bitstream_bytes);
+  for (uint32_t method = 0x500u; method < 0x600u; method += 4u)
+    if (e->regs[MM_REG(method)]) (void)dump_buffer(c, dir, frames, method, e->regs[MM_REG(method)], NVDEC_DUMP_BYTES);
   frames++;
 #endif
 }

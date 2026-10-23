@@ -2201,6 +2201,30 @@ static int32_t last_def(const Sm_Program *p, const bool *targeted, uint32_t pc, 
   return -1;
 }
 
+/* The program's only write to register r, or -1 when there are none, more
+ * than one, or it is predicated: with one definition in the whole program,
+ * any read of r after it sees that value (wherever control flow joins). */
+static int32_t sole_def(const Sm_Program *p, uint32_t r) {
+  int32_t found = -1;
+  for (uint32_t at = 0; at < p->word_count; at++) {
+    const Sm_Insn *in = &p->insns[at];
+    if (in->op == SM_OP_SCHED || in->op == SM_OP_NOP || is_flow(in->op)) continue;
+    const uint32_t d = REG_D(in->raw);
+    uint32_t span = 1;
+    if (in->op == SM_OP_LDG || in->op == SM_OP_LDC || in->op == SM_OP_LDL || in->op == SM_OP_LD)
+      span = (access_bytes(BITS(in->raw, 48, 3)) + 3u) / 4u;
+    else if (in->op == SM_OP_ALD)
+      span = BITS(in->raw, 47, 2) + 1u;
+    else if (is_texture_op(in->op))
+      span = 4;
+    if (in->op == SM_OP_STG || in->op == SM_OP_ST || in->op == SM_OP_STL || in->op == SM_OP_AST) continue;
+    if (r < d || r >= d + span) continue;
+    if (found >= 0 || span > 1u || (in->pred & 7u) != SM_PT || (in->pred & 8u)) return -1;
+    found = (int32_t)at;
+  }
+  return found;
+}
+
 bool wgsl_reads_globals(const Sm_Program *program) {
   for (uint32_t pc = 0; pc < program->word_count; pc++)
     if (program->insns[pc].op == SM_OP_LDG || program->insns[pc].op == SM_OP_STG ||
@@ -2233,7 +2257,9 @@ static bool find_globals(const Sm_Program *program, bool allow_stg, Wgsl_Globals
     const uint64_t w = in->raw;
     const uint32_t ra = REG_A(w);
     if (!BIT(w, LDG_WIDE_BIT) || ra == SM_RZ) GLOBALS_FAIL("LDG at %u: a 32-bit address (R%u)", pc, ra);
-    const int32_t lo_at = last_def(program, targeted, pc, ra), hi_at = last_def(program, targeted, pc, (ra + 1u) & 0xffu);
+    int32_t lo_at = last_def(program, targeted, pc, ra), hi_at = last_def(program, targeted, pc, (ra + 1u) & 0xffu);
+    if (lo_at < 0) lo_at = sole_def(program, ra);
+    if (hi_at < 0) hi_at = sole_def(program, (ra + 1u) & 0xffu);
     if (lo_at < 0 || hi_at < 0)
       GLOBALS_FAIL("LDG at %u: R%u/R%u not defined in the same block (%d, %d)", pc, ra, (ra + 1u) & 0xffu, lo_at, hi_at);
     const Sm_Insn *lo = &program->insns[lo_at], *hi = &program->insns[hi_at];
