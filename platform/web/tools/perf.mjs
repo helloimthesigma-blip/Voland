@@ -703,6 +703,11 @@ async function main() {
     {
       const finalPerf = (await sample()).perf;
       console.log(`JIT async compiles: ${finalPerf.jitAsyncInstalled} installed, ${finalPerf.jitAsyncFailed} failed`);
+      if (finalPerf.render) {
+        const r = finalPerf.render;
+        console.log(`renderer: ${r.gpuDraws} GPU draws, ${r.untranslatedGpuDraws} untranslated (${(100 * r.untranslatedGpuDraws / Math.max(1, r.gpuDraws)).toFixed(1)}%), ` +
+                    `${r.translatedShaders} shaders, ${r.draws} reference draws, ${r.presents} presents`);
+      }
       if (opts.expectJitAsync && (finalPerf.jitAsyncInstalled === 0 || finalPerf.jitAsyncFailed > 0)) {
         console.error("FAIL: --expect-jit-async: the JIT's asynchronous compiles did not install cleanly");
         process.exitCode = 1;

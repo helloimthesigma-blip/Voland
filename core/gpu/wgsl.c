@@ -2201,9 +2201,10 @@ static int32_t last_def(const Sm_Program *p, const bool *targeted, uint32_t pc, 
   return -1;
 }
 
-/* The program's only write to register r, or -1 when there are none, more
- * than one, or it is predicated: with one definition in the whole program,
- * any read of r after it sees that value (wherever control flow joins). */
+/* The program's only write to register r (or the first of several
+ * identical ones), or -1 when there are none, differing ones, or one is
+ * predicated: then any read of r after it sees that value, wherever
+ * control flow joins. */
 static int32_t sole_def(const Sm_Program *p, uint32_t r) {
   int32_t found = -1;
   for (uint32_t at = 0; at < p->word_count; at++) {
@@ -2219,8 +2220,14 @@ static int32_t sole_def(const Sm_Program *p, uint32_t r) {
       span = 4;
     if (in->op == SM_OP_STG || in->op == SM_OP_ST || in->op == SM_OP_STL || in->op == SM_OP_AST) continue;
     if (r < d || r >= d + span) continue;
-    if (found >= 0 || span > 1u || (in->pred & 7u) != SM_PT || (in->pred & 8u)) return -1;
-    found = (int32_t)at;
+    if (span > 1u || (in->pred & 7u) != SM_PT || (in->pred & 8u)) return -1;
+    /* Several writes are as good as one when they are the same
+     * instruction (a branch's two arms loading the same address). */
+    if (found >= 0 && (p->insns[found].op != in->op || p->insns[found].form != in->form ||
+                       p->insns[found].cbuf != in->cbuf || p->insns[found].imm != in->imm ||
+                       REG_A(p->insns[found].raw) != REG_A(in->raw)))
+      return -1;
+    if (found < 0) found = (int32_t)at;
   }
   return found;
 }

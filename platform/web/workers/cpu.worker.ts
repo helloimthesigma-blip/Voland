@@ -265,10 +265,12 @@ interface CpuPerf {
   streamWaitMs: number;
   /** Pictures the game presented (vi). */
   frames: number;
+  /** Renderer counters (emulator_render_stats_ffi), by name. */
+  render: Record<string, number>;
 }
 const perf: CpuPerf = {
   startedMs: 0, slices: 0, sliceMs: 0, yieldMs: 0, bursts: 0,
-  fileReads: 0, fileReadBytes: 0, fileReadMs: 0, fileChunks: 0, ticks: 0, svcs: 0, gpuBytes: 0, gpuStalls: 0, streamWaitMs: 0, frames: 0,
+  fileReads: 0, fileReadBytes: 0, fileReadMs: 0, fileChunks: 0, ticks: 0, svcs: 0, gpuBytes: 0, gpuStalls: 0, streamWaitMs: 0, frames: 0, render: {},
 };
 (globalThis as unknown as { __VOLAND_CPU_PERF__: CpuPerf }).__VOLAND_CPU_PERF__ = perf;
 const PERF_COUNTERS = 6;
@@ -306,6 +308,10 @@ function refreshCorePerf(): void {
     perf.gpuStalls = Number(values[3] ?? 0n);
     perf.streamWaitMs = Number(values[4] ?? 0n) / 1e6;
     perf.frames = Number(values[5] ?? 0n);
+  }
+  {
+    const stats = new BigUint64Array(coreMemory.buffer, Number(core._emulator_render_stats_ffi()), RENDER_STAT_NAMES.length);
+    perf.render = Object.fromEntries(RENDER_STAT_NAMES.map((name, i) => [name, Number(stats[i] ?? 0n)]));
   }
   pollEventFeed();
 }
