@@ -544,6 +544,9 @@ static bool write_plane(const Mm_Context *c, uint32_t value, const uint8_t *src,
   return true;
 }
 
+#define VIDEO_MISSING_NOTICE 120u
+#define VIDEO_PROGRESS_EVERY 300u
+
 #define VIC_SCRATCH_BYTES ((uint64_t)VIDEO_MAX_WIDTH * 4u * (VIDEO_MAX_HEIGHT + 128u))
 
 static void vic_dump(const Mm_Engine *e);
@@ -562,6 +565,12 @@ static void vic_execute(Mm_Engine *e, const Mm_Context *c) {
       !video_frame_for(c->video, sequence, &frame)) {
     vp9_show_existing(v, c, e->regs[MM_REG(VIC_SLOT0_LUMA)]);
     v->missing++;
+    /* The event log: a movie whose pictures never arrive. */
+    if (v->missing == VIDEO_MISSING_NOTICE && !v->conversions)
+      log_warn("[video] no decoded pictures for %u movie frames (%s; %llu frames sent to the decoder)",
+               VIDEO_MISSING_NOTICE, !c->video ? "no decoder" : !surface_sequence(v, e->regs[MM_REG(VIC_SLOT0_LUMA)], &sequence)
+                                                 ? "the surface was never decoded" : "the decoder has not returned them",
+               (unsigned long long)v->frames);
     return;
   }
   Vic_Output o;
@@ -586,7 +595,11 @@ static void vic_execute(Mm_Engine *e, const Mm_Context *c) {
     log_warn("[video] VIC output format 0x%x not handled", o.format);
   }
   if (ok) {
+    if (!v->conversions) log_notice("a movie is playing (%ux%u)", frame.width, frame.height);
     v->conversions++;
+    if (v->conversions % VIDEO_PROGRESS_EVERY == 0)
+      log_info("[video] %llu pictures shown, %llu frames decoded, %llu misses, sequence %u", (unsigned long long)v->conversions,
+               (unsigned long long)v->frames, (unsigned long long)v->missing, sequence);
     video_frame_used(c->video, &frame);
   }
 }

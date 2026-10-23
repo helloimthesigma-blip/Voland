@@ -304,3 +304,7 @@ add_executable(vp9_roundtrip vp9_roundtrip.c)
 target_link_libraries(vp9_roundtrip PRIVATE switch_core)
 add_executable(nvdec_vp9_replay nvdec_vp9_replay.c)
 target_link_libraries(nvdec_vp9_replay PRIVATE switch_core)
+
+add_executable(nvdec_vp9_test nvdec_vp9_test.c)
+target_link_libraries(nvdec_vp9_test PRIVATE switch_core)
+add_test(NAME nvdec_vp9_test COMMAND nvdec_vp9_test)
