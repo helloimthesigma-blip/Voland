@@ -13,11 +13,13 @@
  * alive.
  */
 
-import type { CpuBackendId, GameFileReadHook, GuestOutputHook, SwitchCoreExports } from "@bindings/core";
+import type { CpuBackendId, GameFileReadHook, GuestOutputHook, ModFileReadHook, SwitchCoreExports } from "@bindings/core";
+import { enabledModFiles } from "./mod-store";
+import { FeedFolder, type StatusSample, statusLine } from "./log-feed";
 import { CPU_BACKEND_DISPLAY_NAMES, backendVersionString } from "@bindings/core";
 import { readMemoryLayout } from "@bindings/layout";
 import { CoreResult, SYSTEM_FILES, formatTitleId, loadFailureFromResult, readCString, runStateAfterSlice } from "@bindings/load";
-import type { CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
+import type { CheatInfo, CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
 import { clearSdFiles, diffManifests, parseManifest, persistSdFile, removeSdFile, restoreSdFiles } from "./sd-persistence";
 import { isSaveName, loadSaveArchives, readTar, removeSaveArchive, saveNameOfTar, storeSaveArchive, tarNameOfSave, writeTar } from "./save-store";
 import { writeSaveArchive } from "@bindings/save-archive";
@@ -42,6 +44,7 @@ function log(level: "debug" | "info" | "warn" | "error", message: string): void 
 interface CoreModuleOptions {
   readonly wasmMemory:         WebAssembly.Memory;
   readonly volandReadGameFile: GameFileReadHook;
+  readonly volandReadModFile: ModFileReadHook;
   readonly volandGuestOutput:  GuestOutputHook;
 }
 type CoreModuleFactory = (options: CoreModuleOptions) => Promise<SwitchCoreExports>;
@@ -108,6 +111,78 @@ function readChunk(file: File, index: number): Uint8Array {
   perf.fileChunks = chunksSeen.size;
   cacheChunk(index, bytes);
   return bytes;
+}
+
+/* Mods (§19, workers/mod-store.ts): the enabled mods' files for the game
+ * being loaded, by the id the core was given for each. */
+let modFiles: File[] = [];
+let modNames: string[] = [];
+
+const readModFile: ModFileReadHook = (id, offset, destination, size) => {
+  const file = modFiles[id];
+  if (!file || !coreMemory || offset + size > file.size) return false;
+  try {
+    const bytes = fileReader.readAsArrayBuffer(file.slice(offset, offset + size));
+    if (bytes.byteLength !== size) return false;
+    new Uint8Array(coreMemory.buffer, destination, size).set(new Uint8Array(bytes));
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+const NCA_PROGRAM_ID_OFFSET = 0x210;
+
+/** A decrypted NCA's program id (header field 0x210) as 16 hex digits;
+ * null for anything else (NRO homebrew has no mods). */
+async function ncaProgramId(file: File): Promise<string | null> {
+  if (file.size < 0x400) return null;
+  const header = new DataView(await file.slice(0x200, 0x218).arrayBuffer());
+  const magic = String.fromCharCode(header.getUint8(0), header.getUint8(1), header.getUint8(2), header.getUint8(3));
+  if (magic !== "NCA3" && magic !== "NCA2") return null;
+  return header.getBigUint64(NCA_PROGRAM_ID_OFFSET - 0x200, true).toString(16).padStart(16, "0");
+}
+
+/** Lists the title's enabled mods into the core (before emulator_load). */
+async function prepareMods(file: File): Promise<void> {
+  modFiles = [];
+  modNames = [];
+  const target = core;
+  if (!target) return;
+  target._emulator_mods_clear_ffi();
+  let titleId: string | null = null;
+  try {
+    titleId = await ncaProgramId(file);
+    if (!titleId) return;
+    const files = await enabledModFiles(titleId);
+    const used = new Set<string>();
+    for (const entry of files) {
+      withCString(entry.mod, (mod) => withCString(entry.path, (path) => {
+        if (target._emulator_mods_add_ffi(mod, path, BigInt(`0x${titleId}`), BigInt(entry.file.size), modFiles.length) === 1) {
+          modFiles.push(entry.file);
+          used.add(entry.mod);
+        }
+      }));
+    }
+    modNames = [...used];
+    if (modFiles.length > 0) log("info", `mods: ${modFiles.length} file(s) from ${modNames.join(", ")}`);
+    else if (files.length > 0) log("warn", `mods: none of the ${files.length} file(s) in the enabled mods are romfs/, exefs/, cheats/ or patch files for ${titleId}`);
+  } catch (e) {
+    log("warn", `mods: could not read the installed mods: ${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+function cheatsMessage(titleId: string): CPUToMainMessage {
+  const cheats: CheatInfo[] = [];
+  if (core && coreMemory) {
+    const count = core._emulator_cheat_count_ffi();
+    for (let i = 0; i < count; i++) {
+      const flags = core._emulator_cheat_flags_ffi(i);
+      cheats.push({ name: readCString(coreMemory.buffer, Number(core._emulator_cheat_name_ffi(i)), 64),
+                    enabled: (flags & 1) !== 0, master: (flags & 2) !== 0 });
+    }
+  }
+  return { type: "cheats", titleId, mods: modNames, cheats };
 }
 
 const readGameFile: GameFileReadHook = (offset, destination, size) => {
@@ -183,13 +258,15 @@ interface CpuPerf {
   gpuStalls: number;
   /** Time the core waited for the GPU/video worker to drain a full ring. */
   streamWaitMs: number;
+  /** Pictures the game presented (vi). */
+  frames: number;
 }
 const perf: CpuPerf = {
   startedMs: 0, slices: 0, sliceMs: 0, yieldMs: 0, bursts: 0,
-  fileReads: 0, fileReadBytes: 0, fileReadMs: 0, fileChunks: 0, ticks: 0, svcs: 0, gpuBytes: 0, gpuStalls: 0, streamWaitMs: 0,
+  fileReads: 0, fileReadBytes: 0, fileReadMs: 0, fileChunks: 0, ticks: 0, svcs: 0, gpuBytes: 0, gpuStalls: 0, streamWaitMs: 0, frames: 0,
 };
 (globalThis as unknown as { __VOLAND_CPU_PERF__: CpuPerf }).__VOLAND_CPU_PERF__ = perf;
-const PERF_COUNTERS = 5;
+const PERF_COUNTERS = 6;
 let perfBuffer = 0;
 let lastBurstEnd = 0;
 
@@ -223,7 +300,47 @@ function refreshCorePerf(): void {
     perf.gpuBytes = Number(values[2] ?? 0n);
     perf.gpuStalls = Number(values[3] ?? 0n);
     perf.streamWaitMs = Number(values[4] ?? 0n) / 1e6;
+    perf.frames = Number(values[5] ?? 0n);
   }
+  pollEventFeed();
+}
+
+/* The readable event log (workers/log-feed.ts): the core's milestones and
+ * first-seen problems, folded and explained, polled at most once a
+ * second; a status line and the "N more" counts every STATUS_EVERY_MS. */
+const FEED_POLL_MS = 1000;
+const FEED_TEXT_MAX_BYTES = 64 * 1024;
+const STATUS_EVERY_MS = 30_000;
+const feed = new FeedFolder();
+let lastFeedPoll = 0;
+let lastStatusAt = 0;
+let statusBase: StatusSample | null = null;
+let statusPrevious: StatusSample | null = null;
+
+function statusSample(now: number): StatusSample {
+  return { wallSeconds: (now - perf.startedMs) / 1000, virtualSeconds: perf.ticks / TIMER_HZ, frames: perf.frames };
+}
+
+function pollEventFeed(): void {
+  if (!core || !coreMemory) return;
+  const now = performance.now();
+  if (now - lastFeedPoll < FEED_POLL_MS) return;
+  lastFeedPoll = now;
+  const text = readCString(coreMemory.buffer, Number(core._emulator_take_log_events_ffi()), FEED_TEXT_MAX_BYTES);
+  for (const entry of feed.take(text.split("\n").filter((l) => l.length > 0))) log(entry.level, entry.message);
+  if (!running || paused) return;
+  if (!statusBase) {
+    statusBase = statusSample(now);
+    statusPrevious = statusBase;
+    lastStatusAt = now;
+    return;
+  }
+  if (now - lastStatusAt < STATUS_EVERY_MS) return;
+  lastStatusAt = now;
+  const sample = statusSample(now);
+  log("info", statusLine(statusPrevious ?? statusBase, sample));
+  statusPrevious = sample;
+  for (const entry of feed.summary()) log(entry.level, entry.message);
 }
 const BURST_MS = 12;
 let running = false;
@@ -327,7 +444,7 @@ function runBurst(): void {
     if (!freeRunning && freeFromSlice > 0 && perf.slices >= freeFromSlice - 1) {
       freeRunning = true;
       core._emulator_set_free_running_ffi(1);
-      log("info", `free-running guest cores from slice ${perf.slices + 1}`);
+      log("debug", `free-running guest cores from slice ${perf.slices + 1}`);
     }
     const status = freeRunning
       ? core._emulator_run_for_ffi(Math.max(1, Math.ceil(deadline - now)), SLICE_CYCLES)
@@ -361,6 +478,9 @@ function runBurst(): void {
 }
 
 function startRunning(): void {
+  statusBase = null;
+  statusPrevious = null;
+  feed.reset();
   Object.assign(perf, { startedMs: performance.now(), slices: 0, sliceMs: 0, yieldMs: 0, bursts: 0,
                         fileReads: 0, fileReadBytes: 0, fileReadMs: 0, fileChunks: 0 });
   lastBurstEnd = 0;
@@ -379,7 +499,7 @@ async function loadCoreModule(memory: WebAssembly.Memory): Promise<SwitchCoreExp
    * equivalent in a production build. */
   const coreUrl = new URL(CORE_MODULE_URL, self.location.origin).href;
   const factory = (await import(/* @vite-ignore */ coreUrl)).default as CoreModuleFactory;
-  return factory({ wasmMemory: memory, volandReadGameFile: readGameFile, volandGuestOutput: guestOutput });
+  return factory({ wasmMemory: memory, volandReadGameFile: readGameFile, volandReadModFile: readModFile, volandGuestOutput: guestOutput });
 }
 
 function randomAslrSeed(): bigint {
@@ -970,7 +1090,7 @@ function loadGame(file: File): CPUToMainMessage {
 }
 
 async function init(memory: WebAssembly.Memory): Promise<void> {
-  log("info", "cpu.worker initialising");
+  log("debug", "cpu.worker initialising");
 
   coreMemory = memory;
   try {
@@ -1016,7 +1136,7 @@ async function init(memory: WebAssembly.Memory): Promise<void> {
 
   const backendId = core._cpu_backend_id_ffi() as CpuBackendId;
   const backendName = CPU_BACKEND_DISPLAY_NAMES[backendId] ?? `unknown(${backendId})`;
-  log("info", `guestRamSize=${layout.guestRamSize} bytes, backend=${backendName}`);
+  log("debug", `guestRamSize=${layout.guestRamSize} bytes, backend=${backendName}`);
 
   const ready: CPUToMainMessage = {
     type: "ready",
@@ -1041,9 +1161,22 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   }
 
   if (msg.type === "load-game") {
-    const outcome = loadGame(msg.file);
-    self.postMessage(outcome);
-    if (outcome.type === "game-loaded") startRunning();
+    const file = msg.file;
+    running = false;
+    void prepareMods(file).then(() => {
+      const outcome = loadGame(file);
+      self.postMessage(outcome);
+      if (outcome.type === "game-loaded") {
+        self.postMessage(cheatsMessage(outcome.titleId));
+        startRunning();
+      }
+    });
+    return;
+  }
+
+  if (msg.type === "set-cheat") {
+    core?._emulator_cheat_set_enabled_ffi(msg.index, msg.enabled ? 1 : 0);
+    if (loadedTitleId) self.postMessage(cheatsMessage(loadedTitleId));
     return;
   }
 
@@ -1146,14 +1279,14 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   if (msg.type === "set-pin-ideal-cores") {
     pinIdealCores = msg.on;
     core?._emulator_set_pin_ideal_cores_ffi(pinIdealCores ? 1 : 0);
-    log("info", `pinned cores ${pinIdealCores ? "on" : "off"}`);
+    log("debug", `pinned cores ${pinIdealCores ? "on" : "off"}`);
     return;
   }
 
   if (msg.type === "set-poll-coalescing") {
     pollCoalescing = msg.on;
     core?._emulator_set_poll_coalescing_ffi(pollCoalescing ? 1 : 0);
-    log("info", `poll coalescing ${pollCoalescing ? "on" : "off"}`);
+    log("debug", `poll coalescing ${pollCoalescing ? "on" : "off"}`);
     return;
   }
 

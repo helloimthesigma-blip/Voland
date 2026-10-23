@@ -59,6 +59,16 @@ export interface SwitchCoreExports {
   readonly _emulator_set_gpu_compute_ffi:  (on: number) => void;
   readonly _emulator_set_poll_coalescing_ffi: (on: number) => void;
   readonly _emulator_set_pin_ideal_cores_ffi: (on: number) => void;
+  /* Mods (§19, wasm_entry.c): files are listed before a load and read
+   * back through the `volandReadModFile` hook. add returns 1 if used. */
+  readonly _emulator_mods_clear_ffi: () => void;
+  /* The event feed (common/log.h log_take_events): lines since the last call. */
+  readonly _emulator_take_log_events_ffi: () => bigint;
+  readonly _emulator_mods_add_ffi: (modName: bigint, path: bigint, titleId: bigint, size: bigint, id: number) => number;
+  readonly _emulator_cheat_count_ffi: () => number;
+  readonly _emulator_cheat_name_ffi: (index: number) => bigint; /* const char* or 0 */
+  readonly _emulator_cheat_flags_ffi: (index: number) => number; /* bit 0 enabled, bit 1 master */
+  readonly _emulator_cheat_set_enabled_ffi: (index: number, enabled: number) => void;
   readonly _emulator_set_free_running_ffi: (on: number) => void;
   readonly _emulator_set_pacing_ffi:       (on: number) => void;
   readonly _emulator_pacing_resync_ffi:    () => void;
@@ -102,6 +112,8 @@ export type GuestOutputHook = (address: number, length: number) => void;
  * linear memory at `destination`, returning false on any failure.
  */
 export type GameFileReadHook = (offset: number, destination: number, size: number) => boolean;
+/** Reads `size` bytes at `offset` of mod file `id` into core memory. */
+export type ModFileReadHook = (id: number, offset: number, destination: number, size: number) => boolean;
 
 /* Mirrors the #if ladder in core/stubs/wasm_entry.c's cpu_backend_id_ffi -
  * CPU_BACKEND is a CMake configure-time choice, never a runtime one, so

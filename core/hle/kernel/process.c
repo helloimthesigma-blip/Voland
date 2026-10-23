@@ -8,6 +8,7 @@
 #include "common/layout.h"
 #include "common/log.h"
 
+#include <stdio.h>
 #include <string.h>
 
 /* X1 carries the main thread handle at entry (step 4). */
@@ -98,7 +99,7 @@ static Error zero_range(VMM_Context *vmm, uint64_t gva, uint64_t size) {
  * .bss and inter-segment gaps are clean), decompress each segment into
  * place, then apply final permissions. */
 static Error load_module_image(VMM_Context *vmm, Arena *scratch, size_t scratch_mark,
-                               const NSO *nso, Process_Module *module) {
+                               const NSO *nso, Process_Module *module, const Mod_Set *mods) {
   void *host = NULL;
   vmm_borrow_scope_begin(vmm);
   Error err = vmm_guest_to_host(vmm, module->base_gva, module->image_size, VMM_PERM_RW, &host);
@@ -108,6 +109,10 @@ static Error load_module_image(VMM_Context *vmm, Arena *scratch, size_t scratch_
       const NSO_Segment *segment = &nso->segments[kind];
       err = nso_read_segment(nso, (NSO_Segment_Kind)kind, scratch,
                              (uint8_t *)host + segment->memory_offset, segment->memory_size);
+      arena_rewind_to(scratch, scratch_mark);
+    }
+    if (error_is_ok(err) && mods) {
+      (void)mods_patch_module(mods, module->name, module->module_id, (uint8_t *)host, module->image_size, scratch);
       arena_rewind_to(scratch, scratch_mark);
     }
   }
@@ -182,9 +187,18 @@ Error process_bootstrap(const Process_Bootstrap_Params *params, Process *out) {
     char name[PROCESS_MODULE_NAME_BYTES];
     module_name_at(i, name);
     const ExeFS_Entry *entry = exefs_find(params->exefs, name);
-    if (!entry) continue;
+    char mod_path[PROCESS_MODULE_NAME_BYTES + 8];
+    snprintf(mod_path, sizeof(mod_path), "exefs/%s", name);
+    const Mod_File *replacement = mod_set_find(params->mods, mod_path);
+    if (!entry && !replacement) continue;
 
-    Error err = exefs_entry_source(params->exefs, entry, &sources[module_count]);
+    Error err = OK;
+    if (replacement) {
+      log_notice("mods: executable %s replaced (%llu KB)", name, (unsigned long long)(replacement->size / 1024));
+      err = byte_source_slice(&replacement->source, 0, replacement->size, &sources[module_count]);
+    } else {
+      err = exefs_entry_source(params->exefs, entry, &sources[module_count]);
+    }
     if (!error_is_ok(err)) return err;
     err = nso_open(&sources[module_count].source, &nsos[module_count]);
     if (!error_is_ok(err)) {
@@ -218,7 +232,7 @@ Error process_bootstrap(const Process_Bootstrap_Params *params, Process *out) {
     describe_module(&nsos[m], names[m], cursor, module);
     err = map_fresh_rw(params->vmm, params->pages, &mapped, cursor, module->image_size);
     if (!error_is_ok(err)) goto fail;
-    err = load_module_image(params->vmm, params->scratch, scratch_mark, &nsos[m], module);
+    err = load_module_image(params->vmm, params->scratch, scratch_mark, &nsos[m], module, params->mods);
     if (!error_is_ok(err)) goto fail;
     cursor += module->image_size;
     out->module_count++;

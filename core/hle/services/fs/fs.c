@@ -150,6 +150,8 @@ uint32_t fs_commit_save(Fs_State *s, uint32_t root) {
   return 0;
 }
 
+#define FS_SAVE_NOTICE_EVERY 25u
+
 /* IFileSystem::Commit: the save's current tree becomes what persists. */
 static HLE_ServiceResult cmd_commit(HLE_Context *c, Service_Object *self, const IPC_Request *req, IPC_Response *res) {
   (void)c;
@@ -157,6 +159,10 @@ static HLE_ServiceResult cmd_commit(HLE_Context *c, Service_Object *self, const 
   (void)res;
   Fs_State *s = (Fs_State *)self->interface->service_state;
   (void)fs_commit_save(s, (uint32_t)self->state);
+  /* The event log: the first save, then every FS_SAVE_NOTICE_EVERY. */
+  s->commits++;
+  if (s->commits == 1 || s->commits % FS_SAVE_NOTICE_EVERY == 0)
+    log_notice("the game saved its progress (%llu save%s so far)", (unsigned long long)s->commits, s->commits == 1 ? "" : "s");
   return HLE_RESULT_SUCCESS;
 }
 
@@ -809,6 +815,7 @@ void fs_reset_process(Fs_State *s, const Byte_Source *romfs, uint64_t program_id
   memset(s->directories, 0, sizeof(s->directories));
   s->romfs = romfs;
   s->program_id = program_id;
+  s->commits = 0;
 }
 
 

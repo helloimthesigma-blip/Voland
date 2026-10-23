@@ -8,7 +8,7 @@
  *                       [--url-params "a=1&b=2"] [--browser-arg ARG]...
  *                       [--press SLICE:KEY:SLICES]... [--shot FILE.png] [--shots-every SLICES DIR]
  *                       [--phases NAME:SLICE,NAME:SLICE,...,end:SLICE] [--json FILE]
- *                       [--restore-saves BACKUP.tar] [--user-data-dir DIR] [--system-file FILE]...
+ *                       [--restore-saves BACKUP.tar] [--user-data-dir DIR] [--system-file FILE]... [--mod DIR]...
  *                       [--log-match REGEX] (also print the page's log lines that match)
  *                       [--dump-targets-at SLICE DIR] (every GPU render target as DIR/*.pam, once)
  *
@@ -141,6 +141,7 @@ function parseArgs(argv) {
     else if (a === "--drive") opts.drive = next();
     else if (a === "--restore-saves") opts.restoreSaves = next();
     else if (a === "--system-file") (opts.systemFiles ??= []).push(next());
+    else if (a === "--mod") (opts.mods ??= []).push(next());
     else if (a === "--json") opts.json = next();
     else if (a === "--web-dir") WEB_DIR = resolve(next()); /* another checkout's platform/web */
     else if (a === "--phases") {
@@ -400,6 +401,44 @@ async function main() {
       const note = page.getByTestId("system-result");
       await note.filter({ hasNotText: /Adding|Scanning/ }).waitFor({ timeout: 60_000 });
       console.log(`system file: ${await note.textContent()}`);
+    }
+    if (opts.mods?.length) { /* §19: install mod folders into OPFS for the game's title (as the Mods panel does) */
+      const { readFileSync, readdirSync, statSync, openSync, readSync, closeSync } = await import("node:fs");
+      const header = Buffer.alloc(8);
+      const fd = openSync(opts.game, "r");
+      readSync(fd, header, 0, 8, 0x210);
+      closeSync(fd);
+      const titleId = header.readBigUInt64LE(0).toString(16).padStart(16, "0");
+      for (const dir of opts.mods) {
+        const files = [];
+        const walk = (d, rel) => {
+          for (const name of readdirSync(d).sort()) {
+            const full = `${d}/${name}`;
+            const r = rel ? `${rel}/${name}` : name;
+            if (statSync(full).isDirectory()) walk(full, r);
+            else files.push({ path: r, b64: readFileSync(full).toString("base64") });
+          }
+        };
+        walk(dir, "");
+        const modName = dir.replace(/\/+$/, "").split("/").pop();
+        await page.evaluate(async ({ titleId, modName, files }) => {
+          const root = await navigator.storage.getDirectory();
+          const mods = await root.getDirectoryHandle("mods", { create: true });
+          const title = await mods.getDirectoryHandle(titleId, { create: true });
+          await title.removeEntry(modName, { recursive: true }).catch(() => undefined);
+          const mod = await title.getDirectoryHandle(modName, { create: true });
+          for (const f of files) {
+            const parts = f.path.split("/");
+            const leaf = parts.pop();
+            let at = mod;
+            for (const p of parts) at = await at.getDirectoryHandle(p, { create: true });
+            const w = await (await at.getFileHandle(leaf, { create: true })).createWritable();
+            await w.write(Uint8Array.from(atob(f.b64), (c) => c.charCodeAt(0)));
+            await w.close();
+          }
+        }, { titleId, modName, files });
+        console.log(`mod: installed ${modName} (${files.length} file(s)) for ${titleId}`);
+      }
     }
     await page.getByTestId("load-input").setInputFiles(opts.game);
     await page.getByTestId("load-success").waitFor({ timeout: 600_000 });

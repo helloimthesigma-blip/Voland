@@ -8,7 +8,6 @@ import type { VolandAudioReport } from "../e2e-hooks";
 import processorUrl from "./ring-processor.ts?worker&url";
 
 const SAMPLE_RATE = 48_000;
-const UNDERRUN_LOG_MS = 60_000;
 
 let context: AudioContext | null = null;
 
@@ -25,22 +24,15 @@ export async function startAudioOutput(memory: WebAssembly.Memory, ringBase: num
       processorOptions: { memory, ringBase, capacityFrames },
     });
     node.connect(context.destination);
-    let reportedUnderruns = 0;
-    let lastUnderrunLog = -UNDERRUN_LOG_MS;
     let wasStretching = false;
     node.port.onmessage = (event: MessageEvent<VolandAudioReport>) => {
       window.__VOLAND_AUDIO__ = event.data;
-      /* Underruns are normal while nothing plays; during playback the
-       * first burst is logged, then at most once a minute (not spam). */
-      const now = Date.now();
-      if (event.data.fill > 0 && event.data.underruns > reportedUnderruns && now - lastUnderrunLog >= UNDERRUN_LOG_MS) {
-        onLog(`audio underruns so far: ${event.data.underruns}`);
-        lastUnderrunLog = now;
-      }
-      reportedUnderruns = event.data.underruns;
+      /* Underrun counts are not logged: they follow from the game running
+       * below full speed, which the CPU worker's status line reports in
+       * plain words (workers/log-feed.ts). They stay in __VOLAND_AUDIO__. */
       const stretching = event.data.stretching === true;
       if (stretching !== wasStretching) {
-        onLog(stretching ? "audio: below full speed - time-stretching" : "audio: full speed");
+        onLog(stretching ? "sound: the game is below full speed, so sound is stretched to keep up (may sound slow or crackle)" : "sound: back to full speed");
         wasStretching = stretching;
       }
     };

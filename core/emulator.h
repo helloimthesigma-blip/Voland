@@ -43,6 +43,8 @@
 #include "hle/loader/byte_source.h"
 #include "hle/loader/nca_parse.h"
 #include "hle/loader/nca_compressed.h"
+#include "hle/loader/mods.h"
+#include "hle/cheat_vm.h"
 
 /* Scratch for one bootstrap: the ExeFS directory plus the largest
  * compressed NSO segment staged for LZ4. A shipping title's biggest
@@ -130,6 +132,17 @@ typedef struct Emulator
   NCA_Compressed romfs_compressed;
   Arena content_arena;
   bool content_arena_live;
+  /* Mods (§19, hle/loader/mods.h): the platform's file list, applied at
+   * every load - LayeredFS over the RomFS, ExeFS replacements and patches.
+   * The layered image's tables live in mods_arena (load to unload). */
+  Mod_Set mods;
+  Arena mods_arena;
+  bool mods_arena_live;
+  Layered_RomFS layered_romfs;
+  /* Cheats (hle/cheat_vm.h): the `cheats/` files matching the main NSO's
+   * build id, loaded at each load, run at CHEAT_VM_HZ of virtual time. */
+  Cheat_VM cheats;
+  uint64_t cheat_next_tick;
 
   /* Homebrew (hbloader ABI, v3.39). An NRO runs as "sdmc:<program_path>"
    * (copied onto the SD card at load, since libnx reads its own RomFS
@@ -259,6 +272,18 @@ void emulator_set_poll_coalescing(Emulator *emulator, bool on);
 /* Pinned cores (docs/PARALLEL.md "Pinned cores"): with host cores, every
  * thread runs only on its ideal core's host core. Off by default. */
 void emulator_set_pin_ideal_cores(Emulator *emulator, bool on);
+
+/* Mods (§19, hle/loader/mods.h). The platform binds a read callback once,
+ * then lists the enabled mods' files (highest priority first) before each
+ * load; the list survives unload. Changing it while a program runs takes
+ * effect at the next load. */
+void emulator_mods_bind(Emulator *emulator, Mod_Read_Fn read, void *user);
+void emulator_mods_clear(Emulator *emulator);
+Error emulator_mods_add(Emulator *emulator, const char *path, uint64_t size, uint32_t id);
+
+/* The loaded program's cheats (index < emulator->cheats.count): names
+ * and enable flags, for the platform's toggles. */
+void emulator_cheat_set_enabled(Emulator *emulator, uint32_t index, bool enabled);
 
 /* Compatibility wrapper: one slice, reported as the backend's exit reason
  * (CPU_EXIT_HALT when no thread ran). With nothing loaded it runs the

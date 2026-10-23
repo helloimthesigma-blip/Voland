@@ -89,6 +89,8 @@ set(SWITCH_CORE_SOURCES
   hle/loader/npdm.c
   hle/loader/nso.c
   hle/loader/nro.c
+  hle/loader/mods.c
+  hle/cheat_vm.c
   gpu/framebuffer.c
   gpu/syncpoint.c
   emulator.c

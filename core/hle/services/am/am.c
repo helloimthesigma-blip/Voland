@@ -679,6 +679,14 @@ static HLE_ServiceResult cmd_applet_start(HLE_Context *c, Service_Object *self, 
   Am_Applet *applet = applet_of(s, self->state);
   if (!applet) return HLE_RESULT_INVALID_STATE;
   applet->started = true;
+  {
+    const char *what = applet->applet_id == AM_APPLET_SWKBD ? "the on-screen keyboard"
+                     : applet->applet_id == AM_APPLET_CONTROLLER ? "controller setup"
+                     : applet->applet_id == AM_APPLET_PLAYER_SELECT ? "the user picker"
+                     : applet->applet_id == AM_APPLET_MII_EDIT ? "the Mii editor" : NULL;
+    if (what) log_notice("the game opened %s", what);
+    else log_notice("the game opened system applet 0x%x (Voland answers it as cancelled or with defaults)", applet->applet_id);
+  }
   switch (applet->applet_id) {
   case AM_APPLET_SWKBD:
     start_swkbd(s, c, applet, (uint32_t)self->state);

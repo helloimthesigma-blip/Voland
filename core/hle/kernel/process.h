@@ -70,6 +70,7 @@
 #include "hle/kernel/page_allocator.h"
 #include "hle/kernel/tls.h"
 #include "hle/loader/exefs.h"
+#include "hle/loader/mods.h"
 #include "hle/loader/npdm.h"
 #include "hle/loader/nso.h"
 
@@ -181,6 +182,10 @@ typedef struct Process_Bootstrap_Params {
   Page_Allocator *pages;
   Arena *scratch;        /* NSO staging (compressed bytes) */
   uint64_t aslr_seed;    /* 0 = no ASLR (address_space.h) */
+  /* Optional (§19): `exefs/<module>` files replace ExeFS modules (and may
+   * add ones the ExeFS lacks); matching IPS/pchtxt patches are applied to
+   * each module image before its permissions are set. */
+  const Mod_Set *mods;
 } Process_Bootstrap_Params;
 
 /* Performs steps 2-4. On success `out` describes a fully mapped process

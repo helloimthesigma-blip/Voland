@@ -51,7 +51,7 @@ target_include_directories(loader_fixtures PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 # NSO fixtures compress segments with the vendored LZ4 (core/third_party).
 target_link_libraries(loader_fixtures PRIVATE switch_core)
 
-foreach(loader_test byte_source_test exefs_test romfs_test npdm_test nca_parse_test nca_compressed_test nso_test loader_smoke)
+foreach(loader_test byte_source_test exefs_test romfs_test npdm_test nca_parse_test nca_compressed_test nso_test mods_test loader_smoke)
   add_executable(${loader_test} ${loader_test}.c)
   target_link_libraries(${loader_test} PRIVATE switch_core loader_fixtures)
   add_test(NAME ${loader_test} COMMAND ${loader_test})
@@ -290,3 +290,7 @@ add_test(NAME log_test COMMAND log_test)
 add_executable(save_archive_test save_archive_test.c)
 target_link_libraries(save_archive_test PRIVATE switch_core)
 add_test(NAME save_archive_test COMMAND save_archive_test)
+
+add_executable(cheat_vm_test cheat_vm_test.c)
+target_link_libraries(cheat_vm_test PRIVATE switch_core)
+add_test(NAME cheat_vm_test COMMAND cheat_vm_test)

@@ -112,6 +112,7 @@ typedef struct Vi_State {
   uint64_t next_stray_layer_id;
   uint64_t frames_presented;
   uint64_t frames_dropped;
+  uint32_t noted_width, noted_height; /* the picture size the event log last named */
   /* Frame skip (a user setting, 0 = off): of every frame_skip + 1 frames
    * the guest presents, only the last is rasterised and shown - the others'
    * draws and clears are skipped (every other GPU command still runs).

@@ -87,6 +87,7 @@ typedef struct Fs_State {
   Service_Interface file;        /* object state: open-file slot */
   Service_Interface directory;   /* object state: open-directory slot */
   Service_Interface storage;     /* object state: FS_STORAGE_* */
+  uint64_t commits;              /* save commits this process (event log) */
   Service_Interface device_operator;
   Ramfs_Pool *pool;              /* the Emulator's; outlives processes */
   uint32_t sd_root;

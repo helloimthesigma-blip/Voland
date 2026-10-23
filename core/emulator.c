@@ -1,5 +1,7 @@
 #define _POSIX_C_SOURCE 200809L /* clock_gettime under -std=c11 */
 #include "emulator.h"
+#include "hle/loader/romfs.h"
+#include "common/input_region.h"
 #include "hle/fs/save_archive.h"
 
 #ifdef __EMSCRIPTEN__
@@ -50,9 +52,106 @@ static void release_content_arena(Emulator* emulator) {
   memset(&emulator->romfs_compressed, 0, sizeof(emulator->romfs_compressed));
 }
 
+static void release_mods_arena(Emulator* emulator) {
+  if (!emulator->mods_arena_live) return;
+  arena_destroy(&emulator->mods_arena);
+  emulator->mods_arena_live = false;
+  memset(&emulator->layered_romfs, 0, sizeof(emulator->layered_romfs));
+}
+
+/* LayeredFS (§19): when mods carry romfs/ files, the RomFS the guest sees
+ * is the merged image. The arena holds the base tables, the merged tables
+ * and the build's working set, sized from the base header. */
+static void layer_romfs_mods(Emulator* emulator) {
+  release_mods_arena(emulator);
+  const uint32_t mod_files = mod_set_count_prefix(&emulator->mods, "romfs/");
+  if (mod_files == 0) return;
+  uint64_t base_tables = 0;
+  if (emulator->romfs) {
+    uint8_t header[ROMFS_HEADER_SIZE];
+    if (error_is_ok(byte_source_read(emulator->romfs, 0, header, sizeof(header)))) {
+      for (int field = 1; field <= 4; field++) base_tables += byte_source_le64(header + 0x08 + 0x10 * (uint64_t)(field - 1) + 8);
+    }
+  }
+  if (base_tables > ROMFS_MAX_TABLE_BYTES) base_tables = ROMFS_MAX_TABLE_BYTES;
+  /* Base tables once as read, ~2.5x for the merged tables and per-entry
+   * working records, plus the mod files' share. */
+  const uint64_t bytes = base_tables * 4 + (uint64_t)mod_files * 256 + ((uint64_t)1 << 20);
+  if (!arena_create(&emulator->mods_arena, (size_t)bytes)) {
+    log_warn("[mods] LayeredFS: no memory for %llu bytes of tables; RomFS mods ignored", (unsigned long long)bytes);
+    return;
+  }
+  emulator->mods_arena_live = true;
+  const Error err = layeredfs_build(emulator->romfs, &emulator->mods, &emulator->mods_arena, &emulator->layered_romfs);
+  if (!error_is_ok(err)) {
+    log_warn("[mods] LayeredFS failed (%s); RomFS mods ignored", err.message ? err.message : "?");
+    release_mods_arena(emulator);
+    return;
+  }
+  emulator->romfs = &emulator->layered_romfs.source;
+  log_notice("mods: %u game file(s) replaced, %u added", emulator->layered_romfs.replaced,
+             emulator->layered_romfs.added);
+}
+
+static void locate_romfs_base(Emulator* emulator, bool is_nro);
+
+/* Cheats (§19): every cheats/<mod>/<build id>.txt whose id matches main. */
+static void load_cheats(Emulator* emulator) {
+  cheat_vm_reset(&emulator->cheats);
+  emulator->cheat_next_tick = 0;
+  const Process_Module* main_module = NULL;
+  for (uint32_t m = 0; m < emulator->process.module_count; m++) {
+    if (strcmp(emulator->process.modules[m].name, EXEFS_FILE_MAIN) == 0) main_module = &emulator->process.modules[m];
+  }
+  const Mod_Set* mods = &emulator->mods;
+  if (!main_module || !mods->live) return;
+  Arena scratch;
+  if (!arena_create(&scratch, (size_t)MODS_MAX_TEXT_FILE_BYTES + 64)) return;
+  for (uint32_t i = 0; i < mods->count; i++) {
+    const Mod_File* f = &mods->files[i];
+    if (f->path_length < 7 || memcmp(f->path, "cheats/", 7) != 0) continue;
+    const char* name = strrchr(f->path, '/') + 1;
+    if (!mods_build_id_matches(name, (uint32_t)strlen(name), main_module->module_id)) continue;
+    uint8_t* text = NULL;
+    uint64_t size = 0;
+    arena_reset(&scratch);
+    if (!error_is_ok(mod_file_read_all(f, &scratch, &text, &size))) continue;
+    const uint32_t added = cheat_vm_parse(&emulator->cheats, (const char*)text, (size_t)size);
+    log_notice("mods: %u cheat(s) from %s", added, f->path);
+  }
+  arena_destroy(&scratch);
+}
+
+static void run_cheats(Emulator* emulator) {
+  if (emulator->cheats.count == 0 || emulator->scheduler.ticks < emulator->cheat_next_tick) return;
+  emulator->cheat_next_tick = emulator->scheduler.ticks + SCHEDULER_TIMER_HZ / CHEAT_VM_HZ;
+  const Process_Module* main_module = NULL;
+  for (uint32_t m = 0; m < emulator->process.module_count; m++) {
+    if (strcmp(emulator->process.modules[m].name, EXEFS_FILE_MAIN) == 0) main_module = &emulator->process.modules[m];
+  }
+  Cheat_Env env = {
+      .vmm = emulator->vmm,
+      .main_base = main_module ? main_module->base_gva : 0,
+      .heap_base = emulator->process.address_space.heap.base,
+      .alias_base = emulator->process.address_space.alias.base,
+      .aslr_base = emulator->process.address_space.aslr.base,
+      .keys = 0,
+  };
+  const Memory_Layout* layout = layout_get();
+  Input_Controller_State pad;
+  if (layout && input_region_read_slot((const void*)(uintptr_t)layout->input_region_base, 0, &pad)) env.keys = pad.buttons;
+  cheat_vm_run(&emulator->cheats, &env);
+}
+
 static void locate_romfs(Emulator* emulator, bool is_nro) {
+  locate_romfs_base(emulator, is_nro);
+  layer_romfs_mods(emulator);
+}
+
+static void locate_romfs_base(Emulator* emulator, bool is_nro) {
   emulator->romfs = NULL;
   release_content_arena(emulator);
+  release_mods_arena(emulator);
   const Byte_Source* content = &emulator->content;
   if (is_nro) {
     uint8_t word[4];
@@ -463,6 +562,7 @@ void emulator_destroy(Emulator* emulator) {
     emulator->cpu_backend->destroy(emulator->cpu_state);
   }
   if (emulator->ramfs_ready) ramfs_pool_destroy(&emulator->ramfs);
+  mod_set_clear(&emulator->mods);
   arena_destroy(&emulator->service_arena);
   raster3d_shutdown(&emulator->renderer);
   arena_destroy(&emulator->renderer_arena);
@@ -553,10 +653,14 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
     }
   }
   locate_romfs(emulator, is_nro);
+  load_cheats(emulator);
   fs_reset_process(&emulator->fs, emulator->romfs, emulator->process.npdm.program_id);
   emulator->program_loaded = true;
   log_info("[emulator] program '%s' loaded; main thread armed at pc=0x%010llx",
            emulator->process.npdm.name, (unsigned long long)emulator->process.entry_point);
+  log_notice("game loaded: %s (title %016llx, %s, %u code modules)", emulator->process.npdm.name,
+             (unsigned long long)emulator->process.npdm.program_id,
+             emulator->process.npdm.is_64bit_instruction ? "64-bit" : "32-bit", (unsigned)emulator->process.module_count);
   return OK;
 }
 /* §12 "what load a game actually does", step 1 through 4, with the §1.6
@@ -597,7 +701,14 @@ Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
   err = exefs_open(nca_section_source(&nca, (uint32_t)exefs_index), &scratch, &exefs);
   if (error_is_ok(err)) {
     const ExeFS_Entry* npdm_entry = exefs_find(&exefs, EXEFS_FILE_NPDM);
-    if (!npdm_entry) {
+    const Mod_File* npdm_mod = mod_set_find(&emulator->mods, "exefs/" EXEFS_FILE_NPDM);
+    if (npdm_mod && npdm_mod->size <= NPDM_MAX_FILE_BYTES) {
+      uint8_t* npdm_bytes = ARENA_ALLOC_ARRAY(&scratch, uint8_t, (size_t)npdm_mod->size);
+      err = npdm_bytes ? byte_source_read(&npdm_mod->source, 0, npdm_bytes, npdm_mod->size)
+                       : ERR(RESULT_OUT_OF_MEMORY, "emulator_load_program: loader arena exhausted");
+      if (error_is_ok(err)) err = npdm_parse(npdm_bytes, npdm_mod->size, &npdm);
+      if (error_is_ok(err)) log_notice("mods: main.npdm replaced");
+    } else if (!npdm_entry) {
       err = ERR(RESULT_NOT_FOUND, "emulator_load_program: ExeFS has no main.npdm");
     } else if (npdm_entry->size > NPDM_MAX_FILE_BYTES) {
       err = ERR(RESULT_INVALID_ARGUMENT, "emulator_load_program: main.npdm over size cap");
@@ -621,6 +732,7 @@ Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
         .pages = &emulator->pages,
         .scratch = &scratch,
         .aslr_seed = aslr_seed,
+        .mods = &emulator->mods,
     };
     err = process_bootstrap(&params, &emulator->process);
     if (!error_is_ok(err)) {
@@ -718,6 +830,7 @@ void emulator_unload_program(Emulator* emulator) {
   ipc_session_pool_init(&emulator->sessions); /* every session belonged to the process */
   emulator->romfs = NULL;
   release_content_arena(emulator);
+  release_mods_arena(emulator);
   memset(&emulator->content, 0, sizeof(emulator->content));
   emulator->content_node = RAMFS_NO_NODE;
   emulator->is_homebrew = false;
@@ -743,6 +856,7 @@ static void update_devices(Emulator* emulator) {
              emulator->scheduler.ticks);
   /* Display (§13): vsync composites queued buffers into the §6 slots. */
   vi_update(&emulator->vi, &emulator->hle, emulator->scheduler.ticks);
+  run_cheats(emulator);
   /* Audio (§14): queued PCM / rendered frames into the ring at 48kHz of
    * virtual time. */
   audout_update(&emulator->audout, &emulator->hle, emulator->scheduler.ticks);
@@ -878,6 +992,23 @@ void emulator_set_poll_coalescing(Emulator* emulator, bool on) {
   if (!emulator) return;
   emulator->no_poll_coalescing = !on;
   emulator->scheduler.poll_coalescing = on;
+}
+
+void emulator_mods_bind(Emulator* emulator, Mod_Read_Fn read, void* user) {
+  if (emulator) mod_set_bind(&emulator->mods, read, user);
+}
+
+void emulator_mods_clear(Emulator* emulator) {
+  if (emulator) mod_set_clear(&emulator->mods);
+}
+
+Error emulator_mods_add(Emulator* emulator, const char* path, uint64_t size, uint32_t id) {
+  if (!emulator) return ERR(RESULT_INVALID_ARGUMENT, "emulator_mods_add: NULL");
+  return mod_set_add(&emulator->mods, path, size, id);
+}
+
+void emulator_cheat_set_enabled(Emulator* emulator, uint32_t index, bool enabled) {
+  if (emulator && index < emulator->cheats.count) emulator->cheats.entries[index].enabled = enabled;
 }
 
 void emulator_set_pin_ideal_cores(Emulator* emulator, bool on) {

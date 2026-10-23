@@ -79,6 +79,9 @@ export type MainToCPUMessage =
   /* Poll coalescing (docs/PARALLEL.md "Polling threads"); on by default. */
   | { readonly type: "set-poll-coalescing"; readonly on: boolean }
   | { readonly type: "set-pin-ideal-cores"; readonly on: boolean }
+  /* Mods (§19): toggle one of the running game's cheats (index into the
+   * last "cheats" list). */
+  | { readonly type: "set-cheat"; readonly index: number; readonly enabled: boolean }
   /* Free-running guest cores (docs/PARALLEL.md; prototype, off by default). */
   | { readonly type: "set-free-running"; readonly fromSlice: number } /* 0 = off */
   /* Wall-clock pacing (virtual time keeps up with wall time); on by default. */
@@ -126,6 +129,13 @@ export interface StoredSave {
   readonly archive: ArrayBuffer;
 }
 
+export interface CheatInfo {
+  readonly name: string;
+  readonly enabled: boolean;
+  /** A master code runs always and cannot be turned off. */
+  readonly master: boolean;
+}
+
 export type CPUToMainMessage =
   | { readonly type: "layout"; readonly layout: MemoryLayout }
   | { readonly type: "ready"; readonly backendName: string; readonly backendVersion: string }
@@ -133,6 +143,8 @@ export type CPUToMainMessage =
   | { readonly type: "halted" }
   | { readonly type: "error"; readonly message: string }
   | { readonly type: "game-loaded"; readonly titleId: string; readonly entryPoint: bigint }
+  /* Mods applied at the last load, and its cheats (§19). */
+  | { readonly type: "cheats"; readonly titleId: string; readonly mods: readonly string[]; readonly cheats: readonly CheatInfo[] }
   | { readonly type: "load-failed"; readonly failure: LoadFailure }
   | { readonly type: "sd-files-added"; readonly added: readonly string[]; readonly failed: readonly string[] }
   | { readonly type: "system-file-added"; readonly outcome: SystemFileOutcome }

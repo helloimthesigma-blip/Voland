@@ -35,6 +35,12 @@
  * shared header - but the project's own strict-warnings policy (§3) still
  * requires one. */
 EXPORT int emulator_create_ffi(void);
+EXPORT void emulator_mods_clear_ffi(void);
+EXPORT int emulator_mods_add_ffi(const char *mod_name, const char *path, uint64_t title_id, uint64_t size, uint32_t id);
+EXPORT uint32_t emulator_cheat_count_ffi(void);
+EXPORT uint64_t emulator_cheat_name_ffi(uint32_t index);
+EXPORT uint32_t emulator_cheat_flags_ffi(uint32_t index);
+EXPORT void emulator_cheat_set_enabled_ffi(uint32_t index, int enabled);
 EXPORT void emulator_destroy_ffi(void);
 EXPORT int emulator_run_ffi(uint64_t cycle_budget);
 EXPORT int emulator_step_ffi(void);
@@ -54,6 +60,7 @@ EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity);
 EXPORT uint64_t emulator_crash_pc_ffi(void);
 EXPORT uint64_t emulator_recent_problems_ffi(void);
 EXPORT uint64_t emulator_distinct_problems_ffi(void);
+EXPORT uint64_t emulator_take_log_events_ffi(void);
 EXPORT uint64_t emulator_render_stats_ffi(void);
 EXPORT void emulator_set_program_path_ffi(uint64_t path);
 EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
@@ -181,6 +188,101 @@ static Error host_game_file_read(void *user, uint64_t offset, void *out, uint64_
   if (!call.ok)
     return ERR(RESULT_IO_ERROR, "host read of the game file failed");
   return OK;
+}
+
+/* Mods (§19): the CPU worker reads mod files from OPFS on demand, by
+ * the id it gave each file in emulator_mods_add_ffi. */
+#ifdef __EMSCRIPTEN__
+EM_JS(int, voland_host_read_mod_file, (uint32_t id, uint64_t offset, void *out, uint64_t size), {
+  const read = Module["volandReadModFile"];
+  if (typeof read !== "function") return 0;
+  return read(id, Number(offset), Number(out), Number(size)) ? 1 : 0;
+})
+#else
+static int voland_host_read_mod_file(uint32_t id, uint64_t offset, void *out, uint64_t size)
+{
+  (void)id;
+  (void)offset;
+  (void)out;
+  (void)size;
+  return 0;
+}
+#endif
+
+typedef struct Mod_Read_Call {
+  uint32_t id;
+  uint64_t offset;
+  void *out;
+  uint64_t size;
+  int ok;
+} Mod_Read_Call;
+
+static void mod_read_on_driver(void *ctx)
+{
+  Mod_Read_Call *call = (Mod_Read_Call *)ctx;
+  call->ok = voland_host_read_mod_file(call->id, call->offset, call->out, call->size);
+}
+
+static Error host_mod_file_read(void *user, uint32_t id, uint64_t offset, void *out, uint64_t size)
+{
+  (void)user;
+  Mod_Read_Call call = {id, offset, out, size, 0};
+  parallel_on_driver(mod_read_on_driver, &call);
+  if (!call.ok)
+    return ERR(RESULT_IO_ERROR, "host read of a mod file failed");
+  return OK;
+}
+
+EXPORT void emulator_mods_clear_ffi(void)
+{
+  if (!g_initialised)
+    return;
+  emulator_mods_clear(&g_emulator);
+  emulator_mods_bind(&g_emulator, host_mod_file_read, NULL);
+}
+
+/* One file of a mod folder as the user unpacked it (`path` relative to
+ * the mod's root); the core maps it to its role (mods_normalize_path).
+ * Returns 1 when the file is used, 0 when it is skipped (not a mod file,
+ * another title's, or a lower-priority duplicate's path). */
+EXPORT int emulator_mods_add_ffi(const char *mod_name, const char *path, uint64_t title_id, uint64_t size, uint32_t id)
+{
+  if (!g_initialised || !path)
+    return 0;
+  char normalized[MODS_MAX_PATH_BYTES];
+  if (!mods_normalize_path(mod_name, path, title_id, normalized, sizeof(normalized)))
+    return 0;
+  const uint32_t before = g_emulator.mods.count;
+  const Error err = emulator_mods_add(&g_emulator, normalized, size, id);
+  return error_is_ok(err) && g_emulator.mods.count > before ? 1 : 0;
+}
+
+/* The loaded program's cheats, for the toggles in the mods panel. */
+EXPORT uint32_t emulator_cheat_count_ffi(void)
+{
+  return g_initialised ? g_emulator.cheats.count : 0;
+}
+
+EXPORT uint64_t emulator_cheat_name_ffi(uint32_t index)
+{
+  if (!g_initialised || index >= g_emulator.cheats.count)
+    return 0;
+  return (uint64_t)(uintptr_t)g_emulator.cheats.entries[index].name;
+}
+
+/* Bit 0 enabled, bit 1 master (always runs). */
+EXPORT uint32_t emulator_cheat_flags_ffi(uint32_t index)
+{
+  if (!g_initialised || index >= g_emulator.cheats.count)
+    return 0;
+  const Cheat_Entry *entry = &g_emulator.cheats.entries[index];
+  return (entry->enabled ? 1u : 0u) | (entry->master ? 2u : 0u);
+}
+
+EXPORT void emulator_cheat_set_enabled_ffi(uint32_t index, int enabled)
+{
+  if (g_initialised)
+    emulator_cheat_set_enabled(&g_emulator, index, enabled != 0);
 }
 
 EXPORT int emulator_create_ffi(void)
@@ -338,8 +440,9 @@ EXPORT uint64_t emulator_virtual_ticks_ffi(void)
 /* Perf counters for the browser harness (platform/web/tools/perf.mjs):
  * writes up to `capacity` uint64 values at `out` and returns how many.
  * Order: virtual ticks, SVCs, GPU stream bytes, GPU stream stalls (the
- * producer waited for the GPU worker), host ns spent in those waits. */
-enum { PERF_TICKS, PERF_SVCS, PERF_GPU_BYTES, PERF_GPU_STALLS, PERF_STREAM_WAIT_NS, PERF_COUNT };
+ * producer waited for the GPU worker), host ns spent in those waits,
+ * pictures the game presented. */
+enum { PERF_TICKS, PERF_SVCS, PERF_GPU_BYTES, PERF_GPU_STALLS, PERF_STREAM_WAIT_NS, PERF_FRAMES, PERF_COUNT };
 
 EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity)
 {
@@ -350,6 +453,7 @@ EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity)
     [PERF_GPU_BYTES] = g_emulator.gpu_stream.bytes,
     [PERF_GPU_STALLS] = g_emulator.gpu_stream.stalls,
     [PERF_STREAM_WAIT_NS] = emulator_stream_wait_ns(),
+    [PERF_FRAMES] = g_emulator.vi.frames_presented,
   };
   const uint32_t count = capacity < PERF_COUNT ? capacity : PERF_COUNT;
   memcpy((void *)(uintptr_t)out, values, count * sizeof(uint64_t));
@@ -484,6 +588,16 @@ EXPORT uint64_t emulator_render_stats_ffi(void)
   };
   memcpy(stats, values, sizeof(stats));
   return (uint64_t)(uintptr_t)stats;
+}
+
+/* The event feed (common/log.h log_take_events): lines since the last
+ * call, as a static NUL-terminated string. The CPU worker polls it and
+ * turns the lines into the page's event log. */
+EXPORT uint64_t emulator_take_log_events_ffi(void)
+{
+  static char text[LOG_EVENT_LINES * (LOG_RECENT_LINE_BYTES + 8u) + 64u];
+  (void)log_take_events(text, sizeof(text));
+  return (uint64_t)(uintptr_t)text;
 }
 
 EXPORT uint64_t emulator_recent_problems_ffi(void)

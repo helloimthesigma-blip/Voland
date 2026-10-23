@@ -93,11 +93,58 @@ static uint32_t g_distinct_count;
 static uint64_t g_distinct_dropped;
 static bool g_distinct_lock;
 
+/* The event feed ring (log.h). */
+static char g_events[LOG_EVENT_LINES][LOG_RECENT_LINE_BYTES];
+static uint64_t g_events_head; /* lines ever added */
+static uint64_t g_events_taken; /* lines ever taken (or dropped) */
+static bool g_events_lock;
+
+static void push_event(const char *level, const char *text) {
+  while (__atomic_test_and_set(&g_events_lock, __ATOMIC_ACQUIRE)) {
+  }
+  snprintf(g_events[g_events_head % LOG_EVENT_LINES], LOG_RECENT_LINE_BYTES, "%s %s", level, text);
+  g_events_head++;
+  __atomic_clear(&g_events_lock, __ATOMIC_RELEASE);
+}
+
+size_t log_take_events(char *out, size_t capacity) {
+  if (!out || !capacity) return 0;
+  size_t used = 0;
+  out[0] = '\0';
+  while (__atomic_test_and_set(&g_events_lock, __ATOMIC_ACQUIRE)) {
+  }
+  if (g_events_head - g_events_taken > LOG_EVENT_LINES) {
+    const uint64_t dropped = g_events_head - LOG_EVENT_LINES - g_events_taken;
+    const int n = snprintf(out, capacity, "NOTE (%llu earlier events dropped)\n", (unsigned long long)dropped);
+    if (n > 0 && (size_t)n < capacity) used = (size_t)n;
+    g_events_taken = g_events_head - LOG_EVENT_LINES;
+  }
+  while (g_events_taken < g_events_head) {
+    const int n = snprintf(out + used, capacity - used, "%s\n", g_events[g_events_taken % LOG_EVENT_LINES]);
+    if (n < 0 || (size_t)n >= capacity - used) break;
+    used += (size_t)n;
+    g_events_taken++;
+  }
+  __atomic_clear(&g_events_lock, __ATOMIC_RELEASE);
+  return used;
+}
+
+void log_notice(const char *format, ...) {
+  char text[LOG_RECENT_LINE_BYTES];
+  va_list args;
+  va_start(args, format);
+  (void)vsnprintf(text, sizeof(text), format, args);
+  va_end(args);
+  push_event("NOTE", text);
+  log_message(LOG_LEVEL_INFO, "%s", text);
+}
+
 static void count_problem(const char *line) {
   uint32_t hash = 0x811c9dc5u;
   for (const char *p = line; *p; p++) hash = (hash ^ (uint8_t)*p) * 0x01000193u;
   while (__atomic_test_and_set(&g_distinct_lock, __ATOMIC_ACQUIRE)) {
   }
+  bool first_seen = false;
   for (uint32_t probe = 0; probe < DISTINCT_SLOTS; probe++) {
     Distinct_Problem *slot = &g_distinct[(hash + probe) % DISTINCT_SLOTS];
     if (slot->order && slot->hash == hash && strcmp(slot->line, line) == 0) {
@@ -113,10 +160,13 @@ static void count_problem(const char *line) {
       slot->order = ++g_distinct_count;
       slot->count = 1;
       snprintf(slot->line, sizeof(slot->line), "%s", line);
+      first_seen = true;
       break;
     }
   }
   __atomic_clear(&g_distinct_lock, __ATOMIC_RELEASE);
+  /* "[WARN ] text" -> feed "WARN text". */
+  if (first_seen) push_event(strncmp(line, "[ERROR]", 7) == 0 ? "ERROR" : "WARN", line[0] == '[' && strlen(line) > 8 ? line + 8 : line);
 }
 
 size_t log_distinct_problems(char *out, size_t capacity) {

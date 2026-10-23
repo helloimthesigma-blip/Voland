@@ -13,6 +13,7 @@ import type { GameLoadOutcome, SdImportOutcome, SystemFilesApi } from "@bindings
 import type { LogEntry } from "../log";
 import { getLogHistory, getStatus, subscribeLogs, subscribeStatus } from "../log";
 import SavesPanel from "./SavesPanel";
+import ModsPanel from "./ModsPanel";
 import ControlsLegend from "./ControlsLegend";
 import TextInputDialog from "./TextInputDialog";
 import LoadPanel from "./LoadPanel";
@@ -34,6 +35,15 @@ interface AppProps {
   readonly respondText:  (text: string, accepted: boolean) => void;
 }
 
+const PAGE_STARTED = Date.now();
+
+/** "[12:34] [WARN ] message": minutes:seconds since the page opened. */
+function formatLine(entry: LogEntry): string {
+  const s = Math.max(0, Math.floor((entry.timestamp - PAGE_STARTED) / 1000));
+  const stamp = `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}`;
+  return `[${stamp}] [${entry.level.toUpperCase().padEnd(5, " ")}] ${entry.message}`;
+}
+
 function App(props: AppProps) {
   const [logs, setLogs] = createSignal<readonly LogEntry[]>(getLogHistory().slice());
   const [status, setStatusSig] = createSignal(getStatus());
@@ -51,6 +61,7 @@ function App(props: AppProps) {
   });
 
   const [tools, setTools] = createSignal<HTMLElement>();
+  const [problemsOnly, setProblemsOnly] = createSignal(false);
   const [blankNote, setBlankNote] = createSignal<string | null>(null);
 
   return (
@@ -98,17 +109,26 @@ function App(props: AppProps) {
             <SavesPanel />
           </section>
           <section class="voland-panel">
+            <ModsPanel />
+          </section>
+          <section class="voland-panel">
             <ControlsLegend />
           </section>
           <details class="voland-panel voland-log">
             <summary>Event log</summary>
+            <div class="voland-log-tools">
+              <label>
+                <input type="checkbox" checked={problemsOnly()} onChange={(e) => setProblemsOnly(e.currentTarget.checked)} />
+                Problems only
+              </label>
+              <button type="button" class="voland-load-button voland-load-secondary" data-testid="log-copy"
+                      onClick={() => void navigator.clipboard?.writeText(logs().map(formatLine).join("\n"))}>
+                Copy log
+              </button>
+            </div>
             <div class="voland-log-scroll">
-              <For each={logs()}>
-                {(entry) => (
-                  <p class={`log-line log-${entry.level}`}>
-                    {`[${entry.level.toUpperCase().padEnd(5, " ")}] ${entry.message}`}
-                  </p>
-                )}
+              <For each={logs().filter((e) => problemsOnly() ? e.level === "warn" || e.level === "error" : e.level !== "debug" && e.level !== "trace")}>
+                {(entry) => <p class={`log-line log-${entry.level}`}>{formatLine(entry)}</p>}
               </For>
             </div>
           </details>

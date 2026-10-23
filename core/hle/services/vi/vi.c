@@ -288,6 +288,15 @@ static void composite_run(void *user, const void *payload, uint32_t bytes) {
 
 /* The renderer's present and surfaces under the GPU lock (scheduler.h):
  * a GPFIFO submission on another core may be drawing. */
+/* The event log (common/log.h): the first picture, and size changes. */
+static void note_present(Vi_State *s, uint32_t width, uint32_t height) {
+  if (width == s->noted_width && height == s->noted_height) return;
+  if (s->noted_width == 0) log_notice("first picture from the game (%ux%u)", width, height);
+  else log_notice("picture size changed to %ux%u", width, height);
+  s->noted_width = width;
+  s->noted_height = height;
+}
+
 static void composite(Vi_State *s, HLE_Context *c, const Vi_Slot *slot) {
   Gpu_Thread *gpu_thread = s->nvdrv ? s->nvdrv->gpu_thread : NULL;
   static Composite_Call call;
@@ -326,6 +335,7 @@ static void composite_locked(Vi_State *s, HLE_Context *c, const Vi_Slot *slot) {
     const uint32_t flags = ((slot->transform & VI_TRANSFORM_FLIP_H) ? GPU_PRESENT_FLIP_X : 0u) |
                            ((slot->transform & VI_TRANSFORM_FLIP_V) ? GPU_PRESENT_FLIP_Y : 0u);
     if (raster3d_gpu_present(renderer, base + slot->offset, slot->width, slot->height, crop, flags)) {
+      note_present(s, crop[2] ? (uint32_t)crop[2] : slot->width, crop[3] ? (uint32_t)crop[3] : slot->height);
       s->frames_presented++;
       return;
     }
@@ -397,6 +407,7 @@ static void composite_locked(Vi_State *s, HLE_Context *c, const Vi_Slot *slot) {
   }
   const Framebuffer_Frame frame = {out_w, out_h, out_stride, FRAMEBUFFER_FORMAT_RGBA8};
   framebuffer_publish(fb_slot, &frame);
+  note_present(s, out_w, out_h);
   s->frames_presented++;
 }
 

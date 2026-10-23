@@ -18,6 +18,7 @@ import type { GameLoadOutcome, SdImportOutcome, SystemFileOutcome, SystemFilesAp
 import type { MainToVideoMessage, VideoToMainMessage } from "@bindings/video";
 import { handleSavesMessage, registerSavesWorker, rememberTitleName } from "./saves";
 import { handleSavestateMessage, registerSavestateWorker } from "./savestates";
+import { handleModsMessage, registerModsWorker } from "./mods";
 import { handleReportMessage, registerReportWorker } from "./compat-report";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
@@ -207,7 +208,7 @@ async function boot(): Promise<BootResult | null> {
           "device limits shared memory; use a native build.");
     return null;
   }
-  appendLogLine("info", `allocated shared memory: ${TOTAL_MEMORY_PAGES} pages (~5.25GiB)`);
+  appendLogLine("debug", `allocated shared memory: ${TOTAL_MEMORY_PAGES} pages (~5.25GiB)`);
   publishBootMilestone(memory);
 
   const canvas = document.getElementById("game") as HTMLCanvasElement | null;
@@ -220,6 +221,7 @@ async function boot(): Promise<BootResult | null> {
   const cpuWorker = new Worker(new URL("../workers/cpu.worker.ts", import.meta.url), { type: "module" });
   registerSavesWorker(cpuWorker);
   registerSavestateWorker(cpuWorker);
+  registerModsWorker(cpuWorker);
   registerReportWorker(cpuWorker);
   const gpuWorker = new Worker(new URL("../workers/gpu.worker.ts", import.meta.url), { type: "module" });
 
@@ -253,7 +255,7 @@ async function boot(): Promise<BootResult | null> {
     attachWorkerLogRelay<CPUToMainMessage>("cpu", cpuWorker, msg => {
       if (msg.type === "layout") {
         layout = msg.layout;
-        appendLogLine("info", `layout handshake: guestRamBase=0x${layout.guestRamBase.toString(16)}`);
+        appendLogLine("debug", `layout handshake: guestRamBase=0x${layout.guestRamBase.toString(16)}`);
         gpuWorker.postMessage(
           { type: "init", canvas: offscreen, memory, layout } satisfies MainToGPUMessage,
           [offscreen],
@@ -270,7 +272,7 @@ async function boot(): Promise<BootResult | null> {
       } else if (msg.type === "halted") {
         appendLogLine("warn", "cpu halted");
       } else if (msg.type === "game-loaded") {
-        appendLogLine("info", `loaded title ${msg.titleId}, entry 0x${msg.entryPoint.toString(16)}`);
+        appendLogLine("debug", `loaded title ${msg.titleId}, entry 0x${msg.entryPoint.toString(16)}`);
         if (loadingFileName) rememberTitleName(msg.titleId, loadingFileName);
         gpuWorker.postMessage({ type: "title", titleId: msg.titleId } satisfies MainToGPUMessage);
         pendingLoad?.({ success: true, titleId: msg.titleId, entryPoint: msg.entryPoint });
@@ -288,6 +290,8 @@ async function boot(): Promise<BootResult | null> {
         /* compatibility report (src/compat-report.ts) */
       } else if (handleSavestateMessage(msg)) {
         /* save-state replies (src/savestates.ts) */
+      } else if (handleModsMessage(msg)) {
+        /* applied mods and cheats (src/mods.ts) */
       } else if (msg.type === "system-file-added") {
         appendLogLine(msg.outcome.errors.length ? "warn" : "info",
           `system files: added ${msg.outcome.added.join(", ") || "none"}, skipped ${msg.outcome.skipped}` +
@@ -395,7 +399,7 @@ async function boot(): Promise<BootResult | null> {
   });
 
   cpuWorker.postMessage({ type: "init", memory } satisfies MainToCPUMessage);
-  appendLogLine("info", "cpu worker posted init message; awaiting layout handshake");
+  appendLogLine("debug", "cpu worker posted init message; awaiting layout handshake");
 
   await Promise.race([Promise.all([cpuReady, gpuReady]), timeout]);
 
@@ -544,7 +548,7 @@ async function boot(): Promise<BootResult | null> {
 boot()
   .then(async result => {
     if (!result) return;
-    appendLogLine("info", "core online - mounting Solid shell");
+    appendLogLine("debug", "core online - mounting Solid shell");
     const { mountShell } = await import("./ui/mount");
     mountShell(result);
   })

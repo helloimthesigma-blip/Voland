@@ -16,6 +16,7 @@
  *       --expect-output TEXT         exit 4 unless the guest printed TEXT
  *       --expect-frame-hash HEX      exit 5 unless the newest frame hashes to HEX
  *       --sdmc DIR                   seed the emulated SD card with DIR's contents
+ *       --mods DIR                   apply mods (§19): each subfolder of DIR is a mod (romfs/, exefs/, cheats/, *.ips)
  *       --dump-frame FILE            write the newest frame as a binary PPM (P6)
  *       --frame-skip N               rasterise and show one of every N + 1 frames
  *       --no-poll-coalescing         plain scheduler: pollers re-poll on their own schedule
@@ -210,6 +211,107 @@ static void apply_input(const Input_Event *events, uint32_t count, uint64_t slic
   input_region_write_end(region, 0);
 }
 #define SDMC_MAX_FILE_BYTES ((uint64_t)64 * 1024 * 1024)
+
+/* ------------------------------------------------------------------ */
+/* Mods (§19): --mods DIR. Each subfolder of DIR is one mod, applied in */
+/* name order (earlier names win); a DIR that itself holds romfs/,      */
+/* exefs/... is a single mod. Files are opened on demand.              */
+/* ------------------------------------------------------------------ */
+
+#define CLI_MAX_MOD_FILES 65536u
+
+static char *g_mod_paths[CLI_MAX_MOD_FILES];
+static uint32_t g_mod_count;
+static FILE *g_mod_file;
+static uint32_t g_mod_open = UINT32_MAX;
+
+static Error cli_mod_read(void *user, uint32_t id, uint64_t offset, void *out, uint64_t size) {
+  (void)user;
+  if (id >= g_mod_count) return ERR(RESULT_IO_ERROR, "mods: bad file id");
+  if (g_mod_open != id) {
+    if (g_mod_file) fclose(g_mod_file);
+    g_mod_file = fopen(g_mod_paths[id], "rb");
+    g_mod_open = g_mod_file ? id : UINT32_MAX;
+    if (!g_mod_file) return ERR(RESULT_IO_ERROR, "mods: cannot open file");
+  }
+  if (fseeko(g_mod_file, (off_t)offset, SEEK_SET) != 0 || fread(out, 1, (size_t)size, g_mod_file) != size) {
+    return ERR(RESULT_IO_ERROR, "mods: short read");
+  }
+  return OK;
+}
+
+static int name_cmp(const void *a, const void *b) {
+  return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+/* Adds every file under `dir` (relative path `rel`) for mod `mod`. */
+static void add_mod_tree(Emulator *emu, const char *mod, const char *dir, const char *rel, uint32_t *added) {
+  DIR *d = opendir(dir);
+  if (!d) return;
+  char *names[4096];
+  uint32_t n = 0;
+  struct dirent *e;
+  while ((e = readdir(d)) != NULL && n < 4096) {
+    if (e->d_name[0] == '.') continue;
+    names[n++] = strdup(e->d_name);
+  }
+  closedir(d);
+  qsort(names, n, sizeof(names[0]), name_cmp);
+  for (uint32_t i = 0; i < n; i++) {
+    char full[4096], sub[MODS_MAX_PATH_BYTES];
+    snprintf(full, sizeof(full), "%s/%s", dir, names[i]);
+    snprintf(sub, sizeof(sub), "%s%s%s", rel, *rel ? "/" : "", names[i]);
+    struct stat st;
+    if (stat(full, &st) == 0 && S_ISDIR(st.st_mode)) {
+      add_mod_tree(emu, mod, full, sub, added);
+    } else if (stat(full, &st) == 0 && g_mod_count < CLI_MAX_MOD_FILES) {
+      char normalized[MODS_MAX_PATH_BYTES];
+      if (mods_normalize_path(mod, sub, 0, normalized, sizeof(normalized)) &&
+          error_is_ok(emulator_mods_add(emu, normalized, (uint64_t)st.st_size, g_mod_count))) {
+        g_mod_paths[g_mod_count++] = strdup(full);
+        (*added)++;
+      }
+    }
+    free(names[i]);
+  }
+}
+
+static bool is_mod_root(const char *dir) {
+  static const char *const markers[] = {"romfs", "exefs", "cheats", "atmosphere", "exefs_patches"};
+  for (size_t i = 0; i < sizeof(markers) / sizeof(markers[0]); i++) {
+    char p[4096];
+    struct stat st;
+    snprintf(p, sizeof(p), "%s/%s", dir, markers[i]);
+    if (stat(p, &st) == 0 && S_ISDIR(st.st_mode)) return true;
+  }
+  return false;
+}
+
+static void load_mods(Emulator *emu, const char *dir) {
+  emulator_mods_bind(emu, cli_mod_read, NULL);
+  uint32_t added = 0;
+  if (is_mod_root(dir)) {
+    const char *slash = strrchr(dir, '/');
+    add_mod_tree(emu, slash ? slash + 1 : dir, dir, "", &added);
+  } else {
+    DIR *d = opendir(dir);
+    char *names[1024];
+    uint32_t n = 0;
+    struct dirent *e;
+    while (d && (e = readdir(d)) != NULL && n < 1024) {
+      if (e->d_name[0] != '.') names[n++] = strdup(e->d_name);
+    }
+    if (d) closedir(d);
+    qsort(names, n, sizeof(names[0]), name_cmp);
+    for (uint32_t i = 0; i < n; i++) {
+      char full[4096];
+      snprintf(full, sizeof(full), "%s/%s", dir, names[i]);
+      add_mod_tree(emu, names[i], full, "", &added);
+      free(names[i]);
+    }
+  }
+  fprintf(stderr, "voland-cli: %u mod file(s) from %s\n", added, dir);
+}
 
 /* ------------------------------------------------------------------ */
 /* File-backed Byte_Source (byte_source.h contract).                   */
@@ -1175,6 +1277,7 @@ static int run(int argc, char **argv) {
   bool gpu_async = false, no_gpu_compute = false;
   static uint64_t measure_cycles[SCHEDULER_MAX_THREADS];
   bool poll_coalescing = true, pin_ideal_cores = false;
+  const char *mods_dir = NULL;
   bool test_card = false, svc_stats = false, swkbd_cancel = false, jit_fallbacks = false;
   uint64_t jit_fallbacks_from = 0;
   uint32_t jit_hot_top = 0;
@@ -1280,6 +1383,8 @@ static int run(int argc, char **argv) {
       frame_path = argv[++i];
     } else if (!strcmp(argv[i], "--sdmc") && has_value) {
       sdmc = argv[++i];
+    } else if (!strcmp(argv[i], "--mods") && has_value) {
+      mods_dir = argv[++i];
     } else {
       fprintf(stderr, "voland-cli: unknown option %s\n", argv[i]);
       return EXIT_USAGE;
@@ -1332,6 +1437,7 @@ static int run(int argc, char **argv) {
   for (uint32_t r = 0; r < restore_save_count; r++) { /* before the program: it opens its saves at boot */
     if (!restore_save_archive(&emu, restore_saves[r])) return EXIT_LOAD_FAILED;
   }
+  if (mods_dir) load_mods(&emu, mods_dir);
   err = emulator_load(&emu, &source, 0);
   if (!error_is_ok(err)) {
     fprintf(stderr, "voland-cli: load failed: %s\n", err.message ? err.message : "(no message)");
@@ -1985,7 +2091,7 @@ static void usage(void) {
   fprintf(stderr,
           "usage: voland-cli run <file.nca|file.nro> [options]\n"
           "  running:   --backend interpreter|jit|noop  --budget N  --max-slices N\n"
-          "             --host-cores N [--pin-ideal-cores]  --sdmc DIR  --restore-save FILE.vsave\n"
+          "             --host-cores N [--pin-ideal-cores]  --sdmc DIR  --mods DIR  --restore-save FILE.vsave\n"
           "             --input SLICE:BUTTONS_HEX:SLICES (repeatable; hold buttons)\n"
           "             --swkbd TEXT | --swkbd-cancel  --font FILE.ttf\n"
           "  output:    --dump-frame FILE.ppm [--dump-frames-every N]  --dump-audio FILE\n"
@@ -2104,7 +2210,15 @@ static int romfs_command(int argc, char **argv) {
   Byte_Source source;
   if (!open_source(argv[0], &file, &source)) return EXIT_LOAD_FAILED;
   static Emulator emu;
-  if (!error_is_ok(emulator_create(&emu)) || !error_is_ok(emulator_load(&emu, &source, 0)) || !emu.romfs) {
+  /* --mods DIR (last two arguments): list / extract the layered RomFS. */
+  const char *mods_dir = NULL;
+  if (argc >= 3 && !strcmp(argv[argc - 2], "--mods")) {
+    mods_dir = argv[argc - 1];
+    argc -= 2;
+  }
+  if (!error_is_ok(emulator_create(&emu))) return EXIT_LOAD_FAILED;
+  if (mods_dir) load_mods(&emu, mods_dir);
+  if (!error_is_ok(emulator_load(&emu, &source, 0)) || !emu.romfs) {
     fprintf(stderr, "voland-cli: %s: no RomFS\n", argv[0]);
     return EXIT_LOAD_FAILED;
   }

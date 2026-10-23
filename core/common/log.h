@@ -51,6 +51,19 @@ size_t log_recent_problems(char *out, size_t capacity);
 void log_message(Log_Level level, const char *format, ...)
     SWITCH_PRINTF_FORMAT(2, 3);
 
+/* The event feed: what a player's log shows. It carries every warning or
+ * error line the first time it is seen (repeats are only counted, in
+ * log_distinct_problems) and every log_notice line - milestones a player
+ * cares about: the game loaded, its first picture, a save written, mods
+ * applied, why it stopped. log_take_events returns the lines added since
+ * the previous call, oldest first, one per line, as "<level> <text>"
+ * with level NOTE, WARN or ERROR; if more than LOG_EVENT_LINES arrived in
+ * between, the oldest are dropped and a "(N earlier events dropped)" line
+ * leads. Returns the bytes written (NUL-terminated). */
+#define LOG_EVENT_LINES 64u
+void log_notice(const char *format, ...) SWITCH_PRINTF_FORMAT(1, 2);
+size_t log_take_events(char *out, size_t capacity);
+
 #define log_trace(...) log_message(LOG_LEVEL_TRACE, __VA_ARGS__)
 #define log_debug(...) log_message(LOG_LEVEL_DEBUG, __VA_ARGS__)
 #define log_info(...) log_message(LOG_LEVEL_INFO, __VA_ARGS__)
