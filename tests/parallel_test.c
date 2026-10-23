@@ -282,6 +282,48 @@ static void test_pacing(void) {
   }
 }
 
+/* Pinned cores (docs/PARALLEL.md): a thread runs only on its ideal core's
+ * host core when its affinity allows it, else as its affinity says; every
+ * program still completes on 2-3 cores, in slices and free-running. */
+static void test_pinned_cores(void) {
+  static Outcome o;
+  static Scheduler sched;
+  memset(&sched, 0, sizeof(sched));
+  sched.host_cores = 3;
+  sched.pin_ideal = true;
+  static Sched_Thread t;
+  memset(&t, 0, sizeof(t));
+  t.core_mask = 0x7;
+  t.thread.preferred_core = 1;
+  CHECK(!scheduler_runs_on(&sched, &t, 0) && scheduler_runs_on(&sched, &t, 1) && !scheduler_runs_on(&sched, &t, 2));
+  t.core_mask = 0x5; /* the ideal core outside the mask: the mask decides */
+  CHECK(scheduler_runs_on(&sched, &t, 0) && !scheduler_runs_on(&sched, &t, 1) && scheduler_runs_on(&sched, &t, 2));
+  sched.pin_ideal = false;
+  t.core_mask = 0x7;
+  CHECK(scheduler_runs_on(&sched, &t, 0) && scheduler_runs_on(&sched, &t, 2));
+  for (uint32_t cores = 2; cores <= 3; cores++)
+  for (size_t p = 0; p < PROGRAM_COUNT; p++)
+  for (uint32_t free_running = 0; free_running <= 1; free_running++) {
+    guest_boot(&g_run, TEST_BACKEND, k_programs[p].code, k_programs[p].size);
+    CHECK(emulator_set_host_cores(&g_run.emu, cores) == cores);
+    emulator_set_pin_ideal_cores(&g_run.emu, true);
+    if (free_running) {
+      emulator_set_free_running(&g_run.emu, true);
+      Emulator_Status status = EMULATOR_RUNNING;
+      for (uint32_t bursts = 0; (status == EMULATOR_RUNNING || status == EMULATOR_IDLE) && bursts < FREE_MAX_BURSTS; bursts++)
+        status = emulator_run_for(&g_run.emu, FREE_BURST_MS, 997);
+      o.status = status;
+    } else {
+      o.status = guest_run(&g_run, 997, MAX_SLICES);
+    }
+    o.slices = g_run.slices;
+    memcpy(o.output, g_run.output, sizeof(o.output));
+    guest_shutdown(&g_run);
+    check_completes(&k_programs[p], cores, 997, &o);
+  }
+  printf("[parallel_test] pinned cores: placement, and every program on 2-3 cores (slices, free-running)\n");
+}
+
 static pthread_t g_driver;
 static bool g_ran_on_driver;
 static void note_thread(void *ctx) {
@@ -389,6 +431,7 @@ int main(void) {
   test_free_running();
   test_pacing();
   test_host_calls();
+  test_pinned_cores();
   test_gpu_lock();
   printf("[parallel_test] passed\n");
   return 0;

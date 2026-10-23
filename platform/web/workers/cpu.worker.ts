@@ -257,6 +257,9 @@ const SERIAL_TITLES: ReadonlySet<string> = new Set(["01006A800016E000", "0100F2C
 
 /** Poll coalescing (set-poll-coalescing; ?polls=0 turns it off). */
 let pollCoalescing = true;
+/** Pinned cores (set-pin-ideal-cores; ?pincores=1): each guest thread
+ * only on its ideal core's host core (docs/PARALLEL.md "Pinned cores"). */
+let pinIdealCores = false;
 /** Free-running guest cores (set-free-running; ?free=N): from slice N on,
  * one run_for call per burst instead of a loop of slices. 0 = off; on from
  * the start by default (docs/PARALLEL.md). */
@@ -943,6 +946,7 @@ function loadGame(file: File): CPUToMainMessage {
   applyHostCores(loadingCore);
   if (renderWorkers > 0) log("info", `renderer workers: ${loadingCore._emulator_set_render_workers_ffi(renderWorkers)}`);
   loadingCore._emulator_set_poll_coalescing_ffi(pollCoalescing ? 1 : 0);
+  loadingCore._emulator_set_pin_ideal_cores_ffi(pinIdealCores ? 1 : 0);
   freeRunning = false;
   loadingCore._emulator_set_free_running_ffi(0);
   loadingCore._emulator_set_pacing_ffi(pacing ? 1 : 0);
@@ -1136,6 +1140,13 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   if (msg.type === "set-free-running") {
     freeFromSlice = msg.fromSlice;
     log("info", freeFromSlice > 0 ? `free-running guest cores from slice ${freeFromSlice}` : "free-running guest cores off");
+    return;
+  }
+
+  if (msg.type === "set-pin-ideal-cores") {
+    pinIdealCores = msg.on;
+    core?._emulator_set_pin_ideal_cores_ffi(pinIdealCores ? 1 : 0);
+    log("info", `pinned cores ${pinIdealCores ? "on" : "off"}`);
     return;
   }
 

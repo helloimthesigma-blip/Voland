@@ -121,6 +121,11 @@ typedef struct Scheduler {
    * to one guest core never run at once, as on the Switch (games keep
    * per-core data without locks). */
   uint32_t host_cores;
+  /* Each thread runs only on the host core of its ideal (preferred) guest
+   * core, when its affinity allows it: threads that share an ideal core
+   * never run at once (emulator_set_pin_ideal_cores; docs/PARALLEL.md
+   * "Pinned cores"). Fewer threads run in parallel. */
+  bool pin_ideal;
   bool process_exited;
   bool process_crashed;     /* svcBreak or an unhandled fault */
   uint64_t crash_pc;

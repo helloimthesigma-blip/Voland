@@ -48,7 +48,11 @@ titles).
   worse), and Tears of the Kingdom corrupts its resource data there (hence
   serial by default). One open multicore bug is suspected; ruled out: the
   kernel's mutex words, barriers, same-core concurrency (affinity is now
-  enforced), LL/SC ABA (now checked), GPU semaphore acquires, the async GPU.
+  enforced), LL/SC ABA (now checked), GPU semaphore acquires, the async GPU,
+  GPU compute, threads moving between cores. Mario Kart's tiles appear at
+  the start of a race and look timing-dependent. Pinning each thread to its
+  ideal core (`?pincores=1`, docs/PARALLEL.md "Pinned cores") made Tears of
+  the Kingdom fail less often in a few runs; it does not remove the tiles.
 
 - **Video:** NVDEC decodes H.264 and VP8 (through WebCodecs). VP9
   (SSBU's movies) plays black: its headers would have to be rebuilt from

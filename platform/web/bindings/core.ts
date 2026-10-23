@@ -58,6 +58,7 @@ export interface SwitchCoreExports {
   readonly _emulator_dump_threads_ffi:     (backtrace: number) => void;
   readonly _emulator_set_gpu_compute_ffi:  (on: number) => void;
   readonly _emulator_set_poll_coalescing_ffi: (on: number) => void;
+  readonly _emulator_set_pin_ideal_cores_ffi: (on: number) => void;
   readonly _emulator_set_free_running_ffi: (on: number) => void;
   readonly _emulator_set_pacing_ffi:       (on: number) => void;
   readonly _emulator_pacing_resync_ffi:    () => void;

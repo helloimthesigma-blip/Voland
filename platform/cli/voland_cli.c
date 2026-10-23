@@ -21,6 +21,8 @@
  *       --no-poll-coalescing         plain scheduler: pollers re-poll on their own schedule
  *       --host-cores N               run guest threads on N host threads
  *                                    (docs/PARALLEL.md; 0 = serial, the default)
+ *       --pin-ideal-cores            with host cores: each thread only on its ideal core's
+ *                                    host core (docs/PARALLEL.md "Pinned cores")
  *       --dump-frames-every N        with --dump-frame: also write FILE.<slice>.ppm
  *       --gpu-stream FILE            run the WebGPU renderer's producer (GPU mode) and record
  *                                    its stream to FILE (u32 type, u32 bytes, payload per
@@ -1172,7 +1174,7 @@ static int run(int argc, char **argv) {
   uint64_t free_from = 0, measure_from = 0, measure_seconds = 0;
   bool gpu_async = false, no_gpu_compute = false;
   static uint64_t measure_cycles[SCHEDULER_MAX_THREADS];
-  bool poll_coalescing = true;
+  bool poll_coalescing = true, pin_ideal_cores = false;
   bool test_card = false, svc_stats = false, swkbd_cancel = false, jit_fallbacks = false;
   uint64_t jit_fallbacks_from = 0;
   uint32_t jit_hot_top = 0;
@@ -1259,6 +1261,8 @@ static int run(int argc, char **argv) {
       measure_seconds = strtoull(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--no-poll-coalescing")) {
       poll_coalescing = false;
+    } else if (!strcmp(argv[i], "--pin-ideal-cores")) {
+      pin_ideal_cores = true;
     } else if (!strcmp(argv[i], "--host-cores") && has_value) {
       host_cores = (uint32_t)strtoul(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--savestate-check") && has_value) {
@@ -1336,6 +1340,7 @@ static int run(int argc, char **argv) {
     return EXIT_LOAD_FAILED;
   }
   emulator_set_poll_coalescing(&emu, poll_coalescing);
+  emulator_set_pin_ideal_cores(&emu, pin_ideal_cores);
   if (host_cores) {
     const uint32_t cores = emulator_set_host_cores(&emu, host_cores);
     fprintf(stderr, "voland-cli: %u host core(s) for guest threads\n", cores);
@@ -1980,7 +1985,7 @@ static void usage(void) {
   fprintf(stderr,
           "usage: voland-cli run <file.nca|file.nro> [options]\n"
           "  running:   --backend interpreter|jit|noop  --budget N  --max-slices N\n"
-          "             --host-cores N  --sdmc DIR  --restore-save FILE.vsave\n"
+          "             --host-cores N [--pin-ideal-cores]  --sdmc DIR  --restore-save FILE.vsave\n"
           "             --input SLICE:BUTTONS_HEX:SLICES (repeatable; hold buttons)\n"
           "             --swkbd TEXT | --swkbd-cancel  --font FILE.ttf\n"
           "  output:    --dump-frame FILE.ppm [--dump-frames-every N]  --dump-audio FILE\n"

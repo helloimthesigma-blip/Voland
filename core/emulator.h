@@ -146,6 +146,7 @@ typedef struct Emulator
   Parallel *parallel;  /* emulator_set_host_cores; NULL = serial */
   bool no_poll_coalescing; /* emulator_set_poll_coalescing(false); survives reloads */
   bool free_running;   /* emulator_set_free_running; with host cores only */
+  bool pin_ideal_cores; /* emulator_set_pin_ideal_cores; survives reloads */
   /* Wall-clock pacing (emulator_set_pacing): virtual time never falls
    * behind wall time since the origin. */
   bool pacing;
@@ -254,6 +255,10 @@ void emulator_set_free_running(Emulator *emulator, bool on);
 /* Poll coalescing (scheduler.h, docs/PARALLEL.md "Polling threads"): on
  * by default. Off runs the plain scheduler, bit for bit. */
 void emulator_set_poll_coalescing(Emulator *emulator, bool on);
+
+/* Pinned cores (docs/PARALLEL.md "Pinned cores"): with host cores, every
+ * thread runs only on its ideal core's host core. Off by default. */
+void emulator_set_pin_ideal_cores(Emulator *emulator, bool on);
 
 /* Compatibility wrapper: one slice, reported as the backend's exit reason
  * (CPU_EXIT_HALT when no thread ran). With nothing loaded it runs the

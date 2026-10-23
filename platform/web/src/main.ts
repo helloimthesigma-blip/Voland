@@ -338,6 +338,12 @@ async function boot(): Promise<BootResult | null> {
         if (cores !== null && /^[0-9]+$/.test(cores)) {
           cpuWorker.postMessage({ type: "set-host-cores", cores: Number(cores) } satisfies MainToCPUMessage);
         }
+        /* ?pincores=1: each guest thread only on its ideal core's host core
+         * (docs/PARALLEL.md "Pinned cores"): slower, but threads that share
+         * a core never run at once. */
+        if (new URLSearchParams(location.search).get("pincores") === "1") {
+          cpuWorker.postMessage({ type: "set-pin-ideal-cores", on: true } satisfies MainToCPUMessage);
+        }
         /* ?polls=0: the plain scheduler (no poll coalescing), for A/B runs. */
         if (new URLSearchParams(location.search).get("polls") === "0") {
           cpuWorker.postMessage({ type: "set-poll-coalescing", on: false } satisfies MainToCPUMessage);

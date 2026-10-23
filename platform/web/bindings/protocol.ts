@@ -78,6 +78,7 @@ export type MainToCPUMessage =
   | { readonly type: "set-host-cores"; readonly cores: number }
   /* Poll coalescing (docs/PARALLEL.md "Polling threads"); on by default. */
   | { readonly type: "set-poll-coalescing"; readonly on: boolean }
+  | { readonly type: "set-pin-ideal-cores"; readonly on: boolean }
   /* Free-running guest cores (docs/PARALLEL.md; prototype, off by default). */
   | { readonly type: "set-free-running"; readonly fromSlice: number } /* 0 = off */
   /* Wall-clock pacing (virtual time keeps up with wall time); on by default. */

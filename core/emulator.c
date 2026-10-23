@@ -492,6 +492,7 @@ static Error use_backend(Emulator* emulator, const CPU_Backend* backend) {
   scheduler_init(&emulator->scheduler, backend);
   emulator->scheduler.parallel = emulator->parallel;
   emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
+  emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;
   if (cores && backend->supports_multicore) (void)emulator_set_host_cores(emulator, cores);
   log_info("[emulator] CPU backend for this program: %s", backend->name);
   return OK;
@@ -521,6 +522,7 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
   scheduler_init(&emulator->scheduler, emulator->cpu_backend);
   emulator->scheduler.parallel = emulator->parallel;
   emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
+  emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;
   Sched_Thread *main_thread = scheduler_new_thread(&emulator->scheduler);
   SWITCH_ASSERT_ALWAYS(main_thread != NULL, "empty scheduler has a slot");
   main_thread->thread.cpu_state = emulator->cpu_state;
@@ -703,6 +705,7 @@ void emulator_unload_program(Emulator* emulator) {
   scheduler_init(&emulator->scheduler, emulator->cpu_backend);
   emulator->scheduler.parallel = emulator->parallel;
   emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
+  emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;
   /* Transfer memory still lent at exit: the heap gets its pages back
    * read-write, so teardown can release them. */
   for (uint32_t i = 0; i < TRANSFER_MEMORY_POOL_CAPACITY; i++) {
@@ -875,6 +878,12 @@ void emulator_set_poll_coalescing(Emulator* emulator, bool on) {
   if (!emulator) return;
   emulator->no_poll_coalescing = !on;
   emulator->scheduler.poll_coalescing = on;
+}
+
+void emulator_set_pin_ideal_cores(Emulator* emulator, bool on) {
+  if (!emulator) return;
+  emulator->pin_ideal_cores = on;
+  emulator->scheduler.pin_ideal = on;
 }
 
 #ifdef SWITCH_CPU_BACKEND_JIT
@@ -1491,6 +1500,8 @@ Error emulator_savestate_finish_restore(Emulator* emulator, bool applied) {
   emulator->free_running = before->free_running;
   emulator->no_poll_coalescing = before->no_poll_coalescing;
   emulator->scheduler.poll_coalescing = !before->no_poll_coalescing;
+  emulator->pin_ideal_cores = before->pin_ideal_cores;
+  emulator->scheduler.pin_ideal = before->pin_ideal_cores;
   emulator->frame_skip = before->frame_skip;
   emulator->pacing = before->pacing;
   emulator->pacing_origin_ns = 0; /* re-anchored at the next slice */

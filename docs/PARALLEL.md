@@ -310,6 +310,31 @@ a save state 7.92 M ticks/s, 24.7 fps sliced vs 9.49 M, 29.6 fps free
 worse. 60 s of Silksong at the default pacing: steady 40-45 fps, no gaps.
 Save states load across sessions in either mode.
 
+## Pinned cores (opt-in)
+
+`emulator_set_pin_ideal_cores` (web `?pincores=1`, CLI
+`--pin-ideal-cores`) runs every thread only on the host core of its ideal
+(preferred) guest core, when its affinity mask allows that core; a thread
+whose ideal core is outside its mask keeps the mask's choice. Threads that
+share an ideal core then never run at once, wherever their masks would
+let them float.
+
+What it changes, measured 2026-10-22 (small samples):
+
+- **Tears of the Kingdom**, native interpreter, three cores to 400k slices
+  (~40 s): unpinned, 3 of 3 runs failed (a fault, a guest exit, a stall;
+  the same faults recur: main+0x70b6bc reading 0x15c, an sdk routine);
+  pinned, 3 of 4 runs got through (one to 1.6M slices), one faulted.
+- **Mario Kart 8 Deluxe** on three cores: no help. Its black tiles at the
+  start of a race show up pinned too (one pinned run without them was
+  slowed by another job on the machine: they look timing-dependent), and
+  the race runs at the same ~23-24 fps either way.
+- Keeping a thread on its core only while it runs (not moving it after a
+  run that ended at the budget or in a non-blocking SVC) did not help
+  Tears of the Kingdom: 3 of 4 runs faulted.
+
+It stays off by default, a tool for chasing the open multicore bug.
+
 ## Memory model
 
 `cpu_set_multicore(true)` is set when two or more cores are on. With one

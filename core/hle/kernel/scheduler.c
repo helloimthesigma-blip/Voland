@@ -218,6 +218,8 @@ static uint64_t guest_cores_of(const Sched_Thread *t) {
 bool scheduler_runs_on(const Scheduler *sched, const Sched_Thread *t, uint32_t core) {
   if (sched->host_cores <= 1u) return true;
   const uint64_t mask = guest_cores_of(t);
+  if (sched->pin_ideal && t->thread.preferred_core < THREAD_CORE_COUNT && ((mask >> t->thread.preferred_core) & 1u))
+    return t->thread.preferred_core % sched->host_cores == core;
   for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++)
     if (((mask >> g) & 1u) && g % sched->host_cores == core) return true;
   return false;
