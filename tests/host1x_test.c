@@ -100,8 +100,19 @@ static void test_iova(void) {
   uint64_t gva = 0, left = 0;
   CHECK(mm_iova_translate(&iova, (uint64_t)b + 0x100, &gva, &left) && gva == 0x1234560100ull && left == 0x1FFF00u);
   CHECK(!mm_iova_translate(&iova, (uint64_t)a + 0x3000, &gva, &left)); /* past the end */
+  /* Unmapped (by both channels that mapped it) and mapped again: the same
+   * IOVA - NVDEC knows VP9 reference surfaces by it while VIC maps and
+   * unmaps the same buffers per frame. */
+  CHECK(mm_iova_map(&iova, 2, 0x1234560000ull, 0x200000) == b);
   mm_iova_unmap(&iova, 2);
-  CHECK(!mm_iova_translate(&iova, b, &gva, &left));
+  mm_iova_unmap(&iova, 2);
+  CHECK(mm_iova_map(&iova, 2, 0x1234560000ull, 0x200000) == b);
+  mm_iova_unmap(&iova, 2);
+  /* A full table reclaims an unmapped slot, reusing its range. */
+  for (uint32_t h = 3; h < 3u + MM_MAX_IOVA_MAPS - 2u; h++) CHECK(mm_iova_map(&iova, h, 0x100000000ull + h * 0x10000ull, 0x1000));
+  CHECK(mm_iova_map(&iova, 999, 0x200000000ull, 0x1000) == b);
+  CHECK(mm_iova_translate(&iova, b, &gva, &left) && gva == 0x200000000ull);
+  CHECK(!mm_iova_map(&iova, 1000, 0x300000000ull, 0x1000)); /* nothing left to reclaim */
   /* A handle whose backing changed gets a fresh mapping. */
   const uint32_t a2 = mm_iova_map(&iova, 1, 0x90000000ull, 0x3000);
   CHECK(a2 != a && mm_iova_translate(&iova, a2, &gva, &left) && gva == 0x90000000ull);

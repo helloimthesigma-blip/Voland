@@ -46,6 +46,7 @@ typedef struct Mm_Iova_Map {
   uint32_t handle; /* nvmap handle; 0 = free slot */
   uint32_t iova;
   uint32_t size;
+  uint32_t refs; /* MAP_BUFFERs not yet unmapped; 0 = kept for a remap, reclaimable */
   uint64_t guest_va;
 } Mm_Iova_Map;
 
@@ -56,8 +57,12 @@ typedef struct Mm_Iova {
 
 void mm_iova_init(Mm_Iova *iova);
 /* The IOVA for an nvmap handle backed by guest_va/size (stable per handle
- * while the backing stays the same). 0 when the table is full. */
+ * while the backing stays the same, across unmaps too: NVDEC and VIC map
+ * the same surfaces, and VP9 references are known by their IOVA). 0 when
+ * every slot is in use. */
 uint32_t mm_iova_map(Mm_Iova *iova, uint32_t handle, uint64_t guest_va, uint32_t size);
+/* Drops one map of the handle; at zero its slot may be reclaimed by a new
+ * handle when the table is otherwise full. */
 void mm_iova_unmap(Mm_Iova *iova, uint32_t handle);
 /* IOVA -> guest VA and the bytes left in that buffer. */
 bool mm_iova_translate(const Mm_Iova *iova, uint64_t address, uint64_t *guest_va, uint64_t *remaining);

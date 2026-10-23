@@ -120,28 +120,47 @@ void mm_iova_init(Mm_Iova *iova) {
 }
 
 uint32_t mm_iova_map(Mm_Iova *iova, uint32_t handle, uint64_t guest_va, uint32_t size) {
-  Mm_Iova_Map *free_slot = NULL;
+  Mm_Iova_Map *free_slot = NULL, *idle = NULL;
   for (uint32_t i = 0; i < MM_MAX_IOVA_MAPS; i++) {
     Mm_Iova_Map *m = &iova->maps[i];
     if (m->handle == handle && handle) {
-      if (m->guest_va == guest_va && m->size >= size) return m->iova;
+      if (m->guest_va == guest_va && m->size >= size) {
+        m->refs++;
+        return m->iova;
+      }
       m->handle = 0; /* the handle was reallocated: map it afresh */
     }
     if (!m->handle && !free_slot) free_slot = m;
+    if (m->handle && !m->refs && !idle) idle = m;
   }
   const uint64_t span = ((uint64_t)size + MM_IOVA_ALIGN - 1u) & ~(uint64_t)(MM_IOVA_ALIGN - 1u);
+  if (!free_slot && idle) {
+    /* Every slot is taken: reclaim an unmapped one, reusing its range
+     * when the new buffer fits (IOVA space is not otherwise recycled). */
+    free_slot = idle;
+    const uint64_t old_span = ((uint64_t)idle->size + MM_IOVA_ALIGN - 1u) & ~(uint64_t)(MM_IOVA_ALIGN - 1u);
+    if (span <= old_span) {
+      idle->handle = handle;
+      idle->size = size;
+      idle->guest_va = guest_va;
+      idle->refs = 1;
+      return idle->iova;
+    }
+  }
   if (!free_slot || (uint64_t)iova->next + span > UINT32_MAX) return 0;
   free_slot->handle = handle;
   free_slot->iova = iova->next;
   free_slot->size = size;
   free_slot->guest_va = guest_va;
+  free_slot->refs = 1;
   iova->next += (uint32_t)span;
   return free_slot->iova;
 }
 
 void mm_iova_unmap(Mm_Iova *iova, uint32_t handle) {
   for (uint32_t i = 0; i < MM_MAX_IOVA_MAPS; i++) {
-    if (iova->maps[i].handle == handle) iova->maps[i].handle = 0;
+    Mm_Iova_Map *m = &iova->maps[i];
+    if (m->handle == handle && handle && m->refs) m->refs--;
   }
 }
 
@@ -537,11 +556,13 @@ static bool write_plane(const Mm_Context *c, uint32_t value, const uint8_t *src,
     if (bytes > scratch_bytes || bytes > remaining) return false;
     for (uint32_t r = 0; r < rows; r++) memcpy(scratch + (uint64_t)r * pitch, src + (uint64_t)r * src_pitch, row_bytes);
   }
-  if (!error_is_ok(vmm_write_block(c->vmm, guest, scratch, bytes))) return false;
+  /* The renderer hears of the write first, as the copy engine does: a
+   * software render target over these bytes is written back before VIC's
+   * picture lands, not over it (SSBU's movie showed black). */
   uint32_t handle = 0;
   uint64_t offset = 0;
   if (c->written && mm_iova_handle(c->iova, iova, &handle, &offset)) c->written(c->written_user, handle, offset, bytes);
-  return true;
+  return error_is_ok(vmm_write_block(c->vmm, guest, scratch, bytes));
 }
 
 #define VIDEO_MISSING_NOTICE 120u
@@ -549,14 +570,14 @@ static bool write_plane(const Mm_Context *c, uint32_t value, const uint8_t *src,
 
 #define VIC_SCRATCH_BYTES ((uint64_t)VIDEO_MAX_WIDTH * 4u * (VIDEO_MAX_HEIGHT + 128u))
 
-static void vic_dump(const Mm_Engine *e);
+static void vic_dump(const Mm_Engine *e, const Mm_Context *c);
 
 static void vic_execute(Mm_Engine *e, const Mm_Context *c) {
   static uint8_t config[VIC_CONFIG_BYTES];
   static uint8_t scratch[VIC_SCRATCH_BYTES];
   static uint8_t rgba[(uint64_t)VIDEO_MAX_WIDTH * VIDEO_MAX_HEIGHT * 4u];
   Mm_Video *v = c->state;
-  vic_dump(e);
+  vic_dump(e, c);
   if (!read_buffer(c, e->regs[MM_REG(VIC_CONFIG)], 0, config, sizeof(config))) return;
   if (e->executes <= DISCOVERY_DUMPS) hexdump("vic config", config, sizeof(config));
   uint32_t sequence = 0;
@@ -636,7 +657,7 @@ static uint32_t g_nvdec_dump_frames;
 #endif
 
 /* VIC under VOLAND_DUMP_NVDEC: which surface it reads after which frame. */
-static void vic_dump(const Mm_Engine *e) {
+static void vic_dump(const Mm_Engine *e, const Mm_Context *c) {
 #ifndef __EMSCRIPTEN__
   const char *dir = getenv("VOLAND_DUMP_NVDEC");
   if (!dir || !g_nvdec_dump_frames || g_nvdec_dump_frames > NVDEC_DUMP_FRAMES) return;
@@ -645,9 +666,25 @@ static void vic_dump(const Mm_Engine *e) {
   FILE *f = fopen(path, "a");
   if (!f) return;
   fprintf(f, "after %u: slot0 luma 0x%08x\n", g_nvdec_dump_frames - 1u, e->regs[MM_REG(VIC_SLOT0_LUMA)]);
+  static uint32_t full;
+  if (full++ < 3u) { /* every register, a few times, buffers resolved */
+    for (uint32_t method = 0; method < MM_ENGINE_REGS * 4u; method += 4u) {
+      const uint32_t value = e->regs[MM_REG(method)];
+      if (!value) continue;
+      uint64_t guest = 0, remaining = 0, offset = 0;
+      uint32_t handle = 0;
+      const uint64_t iova = (uint64_t)value << MM_BUFFER_SHIFT;
+      if (method >= 0x400u && mm_iova_translate(c->iova, iova, &guest, &remaining) && mm_iova_handle(c->iova, iova, &handle, &offset))
+        fprintf(f, "  vic 0x%03x = 0x%08x -> guest 0x%llx (handle %u + 0x%llx)\n", method, value, (unsigned long long)guest,
+                handle, (unsigned long long)offset);
+      else
+        fprintf(f, "  vic 0x%03x = 0x%08x\n", method, value);
+    }
+  }
   fclose(f);
 #else
   (void)e;
+  (void)c;
 #endif
 }
 
