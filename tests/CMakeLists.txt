@@ -294,3 +294,7 @@ add_test(NAME save_archive_test COMMAND save_archive_test)
 add_executable(cheat_vm_test cheat_vm_test.c)
 target_link_libraries(cheat_vm_test PRIVATE switch_core)
 add_test(NAME cheat_vm_test COMMAND cheat_vm_test)
+
+add_executable(vp9_write_test vp9_write_test.c)
+target_link_libraries(vp9_write_test PRIVATE switch_core)
+add_test(NAME vp9_write_test COMMAND vp9_write_test)

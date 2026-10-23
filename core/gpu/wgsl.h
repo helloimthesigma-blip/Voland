@@ -211,6 +211,7 @@ typedef struct Wgsl_Globals {
   uint8_t slot[WGSL_MAX_GLOBALS];
   uint16_t offset[WGSL_MAX_GLOBALS];
   uint8_t buffer_of[SM_MAX_WORDS];
+  char why[80]; /* when false: which LDG did not follow the pattern, and how */
 } Wgsl_Globals;
 bool wgsl_find_globals(const Sm_Program *program, Wgsl_Globals *out);
 /* Pixel programs: as wgsl_find_globals, but STG is allowed - a pixel
@@ -227,7 +228,7 @@ typedef struct Wgsl_Result {
   char *text;          /* NUL-terminated; in the caller's buffer */
   size_t length;
   bool ok;             /* false: the program uses something not translated */
-  char reason[96];     /* why not, when !ok */
+  char reason[160];    /* why not, when !ok */
   uint32_t cbuf_slots; /* bit per constant buffer the WGSL reads */
 } Wgsl_Result;
 

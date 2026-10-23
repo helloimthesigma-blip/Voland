@@ -8,6 +8,8 @@
 #include "video/host1x.h"
 #include "video/vic_convert.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define MM_METHOD_EXECUTE 0x300u
@@ -516,6 +518,46 @@ static void vic_execute(Mm_Engine *e, const Mm_Context *c) {
   }
 }
 
+/* VOLAND_DUMP_NVDEC=DIR (native diagnostics): an undecoded codec's
+ * submissions - every non-zero buffer register's value and the first
+ * NVDEC_DUMP_BYTES behind it - as DIR/<n>-<method>.bin plus DIR/<n>.txt,
+ * for the first NVDEC_DUMP_FRAMES frames. */
+#define NVDEC_DUMP_FRAMES 40u
+#define NVDEC_DUMP_BYTES 0x10000u
+static void nvdec_dump_unknown(Mm_Engine *e, const Mm_Context *c) {
+#ifdef __EMSCRIPTEN__
+  (void)e;
+  (void)c;
+#else
+  static uint32_t frames;
+  const char *dir = getenv("VOLAND_DUMP_NVDEC");
+  if (!dir || frames >= NVDEC_DUMP_FRAMES) return;
+  char path[512];
+  snprintf(path, sizeof(path), "%s/%03u.txt", dir, frames);
+  FILE *index = fopen(path, "w");
+  if (!index) return;
+  static uint8_t bytes[NVDEC_DUMP_BYTES];
+  for (uint32_t method = 0x200u; method < 0x800u; method += 4u) {
+    const uint32_t value = e->regs[MM_REG(method)];
+    if (!value) continue;
+    fprintf(index, "0x%03x = 0x%08x\n", method, value);
+    if (method < 0x400u) continue;
+    uint64_t guest = 0, remaining = 0;
+    if (!mm_iova_translate(c->iova, (uint64_t)value << MM_BUFFER_SHIFT, &guest, &remaining)) continue;
+    const uint64_t n = remaining < NVDEC_DUMP_BYTES ? remaining : NVDEC_DUMP_BYTES;
+    if (!error_is_ok(vmm_read_block(c->vmm, guest, bytes, n))) continue;
+    snprintf(path, sizeof(path), "%s/%03u-%03x.bin", dir, frames, method);
+    FILE *f = fopen(path, "wb");
+    if (f) {
+      fwrite(bytes, 1, (size_t)n, f);
+      fclose(f);
+    }
+  }
+  fclose(index);
+  frames++;
+#endif
+}
+
 /* ---- Dispatch ------------------------------------------------------- */
 
 typedef struct Submit_Ctx {
@@ -530,8 +572,10 @@ static void execute(Mm_Engine *e, const Mm_Context *c) {
       nvdec_h264(e, c);
     } else if (e->regs[MM_REG(NVDEC_APPLICATION_ID)] == NVDEC_APP_VP8) {
       nvdec_vp8(e, c);
-    } else if (e->executes <= DISCOVERY_DUMPS) {
-      log_warn("[video] NVDEC application %u not decoded", e->regs[MM_REG(NVDEC_APPLICATION_ID)]);
+    } else {
+      nvdec_dump_unknown(e, c);
+      if (e->executes <= DISCOVERY_DUMPS)
+        log_warn("[video] NVDEC application %u not decoded", e->regs[MM_REG(NVDEC_APPLICATION_ID)]);
     }
   } else if (e->class_id == HOST1X_CLASS_VIC) {
     vic_execute(e, c);

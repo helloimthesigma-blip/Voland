@@ -65,7 +65,7 @@ typedef struct Tr {
   const Wgsl_Program_Desc *d;
   Out body;
   bool ok;
-  char reason[96];
+  char reason[160];
   uint8_t reg_used[SM_REGISTERS / 8u];
   uint32_t cbuf_slots;
   uint32_t textures_used;
@@ -2224,31 +2224,45 @@ static bool find_globals(const Sm_Program *program, bool allow_stg, Wgsl_Globals
     const int32_t target = program->insns[pc].target;
     if (target >= 0 && (uint32_t)target < SM_MAX_WORDS) targeted[target] = true;
   }
+#define GLOBALS_FAIL(...) do { snprintf(out->why, sizeof(out->why), __VA_ARGS__); return false; } while (0)
   for (uint32_t pc = 0; pc < program->word_count; pc++) {
     const Sm_Insn *in = &program->insns[pc];
-    if ((in->op == SM_OP_STG && !allow_stg) || in->op == SM_OP_LD || in->op == SM_OP_ST) return false;
+    if ((in->op == SM_OP_STG && !allow_stg) || in->op == SM_OP_LD || in->op == SM_OP_ST)
+      GLOBALS_FAIL("%s at %u", sm_op_name((Sm_Op)in->op), pc);
     if (in->op != SM_OP_LDG) continue;
     const uint64_t w = in->raw;
     const uint32_t ra = REG_A(w);
-    if (!BIT(w, LDG_WIDE_BIT) || ra == SM_RZ) return false;
+    if (!BIT(w, LDG_WIDE_BIT) || ra == SM_RZ) GLOBALS_FAIL("LDG at %u: a 32-bit address (R%u)", pc, ra);
     const int32_t lo_at = last_def(program, targeted, pc, ra), hi_at = last_def(program, targeted, pc, (ra + 1u) & 0xffu);
-    if (lo_at < 0 || hi_at < 0) return false;
+    if (lo_at < 0 || hi_at < 0)
+      GLOBALS_FAIL("LDG at %u: R%u/R%u not defined in the same block (%d, %d)", pc, ra, (ra + 1u) & 0xffu, lo_at, hi_at);
     const Sm_Insn *lo = &program->insns[lo_at], *hi = &program->insns[hi_at];
-    if (lo->op != SM_OP_IADD || hi->op != SM_OP_IADD || lo->form != SM_FORM_CBUF || hi->form != SM_FORM_CBUF) return false;
-    if (!BIT(lo->raw, IADD_CBUF_CC_BIT) || BIT(lo->raw, IADD_CBUF_X_BIT) || !BIT(hi->raw, IADD_CBUF_X_BIT) ||
-        REG_A(hi->raw) != SM_RZ || BIT(lo->raw, 48) || BIT(lo->raw, 49) || BIT(hi->raw, 48) || BIT(hi->raw, 49))
-      return false; /* no negations */
-    if (hi->cbuf != lo->cbuf || hi->imm != lo->imm + 4u || lo->imm > 0xfff0u) return false;
+    /* The base alone: MOV Rlo = c[slot][offset], MOV Rhi = c[slot][offset + 4]
+     * (the LDG's immediate carries the offset). */
+    const bool moves = lo->op == SM_OP_MOV && hi->op == SM_OP_MOV && lo->form == SM_FORM_CBUF && hi->form == SM_FORM_CBUF &&
+                       !(lo->pred & 8u) && !(hi->pred & 8u);
+    if (moves) {
+      if (hi->cbuf != lo->cbuf || hi->imm != lo->imm + 4u || lo->imm > 0xfff0u)
+        GLOBALS_FAIL("LDG at %u: c%u[0x%x] / c%u[0x%x]", pc, lo->cbuf, lo->imm, hi->cbuf, hi->imm);
+    } else if (lo->op != SM_OP_IADD || hi->op != SM_OP_IADD || lo->form != SM_FORM_CBUF || hi->form != SM_FORM_CBUF)
+      GLOBALS_FAIL("LDG at %u: address from %s(form %u) at %d / %s(form %u) at %d", pc, sm_op_name((Sm_Op)lo->op),
+                   (unsigned)lo->form, lo_at, sm_op_name((Sm_Op)hi->op), (unsigned)hi->form, hi_at);
+    if (!moves && (!BIT(lo->raw, IADD_CBUF_CC_BIT) || BIT(lo->raw, IADD_CBUF_X_BIT) || !BIT(hi->raw, IADD_CBUF_X_BIT) ||
+                   REG_A(hi->raw) != SM_RZ || BIT(lo->raw, 48) || BIT(lo->raw, 49) || BIT(hi->raw, 48) || BIT(hi->raw, 49)))
+      GLOBALS_FAIL("LDG at %u: IADD carry/negate shape", pc); /* no negations */
+    if (hi->cbuf != lo->cbuf || hi->imm != lo->imm + 4u || lo->imm > 0xfff0u)
+      GLOBALS_FAIL("LDG at %u: c%u[0x%x] / c%u[0x%x]", pc, lo->cbuf, lo->imm, hi->cbuf, hi->imm);
     uint32_t k = 0;
     while (k < out->count && !(out->slot[k] == lo->cbuf && out->offset[k] == lo->imm)) k++;
     if (k == out->count) {
-      if (k == WGSL_MAX_GLOBALS) return false;
+      if (k == WGSL_MAX_GLOBALS) GLOBALS_FAIL("more than %u storage buffers", WGSL_MAX_GLOBALS);
       out->slot[k] = (uint8_t)lo->cbuf;
       out->offset[k] = (uint16_t)lo->imm;
       out->count++;
     }
     out->buffer_of[pc] = (uint8_t)k;
   }
+#undef GLOBALS_FAIL
   return true;
 }
 
@@ -2258,7 +2272,7 @@ static void emit_ldg(Tr *t, const Sm_Insn *in, uint32_t pc) {
   const uint64_t w = in->raw;
   const uint32_t k = t->globals.buffer_of[pc];
   if (k == 0xffu) {
-    fail(t, "global memory (LDG)");
+    fail(t, "global memory (LDG): %s", t->globals.why[0] ? t->globals.why : "not traced");
     return;
   }
   t->uses_globals = true;

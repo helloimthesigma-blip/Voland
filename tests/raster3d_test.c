@@ -40,6 +40,7 @@ static int g_failures;
 #define VS_TEX_OFFSET 0x3000u /* a vertex program that samples a texture */
 #define VS_LDG_OFFSET 0x3800u /* a vertex program that reads a storage buffer */
 #define PS_LDG_OFFSET 0x2800u /* a pixel program that reads (and writes) a storage buffer */
+#define PS_LDG_MOV_OFFSET 0x2c00u /* the same, its address moved straight from c[0] */
 #define SSBO_DESC 0x110u      /* the storage buffer's descriptor in c[0] (NVN) */
 #define SSBO (GPU_BASE + 0xC000u)
 #define VERTICES (GPU_BASE + 0x4000u)
@@ -181,6 +182,11 @@ static void build_programs(void) {
   const uint64_t psg[] = {MOV32I(12, 0), IADD_C_CC(4, 12, SSBO_DESC), IADD_C_X(5, SSBO_DESC + 4u), LDG_E128(0, 4),
                           stg_e32, EXIT()};
   write_program(PS_LDG_OFFSET, ps_sph, psg, 6);
+  /* MOV R4 = c[0][desc], MOV R5 = c[0][desc + 4]; LDG.E.128 R0, [R4]. */
+  const uint64_t mov_lo = (0x4c98ull << 48) | (0xfull << 39) | GUARD | ((uint64_t)(SSBO_DESC / 4u) << 20) | 4u;
+  const uint64_t mov_hi = (0x4c98ull << 48) | (0xfull << 39) | GUARD | ((uint64_t)((SSBO_DESC + 4u) / 4u) << 20) | 5u;
+  const uint64_t psm[] = {mov_lo, mov_hi, LDG_E128(0, 4), EXIT()};
+  write_program(PS_LDG_MOV_OFFSET, ps_sph, psm, 4);
 }
 
 /* ---- register state ----------------------------------------------- */
@@ -883,6 +889,11 @@ static void test_gpu_vertex_stage(Raster3d *r) {
             copied[1] == 0.5f,
         "storage-buffer pixel program on the GPU: %u draws, shader %u, buffer 0x%x (%u bytes)", ps_ldg.count,
         ps_ldg.last.shader_id, gdesc[0], gdesc[2]);
+  g_ps_override = PS_LDG_MOV_OFFSET;
+  const Seen_Draw ps_mov = gpu_draw_once(r, FRONT_CW_REG);
+  memcpy(gdesc, g_seen_data + 4u * WGSL_DRAW_PS_GLOBALS, sizeof(gdesc));
+  CHECK(ps_mov.count == 1 && ps_mov.last.shader_id != 0 && gdesc[0] == (uint32_t)SSBO,
+        "MOV-addressed storage-buffer pixel program on the GPU: %u draws, shader %u", ps_mov.count, ps_mov.last.shader_id);
   g_ps_override = 0;
   g_gpu_textured = false;
 }

@@ -79,6 +79,7 @@ set(SWITCH_CORE_SOURCES
   hle/services/nvdrv/nvdec.c
   video/host1x.c
   video/h264.c
+  video/vp9_write.c
   video/video_stream.c
   video/vic_convert.c
   hle/loader/byte_source.c
