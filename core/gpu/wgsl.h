@@ -211,6 +211,10 @@ typedef struct Wgsl_Globals {
   uint8_t slot[WGSL_MAX_GLOBALS];
   uint16_t offset[WGSL_MAX_GLOBALS];
   uint8_t buffer_of[SM_MAX_WORDS];
+  /* LDGs whose address registers are set differently on different
+   * branches: bit k set = buffer k is a candidate too (the WGSL picks the
+   * buffer the address falls in). */
+  uint8_t also[SM_MAX_WORDS];
   char why[80]; /* when false: which LDG did not follow the pattern, and how */
 } Wgsl_Globals;
 bool wgsl_find_globals(const Sm_Program *program, Wgsl_Globals *out);

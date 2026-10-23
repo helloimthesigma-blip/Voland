@@ -41,6 +41,7 @@ static int g_failures;
 #define VS_LDG_OFFSET 0x3800u /* a vertex program that reads a storage buffer */
 #define PS_LDG_OFFSET 0x2800u /* a pixel program that reads (and writes) a storage buffer */
 #define PS_LDG_MOV_OFFSET 0x2c00u /* the same, its address moved straight from c[0] */
+#define PS_LDG_TWO_OFFSET 0x3400u /* its address from one of two descriptors (predicated MOVs) */
 #define SSBO_DESC 0x110u      /* the storage buffer's descriptor in c[0] (NVN) */
 #define SSBO (GPU_BASE + 0xC000u)
 #define VERTICES (GPU_BASE + 0x4000u)
@@ -187,6 +188,12 @@ static void build_programs(void) {
   const uint64_t mov_hi = (0x4c98ull << 48) | (0xfull << 39) | GUARD | ((uint64_t)((SSBO_DESC + 4u) / 4u) << 20) | 5u;
   const uint64_t psm[] = {mov_lo, mov_hi, LDG_E128(0, 4), EXIT()};
   write_program(PS_LDG_MOV_OFFSET, ps_sph, psm, 4);
+  /* The same descriptor's halves, or (@P0) a second descriptor's at +0x20. */
+  const uint64_t p0 = ~(7ull << 16); /* GUARD -> @P0 */
+  const uint64_t mov_lo2 = ((0x4c98ull << 48) | (0xfull << 39) | GUARD | ((uint64_t)((SSBO_DESC + 0x20u) / 4u) << 20) | 4u) & p0;
+  const uint64_t mov_hi2 = ((0x4c98ull << 48) | (0xfull << 39) | GUARD | ((uint64_t)((SSBO_DESC + 0x24u) / 4u) << 20) | 5u) & p0;
+  const uint64_t ps2[] = {mov_lo, mov_hi, mov_lo2, mov_hi2, LDG_E128(0, 4), EXIT()};
+  write_program(PS_LDG_TWO_OFFSET, ps_sph, ps2, 6);
 }
 
 /* ---- register state ----------------------------------------------- */
@@ -678,6 +685,17 @@ static void stream_drain(Seen_Draw *seen) {
     if (rec.type == GPU_REC_SHADER && rec.payload_bytes > 8u) {
       const char *text = (const char *)rec.payload + 8u;
       const size_t length = rec.payload_bytes - 8u;
+      /* RASTER3D_TEST_WGSL=DIR: every shader sent, for tools/validate-wgsl.mjs. */
+      if (getenv("RASTER3D_TEST_WGSL")) {
+        static unsigned shader_files;
+        char path[512];
+        snprintf(path, sizeof(path), "%s/s%03u.wgsl", getenv("RASTER3D_TEST_WGSL"), shader_files++);
+        FILE *f = fopen(path, "w");
+        if (f) {
+          fwrite(text, 1, length, f);
+          fclose(f);
+        }
+      }
       static const char k_entry[] = "@vertex fn vs(vin: VIn)";
       const size_t n = sizeof(k_entry) - 1u;
       for (size_t i = 0; i + n <= length && !seen->vertex_shader; i++)
@@ -894,6 +912,18 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   memcpy(gdesc, g_seen_data + 4u * WGSL_DRAW_PS_GLOBALS, sizeof(gdesc));
   CHECK(ps_mov.count == 1 && ps_mov.last.shader_id != 0 && gdesc[0] == (uint32_t)SSBO,
         "MOV-addressed storage-buffer pixel program on the GPU: %u draws, shader %u", ps_mov.count, ps_mov.last.shader_id);
+  /* Two candidate descriptors: both buffers are copied, the shader picks. */
+  put32(CBUF + SSBO_DESC + 0x20u, (uint32_t)SSBO);
+  put32(CBUF + SSBO_DESC + 0x24u, (uint32_t)(SSBO >> 32));
+  put32(CBUF + SSBO_DESC + 0x28u, sizeof(ssbo));
+  g_ps_override = PS_LDG_TWO_OFFSET;
+  const Seen_Draw ps_two = gpu_draw_once(r, FRONT_CW_REG);
+  uint32_t gdesc2[WGSL_GLOBAL_WORDS];
+  memcpy(gdesc, g_seen_data + 4u * WGSL_DRAW_PS_GLOBALS, sizeof(gdesc));
+  memcpy(gdesc2, g_seen_data + 4u * (WGSL_DRAW_PS_GLOBALS + WGSL_GLOBAL_WORDS), sizeof(gdesc2));
+  CHECK(ps_two.count == 1 && ps_two.last.shader_id != 0 && gdesc[0] == (uint32_t)SSBO && gdesc2[0] == (uint32_t)SSBO,
+        "two-descriptor storage-buffer pixel program on the GPU: %u draws, shader %u, buffers 0x%x 0x%x", ps_two.count,
+        ps_two.last.shader_id, gdesc[0], gdesc2[0]);
   g_ps_override = 0;
   g_gpu_textured = false;
 }

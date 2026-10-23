@@ -2246,6 +2246,51 @@ bool wgsl_find_globals(const Sm_Program *program, Wgsl_Globals *out) { return fi
 
 bool wgsl_find_pixel_globals(const Sm_Program *program, Wgsl_Globals *out) { return find_globals(program, true, out); }
 
+/* The buffer k for descriptor c[slot][offset], added if new; -1 when full. */
+static int32_t globals_buffer(Wgsl_Globals *out, uint32_t slot, uint32_t offset) {
+  uint32_t k = 0;
+  while (k < out->count && !(out->slot[k] == slot && out->offset[k] == offset)) k++;
+  if (k == out->count) {
+    if (k == WGSL_MAX_GLOBALS) return -1;
+    out->slot[k] = (uint8_t)slot;
+    out->offset[k] = (uint16_t)offset;
+    out->count++;
+  }
+  return (int32_t)k;
+}
+
+/* Every write to an LDG's address pair (lo, lo + 1) is a descriptor load
+ * (MOV from, or IADD with, c[s][o] and c[s][o + 4]): each such descriptor
+ * becomes a candidate buffer of the LDG at pc. False otherwise. */
+static bool candidate_buffers(const Sm_Program *p, uint32_t pc, uint32_t lo, Wgsl_Globals *out) {
+  uint32_t found = 0, first = 0xffu, mask = 0;
+  for (uint32_t at = 0; at < p->word_count; at++) {
+    const Sm_Insn *in = &p->insns[at];
+    if (in->op == SM_OP_SCHED || in->op == SM_OP_NOP || is_flow(in->op)) continue;
+    if (in->op == SM_OP_STG || in->op == SM_OP_ST || in->op == SM_OP_STL || in->op == SM_OP_AST) continue;
+    const uint32_t d = REG_D(in->raw);
+    if (d != lo && d != ((lo + 1u) & 0xffu)) continue;
+    if ((in->op != SM_OP_MOV && in->op != SM_OP_IADD) || in->form != SM_FORM_CBUF) return false;
+    if (d != lo) continue; /* the high half is checked with its low half */
+    bool paired = false;
+    for (uint32_t at2 = 0; at2 < p->word_count && !paired; at2++) {
+      const Sm_Insn *h = &p->insns[at2];
+      paired = REG_D(h->raw) == ((lo + 1u) & 0xffu) && (h->op == SM_OP_MOV || h->op == SM_OP_IADD) &&
+               h->form == SM_FORM_CBUF && h->cbuf == in->cbuf && h->imm == in->imm + 4u;
+    }
+    if (!paired || in->imm > 0xfff0u) return false;
+    const int32_t k = globals_buffer(out, in->cbuf, in->imm);
+    if (k < 0) return false;
+    if (first == 0xffu) first = (uint32_t)k;
+    else mask |= 1u << k;
+    found++;
+  }
+  if (!found) return false;
+  out->buffer_of[pc] = (uint8_t)first;
+  out->also[pc] = (uint8_t)(mask & ~(1u << first));
+  return true;
+}
+
 static bool find_globals(const Sm_Program *program, bool allow_stg, Wgsl_Globals *out) {
   memset(out, 0, sizeof(*out));
   memset(out->buffer_of, 0xff, sizeof(out->buffer_of));
@@ -2267,6 +2312,7 @@ static bool find_globals(const Sm_Program *program, bool allow_stg, Wgsl_Globals
     int32_t lo_at = last_def(program, targeted, pc, ra), hi_at = last_def(program, targeted, pc, (ra + 1u) & 0xffu);
     if (lo_at < 0) lo_at = sole_def(program, ra);
     if (hi_at < 0) hi_at = sole_def(program, (ra + 1u) & 0xffu);
+    if ((lo_at < 0 || hi_at < 0) && candidate_buffers(program, pc, ra, out)) continue;
     if (lo_at < 0 || hi_at < 0)
       GLOBALS_FAIL("LDG at %u: R%u/R%u not defined in the same block (%d, %d)", pc, ra, (ra + 1u) & 0xffu, lo_at, hi_at);
     const Sm_Insn *lo = &program->insns[lo_at], *hi = &program->insns[hi_at];
@@ -2309,15 +2355,20 @@ static void emit_ldg(Tr *t, const Sm_Insn *in, uint32_t pc) {
     return;
   }
   t->uses_globals = true;
-  const uint32_t size = BITS(w, 48, 3), n = access_bytes(size),
-                 gb = (t->vertex ? WGSL_DRAW_GLOBALS : WGSL_DRAW_PS_GLOBALS) + WGSL_GLOBAL_WORDS * k;
+  const uint32_t size = BITS(w, 48, 3), n = access_bytes(size), table = t->vertex ? WGSL_DRAW_GLOBALS : WGSL_DRAW_PS_GLOBALS;
   const int32_t off = (int32_t)(BITS(w, 20, 24) << 8) >> 8;
   const uint32_t ra = REG_A(w), dr = REG_D(w);
-  EMIT("{ let a0 = %s; let ga = a0 + 0x%xu; let gh = %s %s; ", reg(t, ra).s, (uint32_t)off, reg(t, (ra + 1u) & 0xffu).s,
-       off >= 0 ? "+ select(0u, 1u, ga < a0)" : "- select(0u, 1u, ga > a0)");
-  EMIT("let rel = ga - D[%uu]; let rh = gh - D[%uu] - select(0u, 1u, ga < D[%uu]); ", gb, gb + 1u, gb);
-  EMIT("let gok = rh == 0u && rel <= D[%uu] && D[%uu] - rel >= %uu; let gat = D[%uu] + rel; ", gb + 2u, gb + 2u, n,
-       gb + 3u);
+  EMIT("{ let a0 = %s; let ga = a0 + 0x%xu; let gh = %s %s; var gok = false; var gat = 0u; ", reg(t, ra).s,
+       (uint32_t)off, reg(t, (ra + 1u) & 0xffu).s, off >= 0 ? "+ select(0u, 1u, ga < a0)" : "- select(0u, 1u, ga > a0)");
+  /* The buffer the address falls in: the traced one, then any candidates. */
+  const uint32_t candidates = (1u << k) | t->globals.also[pc];
+  for (uint32_t c = 0; c < WGSL_MAX_GLOBALS; c++) {
+    if (!(candidates & (1u << c))) continue;
+    const uint32_t gb = table + WGSL_GLOBAL_WORDS * c;
+    EMIT("{ let rel = ga - D[%uu]; let rh = gh - D[%uu] - select(0u, 1u, ga < D[%uu]); ", gb, gb + 1u, gb);
+    EMIT("if (!gok && rh == 0u && rel <= D[%uu] && D[%uu] - rel >= %uu) { gok = true; gat = D[%uu] + rel; } } ", gb + 2u,
+         gb + 2u, n, gb + 3u);
+  }
   if (n < 4u) {
     if (dr != SM_RZ) {
       const Ex d = reg_dst(t, dr);
