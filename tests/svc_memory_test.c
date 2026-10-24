@@ -389,6 +389,26 @@ int main(void) {
     hle_on_svc(emu.cpu_state, 0x06, &emu.hle);
     CHECK_OK(vmm_read_block(emu.vmm, out, &info, sizeof(info)));
     CHECK(info.perm == VMM_PERM_NONE);
+    /* Recommitted pages are new memory: zero, whatever their physical
+     * pages held before (they are the ones just released). */
+    set_svc_args3(regs, base, 2 * PAGE, 0);
+    hle_on_svc(emu.cpu_state, 0x2c, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    CHECK_OK(vmm_write32(emu.vmm, base, 0xDEADBEEFu));
+    CHECK_OK(vmm_write32(emu.vmm, base + PAGE, 0xDEADBEEFu));
+    set_svc_args3(regs, base, 2 * PAGE, 0);
+    hle_on_svc(emu.cpu_state, 0x2d, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    set_svc_args3(regs, base + 4 * PAGE, 2 * PAGE, 0);
+    hle_on_svc(emu.cpu_state, 0x2c, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    uint32_t fresh[2] = {1, 1};
+    CHECK_OK(vmm_read32(emu.vmm, base + 4 * PAGE, &fresh[0]));
+    CHECK_OK(vmm_read32(emu.vmm, base + 5 * PAGE, &fresh[1]));
+    CHECK(fresh[0] == 0 && fresh[1] == 0);
+    set_svc_args3(regs, base + 4 * PAGE, 2 * PAGE, 0);
+    hle_on_svc(emu.cpu_state, 0x2d, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
   }
 
   /* A module's writable pages are CodeMutable (nn::ro's module walk

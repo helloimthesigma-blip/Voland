@@ -112,7 +112,12 @@ static uint64_t page_pa_of(VMM_Context *vmm, uint64_t gva) {
   return (uint64_t)(uintptr_t)host_ptr - layout_get()->guest_ram_base;
 }
 
-static void free_run(Page_Allocator *pages, uint64_t pa, uint64_t page_count) {
+/* Returns a run of heap pages to the allocator, cleared: the next
+ * SetHeapSize grow or MapPhysicalMemory hands them out as new memory,
+ * which the kernel gives zero-filled (TOTK decommits and recommits heap
+ * pages through Unmap/MapPhysicalMemory all the time). */
+static void free_run(VMM_Context *vmm, Page_Allocator *pages, uint64_t pa, uint64_t page_count) {
+  (void)vmm_fill_physical(vmm, pa, 0, page_count << VMM_PAGE_BITS);
   const Error freed = page_allocator_free(pages, pa, page_count);
   if (!error_is_ok(freed)) {
     /* Leaking the pages is survivable; stopping the game is not. */
@@ -147,7 +152,7 @@ static void free_and_unmap_heap_range(VMM_Context *vmm, Page_Allocator *pages,
   const Error got = vmm_guest_to_host(vmm, gva, size, VMM_PERM_R, &host_ptr);
   vmm_borrow_scope_end(vmm);
   if (error_is_ok(got)) {
-    free_run(pages, (uint64_t)(uintptr_t)host_ptr - layout_get()->guest_ram_base, size >> VMM_PAGE_BITS);
+    free_run(vmm, pages, (uint64_t)(uintptr_t)host_ptr - layout_get()->guest_ram_base, size >> VMM_PAGE_BITS);
   } else {
     /* Fragmented backing: release maximal physically contiguous runs. */
     uint64_t run_pa = 0, run_pages = 0;
@@ -157,14 +162,25 @@ static void free_and_unmap_heap_range(VMM_Context *vmm, Page_Allocator *pages,
         run_pages++;
         continue;
       }
-      if (run_pages) free_run(pages, run_pa, run_pages);
+      if (run_pages) free_run(vmm, pages, run_pa, run_pages);
       run_pa = pa;
       run_pages = 1;
     }
-    if (run_pages) free_run(pages, run_pa, run_pages);
+    if (run_pages) free_run(vmm, pages, run_pa, run_pages);
   }
   const Error unmapped = vmm_unmap(vmm, gva, size);
   SWITCH_ASSERT_ALWAYS(error_is_ok(unmapped), "free_and_unmap_heap_range: vmm_unmap failed");
+}
+
+/* Allocates `page_count` physical pages and clears them: the kernel hands
+ * out new memory zero-filled. (free_run returns heap pages clean, but a
+ * shared memory block's pages go back as they were.) */
+static Error allocate_zeroed(HLE_Context *context, uint64_t page_count, uint64_t *pa) {
+  const Error err = page_allocator_allocate(context->pages, page_count, pa);
+  if (!error_is_ok(err)) return err;
+  const Error filled = vmm_fill_physical(context->vmm, *pa, 0, page_count << VMM_PAGE_BITS);
+  if (!error_is_ok(filled)) (void)page_allocator_free(context->pages, *pa, page_count);
+  return filled;
 }
 
 void hle_svc_set_heap_size(HLE_Context *context, CPU_State *cpu_state) {
@@ -222,13 +238,13 @@ void hle_svc_set_heap_size(HLE_Context *context, CPU_State *cpu_state) {
  * the allocator has it, else page by page. */
 static uint32_t map_fresh_pages(HLE_Context *context, uint64_t gva, uint64_t size) {
   uint64_t pa = 0;
-  if (error_is_ok(page_allocator_allocate(context->pages, size >> VMM_PAGE_BITS, &pa))) {
+  if (error_is_ok(allocate_zeroed(context, size >> VMM_PAGE_BITS, &pa))) {
     if (error_is_ok(vmm_map(context->vmm, gva, pa, size, VMM_PERM_RW))) return HLE_RESULT_SUCCESS;
     (void)page_allocator_free(context->pages, pa, size >> VMM_PAGE_BITS);
     return HLE_RESULT_OUT_OF_MEMORY;
   }
   for (uint64_t offset = 0; offset < size; offset += VMM_PAGE_SIZE) {
-    if (!error_is_ok(page_allocator_allocate(context->pages, 1, &pa))) return HLE_RESULT_OUT_OF_MEMORY;
+    if (!error_is_ok(allocate_zeroed(context, 1, &pa))) return HLE_RESULT_OUT_OF_MEMORY;
     if (!error_is_ok(vmm_map(context->vmm, gva + offset, pa, VMM_PAGE_SIZE, VMM_PERM_RW))) {
       (void)page_allocator_free(context->pages, pa, 1);
       return HLE_RESULT_OUT_OF_MEMORY;
@@ -296,11 +312,11 @@ void hle_svc_unmap_physical_memory(HLE_Context *context, CPU_State *cpu_state) {
       run_pages++;
       continue;
     }
-    if (run_pages) free_run(context->pages, run_pa, run_pages);
+    if (run_pages) free_run(context->vmm, context->pages, run_pa, run_pages);
     run_pa = pa;
     run_pages = 1;
   }
-  if (run_pages) free_run(context->pages, run_pa, run_pages);
+  if (run_pages) free_run(context->vmm, context->pages, run_pa, run_pages);
   regs->x[0] = HLE_RESULT_SUCCESS;
 }
 
