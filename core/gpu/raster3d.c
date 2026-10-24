@@ -72,7 +72,7 @@
 #define REG_BLEND_ENABLE 0x4d8u
 #define REG_WINDOW_ORIGIN 0x4ebu
 #define WINDOW_ORIGIN_LOWER_LEFT 0x1u
-#define WINDOW_ORIGIN_FLIP_Y 0x10u /* swaps the facing (OpenGL drivers, with a NEGATIVE_Y swizzle) */
+#define WINDOW_ORIGIN_FLIP_Y 0x10u /* swaps the facing under a positive y scale (OpenGL drivers, with a NEGATIVE_Y swizzle) */
 #define REG_BASE_VERTEX 0x50du
 #define REG_BASE_INSTANCE 0x50eu
 #define REG_POINT_SIZE 0x546u
@@ -663,6 +663,8 @@ void raster3d_flush(Raster3d *r, const Gpu_Memory *mem) {
   for (uint32_t i = 0; i < RASTER_SURFACES; i++) r->surfaces[i].loaded = r->surfaces[i].in_use ? false : r->surfaces[i].loaded;
 }
 
+#define STALE_LOG_LIMIT 40u
+
 void raster3d_sync_range(Raster3d *r, const Gpu_Memory *mem, uint64_t address, uint64_t bytes, bool write) {
   if (!r || !r->ready || !bytes) return;
   if (r->gpu) {
@@ -672,7 +674,23 @@ void raster3d_sync_range(Raster3d *r, const Gpu_Memory *mem, uint64_t address, u
     gpu_mirror_cpu_wrote(address, bytes); /* mirrors take the guest's copy again */
     for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
       Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
-      if (s->in_use && s->address < address + bytes && address < s->address + s->guest_bytes) s->stale = true;
+      if (!s->in_use || s->address >= address + bytes || address >= s->address + s->guest_bytes) continue;
+      /* Only the rows written re-upload: the rest of the target holds what
+       * the GPU drew, which guest memory never received (MK8's race-start
+       * loader writes next to its targets; a whole re-upload blacked out
+       * the GPU's pixels in block-linear staircases). */
+      const uint64_t lo = (address > s->address ? address : s->address) - s->address;
+      const uint64_t hi = (address + bytes < s->address + s->guest_bytes ? address + bytes : s->address + s->guest_bytes) - s->address;
+      {
+        static uint32_t logged;
+        if (logged++ < STALE_LOG_LIMIT)
+          log_debug("[gpu] write %llx+%llx over GPU surface %ux%u fmt 0x%02x @%llx (%llu bytes): its bytes %llx-%llx", (unsigned long long)address,
+                   (unsigned long long)bytes, s->width, s->height, s->format, (unsigned long long)s->address,
+                   (unsigned long long)s->guest_bytes, (unsigned long long)lo, (unsigned long long)hi);
+      }
+      if (!s->stale || lo < s->stale_lo) s->stale_lo = lo;
+      if (!s->stale || hi > s->stale_hi) s->stale_hi = hi;
+      s->stale = true;
     }
     textures_invalidate(r, address, bytes);
     return;
@@ -1819,6 +1837,7 @@ typedef struct Raster_State {
   Sm_Env ps_env;
   Tex_Resolver resolver;
   Raster3d_Stats stats;
+  bool traced_triangle; /* VOLAND_TRACE_DRAWS logged this draw's first triangle */
 } Raster_State;
 
 /* One pixel-program result, reused across a triangle whose inputs do not
@@ -2069,7 +2088,12 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
   rs->z_zero_to_one = (regs[REG_Z_CLIP_RANGE] & 1u) != 0;
   rs->cull = (regs[REG_CULL_ENABLE] & 1u) != 0;
   rs->cull_face = regs[REG_CULL_FACE];
-  rs->front_ccw = (regs[REG_FRONT_FACE] == 0x901u) != ((regs[REG_WINDOW_ORIGIN] & WINDOW_ORIGIN_FLIP_Y) != 0);
+  /* Flip y swaps the facing when the y flip happens outside the viewport
+   * (Celeste: a NEGATIVE_Y swizzle, positive scale). Under a negative y
+   * scale the viewport is the flip itself and the facing stands (SSBU's
+   * full-screen passes: FRONT_FACE CCW, cull back, flip y, scale -360). */
+  const bool flip_facing = (regs[REG_WINDOW_ORIGIN] & WINDOW_ORIGIN_FLIP_Y) != 0 && !(rs->vp_scale[1] < 0.0f);
+  rs->front_ccw = (regs[REG_FRONT_FACE] == 0x901u) != flip_facing;
   rs->provoking_last = regs[REG_PROVOKING_VERTEX] & 1u;
   /* Varyings the pixel program reads, and how. */
   const Sm_Header *ph = &ctx->ps->header;
@@ -2837,6 +2861,22 @@ static void emit_triangle(Raster_State *rs, Vertex_Cache *cache, uint32_t i0, ui
   Vertex vb = *b;
   const Vertex *c = vertex_get(rs->ctx, cache, i2, &ok);
   Vertex vc = *c;
+  if (rs->ctx->r->trace_draws && !rs->traced_triangle) { /* VOLAND_TRACE_DRAWS: the draw's first triangle */
+    rs->traced_triangle = true;
+    log_info("[gpu]   triangle %u %u %u%s: (%g %g %g %g) (%g %g %g %g) (%g %g %g %g)", i0, i1, i2, ok ? "" : " (unshaded)",
+             (double)va.pos[0], (double)va.pos[1], (double)va.pos[2], (double)va.pos[3], (double)vb.pos[0], (double)vb.pos[1],
+             (double)vb.pos[2], (double)vb.pos[3], (double)vc.pos[0], (double)vc.pos[1], (double)vc.pos[2], (double)vc.pos[3]);
+    Screen_Vertex sv[3];
+    to_screen(rs, &va, &sv[0]);
+    to_screen(rs, &vb, &sv[1]);
+    to_screen(rs, &vc, &sv[2]);
+    log_info("[gpu]   on screen (%g %g) (%g %g) (%g %g); viewport %s scale %g %g offset %g %g, lower-left %d, cull %d face 0x%x "
+             "front %s (FRONT_FACE 0x%x WINDOW_ORIGIN 0x%x swizzle 0x%x)",
+             (double)sv[0].x, (double)sv[0].y, (double)sv[1].x, (double)sv[1].y, (double)sv[2].x, (double)sv[2].y,
+             rs->viewport_transform ? "on" : "off", (double)rs->vp_scale[0], (double)rs->vp_scale[1], (double)rs->vp_offset[0],
+             (double)rs->vp_offset[1], rs->lower_left, rs->cull, rs->cull_face, rs->front_ccw ? "ccw" : "cw",
+             rs->ctx->regs[REG_FRONT_FACE], rs->ctx->regs[REG_WINDOW_ORIGIN], rs->ctx->regs[REG_VIEWPORT_SWIZZLE]);
+  }
   if (!ok) return;
   const Vertex *p = prov == 0 ? &va : (prov == 1 ? &vb : &vc);
   draw_triangle(rs, &va, &vb, &vc, p);
@@ -3036,8 +3076,9 @@ static void gpu_create(Raster3d *r, uint32_t id, uint32_t format, uint32_t width
 }
 
 /* Uploads rows of tightly packed texels in records that fit the stream. */
-static void gpu_write_rows(Raster3d *r, uint32_t id, uint32_t width, uint32_t height, uint32_t layer,
-                           uint32_t bytes_per_row, const uint8_t *rows) {
+/* Rows [y0, y0 + height) of texture `id` from `rows` (row 0 = y0). */
+static void gpu_write_rows_at(Raster3d *r, uint32_t id, uint32_t width, uint32_t y0, uint32_t height, uint32_t layer,
+                              uint32_t bytes_per_row, const uint8_t *rows) {
   const uint64_t budget = gpu_stream_max_payload(r->gpu) - sizeof(Gpu_Rec_Texture_Write);
   uint32_t per_record = (uint32_t)(budget / bytes_per_row);
   if (per_record == 0) per_record = 1;
@@ -3046,12 +3087,17 @@ static void gpu_write_rows(Raster3d *r, uint32_t id, uint32_t width, uint32_t he
     const uint32_t data = n * bytes_per_row;
     const uint32_t padded = (data + 7u) & ~7u;
     uint8_t *p = gpu_stream_begin(r->gpu, GPU_REC_TEXTURE_WRITE, (uint32_t)sizeof(Gpu_Rec_Texture_Write) + padded);
-    const Gpu_Rec_Texture_Write w = {id, 0, y, width, n, layer, bytes_per_row, data};
+    const Gpu_Rec_Texture_Write w = {id, 0, y0 + y, width, n, layer, bytes_per_row, data};
     memcpy(p, &w, sizeof(w));
     memcpy(p + sizeof(w), rows + (uint64_t)y * bytes_per_row, data);
     gpu_stream_end(r->gpu);
     r->gpu_stats.upload_bytes += data;
   }
+}
+
+static void gpu_write_rows(Raster3d *r, uint32_t id, uint32_t width, uint32_t height, uint32_t layer,
+                           uint32_t bytes_per_row, const uint8_t *rows) {
+  gpu_write_rows_at(r, id, width, 0, height, layer, bytes_per_row, rows);
 }
 
 /* Uploads a surface's guest contents (formats whose bytes WebGPU reads as
@@ -3075,6 +3121,43 @@ static void gpu_surface_upload(Raster3d *r, Raster3d_Gpu_Surface *s, const Gpu_M
   if (format_lacks_alpha(s->format) && s->bytes_per_pixel == 4u) /* the pad byte: alpha 1 */
     for (uint64_t i = 3; i < (uint64_t)row * s->height; i += 4u) pixels[i] = 0xffu;
   gpu_write_rows(r, s->id, s->width, s->height, 0, row, pixels);
+}
+
+/* Re-uploads the rows of a surface that hold guest bytes [lo, hi) (from
+ * its address): whole block rows for block-linear surfaces. */
+static void gpu_surface_upload_range(Raster3d *r, Raster3d_Gpu_Surface *s, const Gpu_Memory *mem, uint64_t lo, uint64_t hi) {
+  bool direct = false;
+  if (s->depth) return;
+  (void)gpu_color_format(s->format, &direct);
+  if (!direct || hi <= lo) return;
+  const uint32_t row = s->width * s->bytes_per_pixel;
+  uint8_t *pixels = r->surfaces[0].pixels;
+  if ((uint64_t)row * s->height > RASTER_MAX_SURFACE_BYTES) return;
+  uint32_t y0, y1;
+  if (s->block_linear) {
+    const uint32_t block_lines = BLOCK_LINEAR_GOB_HEIGHT << s->block_height_log2;
+    const uint64_t gobs_x = (row + BLOCK_LINEAR_GOB_WIDTH - 1u) / BLOCK_LINEAR_GOB_WIDTH;
+    const uint64_t block_row_bytes = gobs_x * BLOCK_LINEAR_GOB_WIDTH * block_lines;
+    const uint64_t first = lo / block_row_bytes, last = (hi + block_row_bytes - 1u) / block_row_bytes;
+    y0 = (uint32_t)(first * block_lines);
+    y1 = (uint32_t)(last * block_lines);
+    if (y1 > s->height) y1 = s->height;
+    if (y0 >= y1) return;
+    const uint64_t bytes = (last - first) * block_row_bytes;
+    if (!mem->read(mem->user, s->address + first * block_row_bytes, r->staging, bytes)) return;
+    block_linear_to_pitch(r->staging, pixels, row, row, y1 - y0, s->block_height_log2);
+  } else {
+    y0 = (uint32_t)(lo / s->pitch);
+    y1 = (uint32_t)((hi + s->pitch - 1u) / s->pitch);
+    if (y1 > s->height) y1 = s->height;
+    if (y0 >= y1) return;
+    for (uint32_t y = y0; y < y1; y++)
+      if (!mem->read(mem->user, s->address + (uint64_t)y * s->pitch, pixels + (uint64_t)(y - y0) * row, row))
+        memset(pixels + (uint64_t)(y - y0) * row, 0, row);
+  }
+  if (format_lacks_alpha(s->format) && s->bytes_per_pixel == 4u)
+    for (uint64_t i = 3; i < (uint64_t)row * (y1 - y0); i += 4u) pixels[i] = 0xffu;
+  gpu_write_rows_at(r, s->id, s->width, y0, y1 - y0, 0, row, pixels);
 }
 
 #define SURFACE_DROP_LOG_LIMIT 16u /* "table full" warnings (a title cycling targets drops old ones steadily) */
@@ -3115,7 +3198,7 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
     if (!s->in_use || s->address != d->address) continue;
     if (s->width == d->width && s->height == d->height && s->format == d->format && s->depth == d->depth) {
       s->last_used = r->tick;
-      if (s->stale && load) gpu_surface_upload(r, s, mem);
+      if (s->stale && load) gpu_surface_upload_range(r, s, mem, s->stale_lo, s->stale_hi);
       s->stale = false;
       return s;
     }
@@ -4007,6 +4090,13 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
         tex_sampler_parse(tsc, &s);
       uint32_t id = 0, sample_type = WGSL_SAMPLE_FLOAT, gpu_format = 0;
       Raster3d_Gpu_Surface *surf = gpu_surface_at(r, h.address, h.width);
+      if (surf && surf->stale) {
+        /* Sampled after a CPU / copy-engine write (SSBU copies each movie
+         * frame into textures it once cleared as targets): the written
+         * rows first, or the draw samples the old GPU contents. */
+        gpu_surface_upload_range(r, surf, ctx->mem, surf->stale_lo, surf->stale_hi);
+        surf->stale = false;
+      }
       const uint32_t gathered = surf ? gpu_gather_slices(r, &h, surf) : 0u;
       if (gathered) {
         id = gathered;
@@ -4773,6 +4863,7 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
   rs.resolver = ctx->resolver;
   rs.ps_env.user = &rs.resolver;
   memset(&rs.stats, 0, sizeof(rs.stats));
+  rs.traced_triangle = false;
   static Vertex_Cache cache;
   memset(cache.valid, 0, sizeof(cache.valid));
   Assembler as;
@@ -4836,13 +4927,14 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
   if (r->trace_draws) {
     const Target *t0 = &rs.targets[0];
     log_info("[gpu] draw %llu: topo %u count %u vs %llx ps %llx | rt0 %llx fmt 0x%02x %ux%u targets %u mask %x | "
-             "blend %d op %u/%u src %u/%u dst %u/%u | depth %d/%d func %u | cull %d | tris %llu px %llu",
+             "blend %d op %u/%u src %u/%u dst %u/%u | depth %d/%d func %u | cull %d face 0x%x front 0x%x origin 0x%x vp-y %g | tris %llu px %llu",
              (unsigned long long)r->stats.draws, draw->topology, draw->count, (unsigned long long)ctx->vs->address,
              (unsigned long long)ctx->ps->address, (unsigned long long)(t0->surface ? t0->surface->address : 0),
              t0->surface ? t0->surface->format : 0u, t0->surface ? t0->surface->width : 0u,
              t0->surface ? t0->surface->height : 0u, rs.target_count, t0->write_mask, t0->blend, t0->color_op,
              t0->alpha_op, t0->color_src, t0->alpha_src, t0->color_dst, t0->alpha_dst, rs.depth_test, rs.depth_write,
-             rs.depth_func, rs.cull, (unsigned long long)(r->stats.triangles - triangles_before),
+             rs.depth_func, rs.cull, rs.cull_face, regs[REG_FRONT_FACE], regs[REG_WINDOW_ORIGIN], (double)rs.vp_scale[1],
+             (unsigned long long)(r->stats.triangles - triangles_before),
              (unsigned long long)(r->stats.pixels - pixels_before));
     for (uint32_t k = 0; k < 2u * SM_CBUF_SLOTS; k++) { /* the constants each program reads */
       const uint32_t stage = k < SM_CBUF_SLOTS ? 1u : 0u, slot = k % SM_CBUF_SLOTS;

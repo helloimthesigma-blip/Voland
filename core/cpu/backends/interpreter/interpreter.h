@@ -24,7 +24,7 @@ void interp_set_call_trace(const uint64_t *targets, uint32_t count, Interp_Call_
  * bytes [host, host + bytes) invoke `hook` (pc, lr, guest address, size,
  * the bytes read or stored, whether it was a store) - e.g. a shared
  * memory page a title reads (voland-cli VOLAND_WATCH_TIME), or who writes
- * a texture (VOLAND_WATCH_GPU). One compare per access when unused; bytes
+ * a texture (VOLAND_WATCH_GPU: with `writes`, loads are reported too). One compare per access when unused; bytes
  * 0 turns it off. */
 typedef void (*Interp_Read_Hook)(uint64_t pc, uint64_t lr, uint64_t address, uint32_t size, const void *data,
                                  bool write);

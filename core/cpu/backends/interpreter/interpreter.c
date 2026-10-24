@@ -104,7 +104,7 @@ bool interp_read(Interp_State *s, uint64_t address, void *out, uint32_t size) {
     const uint8_t *host = vmm_translate_inline(s->l1, address, VMM_PERM_R, &fault);
     if (host) {
       memcpy(out, host, size);
-      if (interp_watched(host) && !g_interp_watch_writes) g_interp_watch_hook(s->regs.pc, s->regs.x[30], address, size, out, false);
+      if (interp_watched(host)) g_interp_watch_hook(s->regs.pc, s->regs.x[30], address, size, out, false);
       return true;
     }
   }

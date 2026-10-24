@@ -710,6 +710,20 @@ static void watch_gpu_store(uint64_t pc, uint64_t lr, uint64_t address, uint32_t
             (unsigned long long)lr, (unsigned long long)address, size);
 }
 
+/* VOLAND_WATCH_GUEST=GVA:BYTES (diagnostics, interpreter): once the guest
+ * address is mapped, guest loads and stores in those bytes (host-contiguous
+ * from the translation) are printed - the first WATCH_GPU_LOGGED of each,
+ * then counted - to find who reads what an engine (VIC, NVDEC) wrote. */
+static uint64_t g_watch_guest_loads, g_watch_guest_stores;
+static void watch_guest_access(uint64_t pc, uint64_t lr, uint64_t address, uint32_t size, const void *data, bool write) {
+  uint64_t *count = write ? &g_watch_guest_stores : &g_watch_guest_loads;
+  if ((*count)++ >= WATCH_GPU_LOGGED) return;
+  uint64_t first = 0;
+  memcpy(&first, data, size < sizeof(first) ? size : sizeof(first));
+  fprintf(stderr, "voland-cli: watched %s pc %llx lr %llx address %llx size %u: %016llx\n", write ? "store" : "load",
+          (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)address, size, (unsigned long long)first);
+}
+
 /* VOLAND_EXCEPTION_SCAN=1 (diagnostics): after a run, look on each thread's
  * stack for IL2CPP managed objects whose class name ends in "Exception" and
  * print their string fields (message, stack trace) - what a Unity title
@@ -1524,6 +1538,13 @@ static int run(int argc, char **argv) {
     watch_gpu_va = strtoull(getenv("VOLAND_WATCH_GPU"), &end, 0);
     watch_gpu_bytes = (end && *end == ':') ? strtoull(end + 1, NULL, 0) : 4096u;
   }
+  uint64_t watch_guest_va = 0, watch_guest_bytes = 0;
+  bool watch_guest_set = false;
+  if (getenv("VOLAND_WATCH_GUEST")) {
+    char *end = NULL;
+    watch_guest_va = strtoull(getenv("VOLAND_WATCH_GUEST"), &end, 0);
+    watch_guest_bytes = (end && *end == ':') ? strtoull(end + 1, NULL, 0) : 4096u;
+  }
   /* VOLAND_TRACE_DRAWS=START:LENGTH logs every draw in that slice window. */
   uint64_t trace_start = UINT64_MAX, trace_length = 0;
   if (getenv("VOLAND_TRACE_DRAWS")) {
@@ -1676,6 +1697,16 @@ static int run(int argc, char **argv) {
         fprintf(stderr, "voland-cli: watching stores to GPU %llx (guest %llx, %llu bytes) from slice %llu\n",
                 (unsigned long long)watch_gpu_va, (unsigned long long)gva, (unsigned long long)watch_gpu_bytes,
                 (unsigned long long)slices);
+      }
+    }
+    if (watch_guest_va && !watch_guest_set) {
+      VMM_Fault fault;
+      const uint8_t *host = vmm_translate_inline(vmm_page_table_l1(emu.vmm), watch_guest_va, VMM_PERM_R, &fault);
+      if (host) {
+        interp_set_read_watch((uint64_t)(uintptr_t)host, watch_guest_bytes, watch_guest_access, true);
+        watch_guest_set = true;
+        fprintf(stderr, "voland-cli: watching guest %llx (%llu bytes) from slice %llu\n", (unsigned long long)watch_guest_va,
+                (unsigned long long)watch_guest_bytes, (unsigned long long)slices);
       }
     }
     if (getenv("VOLAND_WATCH_TIME") && slices == strtoull(getenv("VOLAND_WATCH_TIME"), NULL, 0) &&

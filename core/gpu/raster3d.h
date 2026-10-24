@@ -136,6 +136,7 @@ typedef struct Raster3d_Gpu_Surface {
   bool in_use;
   bool depth;
   bool stale;           /* guest memory was written by someone else: re-upload before use */
+  uint64_t stale_lo, stale_hi; /* which bytes (from address): only their rows re-upload */
   uint32_t id;
   uint64_t address;     /* GPU virtual address */
   uint64_t cpu_address; /* the guest address it maps to (presents name buffers by it) */

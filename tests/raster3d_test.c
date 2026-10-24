@@ -360,6 +360,22 @@ static void test_viewport_swizzle(Raster3d *r) {
   draw_arrays(r, 4, 3);
   raster3d_flush(r, &k_mem);
   CHECK(r->stats.triangles == drawn + 1u, "front face CW with flip y: culled");
+  /* A negative y scale is the flip itself: the facing stands (SSBU's
+   * full-screen passes - FRONT_FACE CCW, cull back, flip y). The triangle
+   * is counter-clockwise on screen once the scale flips it. */
+  const float flipped = -(RT_SIZE / 2.0f);
+  memcpy(&g_regs[0x281], &flipped, 4);
+  g_regs[REG_FRONT_FACE_TEST] = FRONT_CCW_REG;
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  CHECK(r->stats.triangles == drawn + 2u, "front face CCW, flip y, negative y scale: drawn");
+  g_regs[REG_FRONT_FACE_TEST] = FRONT_CW_REG;
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  CHECK(r->stats.triangles == drawn + 2u, "front face CW, flip y, negative y scale: culled");
+  const float scale = RT_SIZE / 2.0f;
+  memcpy(&g_regs[0x281], &scale, 4);
+  g_regs[0x4eb] = 0;
 }
 
 /* A 2x2 A8B8G8R8 pitch texture (32-byte rows): red, green / blue, white;

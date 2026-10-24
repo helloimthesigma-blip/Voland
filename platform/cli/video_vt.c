@@ -10,6 +10,10 @@
  * FILE as Annex-B, for checking the reconstructed bitstream offline, and
  * (VOLAND_DUMP_VIDEO_FRAMES=PREFIX[:N]) every Nth decoded frame (default
  * 30) is written as PREFIX.<sequence>.ppm.
+ *
+ * VP9 has no native decoder here; VOLAND_VIDEO_PATTERN=1 answers each VP9
+ * request with a test picture instead (bars and a moving block), for
+ * following movie pictures through VIC to the screen.
  */
 #include "video_vt.h"
 
@@ -41,6 +45,8 @@ struct Vt_Decoder {
   uint8_t sps[256], pps[256];
   size_t sps_bytes, pps_bytes;
   uint32_t generation;
+  uint32_t width, height;
+  bool vp9;
   uint64_t decoded, failed;
   uint8_t avcc[MAX_AU_BYTES];
 };
@@ -164,6 +170,9 @@ static void vt_configure(void *user, uint32_t generation, uint32_t width, uint32
   drop_session(d);
   d->generation = generation;
   d->sps_bytes = d->pps_bytes = 0;
+  d->vp9 = strncmp(codec, "vp09", 4) == 0;
+  d->width = width;
+  d->height = height;
   fprintf(stderr, "voland-cli: video stream %u: %s %ux%u (VideoToolbox)\n", generation, codec, width, height);
 }
 
@@ -211,12 +220,46 @@ static size_t to_avcc(Vt_Decoder *d, const uint8_t *data, uint32_t bytes, bool *
   return out;
 }
 
+#define PATTERN_BARS 8u
+#define PATTERN_BLOCK 64u
+#define PATTERN_STEP 8u
+
+/* VOLAND_VIDEO_PATTERN: a picture of vertical luma bars, chroma split
+ * left/right, and a white block moving with the sequence number. */
+static void publish_pattern(Vt_Decoder *d, uint32_t sequence) {
+  const uint32_t w = (d->width < VIDEO_MAX_WIDTH ? d->width : VIDEO_MAX_WIDTH) & ~1u;
+  const uint32_t h = (d->height < VIDEO_MAX_HEIGHT ? d->height : VIDEO_MAX_HEIGHT) & ~1u;
+  if (!w || !h) return;
+  const int32_t slot = video_slot_acquire(d->video);
+  if (slot < 0) return;
+  uint8_t *out = video_slot_pixels(d->video, (uint32_t)slot);
+  const uint32_t bx = (sequence * PATTERN_STEP) % (w - PATTERN_BLOCK), by = h / 2u - PATTERN_BLOCK / 2u;
+  for (uint32_t y = 0; y < h; y++)
+    for (uint32_t x = 0; x < w; x++) {
+      const bool block = x >= bx && x < bx + PATTERN_BLOCK && y >= by && y < by + PATTERN_BLOCK;
+      out[(size_t)y * w + x] = block ? 235u : (uint8_t)(16u + (x * PATTERN_BARS / w) * (219u / (PATTERN_BARS - 1u)));
+    }
+  uint8_t *uv = out + (size_t)w * h;
+  for (uint32_t y = 0; y < h / 2u; y++)
+    for (uint32_t x = 0; x < w; x += 2u) {
+      uv[(size_t)y * w + x] = x < w / 2u ? 64u : 192u;
+      uv[(size_t)y * w + x + 1u] = y < h / 4u ? 64u : 192u;
+    }
+  video_slot_publish(d->video, (uint32_t)slot, sequence, sequence, d->generation, w, h, w, w * h);
+  d->decoded++;
+  dump_frame(sequence, out, w, h);
+}
+
 static void vt_decode(void *user, uint32_t generation, uint32_t sequence, bool key, const uint8_t *data,
                       uint32_t bytes) {
   (void)key;
   Vt_Decoder *d = (Vt_Decoder *)user;
   dump_access_unit(data, bytes);
   if (generation != d->generation || g_forked) return;
+  if (d->vp9) {
+    if (getenv("VOLAND_VIDEO_PATTERN")) publish_pattern(d, sequence);
+    return;
+  }
   bool changed = false;
   const size_t length = to_avcc(d, data, bytes, &changed);
   if (changed) drop_session(d);
