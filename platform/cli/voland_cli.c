@@ -736,8 +736,12 @@ static void watch_guest_access(uint64_t pc, uint64_t lr, uint64_t address, uint3
   }
   const Sched_Thread *self = g_watch_emu ? scheduler_current((Scheduler *)&g_watch_emu->scheduler) : NULL;
   if (skip && self && self->handle == skip) return;
+  /* VOLAND_WATCH_GUEST_LOGGED=N: how many loads and stores each to print. */
+  static uint64_t logged_max;
+  if (!logged_max)
+    logged_max = getenv("VOLAND_WATCH_GUEST_LOGGED") ? strtoull(getenv("VOLAND_WATCH_GUEST_LOGGED"), NULL, 0) : WATCH_GPU_LOGGED;
   uint64_t *count = write ? &g_watch_guest_stores : &g_watch_guest_loads;
-  if ((*count)++ >= WATCH_GPU_LOGGED) return;
+  if ((*count)++ >= logged_max) return;
   uint64_t first = 0;
   memcpy(&first, data, size < sizeof(first) ? size : sizeof(first));
   fprintf(stderr, "voland-cli: watched %s pc %llx lr %llx address %llx size %u: %016llx (h%x, tick %llu)\n",

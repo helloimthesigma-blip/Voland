@@ -126,10 +126,10 @@ static void svc_trace(const HLE_Context *c, uint32_t swi, uint64_t arg0, uint64_
   }
   if (configured != 2 || !c->scheduler || c->scheduler->ticks < from || c->scheduler->ticks > to) return;
   const Sched_Thread *self = scheduler_current(c->scheduler);
-  log_info("[svc] h%x %llu %02x %s (%llx, %llx) -> %llx %llx pc %llx", self ? self->handle : 0u,
+  log_info("[svc] h%x %llu %02x %s (%llx, %llx, %llx, %llx) -> %llx %llx pc %llx", self ? self->handle : 0u,
            (unsigned long long)c->scheduler->ticks, swi, svc_name(swi), (unsigned long long)arg0,
-           (unsigned long long)arg1, (unsigned long long)r->x[0], (unsigned long long)r->x[1],
-           (unsigned long long)r->pc);
+           (unsigned long long)arg1, (unsigned long long)r->x[2], (unsigned long long)r->x[3],
+           (unsigned long long)r->x[0], (unsigned long long)r->x[1], (unsigned long long)r->pc);
   if (swi == SVC_TRACE_CREATE_THREAD || swi == SVC_TRACE_START_THREAD) { /* who asked: the frame chain */
     uint64_t fp = r->x[29], lr = r->x[30];
     char chain[160];
