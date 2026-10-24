@@ -385,12 +385,17 @@ static Interp_Status exclusive(Interp_State *s, uint32_t insn) {
     return INTERP_FAULT;
   }
   if (load) {
+    /* The granule's sequence BEFORE the data (a seqlock read): read after,
+     * another core's complete exclusive updates in between (pop X, push X
+     * back) would pair the old value with the new sequence and let the
+     * store-exclusive pass - the ABA a lock-free stack must not see. */
+    const uint32_t seq = __atomic_load_n(interp_exclusive_seq_slot(address), __ATOMIC_ACQUIRE);
     if (!interp_read(s, address, data, total)) return INTERP_FAULT;
     s->exclusive_valid = true;
     s->exclusive_address = address;
     s->exclusive_size = total;
     memcpy(s->exclusive_value, data, total);
-    s->exclusive_seq = __atomic_load_n(interp_exclusive_seq_slot(address), __ATOMIC_ACQUIRE);
+    s->exclusive_seq = seq;
     set_xreg(s, t, load_le(data, element));
     if (o1) set_xreg(s, t2, load_le(data + element, element));
     if (o0 && cpu_multicore()) __atomic_thread_fence(__ATOMIC_SEQ_CST); /* LDAXR: acquire */

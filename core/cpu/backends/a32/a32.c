@@ -405,12 +405,14 @@ static Interp_Status synchronization(A32_State *a, uint32_t insn) {
   }
   if (load) {
     uint32_t v[2] = {0, 0};
+    /* The sequence before the data, as in the A64 interpreter (ABA). */
+    const uint32_t seq = __atomic_load_n(interp_exclusive_seq_slot(address), __ATOMIC_ACQUIRE);
     if (!a32_read(a, address, v, size)) return INTERP_FAULT;
     a->s.exclusive_valid = true;
     a->s.exclusive_address = address;
     a->s.exclusive_size = size;
     memcpy(a->s.exclusive_value, v, sizeof(v)); /* for the multicore compare-and-swap */
-    a->s.exclusive_seq = __atomic_load_n(interp_exclusive_seq_slot(address), __ATOMIC_ACQUIRE);
+    a->s.exclusive_seq = seq;
     a32_set_reg(a, rd, v[0]);
     if (size == 8u) a32_set_reg(a, rd + 1u, v[1]);
     if (multicore && ordered == 2u) __atomic_thread_fence(__ATOMIC_SEQ_CST); /* LDAEX: acquire */

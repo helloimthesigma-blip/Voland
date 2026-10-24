@@ -346,8 +346,16 @@ core nothing changes.
   holds those bytes.
   - A store by another host thread in between makes it fail, never
     lost.
-  - ABA-tolerant, like every CAS-based monitor (Arm allows spurious
-    passes only in theory, and the guest's retry loops don't care).
+  - ABA: a bare CAS would pass when another core changed the bytes and
+    changed them back (a lock-free stack's pop X, pop Y, push X), which
+    a hardware monitor never allows. So each 64-byte granule hashes to
+    a sequence word (`interp_exclusive_seq`). The load-exclusive reads it
+    *before* the data (a seqlock read: read after, two complete updates
+    in between would pair the old bytes with the new sequence). The
+    store-exclusive claims it (a lock bit), does the CAS, and bumps it
+    on success. Any successful exclusive store to the granule in between
+    therefore fails it. Plain stores don't bump the sequence, so a
+    plain-store-only ABA can still pass.
   - 1, 2, 4 and 8 bytes use `__atomic_compare_exchange_n`.
   - The 16-byte pair (LDXP/STXP of two X registers) uses the native
     128-bit CAS on AArch64 hosts.

@@ -4831,6 +4831,13 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
     return true;
   }
   if (load) { /* LDXR / LDAXR: arm the monitor */
+    if (cpu_multicore()) { /* the granule's sequence, for the store-exclusive's ABA check -
+                            * read before the data (interp_load_store.c, exclusive()) */
+      lget(c, L_STATE);
+      emit_exclusive_seq_address(c);
+      emit_atomic_i32(c, WASM_ATOMIC_I32_LOAD);
+      mem(c, WASM_OP_I32_STORE, ALIGN_4, OFF_EXCLUSIVE_SEQ);
+    }
     emit_load_address(c, element);
     emit_host_load(c, ACCESS_LOAD_ZERO, element, 0, L_VAL);
     lget(c, L_STATE);
@@ -4843,12 +4850,6 @@ static bool c_exclusive(Ctx *c, uint32_t insn) {
     lget(c, L_STATE);
     lget(c, L_VAL);
     mem(c, store_opcode(element), ALIGN_1, OFF_EXCLUSIVE_VALUE);
-    if (cpu_multicore()) { /* the granule's sequence, for the store-exclusive's ABA check */
-      lget(c, L_STATE);
-      emit_exclusive_seq_address(c);
-      emit_atomic_i32(c, WASM_ATOMIC_I32_LOAD);
-      mem(c, WASM_OP_I32_STORE, ALIGN_4, OFF_EXCLUSIVE_SEQ);
-    }
     lget(c, L_VAL);
     set_x(c, t);
     if (o0) emit_multicore_fence(c); /* LDAXR: acquire */

@@ -1950,6 +1950,11 @@ static int run(int argc, char **argv) {
         fprintf(stderr, "    r0-r12:");
         for (uint32_t r = 0; r <= 12u; r++) fprintf(stderr, " %08llx", (unsigned long long)rf->x[r]);
         fprintf(stderr, "\n");
+      } else if (emu.scheduler.process_crashed && pc == emu.scheduler.crash_pc) { /* the faulting thread */
+        for (uint32_t r = 0; r <= 30u; r++) {
+          fprintf(stderr, "%sx%u=%llx", r % 8u ? " " : "    ", r, (unsigned long long)rf->x[r]);
+          if (r % 8u == 7u || r == 30u) fputc('\n', stderr);
+        }
       }
       uint64_t fp = rf->x[narrow_frames ? 11 : 29], lr = rf->x[narrow_frames ? 14 : 30];
       for (uint32_t depth = 0; depth < 24u; depth++) {
