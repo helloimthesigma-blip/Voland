@@ -2205,9 +2205,11 @@ static void trace_hook(CPU_State *state, uint64_t target, uint64_t return_addres
             (unsigned long long)return_address, (unsigned long long)r->x[0]);
     return;
   }
-  fprintf(stderr, "[trace] call 0x%llx from 0x%llx: x0 %llx x1 %llx x2 %llx x3 %llx\n", (unsigned long long)target,
-          (unsigned long long)return_address, (unsigned long long)r->x[0], (unsigned long long)r->x[1],
-          (unsigned long long)r->x[2], (unsigned long long)r->x[3]);
+  const Sched_Thread *self = scheduler_current(&g_trace_emu->scheduler);
+  fprintf(stderr, "[trace] call 0x%llx from 0x%llx: x0 %llx x1 %llx x2 %llx x3 %llx (h%x, tick %llu)\n",
+          (unsigned long long)target, (unsigned long long)return_address, (unsigned long long)r->x[0],
+          (unsigned long long)r->x[1], (unsigned long long)r->x[2], (unsigned long long)r->x[3], self ? self->handle : 0u,
+          (unsigned long long)g_trace_emu->scheduler.ticks);
   /* VOLAND_TRACE_MATCH_X1=OFF:VALUE + VOLAND_TRACE_DUMP_MEM=GVA:BYTES:FILE:
    * at a call whose x1 struct holds u32 VALUE at OFF, dump guest memory
    * (the last such call wins) - diff a job's inputs between two runs. */
