@@ -75,6 +75,18 @@ void tex_header_parse(const uint32_t words[8], Tex_Header *out) {
   if (out->type == TEX_TYPE_1D || out->type == TEX_TYPE_1D_ARRAY || out->type == TEX_TYPE_1D_BUFFER) out->height = 1;
   if (out->type == TEX_TYPE_CUBE) out->depth = 6;
   if (out->type == TEX_TYPE_CUBE_ARRAY) out->depth *= 6u;
+  /* Level 0's GOB block height is the header's, shrunk to the image as
+   * every level's is (bl_level_bytes): a 512x512 ASTC 12x12 texture (6
+   * GOBs of block rows) whose header says 16 GOBs is laid out in blocks
+   * of 8 (Nine Sols' speech-bubble atlas read garbage past column 23). */
+  if (out->layout == TEX_LAYOUT_BLOCK_LINEAR && out->type != TEX_TYPE_3D) {
+    uint32_t bytes = 0, bw = 0, bh = 0;
+    if (tex_format_info(out->format, &bytes, &bw, &bh)) {
+      const uint32_t rows = (out->height + bh - 1u) / bh;
+      const uint32_t gob_rows = (rows + BLOCK_LINEAR_GOB_HEIGHT - 1u) / BLOCK_LINEAR_GOB_HEIGHT;
+      while (out->block_height_log2 > 0 && (1u << (out->block_height_log2 - 1u)) >= gob_rows) out->block_height_log2--;
+    }
+  }
   out->base_level = mw(words, 224, 4); /* RES_VIEW_MIN_MIP_LEVEL */
   if (out->base_level && out->base_level < out->levels && out->layout == TEX_LAYOUT_BLOCK_LINEAR &&
       (out->type == TEX_TYPE_2D || out->type == TEX_TYPE_2D_NO_MIPMAP) && out->depth == 1u)

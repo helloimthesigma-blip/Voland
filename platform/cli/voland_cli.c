@@ -706,10 +706,15 @@ static void watch_read(uint64_t pc, uint64_t lr, uint64_t address, uint32_t size
 static uint64_t g_watch_gpu_stores;
 static void watch_gpu_store(uint64_t pc, uint64_t lr, uint64_t address, uint32_t size, const void *data, bool write) {
   (void)data;
+  static uint64_t last_page = UINT64_MAX;
   if (!write) return;
-  if (g_watch_gpu_stores++ < WATCH_GPU_LOGGED)
-    fprintf(stderr, "voland-cli: watched store pc %llx lr %llx address %llx size %u\n", (unsigned long long)pc,
-            (unsigned long long)lr, (unsigned long long)address, size);
+  /* The first WATCH_GPU_LOGGED stores, then the first store into each new
+   * 4 KiB page (how far a fill reaches). */
+  const bool new_page = (address >> 12) != last_page;
+  last_page = address >> 12;
+  if (g_watch_gpu_stores++ < WATCH_GPU_LOGGED || new_page)
+    fprintf(stderr, "voland-cli: watched store pc %llx lr %llx address %llx size %u (store %llu)\n", (unsigned long long)pc,
+            (unsigned long long)lr, (unsigned long long)address, size, (unsigned long long)g_watch_gpu_stores);
 }
 
 /* VOLAND_WATCH_GUEST=GVA:BYTES (diagnostics, interpreter): once the guest
@@ -1838,6 +1843,22 @@ static int run(int argc, char **argv) {
     fprintf(stderr, "voland-cli: async GPU: %llu submissions carried their commands (%llu MB), %llu ran in place, %llu latency waits\n",
             (unsigned long long)emu.nvdrv.captured_submissions, (unsigned long long)(emu.nvdrv.captured_bytes >> 20),
             (unsigned long long)emu.nvdrv.uncaptured_submissions, (unsigned long long)emu.nvdrv.stalls_for_latency);
+  if (getenv("VOLAND_DUMP_GUEST")) { /* VOLAND_DUMP_GUEST=GVA:BYTES:FILE - guest memory at exit, raw */
+    char *end = NULL;
+    const uint64_t at = strtoull(getenv("VOLAND_DUMP_GUEST"), &end, 0);
+    const uint64_t bytes = end && *end == ':' ? strtoull(end + 1, &end, 0) : 0;
+    FILE *f = (end && *end == ':' && bytes) ? fopen(end + 1, "wb") : NULL;
+    if (f) {
+      static uint8_t chunk[4096];
+      for (uint64_t off = 0; off < bytes; off += sizeof(chunk)) {
+        const uint64_t n = bytes - off < sizeof(chunk) ? bytes - off : sizeof(chunk);
+        if (!error_is_ok(vmm_read_block(emu.vmm, at + off, chunk, n))) memset(chunk, 0, n);
+        fwrite(chunk, 1, (size_t)n, f);
+      }
+      fclose(f);
+      fprintf(stderr, "voland-cli: dumped %llu bytes of guest %llx\n", (unsigned long long)bytes, (unsigned long long)at);
+    }
+  }
   if (getenv("VOLAND_PEEK")) { /* debugging a stall: a guest word, and the GPU thread's state */
     /* VOLAND_PEEK=ADDR[:BYTES][,ADDR[:BYTES]...] */
     const char *spec = getenv("VOLAND_PEEK");
