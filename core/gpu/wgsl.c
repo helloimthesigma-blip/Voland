@@ -1511,9 +1511,11 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
   }
   case SM_OP_ISCADD: {
     const Ex a = reg(t, REG_A(w)), b = op_b(t, in);
-    EMIT("{ let r = ((%s%s) << %uu) + (%s%s); ", BIT(w, 49) ? "0u - " : "", a.s, BITS(w, 39, 5), BIT(w, 48) ? "0u - " : "",
-         b.s);
-    if (BIT(w, 47)) EMIT("ccz = r == 0u; ccs = (r >> 31u) != 0u; ");
+    EMIT("{ let sv = (%s%s) << %uu; let bv = %s%s; let r = sv + bv; ", BIT(w, 49) ? "0u - " : "", a.s, BITS(w, 39, 5),
+         BIT(w, 48) ? "0u - " : "", b.s);
+    /* .CC carries like IADD's (ISCADD.CC + IADD.X: a 64-bit pointer plus a scaled index). */
+    if (BIT(w, 47))
+      EMIT("ccc = r < sv; cco = ((~(sv ^ bv) & (sv ^ r)) >> 31u) != 0u; ccz = r == 0u; ccs = (r >> 31u) != 0u; ");
     EMIT("%s = r; } ", reg_dst(t, REG_D(w)).s);
     return;
   }
@@ -2173,11 +2175,21 @@ static const char k_vertex_pull[] =
 #define LDG_WIDE_BIT 45u     /* a 64-bit address (Ra, Ra + 1) */
 #define GLOBAL_DEF_SEARCH 64u
 
+/* Instructions that may write a predicate register. */
+static bool writes_predicate(uint16_t op) {
+  return op == SM_OP_ISETP || op == SM_OP_FSETP || op == SM_OP_HSETP2 || op == SM_OP_PSETP ||
+         op == SM_OP_CSETP || op == SM_OP_R2P || op == SM_OP_LEA || op == SM_OP_SHFL || op == SM_OP_VOTE;
+}
+
 /* The latest instruction before `pc` writing register r, or -1 when it is
  * not certain: a control transfer or a branch target lies in between (another
- * path may join), the write is predicated, or a load that may write several
- * registers covers r. Flow-stack pushes (SSY, PBK, PCNT) change nothing. */
-static int32_t last_def(const Sm_Program *p, const bool *targeted, uint32_t pc, uint32_t r) {
+ * path may join), the write is predicated - unless the consumer is
+ * predicated the same way (`use_pred`) and no predicate is written in
+ * between: if the consumer runs, so did it - or a load that may write
+ * several registers covers r. Flow-stack pushes (SSY, PBK, PCNT) change
+ * nothing. */
+static int32_t last_def_pred(const Sm_Program *p, const bool *targeted, uint32_t pc, uint32_t r, uint32_t use_pred) {
+  bool predicate_written = false;
   for (uint32_t back = 1; back <= GLOBAL_DEF_SEARCH && back <= pc; back++) {
     const uint32_t at = pc - back;
     const Sm_Insn *in = &p->insns[at];
@@ -2195,8 +2207,12 @@ static int32_t last_def(const Sm_Program *p, const bool *targeted, uint32_t pc, 
     else if (is_texture_op(in->op))
       span = 4;
     if (span > 1u && r > d && r < d + span) return -1; /* written by a multi-register load */
-    if (d != r) continue;
-    return (in->pred & 7u) == SM_PT && !(in->pred & 8u) ? (int32_t)at : -1;
+    if (d != r) {
+      if (writes_predicate(in->op)) predicate_written = true;
+      continue;
+    }
+    if ((in->pred & 7u) == SM_PT && !(in->pred & 8u)) return (int32_t)at;
+    return in->pred == use_pred && use_pred != SM_PT && !predicate_written ? (int32_t)at : -1;
   }
   return -1;
 }
@@ -2309,7 +2325,8 @@ static bool find_globals(const Sm_Program *program, bool allow_stg, Wgsl_Globals
     const uint64_t w = in->raw;
     const uint32_t ra = REG_A(w);
     if (!BIT(w, LDG_WIDE_BIT) || ra == SM_RZ) GLOBALS_FAIL("LDG at %u: a 32-bit address (R%u)", pc, ra);
-    int32_t lo_at = last_def(program, targeted, pc, ra), hi_at = last_def(program, targeted, pc, (ra + 1u) & 0xffu);
+    int32_t lo_at = last_def_pred(program, targeted, pc, ra, in->pred),
+            hi_at = last_def_pred(program, targeted, pc, (ra + 1u) & 0xffu, in->pred);
     if (lo_at < 0) lo_at = sole_def(program, ra);
     if (hi_at < 0) hi_at = sole_def(program, (ra + 1u) & 0xffu);
     if ((lo_at < 0 || hi_at < 0) && candidate_buffers(program, pc, ra, out)) continue;
@@ -2323,10 +2340,15 @@ static bool find_globals(const Sm_Program *program, bool allow_stg, Wgsl_Globals
     if (moves) {
       if (hi->cbuf != lo->cbuf || hi->imm != lo->imm + 4u || lo->imm > 0xfff0u)
         GLOBALS_FAIL("LDG at %u: c%u[0x%x] / c%u[0x%x]", pc, lo->cbuf, lo->imm, hi->cbuf, hi->imm);
-    } else if (lo->op != SM_OP_IADD || hi->op != SM_OP_IADD || lo->form != SM_FORM_CBUF || hi->form != SM_FORM_CBUF)
+    } else if ((lo->op != SM_OP_IADD && lo->op != SM_OP_ISCADD) || hi->op != SM_OP_IADD || lo->form != SM_FORM_CBUF ||
+               hi->form != SM_FORM_CBUF)
       GLOBALS_FAIL("LDG at %u: address from %s(form %u) at %d / %s(form %u) at %d", pc, sm_op_name((Sm_Op)lo->op),
                    (unsigned)lo->form, lo_at, sm_op_name((Sm_Op)hi->op), (unsigned)hi->form, hi_at);
-    if (!moves && (!BIT(lo->raw, IADD_CBUF_CC_BIT) || BIT(lo->raw, IADD_CBUF_X_BIT) || !BIT(hi->raw, IADD_CBUF_X_BIT) ||
+    /* (ISCADD.CC Rlo = (index << s) + c[slot][offset]: a scaled index on
+     * the descriptor's base, carrying like IADD.CC - same bits.) */
+    /* (ISCADD's bits 39-43 are its shift: no carry-in bit to check.) */
+    const bool lo_carry_in = lo->op == SM_OP_IADD && BIT(lo->raw, IADD_CBUF_X_BIT);
+    if (!moves && (!BIT(lo->raw, IADD_CBUF_CC_BIT) || lo_carry_in || !BIT(hi->raw, IADD_CBUF_X_BIT) ||
                    REG_A(hi->raw) != SM_RZ || BIT(lo->raw, 48) || BIT(lo->raw, 49) || BIT(hi->raw, 48) || BIT(hi->raw, 49)))
       GLOBALS_FAIL("LDG at %u: IADD carry/negate shape", pc); /* no negations */
     if (hi->cbuf != lo->cbuf || hi->imm != lo->imm + 4u || lo->imm > 0xfff0u)

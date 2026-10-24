@@ -538,6 +538,24 @@ static void test_lea(void) {
   CHECK(g_thread.r[4][0] == 0x1000u - 0x30u, "LEA.NEG %08x", g_thread.r[4][0]);
 }
 
+/* ISCADD.CC carries into an IADD.X: a 64-bit pointer plus a scaled index
+ * (0x10_fffffff0 + (4 << 4) = 0x11_00000030). */
+static void test_iscadd_carry(void) {
+  Builder b;
+  begin(&b, SM_STAGE_VERTEX);
+  emit(&b, MOV32I(1, 0xfffffff0u));
+  emit(&b, MOV32I(2, 4u));
+  emit(&b, MOV32I(5, 0x10u));
+  emit(&b, op_top(0x5c18) | GUARD | (1ull << 47) | (4ull << 39) | rb(1) | ra(2) | rd(3)); /* ISCADD.CC R3 = (R2 << 4) + R1 */
+  emit(&b, op_top(0x5c10) | GUARD | (1ull << 43) | rb(5) | ra(RZ) | rd(4));               /* IADD.X R4 = RZ + R5 + CF */
+  emit(&b, EXIT());
+  load(&b);
+  sm_thread_reset(&g_thread, 1);
+  CHECK(run(), "ISCADD program runs");
+  CHECK(g_thread.r[3][0] == 0x30u, "ISCADD.CC low %08x", g_thread.r[3][0]);
+  CHECK(g_thread.r[4][0] == 0x11u, "IADD.X takes ISCADD.CC's carry: %08x", g_thread.r[4][0]);
+}
+
 /* ATOM / RED on global memory: each lane updates in turn (a warp's own
  * adds accumulate), ATOM returns the old value, RED.MIN.S32 keeps the
  * smallest signed value. */
@@ -754,6 +772,7 @@ int main(void) {
   test_funnel_shift();
   test_vmnmx();
   test_lea();
+  test_iscadd_carry();
   test_atomics();
   test_derivatives();
   test_conditional_exit();

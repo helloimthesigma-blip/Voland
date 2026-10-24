@@ -1856,17 +1856,24 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     const uint32_t *a = t->r[REG_A(w)], *b = op_b(in, env, t, tb);
     uint32_t *d = dst_row(t, REG_D(w));
     const uint32_t na = BIT(w, 49), nb = BIT(w, 48), shift = BITS(w, 39, 5);
-    Sm_Mask zero = 0, sign = 0;
+    Sm_Mask zero = 0, sign = 0, carry = 0, over = 0;
     FOR_LANES(m) {
       uint32_t av = a[l], bv = b[l];
       if (na) av = (uint32_t)(-(int64_t)av);
       if (nb) bv = (uint32_t)(-(int64_t)bv);
-      const uint32_t r = (av << shift) + bv;
+      const uint32_t sv = av << shift;
+      const uint32_t r = sv + bv;
       if (r == 0) zero |= (Sm_Mask)(1u << l);
       if (r >> 31) sign |= (Sm_Mask)(1u << l);
+      /* .CC carries like IADD's: ISCADD.CC + IADD.X is how a 64-bit
+       * pointer gets a scaled index (TOTK's storage-buffer addresses). */
+      if (r < sv) carry |= (Sm_Mask)(1u << l);
+      if ((~(sv ^ bv) & (sv ^ r)) >> 31) over |= (Sm_Mask)(1u << l);
       d[l] = r;
     }
     if (BIT(w, 47)) {
+      set_mask(&t->cc_carry, m, carry);
+      set_mask(&t->cc_overflow, m, over);
       set_mask(&t->cc_zero, m, zero);
       set_mask(&t->cc_sign, m, sign);
     }

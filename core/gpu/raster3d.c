@@ -3922,9 +3922,12 @@ static bool gpu_plan_globals(Draw_Context *ctx, Gpu_Draw *g, uint64_t *words) {
   const Raster3d_Program *found = program_globals(ctx->vs);
   if (!found) return true;
   if (found->globals_state != RASTER_GLOBALS_FOUND) {
-    if (!g_vs_cpu_globals++)
+    if (!g_vs_cpu_globals++) {
+      static Wgsl_Globals why; /* the analysis again, for its reason (logged once) */
+      (void)wgsl_find_globals(ctx->vs, &why);
       log_warn("[gpu] vertices on the CPU: program %llx reads global memory through addresses not traced to a "
-               "constant buffer", (unsigned long long)ctx->vs->address);
+               "constant buffer (%s)", (unsigned long long)ctx->vs->address, why.why[0] ? why.why : "?");
+    }
     return false;
   }
   uint64_t total = 0;
