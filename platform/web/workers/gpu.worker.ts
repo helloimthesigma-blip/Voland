@@ -317,6 +317,7 @@ self.addEventListener("message", (event: MessageEvent<MainToGPUMessage>) => {
     return;
   }
   if (event.data.type === "init") {
+    if (event.data.trivialShaders) (globalThis as { TRIVIAL_SHADERS?: boolean }).TRIVIAL_SHADERS = true;
     init(event.data.canvas, event.data.memory, event.data.layout).catch((e: unknown) => {
       const err: GPUToMainMessage = {
         type: "error",

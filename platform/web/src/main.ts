@@ -257,7 +257,8 @@ async function boot(): Promise<BootResult | null> {
         layout = msg.layout;
         appendLogLine("debug", `layout handshake: guestRamBase=0x${layout.guestRamBase.toString(16)}`);
         gpuWorker.postMessage(
-          { type: "init", canvas: offscreen, memory, layout } satisfies MainToGPUMessage,
+          { type: "init", canvas: offscreen, memory, layout,
+            trivialShaders: new URLSearchParams(location.search).get("trivialshaders") === "1" } satisfies MainToGPUMessage,
           [offscreen],
         );
         startVideoWorker(memory, layout);

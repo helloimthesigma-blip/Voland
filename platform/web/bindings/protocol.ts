@@ -174,6 +174,9 @@ export type MainToGPUMessage =
       readonly canvas: OffscreenCanvas;
       readonly memory: WebAssembly.Memory;
       readonly layout: MemoryLayout;
+      /* Diagnostics (?trivialshaders=1): every pixel shader replaced by
+       * one that writes nothing - is a title limited by GPU shading? */
+      readonly trivialShaders: boolean;
     }
   | { readonly type: "resize"; readonly width: number; readonly height: number }
   /* The title that just loaded (lifecycle): its persistent shader cache
