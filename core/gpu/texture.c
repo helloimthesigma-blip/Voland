@@ -285,6 +285,12 @@ uint64_t tex_read_bytes(const Tex_Header *h) {
   return tex_layer_stride(h) * (layers - 1u) + tex_level0_bytes(h);
 }
 
+static bool block_is_zero(const uint8_t *block) {
+  for (uint32_t i = 0; i < ASTC_BLOCK_BYTES; i++)
+    if (block[i]) return false;
+  return true;
+}
+
 uint32_t tex_layer_count(const Tex_Header *h) { return is_bl3d(h) ? 1u : layer_count(h); }
 
 bool tex_level_layout(const Tex_Header *h, uint32_t level, Tex_Level_Layout *out) {
@@ -557,7 +563,13 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
       for (uint32_t bx = 0; bx < cols; bx++) {
         uint8_t px[ASTC_MAX_FOOTPRINT * ASTC_MAX_FOOTPRINT][4];
         const uint8_t *block = blocks + (uint64_t)by * row_bytes + (uint64_t)bx * f->bytes;
-        if (astc) {
+        if (astc && block_is_zero(block)) {
+          /* Untouched texture memory (Nine Sols' speech-bubble atlas leaves
+           * its unused space all zero, and samples it): transparent black,
+           * not the error colour - the game shows nothing there on the
+           * console. */
+          memset(px, 0, sizeof(px));
+        } else if (astc) {
           const bool decoded = astc_decode_block(block, f->bw, f->bh, h->srgb, px);
           if (!decoded) {
             astc_bad++;

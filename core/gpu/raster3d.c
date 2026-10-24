@@ -3197,6 +3197,17 @@ static uint32_t gpu_native_format(const Raster3d *r, const Tex_Header *h) {
   return GPU_FMT_NONE;
 }
 
+/* An ASTC void-extent block: constant RGBA 0 (transparent black). */
+static const uint8_t k_astc_transparent_block[16] = {0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0};
+
+/* All-zero ASTC blocks (untouched texture memory) become transparent
+ * black, as the CPU decoder treats them, not the GPU's error colour. */
+static void astc_clear_zero_blocks(uint8_t *blocks, uint64_t bytes) {
+  static const uint8_t zero[16];
+  for (uint64_t at = 0; at + 16u <= bytes; at += 16u)
+    if (memcmp(blocks + at, zero, 16) == 0) memcpy(blocks + at, k_astc_transparent_block, 16);
+}
+
 /* Rows [y0, y0 + rows) of blocks of one level (row 0 = y0) in records
  * that fit the stream. */
 static void gpu_write_level_rows(Raster3d *r, uint32_t id, uint32_t level, uint32_t layer, uint32_t block_w,
@@ -3250,6 +3261,7 @@ static bool gpu_texture_native(Raster3d *r, Raster3d_Texture *t, const Tex_Heade
     t->gpu_levels = levels;
   }
   t->native = true;
+  const bool astc = format >= GPU_FMT_ASTC_FIRST && format <= GPU_FMT_ASTC_LAST;
   uint8_t *raw = r->texture_raw;
   for (uint32_t l = 0; l < layers; l++) {
     if (!mem->read(mem->user, h->address + stride * l, raw, chain)) return false;
@@ -3259,6 +3271,7 @@ static bool gpu_texture_native(Raster3d *r, Raster3d_Texture *t, const Tex_Heade
       const uint32_t row_bytes = m.cols * element;
       if (!m.block_linear) {
         for (uint32_t y = 0; y < m.rows; y++) memcpy(r->staging + (size_t)y * row_bytes, raw + (size_t)y * m.pitch, row_bytes);
+        if (astc) astc_clear_zero_blocks(r->staging, (uint64_t)m.rows * row_bytes);
         gpu_write_level_rows(r, t->gpu_id, level, l, bw, bh, m.cols, 0, m.rows, row_bytes, r->staging);
         continue;
       }
@@ -3270,6 +3283,7 @@ static bool gpu_texture_native(Raster3d *r, Raster3d_Texture *t, const Tex_Heade
         if ((uint64_t)n * row_bytes > RASTER_MAX_SURFACE_BYTES) return false;
         block_linear_to_pitch(raw + m.offset + band_bytes * (y / band_rows), r->staging, row_bytes, row_bytes, n,
                               m.block_height_log2);
+        if (astc) astc_clear_zero_blocks(r->staging, (uint64_t)n * row_bytes);
         gpu_write_level_rows(r, t->gpu_id, level, l, bw, bh, m.cols, y, n, row_bytes, r->staging);
       }
     }

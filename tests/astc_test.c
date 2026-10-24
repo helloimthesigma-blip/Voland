@@ -49,6 +49,11 @@ static void test_void_extent(void) {
     CHECK(out[i][0] == 0x12 && out[i][1] == 0xAB && out[i][2] == 0x00 && out[i][3] == 0xFF, "void-extent texel %u", i);
   set_bits(block, 9, 1, 1); /* HDR */
   CHECK(!astc_decode_block(block, 6, 6, false, out) && is_error(out[0]), "HDR void extent is the error colour (LDR)");
+  /* raster3d's stand-in for all-zero blocks it uploads compressed:
+   * constant transparent black. */
+  static const uint8_t transparent[ASTC_BLOCK_BYTES] = {0xFC, 0xFD, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+  CHECK(astc_decode_block(transparent, 6, 6, false, out) && out[0][0] == 0 && out[0][3] == 0 && out[35][3] == 0,
+        "the transparent void-extent block decodes to RGBA 0");
 }
 
 static void test_reserved_mode(void) {
