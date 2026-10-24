@@ -8,7 +8,7 @@ up on more titles. Where they stand (October 2026, browser, Chromium):
 | Hollow Knight: Silksong | boot to gameplay at real speed, saves, video cutscenes |
 | Hollow Knight | title, menus, saved games and new games (through the intro movie into King's Pass) play at real speed. The new-game intro used to stall after 13 pictures: an all-zero unused voice entry stopped the movie audio's voice 0, so its buffers never drained (fixed 2026-10-22) |
 | Celeste | title, file select and gameplay; ~100 fps unpaced |
-| Super Smash Bros. Ultimate | matches with correct colours and saves, 18-22 fps in a fight; its VP9 movies are black |
+| Super Smash Bros. Ultimate | matches with correct colours and saves, 18-22 fps in a fight; the VP9 opening movie plays in the browser (2026-10-23) |
 | Mario Kart 8 Deluxe (32-bit) | whole races, ~23 fps on three cores; occasional black tiles in multicore runs |
 | Nine Sols | title, file select, the VP8 opening cinematic and gameplay, ~22 fps; the speech-bubble sprite atlas (ASTC 12x12, 512x512, 10 mips) is written by the CPU as if each row were 23 blocks (276 texels) wide - every row goes bad at block column 23 - so bubbles show magenta; no copy engine touches it |
 | Animal Crossing: New Horizons | boots, presents and draws 3D (92M triangles by 2M slices), but its own UI fade stays at black (c3 = (0,0,0,1) on a white BC4 pane); needs the NG word list 2 system file (0100000000000823). Ruled out so far: controller applet result, focus messages, clock snapshot, preselected user, nfp, unimplemented commands |
@@ -54,9 +54,10 @@ titles).
   ideal core (`?pincores=1`, docs/PARALLEL.md "Pinned cores") made Tears of
   the Kingdom fail less often in a few runs; it does not remove the tiles.
 
-- **Video:** NVDEC decodes H.264 and VP8 (through WebCodecs). VP9
-  (SSBU's movies) plays black: its headers would have to be rebuilt from
-  the picture setup and NVDEC's probability tables.
+- **Video:** NVDEC decodes H.264, VP8 and VP9 (through WebCodecs; VP9
+  headers are rebuilt from the picture setup and NVDEC's probability
+  tables). The native CLI has no VP9 decoder: VOLAND_VIDEO_PATTERN=1
+  stands in a test picture there.
 - **Shader instructions not decoded:** LEA.HI, surface loads (SULD); the warning lists every distinct opcode a program
   lacks. Global atomics in graphics stages are dropped on the GPU (compute
   runs them on the CPU).
