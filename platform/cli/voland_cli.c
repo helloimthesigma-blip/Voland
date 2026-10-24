@@ -1736,8 +1736,8 @@ static int run(int argc, char **argv) {
     if (g_gpu_file && dump_every && slices % dump_every == 0) {
       /* GPU mode rasterises nothing CPU-side: name the present a replay
        * (replay-gpu-stream.mjs --at) captures for this slice instead. */
-      fprintf(stderr, "voland-cli: gpu-stream slice %llu present %llu\n", (unsigned long long)slices,
-              (unsigned long long)emu.renderer.gpu_stats.presents);
+      fprintf(stderr, "voland-cli: gpu-stream slice %llu present %llu (%.2f s virtual)\n", (unsigned long long)slices,
+              (unsigned long long)emu.renderer.gpu_stats.presents, (double)emu.scheduler.ticks / (double)SCHEDULER_TIMER_HZ);
     }
     if (frame_path && dump_every && slices % dump_every == 0) {
       char numbered[1024];
