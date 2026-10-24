@@ -422,6 +422,21 @@ let pollCoalescing = true;
 /** Pinned cores (set-pin-ideal-cores; ?pincores=1): each guest thread
  * only on its ideal core's host core (docs/PARALLEL.md "Pinned cores"). */
 let pinIdealCores = false;
+/** Titles whose guest threads may run on any host core by default (free
+ * placement, docs/PARALLEL.md "Free placement"). None yet: Tears of the
+ * Kingdom gets ~24 frames per virtual second on three cores placed freely
+ * (~11 with affinity enforced) but still crashes ~15 s in on a third of
+ * runs, so it stays serial (?cores=3&placement=free to try it). */
+const FREE_PLACEMENT_TITLES: ReadonlySet<string> = new Set();
+/** ?placement=free|strict (set-free-placement); null = the title's default. */
+let requestedFreePlacement: boolean | null = null;
+
+function applyPlacement(target: SwitchCoreExports): void {
+  const free = requestedFreePlacement ?? (loadedTitleId !== null && FREE_PLACEMENT_TITLES.has(loadedTitleId));
+  target._emulator_set_free_placement_ffi(free ? 1 : 0);
+  if (free) log("info", "free thread placement: any host core runs any guest thread");
+}
+
 /** Free-running guest cores (set-free-running; ?free=N): from slice N on,
  * one run_for call per burst instead of a loop of slices. 0 = off; on from
  * the start by default (docs/PARALLEL.md). */
@@ -1114,6 +1129,7 @@ function loadGame(file: File): CPUToMainMessage {
   if (renderWorkers > 0) log("info", `renderer workers: ${loadingCore._emulator_set_render_workers_ffi(renderWorkers)}`);
   loadingCore._emulator_set_poll_coalescing_ffi(pollCoalescing ? 1 : 0);
   loadingCore._emulator_set_pin_ideal_cores_ffi(pinIdealCores ? 1 : 0);
+  applyPlacement(loadingCore);
   freeRunning = false;
   loadingCore._emulator_set_free_running_ffi(0);
   loadingCore._emulator_set_pacing_ffi(pacing ? 1 : 0);
@@ -1130,6 +1146,7 @@ function loadGame(file: File): CPUToMainMessage {
   loadedTitleId = formatTitleId(core._emulator_program_id_ffi());
   if (requestedHostCores === null) applyHostCores(core); /* the default may depend on the title */
   if (requestedCpuPercent === null) applyCpuSpeed(core);
+  if (requestedFreePlacement === null) applyPlacement(core);
   return {
     type: "game-loaded",
     titleId: loadedTitleId,
@@ -1339,6 +1356,12 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   if (msg.type === "set-free-running") {
     freeFromSlice = msg.fromSlice;
     log("info", freeFromSlice > 0 ? `free-running guest cores from slice ${freeFromSlice}` : "free-running guest cores off");
+    return;
+  }
+
+  if (msg.type === "set-free-placement") {
+    requestedFreePlacement = msg.on;
+    if (core) applyPlacement(core);
     return;
   }
 

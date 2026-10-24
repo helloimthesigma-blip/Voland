@@ -25,6 +25,8 @@
  *                                    (docs/PARALLEL.md; 0 = serial, the default)
  *       --pin-ideal-cores            with host cores: each thread only on its ideal core's
  *                                    host core (docs/PARALLEL.md "Pinned cores")
+ *       --free-placement             with host cores: any host core runs any thread
+ *                                    (affinity not enforced; docs/PARALLEL.md "Free placement")
  *       --dump-frames-every N        with --dump-frame: also write FILE.<slice>.ppm
  *       --gpu-stream FILE            run the WebGPU renderer's producer (GPU mode) and record
  *                                    its stream to FILE (u32 type, u32 bytes, payload per
@@ -1298,7 +1300,7 @@ static int run(int argc, char **argv) {
   uint64_t free_from = 0, measure_from = 0, measure_seconds = 0;
   bool gpu_async = false, no_gpu_compute = false;
   static uint64_t measure_cycles[SCHEDULER_MAX_THREADS];
-  bool poll_coalescing = true, pin_ideal_cores = false;
+  bool poll_coalescing = true, pin_ideal_cores = false, free_placement = false;
   const char *mods_dir = NULL;
   bool test_card = false, svc_stats = false, swkbd_cancel = false, jit_fallbacks = false;
   uint64_t jit_fallbacks_from = 0;
@@ -1391,6 +1393,8 @@ static int run(int argc, char **argv) {
       poll_coalescing = false;
     } else if (!strcmp(argv[i], "--pin-ideal-cores")) {
       pin_ideal_cores = true;
+    } else if (!strcmp(argv[i], "--free-placement")) {
+      free_placement = true;
     } else if (!strcmp(argv[i], "--host-cores") && has_value) {
       host_cores = (uint32_t)strtoul(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--savestate-check") && has_value) {
@@ -1472,6 +1476,7 @@ static int run(int argc, char **argv) {
   }
   emulator_set_poll_coalescing(&emu, poll_coalescing);
   emulator_set_pin_ideal_cores(&emu, pin_ideal_cores);
+  emulator_set_free_placement(&emu, free_placement);
   if (cpu_percent) emulator_set_cpu_percent(&emu, cpu_percent);
   if (host_cores) {
     const uint32_t cores = emulator_set_host_cores(&emu, host_cores);

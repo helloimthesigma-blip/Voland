@@ -335,6 +335,54 @@ What it changes, measured 2026-10-22 (small samples):
 
 It stays off by default, a tool for chasing the open multicore bug.
 
+## Free placement (opt-in)
+
+`emulator_set_free_placement` (web `?placement=free`, CLI
+`--free-placement`; `FREE_PLACEMENT_TITLES` in `cpu.worker.ts` for a
+per-title default, empty for now) lets any host core run any thread. Affinity
+is still reported: GetCurrentProcessorNumber answers the guest core that
+the thread's mask and the host core it runs on give, as without it. But
+it is not enforced, so threads pinned to one guest core may run at once.
+That is not the Switch's rule. It is for titles that pile their threads
+onto one guest core, which a host core cannot carry at the Switch's
+speed.
+
+Tears of the Kingdom, native interpreter, three cores, 300k slices
+(2026-10-24):
+
+| Placement | Presents in 300k slices (survivors) | Runs crashing ~13-16 s in |
+|---|---|---|
+| Serial | ~60 | 0 of 6 (also clean through 1.2M slices / 787 presents) |
+| Affinity enforced (default) | ~410 | ~9 of 12 |
+| Free | ~2930 (~24 per virtual second) | 3 of 9 |
+
+## Diagnostics for the open multicore crash
+
+- `VOLAND_SOLO_THREADS=0x18802c,...` (thread handles, stable from run to
+  run) or `=all`: those threads run alone - nothing else is picked while
+  one runs, and one is picked only when no core is busy.
+- `VOLAND_BUDGET_JITTER=SEED`: each slice's budget scaled by a
+  deterministic pseudo-random 1/2..3/2, for other interleavings in serial
+  mode.
+
+What they showed for Tears of the Kingdom (2026-10-24; crashes in its
+resource loader - a zstd-style decoder reading a corrupt context, a
+`BinaryFileHeader` that claims "relocated" over raw offsets - or a
+game-initiated ExitProcess):
+
+- `all` (multicore scheduling, no two threads at once) still crashes,
+  later (196k-271k slices), with serial exclusive semantics as well. Serial
+  with jitter never did. So the crash needs the multicore scheduler's
+  *order* - a lower-priority thread on one core running while a
+  higher-priority thread of another core waits, which serial never does -
+  not two threads touching memory at once.
+- Solo for the thread doing Map/UnmapPhysicalMemory (" Memory"): the early
+  crashes went away (2 of 6 crashed, both late). Never reusing released
+  physical pages: no change.
+- Floating guest cores (any host core, one thread per guest core at a
+  time): 3 of 3 crashed early, so the static guest-to-host mapping is not
+  the cause either.
+
 ## Memory model
 
 `cpu_set_multicore(true)` is set when two or more cores are on. With one

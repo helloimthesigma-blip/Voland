@@ -365,6 +365,13 @@ async function boot(): Promise<BootResult | null> {
         if (new URLSearchParams(location.search).get("pincores") === "1") {
           cpuWorker.postMessage({ type: "set-pin-ideal-cores", on: true } satisfies MainToCPUMessage);
         }
+        /* ?placement=free|strict: guest threads on any host core, or only
+         * where their affinity allows (docs/PARALLEL.md "Free placement");
+         * default by title. */
+        const placement = new URLSearchParams(location.search).get("placement");
+        if (placement === "free" || placement === "strict") {
+          cpuWorker.postMessage({ type: "set-free-placement", on: placement === "free" } satisfies MainToCPUMessage);
+        }
         /* ?polls=0: the plain scheduler (no poll coalescing), for A/B runs. */
         if (new URLSearchParams(location.search).get("polls") === "0") {
           cpuWorker.postMessage({ type: "set-poll-coalescing", on: false } satisfies MainToCPUMessage);

@@ -160,6 +160,7 @@ typedef struct Emulator
   bool no_poll_coalescing; /* emulator_set_poll_coalescing(false); survives reloads */
   bool free_running;   /* emulator_set_free_running; with host cores only */
   bool pin_ideal_cores; /* emulator_set_pin_ideal_cores; survives reloads */
+  bool free_placement;  /* emulator_set_free_placement; survives reloads */
   uint32_t cpu_percent; /* emulator_set_cpu_percent (0 = default); survives reloads */
   /* Wall-clock pacing (emulator_set_pacing): virtual time never falls
    * behind wall time since the origin. */
@@ -273,6 +274,11 @@ void emulator_set_poll_coalescing(Emulator *emulator, bool on);
 /* Pinned cores (docs/PARALLEL.md "Pinned cores"): with host cores, every
  * thread runs only on its ideal core's host core. Off by default. */
 void emulator_set_pin_ideal_cores(Emulator *emulator, bool on);
+
+/* Free placement (Scheduler.free_placement, docs/PARALLEL.md "Free
+ * placement"): with host cores, any host core runs any guest thread;
+ * affinity is reported but not enforced. Off by default. */
+void emulator_set_free_placement(Emulator *emulator, bool on);
 
 /* The virtual CPU clock in percent of the Switch's (scheduler_set_cpu_percent):
  * more guest work per virtual second where the host keeps up. */

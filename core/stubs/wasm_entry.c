@@ -80,6 +80,7 @@ EXPORT void emulator_set_gpu_compute_ffi(uint32_t on);
 EXPORT void emulator_set_poll_coalescing_ffi(uint32_t on);
 EXPORT void emulator_set_free_running_ffi(uint32_t on);
 EXPORT void emulator_set_pin_ideal_cores_ffi(uint32_t on);
+EXPORT void emulator_set_free_placement_ffi(uint32_t on);
 EXPORT void emulator_set_pacing_ffi(uint32_t on);
 EXPORT void emulator_pacing_resync_ffi(void);
 EXPORT int emulator_run_for_ffi(uint32_t host_ms, uint64_t cycle_budget);
@@ -590,6 +591,12 @@ EXPORT int emulator_run_for_ffi(uint32_t host_ms, uint64_t cycle_budget)
 EXPORT void emulator_set_pin_ideal_cores_ffi(uint32_t on)
 {
   if (g_initialised) emulator_set_pin_ideal_cores(&g_emulator, on != 0);
+}
+
+/* Free placement (emulator_set_free_placement; off by default). */
+EXPORT void emulator_set_free_placement_ffi(uint32_t on)
+{
+  if (g_initialised) emulator_set_free_placement(&g_emulator, on != 0);
 }
 
 /* Poll coalescing (emulator_set_poll_coalescing; on by default). */

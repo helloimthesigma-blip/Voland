@@ -63,6 +63,7 @@ export interface SwitchCoreExports {
   readonly _emulator_set_gpu_compute_ffi:  (on: number) => void;
   readonly _emulator_set_poll_coalescing_ffi: (on: number) => void;
   readonly _emulator_set_pin_ideal_cores_ffi: (on: number) => void;
+  readonly _emulator_set_free_placement_ffi: (on: number) => void;
   /* Mods (§19, wasm_entry.c): files are listed before a load and read
    * back through the `volandReadModFile` hook. add returns 1 if used. */
   readonly _emulator_mods_clear_ffi: () => void;

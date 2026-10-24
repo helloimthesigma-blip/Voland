@@ -88,6 +88,7 @@ export type MainToCPUMessage =
   /* Poll coalescing (docs/PARALLEL.md "Polling threads"); on by default. */
   | { readonly type: "set-poll-coalescing"; readonly on: boolean }
   | { readonly type: "set-pin-ideal-cores"; readonly on: boolean }
+  | { readonly type: "set-free-placement"; readonly on: boolean }
   /* Mods (§19): toggle one of the running game's cheats (index into the
    * last "cheats" list). */
   | { readonly type: "set-cheat"; readonly index: number; readonly enabled: boolean }

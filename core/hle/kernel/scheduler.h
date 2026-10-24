@@ -127,6 +127,13 @@ typedef struct Scheduler {
    * never run at once (emulator_set_pin_ideal_cores; docs/PARALLEL.md
    * "Pinned cores"). Fewer threads run in parallel. */
   bool pin_ideal;
+  /* Free placement: any host core runs any thread, affinity aside (it is
+   * reported - GetCurrentProcessorNumber answers as without it - but not
+   * enforced), so threads pinned to one guest core may run at once. Not
+   * the Switch's rule; for titles that pile their threads onto one guest
+   * core, which a host core cannot carry at full speed
+   * (emulator_set_free_placement; docs/PARALLEL.md "Free placement"). */
+  bool free_placement;
   bool process_exited;
   bool process_crashed;     /* svcBreak or an unhandled fault */
   uint64_t crash_pc;

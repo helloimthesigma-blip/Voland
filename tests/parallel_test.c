@@ -301,6 +301,13 @@ static void test_pinned_cores(void) {
   sched.pin_ideal = false;
   t.core_mask = 0x7;
   CHECK(scheduler_runs_on(&sched, &t, 0) && scheduler_runs_on(&sched, &t, 2));
+  /* Free placement: every host core, whatever the mask. */
+  t.core_mask = 0x2;
+  CHECK(!scheduler_runs_on(&sched, &t, 0) && scheduler_runs_on(&sched, &t, 1));
+  sched.free_placement = true;
+  CHECK(scheduler_runs_on(&sched, &t, 0) && scheduler_runs_on(&sched, &t, 1) && scheduler_runs_on(&sched, &t, 2));
+  sched.free_placement = false;
+  t.core_mask = 0x7;
   for (uint32_t cores = 2; cores <= 3; cores++)
   for (size_t p = 0; p < PROGRAM_COUNT; p++)
   for (uint32_t free_running = 0; free_running <= 1; free_running++) {

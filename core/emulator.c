@@ -26,6 +26,7 @@
 #include "hle/kernel/thread.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -593,6 +594,7 @@ static Error use_backend(Emulator* emulator, const CPU_Backend* backend) {
   emulator->scheduler.parallel = emulator->parallel;
   emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
   emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;
+  emulator->scheduler.free_placement = emulator->free_placement;
   if (emulator->cpu_percent) scheduler_set_cpu_percent(&emulator->scheduler, emulator->cpu_percent);
   if (cores && backend->supports_multicore) (void)emulator_set_host_cores(emulator, cores);
   log_info("[emulator] CPU backend for this program: %s", backend->name);
@@ -624,6 +626,7 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
   emulator->scheduler.parallel = emulator->parallel;
   emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
   emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;
+  emulator->scheduler.free_placement = emulator->free_placement;
   if (emulator->cpu_percent) scheduler_set_cpu_percent(&emulator->scheduler, emulator->cpu_percent);
   Sched_Thread *main_thread = scheduler_new_thread(&emulator->scheduler);
   SWITCH_ASSERT_ALWAYS(main_thread != NULL, "empty scheduler has a slot");
@@ -820,6 +823,7 @@ void emulator_unload_program(Emulator* emulator) {
   emulator->scheduler.parallel = emulator->parallel;
   emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
   emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;
+  emulator->scheduler.free_placement = emulator->free_placement;
   /* Transfer memory still lent at exit: the heap gets its pages back
    * read-write, so teardown can release them. */
   for (uint32_t i = 0; i < TRANSFER_MEMORY_POOL_CAPACITY; i++) {
@@ -948,9 +952,28 @@ static void wait_for_gpu(Emulator* emulator) {
   }
 }
 
+/* Diagnostics: VOLAND_BUDGET_JITTER=SEED scales each slice's budget by a
+ * pseudo-random 1/2..3/2 (deterministic per seed) - other interleavings
+ * of the guest threads in serial mode. */
+static uint64_t jitter_budget(uint64_t budget) {
+  static int parsed;
+  static uint64_t state;
+  if (!parsed) {
+    parsed = 1;
+    const char *seed = getenv("VOLAND_BUDGET_JITTER");
+    state = seed ? strtoull(seed, NULL, 0) * 0x9E3779B97F4A7C15ull | 1u : 0;
+  }
+  if (!state) return budget;
+  state ^= state << 13;
+  state ^= state >> 7;
+  state ^= state << 17;
+  return budget / 2u + state % (budget + 1u);
+}
+
 Emulator_Status emulator_run_slice(Emulator* emulator, uint64_t cycle_budget) {
   SWITCH_ASSERT_ALWAYS(emulator != NULL, "emulator_run_slice: emulator is NULL");
   if (!emulator->program_loaded) return EMULATOR_NOT_LOADED;
+  cycle_budget = jitter_budget(cycle_budget);
   CPU_ExitReason reason = CPU_EXIT_CYCLES_ELAPSED;
   pace(emulator);
   update_devices(emulator);
@@ -1017,6 +1040,12 @@ void emulator_set_pin_ideal_cores(Emulator* emulator, bool on) {
   if (!emulator) return;
   emulator->pin_ideal_cores = on;
   emulator->scheduler.pin_ideal = on;
+}
+
+void emulator_set_free_placement(Emulator* emulator, bool on) {
+  if (!emulator) return;
+  emulator->free_placement = on;
+  emulator->scheduler.free_placement = on;
 }
 
 void emulator_set_cpu_percent(Emulator* emulator, uint32_t percent) {
@@ -1642,6 +1671,8 @@ Error emulator_savestate_finish_restore(Emulator* emulator, bool applied) {
   emulator->scheduler.poll_coalescing = !before->no_poll_coalescing;
   emulator->pin_ideal_cores = before->pin_ideal_cores;
   emulator->scheduler.pin_ideal = before->pin_ideal_cores;
+  emulator->free_placement = before->free_placement;
+  emulator->scheduler.free_placement = before->free_placement;
   emulator->frame_skip = before->frame_skip;
   emulator->pacing = before->pacing;
   emulator->pacing_origin_ns = 0; /* re-anchored at the next slice */

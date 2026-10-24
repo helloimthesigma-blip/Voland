@@ -7,6 +7,7 @@
 #include "hle/hle.h"
 #include "hle/kernel/parallel.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 #define NS_PER_SECOND 1000000000ull
@@ -225,7 +226,7 @@ static uint64_t guest_cores_of(const Sched_Thread *t) {
 }
 
 bool scheduler_runs_on(const Scheduler *sched, const Sched_Thread *t, uint32_t core) {
-  if (sched->host_cores <= 1u) return true;
+  if (sched->host_cores <= 1u || sched->free_placement) return true;
   const uint64_t mask = guest_cores_of(t);
   if (sched->pin_ideal && t->thread.preferred_core < THREAD_CORE_COUNT && ((mask >> t->thread.preferred_core) & 1u))
     return t->thread.preferred_core % sched->host_cores == core;
@@ -244,11 +245,52 @@ uint32_t scheduler_guest_core(const Scheduler *sched, const Sched_Thread *t) {
   return t->thread.preferred_core;
 }
 
+/* Diagnostics: VOLAND_SOLO_THREADS="0x18802c,..." (thread handles) or "all" - with
+ * several cores, those threads run alone: nothing else is picked while
+ * one runs, and one is picked only when no core is busy. Bisects which
+ * threads race. */
+#define SOLO_MAX 16u
+static uint32_t g_solo[SOLO_MAX], g_solo_count;
+static bool g_solo_all;
+static uint32_t solo_count(void) {
+  static int parsed;
+  if (!parsed) {
+    parsed = 1;
+    const char *spec = getenv("VOLAND_SOLO_THREADS");
+    if (spec && strcmp(spec, "all") == 0) {
+      g_solo_all = true;
+      return g_solo_count = 1u;
+    }
+    while (spec && *spec && g_solo_count < SOLO_MAX) {
+      char *end = NULL;
+      g_solo[g_solo_count++] = (uint32_t)strtoul(spec, &end, 0);
+      spec = end && *end == ',' ? end + 1 : NULL;
+    }
+  }
+  return g_solo_count;
+}
+static bool solo(const Sched_Thread *t) {
+  if (g_solo_all) return true;
+  for (uint32_t i = 0; i < g_solo_count; i++)
+    if (g_solo[i] == t->handle) return true;
+  return false;
+}
+
 static int32_t pick(Scheduler *sched, bool affine, uint32_t core) {
   int32_t best = -1;
+  bool busy = false;
+  if (sched->host_cores > 1u && solo_count()) {
+    for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+      const Sched_Thread *t = &sched->threads[i];
+      if (!t->on_core) continue;
+      if (solo(t)) return -1;
+      busy = true;
+    }
+  }
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     const Sched_Thread *t = &sched->threads[i];
     if (t->state != THREAD_STATE_RUNNABLE || t->paused || t->on_core) continue;
+    if (busy && solo(t)) continue;
     if (affine && !scheduler_runs_on(sched, t, core)) continue;
     if (best < 0 || better(t, &sched->threads[best], affine, core)) best = (int32_t)i;
   }
