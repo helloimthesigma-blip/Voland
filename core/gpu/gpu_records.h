@@ -32,6 +32,9 @@ enum {
   GPU_REC_BUFFER_DESTROY,     /* u32 id */
   GPU_REC_BUFFER_WRITE,       /* u32 id, u32 offset, u32 bytes, then the bytes (multiples of 4) */
   GPU_REC_COMPUTE,            /* Gpu_Rec_Compute + bindings */
+  /* Version 8: one mip level of a texture, as it is (compressed formats:
+   * rows of blocks; the consumer builds no mips for these). */
+  GPU_REC_TEXTURE_WRITE_LEVEL, /* Gpu_Rec_Texture_Write_Level + rows */
 };
 
 /* Texture formats (the WebGPU format each maps to, in gpu-records.ts). */
@@ -64,8 +67,33 @@ enum {
   GPU_FMT_RGBA16_SINT,
   GPU_FMT_RGBA32_SINT,
   GPU_FMT_R32_SINT,
+  /* Version 8: block-compressed formats, uploaded as they are where the
+   * device supports them (texture-compression-bc / -astc). */
+  GPU_FMT_BC1_UNORM,
+  GPU_FMT_BC1_SRGB,
+  GPU_FMT_BC2_UNORM,
+  GPU_FMT_BC2_SRGB,
+  GPU_FMT_BC3_UNORM,
+  GPU_FMT_BC3_SRGB,
+  GPU_FMT_BC4_UNORM,
+  GPU_FMT_BC4_SNORM,
+  GPU_FMT_BC5_UNORM,
+  GPU_FMT_BC5_SNORM,
+  GPU_FMT_BC6H_UFLOAT,
+  GPU_FMT_BC6H_FLOAT,
+  GPU_FMT_BC7_UNORM,
+  GPU_FMT_BC7_SRGB,
+  /* ASTC footprints in WebGPU's order (4x4, 5x4, 5x5, 6x5, 6x6, 8x5, 8x6,
+   * 8x8, 10x5, 10x6, 10x8, 10x10, 12x10, 12x12), each UNORM then sRGB. */
+  GPU_FMT_ASTC_FIRST,
+  GPU_FMT_ASTC_LAST = GPU_FMT_ASTC_FIRST + 27,
   GPU_FMT_COUNT,
 };
+#define GPU_ASTC_FOOTPRINTS 14u
+
+/* Device support for the compressed formats (raster3d_set_gpu_compression). */
+#define GPU_COMPRESSION_BC 1u
+#define GPU_COMPRESSION_ASTC 2u
 
 #define GPU_USAGE_SAMPLED 1u
 #define GPU_USAGE_RENDER 2u /* render attachment (also copy source / destination) */
@@ -80,6 +108,13 @@ typedef struct Gpu_Rec_Texture_Create {
 typedef struct Gpu_Rec_Texture_Write {
   uint32_t id, x, y, width, height, layer, bytes_per_row, data_bytes; /* then data_bytes of rows */
 } Gpu_Rec_Texture_Write;
+
+/* Texels [y, y + height) of level `level` (whole rows; width and height
+ * in texels, rounded up to whole blocks; y a multiple of the block
+ * height); bytes_per_row is one row of blocks. */
+typedef struct Gpu_Rec_Texture_Write_Level {
+  uint32_t id, level, layer, y, width, height, bytes_per_row, data_bytes; /* then data_bytes of rows */
+} Gpu_Rec_Texture_Write_Level;
 
 #define GPU_CLEAR_COLOR 1u
 #define GPU_CLEAR_DEPTH 2u

@@ -5,7 +5,7 @@
  */
 
 export const GPU_STREAM_MAGIC = 0x55504756;
-export const GPU_STREAM_VERSION = 7;
+export const GPU_STREAM_VERSION = 8;
 export const GPU_STREAM_HEADER_BYTES = 56;
 export const GPU_STREAM_RECORD_HEADER_BYTES = 8;
 export const OFF_MAGIC = 0;
@@ -32,6 +32,8 @@ export const REC_BUFFER_CREATE = 9;
 export const REC_BUFFER_DESTROY = 10;
 export const REC_BUFFER_WRITE = 11;
 export const REC_COMPUTE = 12;
+/* Version 8: one mip level as it is (block-compressed textures). */
+export const REC_TEXTURE_WRITE_LEVEL = 13;
 
 /* GPU_FMT_* by index. */
 export const FORMATS: readonly (GPUTextureFormat | null)[] = [
@@ -63,7 +65,55 @@ export const FORMATS: readonly (GPUTextureFormat | null)[] = [
   "rgba16sint",
   "rgba32sint",
   "r32sint",
+  /* Version 8: block-compressed, uploaded as they are. */
+  "bc1-rgba-unorm",
+  "bc1-rgba-unorm-srgb",
+  "bc2-rgba-unorm",
+  "bc2-rgba-unorm-srgb",
+  "bc3-rgba-unorm",
+  "bc3-rgba-unorm-srgb",
+  "bc4-r-unorm",
+  "bc4-r-snorm",
+  "bc5-rg-unorm",
+  "bc5-rg-snorm",
+  "bc6h-rgb-ufloat",
+  "bc6h-rgb-float",
+  "bc7-rgba-unorm",
+  "bc7-rgba-unorm-srgb",
+  "astc-4x4-unorm",
+  "astc-4x4-unorm-srgb",
+  "astc-5x4-unorm",
+  "astc-5x4-unorm-srgb",
+  "astc-5x5-unorm",
+  "astc-5x5-unorm-srgb",
+  "astc-6x5-unorm",
+  "astc-6x5-unorm-srgb",
+  "astc-6x6-unorm",
+  "astc-6x6-unorm-srgb",
+  "astc-8x5-unorm",
+  "astc-8x5-unorm-srgb",
+  "astc-8x6-unorm",
+  "astc-8x6-unorm-srgb",
+  "astc-8x8-unorm",
+  "astc-8x8-unorm-srgb",
+  "astc-10x5-unorm",
+  "astc-10x5-unorm-srgb",
+  "astc-10x6-unorm",
+  "astc-10x6-unorm-srgb",
+  "astc-10x8-unorm",
+  "astc-10x8-unorm-srgb",
+  "astc-10x10-unorm",
+  "astc-10x10-unorm-srgb",
+  "astc-12x10-unorm",
+  "astc-12x10-unorm-srgb",
+  "astc-12x12-unorm",
+  "astc-12x12-unorm-srgb",
 ];
+
+/** Block-compressed formats (uploaded by level, never rendered to). */
+export function isCompressedFormat(f: GPUTextureFormat): boolean {
+  return f.startsWith("bc") || f.startsWith("astc");
+}
 
 export const BLEND_FACTORS: readonly GPUBlendFactor[] = [
   "zero", "one", "src", "one-minus-src", "src-alpha", "one-minus-src-alpha", "dst", "one-minus-dst", "dst-alpha",
@@ -244,6 +294,26 @@ export function parseTextureCreate(v: DataView): TextureCreate {
   return {
     id: u32(v, 0), format: u32(v, 4), width: u32(v, 8), height: u32(v, 12), layers: u32(v, 16), usage: u32(v, 20),
     levels: v.byteLength >= 28 ? Math.max(1, u32(v, 24)) : 1,
+  };
+}
+
+export interface TextureWriteLevel {
+  readonly id: number;
+  readonly level: number;
+  readonly layer: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+  readonly bytesPerRow: number;
+  readonly dataBytes: number;
+}
+
+export const TEXTURE_WRITE_LEVEL_BYTES = 32;
+
+export function parseTextureWriteLevel(v: DataView): TextureWriteLevel {
+  return {
+    id: u32(v, 0), level: u32(v, 4), layer: u32(v, 8), y: u32(v, 12), width: u32(v, 16), height: u32(v, 20),
+    bytesPerRow: u32(v, 24), dataBytes: u32(v, 28),
   };
 }
 

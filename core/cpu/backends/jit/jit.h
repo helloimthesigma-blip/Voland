@@ -73,6 +73,11 @@ void jit_print_fallback_profile(uint32_t top);
 void jit_set_hot_profile(bool enabled);
 void jit_print_hot_regions(uint32_t top);
 
+/* Diagnostics: run every thread on the interpreter from now on (a JIT run
+ * reaches a scene fast; this checks the JIT there - voland-cli's snapshot
+ * job line "interpret"). */
+void jit_set_interpret_only(bool enabled);
+
 /* Diagnostics: write every compiled module to DIR/<pc>.wasm (NULL: off). */
 void jit_set_dump_directory(const char *directory);
 

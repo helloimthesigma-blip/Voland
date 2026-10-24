@@ -1,4 +1,4 @@
-# GPU command stream (version 7)
+# GPU command stream (version 8)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -74,6 +74,7 @@ means none.
 | 12 | COMPUTE | `Gpu_Rec_Compute` (shader id, grid x/y/z, binding count), then its bindings |
 | 7 | COPY | source id, destination id, source rect, destination rect, filter, destination layer (version 7) |
 | 8 | PRESENT | id, rect, flags (1 flip x, 2 flip y) |
+| 13 | TEXTURE_WRITE_LEVEL | id, mip level, layer, y, width, height (texels, whole blocks), bytes per block row, data bytes; then the block rows (version 8) |
 
 ### DRAW
 
@@ -183,6 +184,22 @@ The CPU's work per vertex goes away: no attribute fetch, no format
 decoding and no per-record vertex map. In an SSBU fight, `fetch_attribute`
 and its vertex window refills were about a third of the CPU worker before.
 `voland-cli --no-vertex-pull` keeps the version-4 form.
+
+### Compressed textures as they are (version 8)
+
+Where the GPU worker's device samples block-compressed formats
+(`texture-compression-bc`, `texture-compression-astc`; the worker reports
+them, the CPU worker passes them to the core with
+`emulator_set_gpu_compression_ffi`), raster3d uploads BCn and LDR ASTC
+textures undecoded: TEXTURE_CREATE names one of the `GPU_FMT_BC*` /
+`GPU_FMT_ASTC_*` formats (appended after `GPU_FMT_R32_SINT`, in
+gpu-records.ts' order), and every mip level of every layer arrives as
+TEXTURE_WRITE_LEVEL records of deswizzled block rows. The consumer builds
+no mips for these (it cannot render to them). Only 2D, 2D-array and cube
+images whose size is whole blocks qualify (WebGPU's rule); anything else,
+and every texture the CPU itself samples, is still decoded. `?compressed=0`
+turns it off. Version 7 consumers ignore record 13 and never see the new
+formats unless a device reported them.
 
 ### Slices into layers (version 7)
 

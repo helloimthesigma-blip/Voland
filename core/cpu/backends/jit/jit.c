@@ -930,10 +930,15 @@ stale:
 /* Backend vtable.                                                     */
 /* ------------------------------------------------------------------ */
 
+static bool g_interpret_only;
+void jit_set_interpret_only(bool enabled) { g_interpret_only = enabled; }
+
 static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
   Jit_State *j = (Jit_State *)state;
   Interp_State *s = &j->interp;
   SWITCH_ASSERT_ALWAYS(s->l1 != NULL, "jit run() without a vmm");
+  if (g_interpret_only) /* diagnostics: the reference for a scene reached with the JIT */
+    return j->isa == JIT_ISA_A32 ? CPU_BACKEND_A32.run(state, cycle_budget) : CPU_BACKEND_INTERPRETER.run(state, cycle_budget);
   /* Multicore (docs/PARALLEL.md): each host thread compiles into and runs
    * from its own cache (Jit_Thread), and code compiled while
    * cpu_multicore() is set makes store-exclusives a compare-and-swap and

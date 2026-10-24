@@ -336,6 +336,14 @@ async function boot(): Promise<BootResult | null> {
         const software = new URLSearchParams(location.search).get("renderer") === "software";
         if (msg.streamRenderer && !software) {
           cpuWorker.postMessage({ type: "set-gpu-mode", on: true } satisfies MainToCPUMessage);
+          /* ?compressed=0: decode BCn / ASTC on the CPU even where the GPU samples them. */
+          const compressed = new URLSearchParams(location.search).get("compressed") !== "0";
+          cpuWorker.postMessage({ type: "set-gpu-compression", mask: compressed ? msg.textureCompression : 0 } satisfies
+            MainToCPUMessage);
+          if (compressed && msg.textureCompression) {
+            appendLogLine("info", `textures upload compressed (${msg.textureCompression & 1 ? "BCn " : ""}${
+              msg.textureCompression & 2 ? "ASTC" : ""})`);
+          }
         }
         /* ?cores=N: host threads for guest threads (0 = serial). */
         const cores = new URLSearchParams(location.search).get("cores");

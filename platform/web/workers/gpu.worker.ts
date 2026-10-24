@@ -67,7 +67,11 @@ const POLL_MS = 4;
 const STREAM_IDLE_POLL_MS = 50;
 const OPTIONAL_FEATURES: readonly GPUFeatureName[] = [
   "rg11b10ufloat-renderable", "depth32float-stencil8", "float32-filterable", "float32-blendable",
+  "texture-compression-bc", "texture-compression-astc",
 ];
+/* GPU_COMPRESSION_* (core/gpu/gpu_records.h). */
+const COMPRESSION_BC = 1;
+const COMPRESSION_ASTC = 2;
 
 type WaitAsync = (a: Int32Array, i: number, v: number) => { async: boolean; value: Promise<string> | string };
 const waitAsync = (Atomics as unknown as { waitAsync?: WaitAsync }).waitAsync;
@@ -284,6 +288,8 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
     type: "ready",
     adapterName: ((adapter as unknown as { info?: { vendor?: string } }).info?.vendor) ?? null,
     streamRenderer: true,
+    textureCompression: (device.features.has("texture-compression-bc") ? COMPRESSION_BC : 0) |
+      (device.features.has("texture-compression-astc") ? COMPRESSION_ASTC : 0),
   };
   self.postMessage(ready);
 

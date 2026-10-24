@@ -361,6 +361,8 @@ let paused = false;
 let frameSkip = 0;
 /** The renderer the main thread chose (set-gpu-mode); applied to every core load. */
 let gpuMode = false;
+/** Block-compressed formats the GPU samples (set-gpu-compression). */
+let gpuCompression = 0;
 /** Host threads running guest threads (docs/PARALLEL.md): the Switch's
  * three application cores where the machine has room for them besides the
  * page and the CPU and GPU workers (Silksong gameplay: 1.94x parallelism
@@ -1072,6 +1074,7 @@ function loadGame(file: File): CPUToMainMessage {
   loadingCore._emulator_set_rtc_ffi(BigInt(Math.floor(Date.now() / 1000)));
   loadingCore._emulator_set_frame_skip_ffi(frameSkip);
   loadingCore._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
+  loadingCore._emulator_set_gpu_compression_ffi(gpuCompression);
   applyGpuAsync(loadingCore);
   loadingCore._emulator_set_gpu_compute_ffi(gpuCompute ? 1 : 0);
   applyHostCores(loadingCore);
@@ -1264,6 +1267,12 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
       withCString(msg.text, (pointer) => sdCore._emulator_text_respond_ffi(pointer, msg.accepted ? 1 : 0));
     }
     textRequestShown = false;
+    return;
+  }
+
+  if (msg.type === "set-gpu-compression") {
+    gpuCompression = msg.mask;
+    core?._emulator_set_gpu_compression_ffi(gpuCompression);
     return;
   }
 

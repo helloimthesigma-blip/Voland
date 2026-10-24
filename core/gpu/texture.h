@@ -124,6 +124,25 @@ uint64_t tex_layer_stride(const Tex_Header *header);
 /* Guest-memory size the decoder must read (all layers' level 0). */
 uint64_t tex_read_bytes(const Tex_Header *header);
 
+/* Layers (array layers, cube faces) the header's image has. */
+uint32_t tex_layer_count(const Tex_Header *header);
+
+/* Where one mip level of one layer sits in guest memory, in elements
+ * (blocks for compressed formats): `offset` from the layer's start
+ * (tex_layer_stride apart), `cols` x `rows` elements of `element_bytes`,
+ * block-linear with `block_height_log2` (the level's own, shrunk for
+ * small levels) or pitch-linear rows `pitch` apart. False for an
+ * unsupported format, a level past the chain, or 3D block-linear. */
+typedef struct Tex_Level_Layout {
+  uint64_t offset;
+  uint32_t width, height; /* texels */
+  uint32_t cols, rows, element_bytes;
+  bool block_linear;
+  uint32_t block_height_log2;
+  uint32_t pitch;
+} Tex_Level_Layout;
+bool tex_level_layout(const Tex_Header *header, uint32_t level, Tex_Level_Layout *out);
+
 /* Decodes `raw` (tex_read_bytes of guest memory at header->address) into
  * `dst` (tex_decoded_bytes long). */
 uint64_t tex_decoded_bytes(const Tex_Header *header);

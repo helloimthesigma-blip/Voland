@@ -65,13 +65,16 @@ import {
   REC_TEXTURE_CREATE,
   REC_TEXTURE_DESTROY,
   REC_TEXTURE_WRITE,
+  REC_TEXTURE_WRITE_LEVEL,
   SAMPLER_LINEAR,
   SAMPLER_MIN_LINEAR,
   SAMPLER_MIP_LINEAR,
   SAMPLER_WRAPS,
   STENCIL_OPS,
   TEXTURE_WRITE_BYTES,
+  TEXTURE_WRITE_LEVEL_BYTES,
   USAGE_RENDER,
+  isCompressedFormat,
   VERTEX_HEADER_BYTES,
   parseClear,
   parseCopy,
@@ -79,6 +82,7 @@ import {
   parsePresent,
   parseTextureCreate,
   parseTextureWrite,
+  parseTextureWriteLevel,
 } from "@bindings/gpu-records";
 
 const VERTEX_BUFFER_BYTES = 16 * 1024 * 1024;
@@ -338,6 +342,7 @@ export class GpuExecutor {
       case REC_TEXTURE_CREATE: this.textureCreate(view); break;
       case REC_TEXTURE_DESTROY: this.textureDestroy(view.getUint32(0, true)); break;
       case REC_TEXTURE_WRITE: this.textureWrite(view, payload); break;
+      case REC_TEXTURE_WRITE_LEVEL: this.textureWriteLevel(view, payload); break;
       case REC_SHADER: this.shader(view, payload); break;
       case REC_CLEAR: this.clear(parseClear(view)); break;
       case REC_DRAW: this.draw(parseDraw(view), view, payload); break;
@@ -454,8 +459,10 @@ export class GpuExecutor {
 
   private makeTex(format: GPUTextureFormat, width: number, height: number, layers: number, render: boolean,
                   fallback: boolean, levels = 1): Tex {
+    /* Mip chains are rendered (buildMips) - except compressed ones, whose
+     * levels arrive as they are. */
     const usage = GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC |
-      (render || levels > 1 ? GPUTextureUsage.RENDER_ATTACHMENT : 0);
+      (render || (levels > 1 && !isCompressedFormat(format)) ? GPUTextureUsage.RENDER_ATTACHMENT : 0);
     const texture = this.device.createTexture({ size: [width, height, layers], format, usage, mipLevelCount: levels });
     const aspect: GPUTextureAspect = hasDepth(format) && hasStencil(format) ? "depth-only" : "all";
     return {
@@ -522,6 +529,11 @@ export class GpuExecutor {
     const full = Math.floor(Math.log2(Math.max(width, height))) + 1;
     const levels = (c.usage & USAGE_RENDER) === 0 && shaderType(format) === "f32" && !isDepthFormat(format)
       ? Math.min(c.levels, full) : 1;
+    if (isCompressedFormat(format) && !this.device.features.has(format.startsWith("bc") ? "texture-compression-bc"
+      : "texture-compression-astc")) {
+      this.warnOnce(`format ${format}`, `GPU texture format ${format} needs a device feature this one lacks`);
+      return;
+    }
     this.textures.set(c.id, this.makeTex(format, width, height, Math.max(1, c.layers), (c.usage & USAGE_RENDER) !== 0,
       fallback, levels));
   }
@@ -671,6 +683,22 @@ export class GpuExecutor {
       { width: w.width, height: w.height, depthOrArrayLayers: 1 },
     );
     if (t.levels > 1) this.mipsStale.add(t.texture);
+  }
+
+  /** One mip level of a block-compressed texture, as it is (no mips are
+   * built from it: every level arrives). */
+  private textureWriteLevel(v: DataView, payload: Uint8Array): void {
+    const w = parseTextureWriteLevel(v);
+    const t = this.textures.get(w.id);
+    if (!t || w.level >= t.levels) return;
+    this.materialize(w.id);
+    if (this.touched.has(t.texture)) this.flush();
+    this.device.queue.writeTexture(
+      { texture: t.texture, mipLevel: w.level, origin: { x: 0, y: w.y, z: w.layer } },
+      payload.subarray(TEXTURE_WRITE_LEVEL_BYTES, TEXTURE_WRITE_LEVEL_BYTES + w.dataBytes),
+      { bytesPerRow: w.bytesPerRow },
+      { width: w.width, height: w.height, depthOrArrayLayers: 1 },
+    );
   }
 
   private shader(v: DataView, payload: Uint8Array): void {

@@ -134,6 +134,7 @@ typedef struct Raster3d_Texture {
   uint32_t last_used;    /* draw serial; the current draw's textures are never evicted */
   Tex_Image image;
   /* GPU mode: the GPU texture holding it (0 = none) and what was uploaded. */
+  bool native;           /* uploaded as it is (block-compressed); image.texels decode on demand */
   uint32_t gpu_id;
   uint64_t gpu_hash;
   uint32_t gpu_width, gpu_height, gpu_layers, gpu_format, gpu_levels;
@@ -259,6 +260,7 @@ typedef struct Raster3d {
   void *on_frame_end_user;
   /* GPU mode (§13 WebGPU renderer): set by raster3d_set_gpu. */
   struct Gpu_Stream *gpu;
+  uint32_t gpu_compression; /* GPU_COMPRESSION_* the device samples (raster3d_set_gpu_compression) */
   uint32_t gpu_next_id;
   Raster3d_Gpu_Surface gpu_surfaces[RASTER_GPU_SURFACES];
   /* gpu_surfaces in use, by address: bucket heads and chains of slot + 1
@@ -353,6 +355,10 @@ void raster3d_flush(Raster3d *r, const struct Gpu_Memory *mem);
  * work, assembly, clipping and culling stay on this side, pixel programs
  * are translated to WGSL (gpu/wgsl.h). NULL returns to software. */
 void raster3d_set_gpu(Raster3d *r, struct Gpu_Stream *stream);
+/* GPU mode: block-compressed formats (GPU_COMPRESSION_* of gpu_records.h)
+ * the GPU samples itself - textures in them upload as they are, every mip
+ * level, instead of being decoded on the CPU. */
+void raster3d_set_gpu_compression(Raster3d *r, uint32_t mask);
 
 /* One vertex attribute decoded from its element's bytes (raw: the bytes
  * at the attribute's offset) under VERTEX_ATTRIB word `attrib`: the four

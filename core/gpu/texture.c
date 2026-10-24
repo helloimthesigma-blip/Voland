@@ -285,6 +285,31 @@ uint64_t tex_read_bytes(const Tex_Header *h) {
   return tex_layer_stride(h) * (layers - 1u) + tex_level0_bytes(h);
 }
 
+uint32_t tex_layer_count(const Tex_Header *h) { return is_bl3d(h) ? 1u : layer_count(h); }
+
+bool tex_level_layout(const Tex_Header *h, uint32_t level, Tex_Level_Layout *out) {
+  const Format_Info *f = format_info(h->format);
+  if (!f || level >= h->levels || is_bl3d(h)) return false;
+  memset(out, 0, sizeof(*out));
+  out->width = max1(h->width >> level);
+  out->height = max1(h->height >> level);
+  out->cols = (out->width + f->bw - 1u) / f->bw;
+  out->rows = (out->height + f->bh - 1u) / f->bh;
+  out->element_bytes = f->bytes;
+  if (h->layout == TEX_LAYOUT_BLOCK_LINEAR) {
+    for (uint32_t k = 0; k < level; k++) out->offset += bl_level_bytes(h, f, k);
+    uint32_t bh = h->block_height_log2;
+    const uint32_t gob_rows = (out->rows + BLOCK_LINEAR_GOB_HEIGHT - 1u) / BLOCK_LINEAR_GOB_HEIGHT;
+    while (bh > 0 && (1u << (bh - 1u)) >= gob_rows) bh--; /* as bl_level_bytes */
+    out->block_linear = true;
+    out->block_height_log2 = bh;
+    return true;
+  }
+  if (h->layout != TEX_LAYOUT_PITCH || level != 0) return false; /* pitch textures have one level */
+  out->pitch = h->pitch;
+  return true;
+}
+
 /* 8-bit UNORM formats sampled through an RGBA8 copy. */
 static bool expands_to_rgba8(const Tex_Header *h) {
   uint32_t comps;

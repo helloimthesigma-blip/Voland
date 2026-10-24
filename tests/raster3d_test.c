@@ -410,6 +410,19 @@ static void texture_state(void) {
   g_bindings.size[0][0] = 0x200;
 }
 
+/* texture_state's binding, its TIC an 8x8 DXT1 (BC1) pitch texture: 2x2
+ * blocks of 8 bytes, rows 32 bytes apart, each block's bytes its index. */
+static void texture_state_bc1(void) {
+  texture_state();
+  uint32_t tic[8];
+  memcpy(tic, g_gpu + (TIC_POOL - GPU_BASE), sizeof(tic));
+  tic[0] = (tic[0] & ~0x7fu) | 0x24u;   /* DXT1 */
+  tic[4] = (8u - 1u) | (1u << 23);       /* width-1, 2D */
+  tic[5] = (8u - 1u) | (1u << 31);       /* height-1, normalized */
+  memcpy(g_gpu + (TIC_POOL - GPU_BASE), tic, sizeof(tic));
+  for (uint32_t b = 0; b < 4u; b++) memset(g_gpu + (TEXELS - GPU_BASE) + (b / 2u) * 32u + (b % 2u) * 8u, (int)(b + 1u), 8);
+}
+
 static void test_texture(Raster3d *r) {
   base_state(RT, false, PS_TEX_OFFSET);
   raster3d_begin_submission(r);
@@ -691,6 +704,10 @@ typedef struct Seen_Draw {
   bool compute_shader;
   uint32_t computes, buffer_creates, buffer_writes;
   uint32_t resident_binding;    /* the last draw's BUFFER binding (its buffer id), 0: none */
+  /* Stream version 8: compressed textures uploaded as they are. */
+  uint32_t last_texture_format, level_writes;
+  Gpu_Rec_Texture_Write_Level first_level_write;
+  uint8_t first_level_bytes[16];
 } Seen_Draw;
 #define SEEN_DATA_BYTES (256u * 1024u)
 static uint8_t g_seen_data[SEEN_DATA_BYTES];
@@ -698,6 +715,17 @@ static uint8_t g_seen_data[SEEN_DATA_BYTES];
 static void stream_drain(Seen_Draw *seen) {
   Gpu_Stream_Record rec;
   while (gpu_stream_read(g_stream_header, &rec)) {
+    if (rec.type == GPU_REC_TEXTURE_CREATE) {
+      Gpu_Rec_Texture_Create c;
+      memcpy(&c, rec.payload, sizeof(c));
+      seen->last_texture_format = c.format;
+    }
+    if (rec.type == GPU_REC_TEXTURE_WRITE_LEVEL && rec.payload_bytes >= sizeof(Gpu_Rec_Texture_Write_Level) + 16u) {
+      if (!seen->level_writes++) {
+        memcpy(&seen->first_level_write, rec.payload, sizeof(seen->first_level_write));
+        memcpy(seen->first_level_bytes, rec.payload + sizeof(Gpu_Rec_Texture_Write_Level), 16u);
+      }
+    }
     if (rec.type == GPU_REC_SHADER && rec.payload_bytes > 8u) {
       const char *text = (const char *)rec.payload + 8u;
       const size_t length = rec.payload_bytes - 8u;
@@ -765,6 +793,7 @@ static Seen_Draw gpu_draw_once(Raster3d *r, uint32_t front_face_reg) {
   return gpu_draw_topology(r, front_face_reg, 4, 3);
 }
 static bool g_gpu_textured; /* gpu_draw_topology: the texturing pixel program */
+static bool g_bc1_texture;  /* ... sampling texture_state_bc1's texture */
 static uint32_t g_ps_override; /* gpu_draw_topology: this pixel program instead (0: none) */
 static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_t topology, uint32_t count) {
   static Gpu_Stream stream;
@@ -774,6 +803,7 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
   raster3d_set_gpu(r, &stream);
   base_state(RT, false, g_ps_override ? g_ps_override : g_gpu_textured ? PS_TEX_OFFSET : PS_OFFSET);
   if (g_gpu_textured) texture_state();
+  if (g_bc1_texture) texture_state_bc1();
   g_regs[REG_CULL_ENABLE_TEST] = 1;
   g_regs[REG_CULL_FACE_TEST] = CULL_BACK_REG;
   g_regs[REG_FRONT_FACE_TEST] = front_face_reg;
@@ -789,6 +819,33 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
   stream_drain(&seen);
   raster3d_set_gpu(r, NULL);
   return seen;
+}
+
+/* GPU mode with BCn sampled by the device: a DXT1 texture is created as
+ * BC1 and its blocks stream as they are (one level, rows of blocks); with
+ * the device lacking BCn it is decoded (an RGBA texture, no level writes). */
+static void test_gpu_compressed_upload(Raster3d *r) {
+  g_gpu_textured = true;
+  g_bc1_texture = true;
+  raster3d_set_gpu_compression(r, GPU_COMPRESSION_BC);
+  Seen_Draw seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.last_texture_format == GPU_FMT_BC1_UNORM, "BCn device: BC1 texture (format %u)", seen.last_texture_format);
+  CHECK(seen.level_writes == 1u, "BCn device: one level write (%u)", seen.level_writes);
+  const Gpu_Rec_Texture_Write_Level *w = &seen.first_level_write;
+  CHECK(w->level == 0 && w->layer == 0 && w->y == 0 && w->width == 8u && w->height == 8u && w->bytes_per_row == 16u &&
+            w->data_bytes == 32u,
+        "level write: level %u layer %u y %u %ux%u, %u bytes a row, %u bytes", w->level, w->layer, w->y, w->width,
+        w->height, w->bytes_per_row, w->data_bytes);
+  CHECK(seen.first_level_bytes[0] == 1u && seen.first_level_bytes[8] == 2u, "blocks as they are (%u %u)",
+        seen.first_level_bytes[0], seen.first_level_bytes[8]);
+  /* The same texture changed, on a device without BCn: decoded. */
+  memset(g_gpu + (TEXELS - GPU_BASE), 9, 8);
+  raster3d_set_gpu_compression(r, 0);
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.level_writes == 0u && seen.last_texture_format != GPU_FMT_BC1_UNORM, "no BCn: decoded (format %u, %u level writes)",
+        seen.last_texture_format, seen.level_writes);
+  g_gpu_textured = false;
+  g_bc1_texture = false;
 }
 
 static void test_gpu_vertex_stage(Raster3d *r) {
@@ -1145,6 +1202,7 @@ int main(void) {
   test_derivatives(&r);
   test_worker_count_invariance(&r);
   test_gpu_vertex_stage(&r);
+  test_gpu_compressed_upload(&r);
   test_compute(&r);
   test_gpu_compute(&r);
   CHECK(r.stats.shader_faults == 0, "no shader faults");

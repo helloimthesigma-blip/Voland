@@ -1180,8 +1180,14 @@ static void texture_index_add(Raster3d *r, uint32_t slot) {
   texture_index_put(r, r->textures[slot].tic, slot);
 }
 
+static uint32_t gpu_native_format(const Raster3d *r, const Tex_Header *h);
+static bool gpu_texture_native(Raster3d *r, Raster3d_Texture *t, const Tex_Header *h, const Gpu_Memory *mem,
+                               uint32_t format);
+
 /* `texels`: the caller samples on the CPU (GPU mode releases decoded
- * copies once uploaded; this decodes again where needed). */
+ * copies once uploaded; this decodes again where needed). GPU mode uploads
+ * block-compressed textures the device samples as they are, undecoded
+ * (gpu_texture_native), unless `texels`. */
 static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const Gpu_Memory *mem, bool texels) {
   Raster3d_Texture *view = surface_view(r, tic);
   if (view) return view;
@@ -1198,7 +1204,9 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     texture_miss(r, &h, "unsupported format");
     return NULL;
   }
-  if (raw_bytes > RASTER_TEXTURE_RAW_BYTES || decoded_aligned > RASTER_TEXTURE_POOL_BYTES) {
+  const uint32_t native = texels ? GPU_FMT_NONE : gpu_native_format(r, &h);
+  if (native ? tex_layer_stride(&h) > RASTER_TEXTURE_RAW_BYTES
+             : raw_bytes > RASTER_TEXTURE_RAW_BYTES || decoded_aligned > RASTER_TEXTURE_POOL_BYTES) {
     texture_miss(r, &h, "larger than the texture cache");
     return NULL;
   }
@@ -1243,6 +1251,31 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     t->sample_hash = sample;
     return t;
   }
+  if (native) {
+    /* Uploaded as it is: no decoded copy, no pool block. */
+    if (!t) {
+      for (uint32_t i = 0; i < RASTER_TEXTURES && !t; i++)
+        if (!r->textures[i].valid) t = &r->textures[i];
+      if (!t) t = texture_victim(r);
+      if (!t) {
+        texture_miss(r, &h, "every cached texture is in use");
+        return NULL;
+      }
+      t->valid = false;
+      t->pool_bytes = 0;
+    }
+    if (!gpu_texture_native(r, t, &h, mem, native)) {
+      t->valid = false;
+      r->stats.texture_misses++;
+      return NULL;
+    }
+    memset(&t->image, 0, sizeof(t->image));
+    t->image.header = h;
+    t->image.format = h.format;
+    t->image.width = h.width;
+    t->image.height = h.height;
+    t->image.layers = tex_layer_count(&h);
+  } else {
   uint8_t *raw = r->texture_raw;
   if (!mem->read(mem->user, h.address, raw, raw_bytes)) {
     texture_miss(r, &h, "unreadable");
@@ -1269,6 +1302,7 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
       return NULL;
     }
     t->valid = false;
+    t->native = false;
     const size_t offset = pool_allocate(r, decoded_aligned);
     if (offset == SIZE_MAX) {
       texture_miss(r, &h, "texture cache full");
@@ -1282,9 +1316,15 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
     r->stats.texture_misses++;
     return NULL;
   }
-  log_debug("[gpu] texture %ux%u fmt 0x%02x types %u%u%u%u swizzle %u%u%u%u layout %u type %u srgb %d @%llx",
+  if (t->native) { /* decoded for the CPU: its GPU copy follows the change too */
+    const uint32_t format = gpu_native_format(r, &h);
+    if (!format || !gpu_texture_native(r, t, &h, mem, format)) t->native = false;
+  }
+  }
+  log_debug("[gpu] texture %ux%u fmt 0x%02x types %u%u%u%u swizzle %u%u%u%u layout %u type %u srgb %d @%llx%s",
             h.width, h.height, h.format, h.data_type[0], h.data_type[1], h.data_type[2], h.data_type[3], h.swizzle[0],
-            h.swizzle[1], h.swizzle[2], h.swizzle[3], h.layout, h.type, h.srgb, (unsigned long long)h.address);
+            h.swizzle[1], h.swizzle[2], h.swizzle[3], h.layout, h.type, h.srgb, (unsigned long long)h.address,
+            native ? " (compressed upload)" : "");
   const bool indexed = t->valid && memcmp(t->tic, tic, sizeof(t->tic)) == 0;
   memcpy(t->tic, tic, sizeof(t->tic));
   t->address = h.address;
@@ -1296,7 +1336,7 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
   t->last_used = r->draw_serial;
   t->valid = true;
   if (!indexed) texture_index_add(r, (uint32_t)(t - r->textures));
-  if (r->on_texture_decoded) r->on_texture_decoded(r->on_texture_user, &t->image, h.address);
+  if (r->on_texture_decoded && t->image.texels) r->on_texture_decoded(r->on_texture_user, &t->image, h.address);
   return t;
 }
 
@@ -2984,6 +3024,13 @@ static void assemble_end(Raster_State *rs, Vertex_Cache *cache, Assembler *as) {
 #define GPU_DATA_WINDOW_WORDS ((2u << 20) / 4u)
 #define GPU_VERTEX_HEADER_BYTES (GPU_VERTEX_HEADER_WORDS * 4u)
 
+void raster3d_set_gpu_compression(Raster3d *r, uint32_t mask) {
+  if (r->gpu_compression != mask)
+    log_info("[gpu] compressed textures upload as they are: %s%s", (mask & GPU_COMPRESSION_BC) ? "BCn " : "",
+             (mask & GPU_COMPRESSION_ASTC) ? "ASTC" : mask ? "" : "none");
+  r->gpu_compression = mask;
+}
+
 void raster3d_set_gpu(Raster3d *r, Gpu_Stream *stream) {
   if (!r->ready) return;
   r->gpu = stream;
@@ -3103,6 +3150,132 @@ static void gpu_write_rows_at(Raster3d *r, uint32_t id, uint32_t width, uint32_t
 static void gpu_write_rows(Raster3d *r, uint32_t id, uint32_t width, uint32_t height, uint32_t layer,
                            uint32_t bytes_per_row, const uint8_t *rows) {
   gpu_write_rows_at(r, id, width, 0, height, layer, bytes_per_row, rows);
+}
+
+/* ---- block-compressed textures uploaded as they are ---------------- */
+
+#define TEX_FORMAT_BC6H_SF16 0x10u
+#define TEX_FORMAT_BC6H_UF16 0x11u
+#define TEX_FORMAT_BC7U 0x17u
+#define TEX_FORMAT_DXT1 0x24u
+#define TEX_FORMAT_DXT23 0x25u
+#define TEX_FORMAT_DXT45 0x26u
+#define TEX_FORMAT_DXN1 0x27u
+#define TEX_FORMAT_DXN2 0x28u
+
+/* Maxwell's ASTC format codes in WebGPU's footprint order (gpu_records.h). */
+static const uint8_t k_astc_formats[GPU_ASTC_FOOTPRINTS] = {0x40, 0x50, 0x41, 0x51, 0x42, 0x55, 0x52,
+                                                            0x44, 0x56, 0x57, 0x53, 0x45, 0x54, 0x46};
+
+/* The GPU format a texture uploads to undecoded, or GPU_FMT_NONE: BCn /
+ * ASTC the device samples, 2D (array, cube) images whose size is whole
+ * blocks (WebGPU's rule), LDR ASTC only. */
+static uint32_t gpu_native_format(const Raster3d *r, const Tex_Header *h) {
+  if (!r->gpu || !r->gpu_compression) return GPU_FMT_NONE;
+  if (h->type != TEX_TYPE_2D && h->type != TEX_TYPE_2D_NO_MIPMAP && h->type != TEX_TYPE_2D_ARRAY &&
+      h->type != TEX_TYPE_CUBE && h->type != TEX_TYPE_CUBE_ARRAY)
+    return GPU_FMT_NONE;
+  if (h->layout != TEX_LAYOUT_BLOCK_LINEAR && h->layout != TEX_LAYOUT_PITCH) return GPU_FMT_NONE;
+  uint32_t bytes = 0, bw = 0, bh = 0;
+  if (!tex_format_info(h->format, &bytes, &bw, &bh) || bw == 1u || h->width % bw || h->height % bh) return GPU_FMT_NONE;
+  const bool bc = (r->gpu_compression & GPU_COMPRESSION_BC) != 0, srgb = h->srgb;
+  const bool snorm = h->data_type[0] == TEX_DATA_SNORM;
+  switch (h->format) {
+  case TEX_FORMAT_DXT1: return bc ? (srgb ? GPU_FMT_BC1_SRGB : GPU_FMT_BC1_UNORM) : GPU_FMT_NONE;
+  case TEX_FORMAT_DXT23: return bc ? (srgb ? GPU_FMT_BC2_SRGB : GPU_FMT_BC2_UNORM) : GPU_FMT_NONE;
+  case TEX_FORMAT_DXT45: return bc ? (srgb ? GPU_FMT_BC3_SRGB : GPU_FMT_BC3_UNORM) : GPU_FMT_NONE;
+  case TEX_FORMAT_DXN1: return bc ? (snorm ? GPU_FMT_BC4_SNORM : GPU_FMT_BC4_UNORM) : GPU_FMT_NONE;
+  case TEX_FORMAT_DXN2: return bc ? (snorm ? GPU_FMT_BC5_SNORM : GPU_FMT_BC5_UNORM) : GPU_FMT_NONE;
+  case TEX_FORMAT_BC6H_SF16: return bc ? GPU_FMT_BC6H_FLOAT : GPU_FMT_NONE;
+  case TEX_FORMAT_BC6H_UF16: return bc ? GPU_FMT_BC6H_UFLOAT : GPU_FMT_NONE;
+  case TEX_FORMAT_BC7U: return bc ? (srgb ? GPU_FMT_BC7_SRGB : GPU_FMT_BC7_UNORM) : GPU_FMT_NONE;
+  default: break;
+  }
+  if (!(r->gpu_compression & GPU_COMPRESSION_ASTC) || h->data_type[0] != TEX_DATA_UNORM) return GPU_FMT_NONE;
+  for (uint32_t i = 0; i < GPU_ASTC_FOOTPRINTS; i++)
+    if (k_astc_formats[i] == h->format) return GPU_FMT_ASTC_FIRST + 2u * i + (srgb ? 1u : 0u);
+  return GPU_FMT_NONE;
+}
+
+/* Rows [y0, y0 + rows) of blocks of one level (row 0 = y0) in records
+ * that fit the stream. */
+static void gpu_write_level_rows(Raster3d *r, uint32_t id, uint32_t level, uint32_t layer, uint32_t block_w,
+                                 uint32_t block_h, uint32_t cols, uint32_t y0, uint32_t rows, uint32_t row_bytes,
+                                 const uint8_t *data) {
+  const uint64_t budget = gpu_stream_max_payload(r->gpu) - sizeof(Gpu_Rec_Texture_Write_Level);
+  uint32_t per_record = (uint32_t)(budget / row_bytes);
+  if (per_record == 0) per_record = 1;
+  for (uint32_t y = 0; y < rows; y += per_record) {
+    const uint32_t n = rows - y < per_record ? rows - y : per_record;
+    const uint32_t bytes = n * row_bytes, padded = (bytes + 7u) & ~7u;
+    uint8_t *p = gpu_stream_begin(r->gpu, GPU_REC_TEXTURE_WRITE_LEVEL, (uint32_t)sizeof(Gpu_Rec_Texture_Write_Level) + padded);
+    const Gpu_Rec_Texture_Write_Level w = {id, level, layer, (y0 + y) * block_h, cols * block_w, n * block_h, row_bytes,
+                                           bytes};
+    memcpy(p, &w, sizeof(w));
+    memcpy(p + sizeof(w), data + (size_t)y * row_bytes, bytes);
+    gpu_stream_end(r->gpu);
+    r->gpu_stats.upload_bytes += bytes;
+  }
+}
+
+/* A block-compressed texture's GPU copy: every level of every layer, the
+ * blocks as they are (deswizzled one GOB block row at a time through the
+ * staging buffer). False when its guest bytes are unreadable. */
+static bool gpu_texture_native(Raster3d *r, Raster3d_Texture *t, const Tex_Header *h, const Gpu_Memory *mem,
+                               uint32_t format) {
+  uint32_t element = 0, bw = 0, bh = 0;
+  if (!tex_format_info(h->format, &element, &bw, &bh)) return false;
+  const uint32_t layers = tex_layer_count(h);
+  uint32_t full = 1;
+  for (uint32_t size = h->width > h->height ? h->width : h->height; size > 1u; size >>= 1) full++;
+  uint32_t levels = h->levels ? h->levels : 1u;
+  if (levels > full) levels = full;
+  if (h->layout == TEX_LAYOUT_PITCH || h->type == TEX_TYPE_2D_NO_MIPMAP) levels = 1;
+  Tex_Level_Layout last;
+  if (!tex_level_layout(h, levels - 1u, &last)) return false;
+  const uint64_t chain = last.block_linear
+                             ? last.offset + block_linear_size(last.cols * element, last.rows, last.block_height_log2)
+                             : (uint64_t)last.pitch * last.rows;
+  const uint64_t stride = tex_layer_stride(h);
+  const bool same = t->gpu_id && t->native && t->gpu_width == h->width && t->gpu_height == h->height &&
+                    t->gpu_layers == layers && t->gpu_format == format && t->gpu_levels == levels;
+  if (!same) {
+    gpu_destroy(r, t->gpu_id);
+    t->gpu_id = gpu_new_id(r);
+    gpu_create(r, t->gpu_id, format, h->width, h->height, layers, GPU_USAGE_SAMPLED, levels);
+    t->gpu_width = h->width;
+    t->gpu_height = h->height;
+    t->gpu_layers = layers;
+    t->gpu_format = format;
+    t->gpu_levels = levels;
+  }
+  t->native = true;
+  uint8_t *raw = r->texture_raw;
+  for (uint32_t l = 0; l < layers; l++) {
+    if (!mem->read(mem->user, h->address + stride * l, raw, chain)) return false;
+    for (uint32_t level = 0; level < levels; level++) {
+      Tex_Level_Layout m;
+      if (!tex_level_layout(h, level, &m)) return false;
+      const uint32_t row_bytes = m.cols * element;
+      if (!m.block_linear) {
+        for (uint32_t y = 0; y < m.rows; y++) memcpy(r->staging + (size_t)y * row_bytes, raw + (size_t)y * m.pitch, row_bytes);
+        gpu_write_level_rows(r, t->gpu_id, level, l, bw, bh, m.cols, 0, m.rows, row_bytes, r->staging);
+        continue;
+      }
+      /* One GOB block row (2^bh GOBs of 8 rows) at a time. */
+      const uint32_t band_rows = BLOCK_LINEAR_GOB_HEIGHT << m.block_height_log2;
+      const uint64_t band_bytes = block_linear_size(row_bytes, band_rows, m.block_height_log2);
+      for (uint32_t y = 0; y < m.rows; y += band_rows) {
+        const uint32_t n = m.rows - y < band_rows ? m.rows - y : band_rows;
+        if ((uint64_t)n * row_bytes > RASTER_MAX_SURFACE_BYTES) return false;
+        block_linear_to_pitch(raw + m.offset + band_bytes * (y / band_rows), r->staging, row_bytes, row_bytes, n,
+                              m.block_height_log2);
+        gpu_write_level_rows(r, t->gpu_id, level, l, bw, bh, m.cols, y, n, row_bytes, r->staging);
+      }
+    }
+  }
+  r->gpu_stats.texture_uploads++;
+  return true;
 }
 
 /* Uploads a surface's guest contents (formats whose bytes WebGPU reads as
@@ -3398,6 +3571,7 @@ static bool image_is_rgba16f(const Tex_Image *img) {
 }
 
 static uint32_t gpu_texture(Raster3d *r, Raster3d_Texture *t) {
+  if (t->native) return t->gpu_id; /* gpu_texture_native uploaded it with the load */
   const Tex_Image *img = &t->image;
   const uint32_t layers = img->layers ? img->layers : 1u;
   const bool is_int = img->header.data_type[0] == TEX_DATA_UINT || img->header.data_type[0] == TEX_DATA_SINT;

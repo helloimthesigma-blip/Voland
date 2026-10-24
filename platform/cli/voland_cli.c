@@ -39,7 +39,8 @@
  *                                    (max_slices N, input S:HEX:L, frame PATH,
  *                                    every N, trace S:L, log PATH, snapshot N DIR -
  *                                    a nested snapshot server, gpu_stream FILE -
- *                                    GPU mode recorded from here, dump_shaders DIR);
+ *                                    GPU mode recorded from here, dump_shaders DIR,
+ *                                    interpret - the JIT's threads interpreted from here);
  *                                    the result is
  *                                    DIR/job.done.<pid>. DIR/quit ends the server.
  *                                    Iterating on a late scene without replaying.
@@ -574,6 +575,7 @@ static bool read_job(const char *path, Snapshot_Job *job) {
     else if (sscanf(line, "cores %llu", &a) == 1) job->host_cores = (int32_t)a;
     else if (sscanf(line, "polls %llu", &a) == 1) job->poll_coalescing = (int32_t)a;
     else if (sscanf(line, "every %llu", &a) == 1) job->dump_every = a;
+    else if (strncmp(line, "interpret", 9) == 0) jit_set_interpret_only(true); /* the interpreter from here */
     else if (sscanf(line, "trace %llu:%llu", &a, &b) == 2) {
       job->trace_start = a;
       job->trace_length = b;

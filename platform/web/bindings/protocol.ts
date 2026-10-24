@@ -22,6 +22,9 @@ export type LogLevel = "trace" | "debug" | "info" | "warn" | "error";
 
 export type MainToCPUMessage =
   | { readonly type: "init"; readonly memory: WebAssembly.Memory }
+  /* The block-compressed texture formats the GPU worker's device samples
+   * (GPU_COMPRESSION_* bits): textures in them upload as they are. */
+  | { readonly type: "set-gpu-compression"; readonly mask: number }
   | { readonly type: "load-game"; readonly file: File }
   /* Copy files onto the emulated SD card (§15): .nro files go to /switch/
    * (where homebrew menus look), anything else to the root. Answered by
@@ -188,7 +191,10 @@ export interface DebugTargetImage {
 }
 
 export type GPUToMainMessage =
-  | { readonly type: "ready"; readonly adapterName: string | null; readonly streamRenderer: boolean }
+  /* textureCompression: the block-compressed formats the device samples
+   * (GPU_COMPRESSION_* bits of core/gpu/gpu_records.h). */
+  | { readonly type: "ready"; readonly adapterName: string | null; readonly streamRenderer: boolean;
+      readonly textureCompression: number }
   | { readonly type: "log"; readonly level: LogLevel; readonly message: string }
   | { readonly type: "error"; readonly message: string }
   | { readonly type: "debug-targets"; readonly targets: readonly DebugTargetImage[] };
