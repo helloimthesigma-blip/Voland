@@ -404,13 +404,74 @@ void scheduler_gpu_end(Scheduler *sched, const Kernel_Suspend *saved) {
   if (sched && sched->parallel) parallel_gpu_end(sched->parallel, saved);
 }
 
+/* Diagnostics: VOLAND_RUN_TRACE=FROM:TO (virtual ticks) logs every serial
+ * run in that window - thread, start, cycles, how it ended, the pc. */
+static void run_trace(const Scheduler *sched, const CPU_Backend *backend, Sched_Thread *thread, uint64_t start,
+                      CPU_ExitReason exit_reason) {
+  static int parsed;
+  static uint64_t from, to;
+  if (!parsed) {
+    const char *spec = getenv("VOLAND_RUN_TRACE");
+    char *end = NULL;
+    parsed = spec ? 2 : 1;
+    if (spec) {
+      from = strtoull(spec, &end, 0);
+      to = end && *end == ':' ? strtoull(end + 1, NULL, 0) : UINT64_MAX;
+    }
+  }
+  if (parsed != 2 || start < from || start > to) return;
+  (void)sched;
+  log_info("[run] h%x %llu +%llu exit %d pc %llx", thread->handle, (unsigned long long)start,
+           (unsigned long long)backend->get_cycles_consumed(thread->thread.cpu_state), (int)exit_reason,
+           (unsigned long long)backend->get_pc(thread->thread.cpu_state));
+}
+
+/* Diagnostics: VOLAND_SERIAL_ROTATE=N - the serial scheduler takes guest
+ * cores 0..N-1 in turn, one slice each, and runs that core's best thread:
+ * the order several host cores give (a lower-priority thread of one core
+ * runs while another core's better thread waits), deterministically. */
+static uint32_t rotate_cores(void) {
+  static int parsed;
+  static uint32_t cores;
+  if (!parsed) {
+    parsed = 1;
+    const char *spec = getenv("VOLAND_SERIAL_ROTATE");
+    cores = spec ? (uint32_t)strtoul(spec, NULL, 0) : 0u;
+    if (cores > THREAD_CORE_COUNT) cores = THREAD_CORE_COUNT;
+  }
+  return cores;
+}
+static int32_t pick_rotating(Scheduler *sched) {
+  static uint32_t turn;
+  const uint32_t cores = rotate_cores();
+  for (uint32_t k = 0; k < cores; k++) {
+    const uint32_t g = (turn + k) % cores;
+    int32_t best = -1;
+    for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+      const Sched_Thread *t = &sched->threads[i];
+      if (t->state != THREAD_STATE_RUNNABLE || t->paused) continue;
+      /* Guest cores past the rotation share its last one. */
+      uint64_t mask = guest_cores_of(t), own = 0;
+      for (uint32_t c = 0; c < THREAD_CORE_COUNT; c++)
+        if ((mask >> c) & 1u) own |= (uint64_t)1 << (c < cores ? c : cores - 1u);
+      if (!((own >> g) & 1u)) continue;
+      if (best < 0 || better(t, &sched->threads[best], false, 0)) best = (int32_t)i;
+    }
+    if (best >= 0) {
+      turn = g + 1u;
+      return best;
+    }
+  }
+  return -1;
+}
+
 Scheduler_Status scheduler_tick(Scheduler *sched, const CPU_Backend *backend, uint64_t budget,
                                 CPU_ExitReason *reason) {
   if (sched->process_crashed) return SCHEDULER_CRASHED;
   if (sched->process_exited) return SCHEDULER_EXITED;
   scheduler_expire_timeouts(sched);
 
-  const int32_t index = scheduler_pick(sched);
+  const int32_t index = rotate_cores() ? pick_rotating(sched) : scheduler_pick(sched);
   if (index < 0) return scheduler_idle(sched);
 
   Sched_Thread *thread = &sched->threads[index];
@@ -421,5 +482,6 @@ Scheduler_Status scheduler_tick(Scheduler *sched, const CPU_Backend *backend, ui
   const CPU_ExitReason exit_reason = backend->run(thread->thread.cpu_state, budget);
   sched->current = -1;
   if (reason) *reason = exit_reason;
+  run_trace(sched, backend, thread, start_ticks, exit_reason);
   return scheduler_finish_run(sched, backend, thread, start_ticks, exit_reason);
 }

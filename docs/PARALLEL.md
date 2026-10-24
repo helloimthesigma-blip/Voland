@@ -383,6 +383,39 @@ game-initiated ExitProcess):
   time): 3 of 3 crashed early, so the static guest-to-host mapping is not
   the cause either.
 
+**Deterministic repro (serial):** `VOLAND_SERIAL_ROTATE=3` makes the serial
+scheduler take guest cores 0-2 in turn (a slice each, that core's best
+thread) - the order several host cores give. Tears of the Kingdom then
+crashes every time, identically: slice 443225, tick 467396835,
+cDecompresionThread (h170029) at main+0x98c5c, its bitstream pointer 4 GiB
+low (a bits-consumed count gone wild, `asr w3, w7, #3` zero-extended). The
+same run without rotation is clean through 1.2M slices.
+
+What the deterministic run showed (tools below):
+
+- The input is intact. The decoder reads TOTK's `MCPK` (mesh codec pack)
+  read by "Loading 0" (h150025) at tick 466216396: romfs 0xf17b3920+0x6eea0
+  into 0x1014394d68. It has the same hash in the normal run, and at the
+  crash the buffer still hashes the same.
+- From 466430329, when h170029 starts reading that section, to the crash,
+  no other thread loads or stores in its context and workspace
+  (0x1013f84000+0xb0000) or its stack.
+- Normal serial decodes everything through one decoder context
+  (0x1013f84df8, h170029's). Rotated, a second context (0x1013d04df8) is
+  used too, and h150025 runs 259 slices interleaved with h170029's
+  decode.
+- Open: whether the section bounds h170029 gets are already wrong (from
+  the pack's parse), or shared state outside the watched ranges is.
+
+Tools: `VOLAND_RUN_TRACE=FROM:TO` (every serial run: thread, start,
+cycles, exit, pc); `VOLAND_FS_HASH=1` (FNV-1a of every IStorage read);
+`VOLAND_WATCH_GUEST=GVA:BYTES` with `VOLAND_WATCH_GUEST_FROM=TICKS` and
+`VOLAND_WATCH_GUEST_SKIP=HANDLE` (guest loads and stores there, with thread
+and tick); `VOLAND_REG_WATCH=LO:HI[:TLS]` with `VOLAND_NO_PREDECODE=1`
+(instructions that move a register into a range);
+`VOLAND_TRACE_CALLS` with `VOLAND_TRACE_MATCH_X1=OFF:VALUE` and
+`VOLAND_TRACE_DUMP_MEM=GVA:BYTES:FILE` (memory at a matching call).
+
 ## Memory model
 
 `cpu_set_multicore(true)` is set when two or more cores are on. With one

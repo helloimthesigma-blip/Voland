@@ -236,9 +236,57 @@ bool interp_retire(Interp_State *s, Interp_Status status, uint64_t pc, uint32_t 
   return false;
 }
 
+static bool interp_run_one_plain(Interp_State *s, CPU_ExitReason *exit_reason);
+
+/* Diagnostics (reference path only - VOLAND_NO_PREDECODE=1):
+ * VOLAND_REG_WATCH=LO:HI[:TLS] logs the first instructions that move a
+ * general register into [LO, HI) - where a bad pointer comes from - in
+ * every thread, or only the one whose tpidrro_el0 is TLS. */
+static int g_reg_watch = -1;
+static uint64_t g_reg_watch_lo, g_reg_watch_hi, g_reg_watch_tls;
+static uint32_t g_reg_watch_left = 64;
+static void reg_watch_check(const Interp_State *s, const uint64_t before[31], uint64_t pc, uint32_t insn) {
+  for (uint32_t k = 0; k < 31u && g_reg_watch_left; k++) {
+    const uint64_t v = s->regs.x[k];
+    if (v == before[k] || v < g_reg_watch_lo || v >= g_reg_watch_hi) continue;
+    if (before[k] >= g_reg_watch_lo && before[k] < g_reg_watch_hi) continue;
+    g_reg_watch_left--;
+    log_warn("[regwatch] pc 0x%llx insn %08x: x%u 0x%llx -> 0x%llx (tpidrro 0x%llx)", (unsigned long long)pc, insn, k,
+             (unsigned long long)before[k], (unsigned long long)v, (unsigned long long)s->tpidrro_el0);
+    for (uint32_t r = 0; r < 31u; r += 4u)
+      log_warn("[regwatch]   x%u %llx %llx %llx %llx", r, (unsigned long long)before[r],
+               (unsigned long long)(r + 1u < 31u ? before[r + 1u] : 0), (unsigned long long)(r + 2u < 31u ? before[r + 2u] : 0),
+               (unsigned long long)(r + 3u < 31u ? before[r + 3u] : 0));
+  }
+}
+
 /* One instruction through the full decoder (the reference path: step()
  * and anything the predecoded path does not cache). */
 bool interp_run_one(Interp_State *s, CPU_ExitReason *exit_reason) {
+  if (g_reg_watch < 0) {
+    const char *spec = getenv("VOLAND_REG_WATCH");
+    char *end = NULL;
+    g_reg_watch = spec ? 1 : 0;
+    if (spec) {
+      g_reg_watch_lo = strtoull(spec, &end, 0);
+      g_reg_watch_hi = end && *end == ':' ? strtoull(end + 1, &end, 0) : UINT64_MAX;
+      g_reg_watch_tls = end && *end == ':' ? strtoull(end + 1, NULL, 0) : 0;
+    }
+  }
+  if (g_reg_watch && (!g_reg_watch_tls || s->tpidrro_el0 == g_reg_watch_tls)) {
+    uint64_t before[31];
+    memcpy(before, s->regs.x, sizeof(before));
+    const uint64_t pc = s->regs.pc;
+    uint32_t insn = 0;
+    (void)vmm_read32_inline(s->l1, pc, &insn, &(VMM_Fault){0});
+    const bool more = interp_run_one_plain(s, exit_reason);
+    reg_watch_check(s, before, pc, insn);
+    return more;
+  }
+  return interp_run_one_plain(s, exit_reason);
+}
+
+static bool interp_run_one_plain(Interp_State *s, CPU_ExitReason *exit_reason) {
   const uint64_t pc = s->regs.pc;
   uint32_t insn = 0;
   VMM_Fault fault;

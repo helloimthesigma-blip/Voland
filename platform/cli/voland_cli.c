@@ -725,13 +725,25 @@ static void watch_gpu_store(uint64_t pc, uint64_t lr, uint64_t address, uint32_t
  * from the translation) are printed - the first WATCH_GPU_LOGGED of each,
  * then counted - to find who reads what an engine (VIC, NVDEC) wrote. */
 static uint64_t g_watch_guest_loads, g_watch_guest_stores;
+static const Emulator *g_watch_emu; /* for the time and thread in each line */
 static void watch_guest_access(uint64_t pc, uint64_t lr, uint64_t address, uint32_t size, const void *data, bool write) {
+  /* VOLAND_WATCH_GUEST_SKIP=HANDLE: not that thread's accesses (who else touches it?). */
+  static int skip_parsed;
+  static uint32_t skip;
+  if (!skip_parsed) {
+    skip_parsed = 1;
+    skip = getenv("VOLAND_WATCH_GUEST_SKIP") ? (uint32_t)strtoul(getenv("VOLAND_WATCH_GUEST_SKIP"), NULL, 0) : 0u;
+  }
+  const Sched_Thread *self = g_watch_emu ? scheduler_current((Scheduler *)&g_watch_emu->scheduler) : NULL;
+  if (skip && self && self->handle == skip) return;
   uint64_t *count = write ? &g_watch_guest_stores : &g_watch_guest_loads;
   if ((*count)++ >= WATCH_GPU_LOGGED) return;
   uint64_t first = 0;
   memcpy(&first, data, size < sizeof(first) ? size : sizeof(first));
-  fprintf(stderr, "voland-cli: watched %s pc %llx lr %llx address %llx size %u: %016llx\n", write ? "store" : "load",
-          (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)address, size, (unsigned long long)first);
+  fprintf(stderr, "voland-cli: watched %s pc %llx lr %llx address %llx size %u: %016llx (h%x, tick %llu)\n",
+          write ? "store" : "load", (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)address, size,
+          (unsigned long long)first, self ? self->handle : 0u,
+          (unsigned long long)(g_watch_emu ? g_watch_emu->scheduler.ticks : 0));
 }
 
 /* VOLAND_EXCEPTION_SCAN=1 (diagnostics): after a run, look on each thread's
@@ -1716,7 +1728,10 @@ static int run(int argc, char **argv) {
                 (unsigned long long)slices);
       }
     }
-    if (watch_guest_va && !watch_guest_set) {
+    /* VOLAND_WATCH_GUEST_FROM=TICKS: arm the guest watch only from then. */
+    if (watch_guest_va && !watch_guest_set &&
+        emu.scheduler.ticks >= (getenv("VOLAND_WATCH_GUEST_FROM") ? strtoull(getenv("VOLAND_WATCH_GUEST_FROM"), NULL, 0) : 0)) {
+      g_watch_emu = &emu;
       VMM_Fault fault;
       const uint8_t *host = vmm_translate_inline(vmm_page_table_l1(emu.vmm), watch_guest_va, VMM_PERM_R, &fault);
       if (host) {
@@ -1914,9 +1929,10 @@ static int run(int argc, char **argv) {
       if (error_is_ok(vmm_read_block(emu.vmm, th->thread.tls_gva + (narrow ? 0x1FCu : 0x1F8u), &type, narrow ? 4u : 8u)) && type) {
         char name[33] = {0};
         if (error_is_ok(vmm_read_block(emu.vmm, type + (narrow ? 0xC8u : 0x188u), name, 32)))
-          fprintf(stderr, "    name \"%s\" priority %d core %d mask 0x%llx cycles %llu sp 0x%llx\n", name,
+          fprintf(stderr, "    name \"%s\" priority %d core %d mask 0x%llx cycles %llu sp 0x%llx tls 0x%llx\n", name,
                   (int)th->thread.priority, (int)th->thread.preferred_core, (unsigned long long)th->core_mask,
-                  (unsigned long long)th->cycles_run, (unsigned long long)emu.cpu_backend->get_sp(th->thread.cpu_state));
+                  (unsigned long long)th->cycles_run, (unsigned long long)emu.cpu_backend->get_sp(th->thread.cpu_state),
+                  (unsigned long long)th->thread.tls_gva);
       }
     }
     if (th->state == THREAD_STATE_CREATED) { /* never started: its entry argument (nn::os: the ThreadType) */
@@ -2192,6 +2208,29 @@ static void trace_hook(CPU_State *state, uint64_t target, uint64_t return_addres
   fprintf(stderr, "[trace] call 0x%llx from 0x%llx: x0 %llx x1 %llx x2 %llx x3 %llx\n", (unsigned long long)target,
           (unsigned long long)return_address, (unsigned long long)r->x[0], (unsigned long long)r->x[1],
           (unsigned long long)r->x[2], (unsigned long long)r->x[3]);
+  /* VOLAND_TRACE_MATCH_X1=OFF:VALUE + VOLAND_TRACE_DUMP_MEM=GVA:BYTES:FILE:
+   * at a call whose x1 struct holds u32 VALUE at OFF, dump guest memory
+   * (the last such call wins) - diff a job's inputs between two runs. */
+  const char *match = getenv("VOLAND_TRACE_MATCH_X1"), *mem = getenv("VOLAND_TRACE_DUMP_MEM");
+  if (match && mem) {
+    char *end = NULL;
+    const uint64_t off = strtoull(match, &end, 0);
+    const uint32_t want = end && *end == ':' ? (uint32_t)strtoul(end + 1, NULL, 0) : 0u;
+    uint32_t got = 0;
+    if (error_is_ok(vmm_read32(g_trace_emu->vmm, r->x[1] + off, &got)) && got == want) {
+      const uint64_t at = strtoull(mem, &end, 0);
+      const uint64_t bytes = end && *end == ':' ? strtoull(end + 1, &end, 0) : 0;
+      FILE *f = end && *end == ':' ? fopen(end + 1, "wb") : NULL;
+      for (uint64_t o = 0; f && o < bytes; o += 4096u) {
+        uint8_t page[4096];
+        if (!error_is_ok(vmm_read_block(g_trace_emu->vmm, at + o, page, sizeof(page)))) memset(page, 0xEE, sizeof(page));
+        fwrite(page, 1, sizeof(page), f);
+      }
+      if (f) fclose(f);
+      fprintf(stderr, "[trace] dumped %llx+%llx at tick %llu\n", (unsigned long long)at, (unsigned long long)bytes,
+              (unsigned long long)g_trace_emu->scheduler.ticks);
+    }
+  }
   const char *dump = getenv("VOLAND_TRACE_DUMP_X1");
   if (dump) {
     uint8_t bytes[0x80];

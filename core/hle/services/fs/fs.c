@@ -9,6 +9,8 @@
 #include "common/log.h"
 #include "hle/services/service_util.h"
 
+#include <stdlib.h>
+
 #define FS_TIMESTAMP_BYTES 0x20u
 #define FS_RANGE_INFO_BYTES 0x40u
 #define FS_ENTRY_TYPE_OFFSET 0x304u
@@ -635,17 +637,26 @@ static HLE_ServiceResult cmd_storage_read(HLE_Context *c, Service_Object *self, 
   const IPC_Buffer *buf = service_out_buffer(req, 0);
   if (!buf) return size ? FS_RESULT_OUT_OF_RANGE : HLE_RESULT_SUCCESS;
   if (size > buf->size) size = buf->size;
-  if (self->state == FS_STORAGE_CONTENT_ROMFS) log_debug("[fs] romfs read 0x%llx+0x%llx", (unsigned long long)offset, (unsigned long long)size);
+  if (self->state == FS_STORAGE_CONTENT_ROMFS)
+    log_debug("[fs] romfs read 0x%llx+0x%llx to 0x%llx", (unsigned long long)offset, (unsigned long long)size,
+              (unsigned long long)buf->gva);
   if (self->state == FS_STORAGE_SYSTEM_DATA)
     log_debug("[fs] system data read 0x%llx+0x%llx of 0x%llx", (unsigned long long)offset, (unsigned long long)size,
               (unsigned long long)source->size);
   if (offset > source->size || size > source->size - offset) return FS_RESULT_OUT_OF_RANGE;
+  /* Diagnostics: VOLAND_FS_HASH=1 logs each read's FNV-1a hash. */
+  static int hash_reads = -1;
+  if (hash_reads < 0) hash_reads = getenv("VOLAND_FS_HASH") != NULL;
+  uint64_t hash = 0xcbf29ce484222325ull;
   for (uint64_t done = 0; done < size;) {
     const uint64_t chunk = size - done < FS_BOUNCE_BYTES ? size - done : FS_BOUNCE_BYTES;
     if (!error_is_ok(byte_source_read(source, offset + done, s->bounce, chunk))) return FS_RESULT_OUT_OF_RANGE;
     if (!error_is_ok(vmm_write_block(c->vmm, buf->gva + done, s->bounce, chunk))) return HLE_RESULT_INVALID_POINTER;
+    for (uint64_t k = 0; hash_reads && k < chunk; k++) hash = (hash ^ s->bounce[k]) * 0x100000001b3ull;
     done += chunk;
   }
+  if (hash_reads) log_info("[fs] read 0x%llx+0x%llx hash %016llx", (unsigned long long)offset, (unsigned long long)size,
+                           (unsigned long long)hash);
   return HLE_RESULT_SUCCESS;
 }
 
