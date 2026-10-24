@@ -456,8 +456,13 @@ EXPORT uint64_t emulator_virtual_ticks_ffi(void)
  * writes up to `capacity` uint64 values at `out` and returns how many.
  * Order: virtual ticks, SVCs, GPU stream bytes, GPU stream stalls (the
  * producer waited for the GPU worker), host ns spent in those waits,
- * pictures the game presented. */
-enum { PERF_TICKS, PERF_SVCS, PERF_GPU_BYTES, PERF_GPU_STALLS, PERF_STREAM_WAIT_NS, PERF_FRAMES, PERF_COUNT };
+ * pictures the game presented, host ns guest ioctls waited for the GPU
+ * thread's lock (command processing), times the guest waited for the GPU
+ * thread to catch up (nvdrv_bound_gpu_latency). */
+enum {
+  PERF_TICKS, PERF_SVCS, PERF_GPU_BYTES, PERF_GPU_STALLS, PERF_STREAM_WAIT_NS, PERF_FRAMES, PERF_GPU_LOCK_WAIT_NS,
+  PERF_GPU_LATENCY_STALLS, PERF_COUNT
+};
 
 EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity)
 {
@@ -469,6 +474,8 @@ EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity)
     [PERF_GPU_STALLS] = g_emulator.gpu_stream.stalls,
     [PERF_STREAM_WAIT_NS] = emulator_stream_wait_ns(),
     [PERF_FRAMES] = g_emulator.vi.frames_presented,
+    [PERF_GPU_LOCK_WAIT_NS] = gpu_thread_lock_wait_ns(&g_emulator.gpu_thread),
+    [PERF_GPU_LATENCY_STALLS] = g_emulator.nvdrv.stalls_for_latency,
   };
   const uint32_t count = capacity < PERF_COUNT ? capacity : PERF_COUNT;
   memcpy((void *)(uintptr_t)out, values, count * sizeof(uint64_t));
