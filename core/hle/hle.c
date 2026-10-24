@@ -105,6 +105,10 @@ static const char *svc_name(uint32_t swi)
 
 static void dispatch_svc(HLE_Context *context, CPU_State *cpu_state, uint32_t swi);
 
+#define SVC_TRACE_CREATE_THREAD 0x08u
+#define SVC_TRACE_START_THREAD 0x09u
+#define SVC_TRACE_FRAMES 6u
+
 /* Diagnostics: VOLAND_SVC_TRACE="FROM:TO" (virtual ticks) logs every SVC
  * in that window - thread, number, the first arguments and the results. */
 static void svc_trace(const HLE_Context *c, uint32_t swi, uint64_t arg0, uint64_t arg1, const CPU_Register_File *r) {
@@ -126,6 +130,18 @@ static void svc_trace(const HLE_Context *c, uint32_t swi, uint64_t arg0, uint64_
            (unsigned long long)c->scheduler->ticks, swi, svc_name(swi), (unsigned long long)arg0,
            (unsigned long long)arg1, (unsigned long long)r->x[0], (unsigned long long)r->x[1],
            (unsigned long long)r->pc);
+  if (swi == SVC_TRACE_CREATE_THREAD || swi == SVC_TRACE_START_THREAD) { /* who asked: the frame chain */
+    uint64_t fp = r->x[29], lr = r->x[30];
+    char chain[160];
+    size_t at = (size_t)snprintf(chain, sizeof(chain), "%llx", (unsigned long long)lr);
+    for (uint32_t depth = 0; depth < SVC_TRACE_FRAMES && fp && at < sizeof(chain); depth++) {
+      uint64_t next_fp = 0;
+      if (!error_is_ok(vmm_read64(c->vmm, fp, &next_fp)) || !error_is_ok(vmm_read64(c->vmm, fp + 8u, &lr))) break;
+      at += (size_t)snprintf(chain + at, sizeof(chain) - at, " %llx", (unsigned long long)lr);
+      fp = next_fp;
+    }
+    log_info("[svc]   from %s", chain);
+  }
 }
 
 /* Every SVC runs under the scheduler's kernel lock (a no-op in serial
