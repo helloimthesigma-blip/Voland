@@ -346,6 +346,11 @@ async function boot(): Promise<BootResult | null> {
               msg.textureCompression & 2 ? "ASTC" : ""})`);
           }
         }
+        /* ?cpuspeed=N: the virtual CPU clock, % of the Switch's. */
+        const cpuSpeed = new URLSearchParams(location.search).get("cpuspeed");
+        if (cpuSpeed !== null && Number.isFinite(Number(cpuSpeed))) {
+          cpuWorker.postMessage({ type: "set-cpu-speed", percent: Number(cpuSpeed) } satisfies MainToCPUMessage);
+        }
         /* ?cores=N: host threads for guest threads (0 = serial). */
         const cores = new URLSearchParams(location.search).get("cores");
         if (cores !== null && /^[0-9]+$/.test(cores)) {

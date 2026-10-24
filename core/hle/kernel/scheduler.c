@@ -13,7 +13,8 @@
 
 /* Cycles -> ticks: 19.2 MHz / 1.02 GHz = 192 / 10200. */
 #define TICKS_PER_CYCLE_NUMERATOR (SCHEDULER_TIMER_HZ / 100000u)
-#define TICKS_PER_CYCLE_DENOMINATOR (SCHEDULER_CPU_HZ / 100000u)
+#define TICKS_PER_CYCLE_DENOMINATOR(sched) (SCHEDULER_CPU_HZ / 100000u * (sched)->cpu_percent / 100u)
+#define SCHEDULER_CPU_PERCENT_DEFAULT 100u
 
 void scheduler_init(Scheduler *sched, const CPU_Backend *backend) {
   memset(sched, 0, sizeof(*sched));
@@ -23,6 +24,14 @@ void scheduler_init(Scheduler *sched, const CPU_Backend *backend) {
   sched->current = -1;
   sched->next_thread_id = 1;
   sched->device_wake_at = SCHEDULER_WAIT_FOREVER;
+  sched->cpu_percent = SCHEDULER_CPU_PERCENT_DEFAULT;
+}
+
+void scheduler_set_cpu_percent(Scheduler *sched, uint32_t percent) {
+  if (percent < SCHEDULER_CPU_PERCENT_MIN) percent = SCHEDULER_CPU_PERCENT_MIN;
+  if (percent > SCHEDULER_CPU_PERCENT_MAX) percent = SCHEDULER_CPU_PERCENT_MAX;
+  sched->cpu_percent = percent;
+  sched->cycle_remainder = 0;
 }
 
 uint64_t scheduler_ns_to_ticks(uint64_t ns) {
@@ -298,13 +307,13 @@ Scheduler_Status scheduler_finish_run(Scheduler *sched, const CPU_Backend *backe
     /* Time did not move during the run (always so in serial mode): exact,
      * with the sub-tick remainder carried. */
     const uint64_t scaled = cycles * TICKS_PER_CYCLE_NUMERATOR + sched->cycle_remainder;
-    sched->ticks += scaled / TICKS_PER_CYCLE_DENOMINATOR;
-    sched->cycle_remainder = scaled % TICKS_PER_CYCLE_DENOMINATOR;
+    sched->ticks += scaled / TICKS_PER_CYCLE_DENOMINATOR(sched);
+    sched->cycle_remainder = scaled % TICKS_PER_CYCLE_DENOMINATOR(sched);
   } else {
     /* Another core moved time meanwhile: this run ends at its own start
      * plus its cycles, and time is the latest any core has reached
      * (docs/PARALLEL.md "Virtual time"). */
-    const uint64_t end = start_ticks + cycles * TICKS_PER_CYCLE_NUMERATOR / TICKS_PER_CYCLE_DENOMINATOR;
+    const uint64_t end = start_ticks + cycles * TICKS_PER_CYCLE_NUMERATOR / TICKS_PER_CYCLE_DENOMINATOR(sched);
     if (end > sched->ticks) sched->ticks = end;
   }
   thread->last_run = ++sched->run_counter;

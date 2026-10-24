@@ -383,6 +383,18 @@ let requestedHostCores: number | null = null;
  *   exit ~15-18 s in - a race not found yet (docs/NEW_GAMES.md). Serial
  *   plays the opening. */
 const SERIAL_TITLES: ReadonlySet<string> = new Set(["01006A800016E000", "0100F2C0115B6000"]);
+/** The virtual CPU clock by title (percent of the Switch's 1.02 GHz): a
+ * serial title whose threads share one core gets more instructions per
+ * virtual second where the host keeps up. ?cpuspeed=N overrides. */
+const TITLE_CPU_PERCENT: ReadonlyMap<string, number> = new Map();
+/** ?cpuspeed=N (set-cpu-speed); null = the title's default. */
+let requestedCpuPercent: number | null = null;
+
+function applyCpuSpeed(target: SwitchCoreExports): void {
+  const percent = requestedCpuPercent ?? (loadedTitleId !== null ? TITLE_CPU_PERCENT.get(loadedTitleId) : undefined) ?? 100;
+  target._emulator_set_cpu_percent_ffi(percent);
+  if (percent !== 100) log("info", `virtual CPU at ${percent}% of the Switch's clock`);
+}
 
 
 /** Poll coalescing (set-poll-coalescing; ?polls=0 turns it off). */
@@ -1078,6 +1090,7 @@ function loadGame(file: File): CPUToMainMessage {
   applyGpuAsync(loadingCore);
   loadingCore._emulator_set_gpu_compute_ffi(gpuCompute ? 1 : 0);
   applyHostCores(loadingCore);
+  applyCpuSpeed(loadingCore);
   if (renderWorkers > 0) log("info", `renderer workers: ${loadingCore._emulator_set_render_workers_ffi(renderWorkers)}`);
   loadingCore._emulator_set_poll_coalescing_ffi(pollCoalescing ? 1 : 0);
   loadingCore._emulator_set_pin_ideal_cores_ffi(pinIdealCores ? 1 : 0);
@@ -1096,6 +1109,7 @@ function loadGame(file: File): CPUToMainMessage {
 
   loadedTitleId = formatTitleId(core._emulator_program_id_ffi());
   if (requestedHostCores === null) applyHostCores(core); /* the default may depend on the title */
+  if (requestedCpuPercent === null) applyCpuSpeed(core);
   return {
     type: "game-loaded",
     titleId: loadedTitleId,
@@ -1267,6 +1281,12 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
       withCString(msg.text, (pointer) => sdCore._emulator_text_respond_ffi(pointer, msg.accepted ? 1 : 0));
     }
     textRequestShown = false;
+    return;
+  }
+
+  if (msg.type === "set-cpu-speed") {
+    requestedCpuPercent = msg.percent;
+    if (core) applyCpuSpeed(core);
     return;
   }
 

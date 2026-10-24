@@ -25,6 +25,9 @@ export type MainToCPUMessage =
   /* The block-compressed texture formats the GPU worker's device samples
    * (GPU_COMPRESSION_* bits): textures in them upload as they are. */
   | { readonly type: "set-gpu-compression"; readonly mask: number }
+  /* ?cpuspeed=N: the virtual CPU clock in percent of the Switch's (null:
+   * the per-title default). */
+  | { readonly type: "set-cpu-speed"; readonly percent: number | null }
   | { readonly type: "load-game"; readonly file: File }
   /* Copy files onto the emulated SD card (§15): .nro files go to /switch/
    * (where homebrew menus look), anything else to the root. Answered by

@@ -20,6 +20,7 @@
  *       --dump-frame FILE            write the newest frame as a binary PPM (P6)
  *       --frame-skip N               rasterise and show one of every N + 1 frames
  *       --no-poll-coalescing         plain scheduler: pollers re-poll on their own schedule
+ *       --cpu-speed PERCENT          virtual CPU clock, % of the Switch's 1.02 GHz (100-800)
  *       --host-cores N               run guest threads on N host threads
  *                                    (docs/PARALLEL.md; 0 = serial, the default)
  *       --pin-ideal-cores            with host cores: each thread only on its ideal core's
@@ -1302,6 +1303,7 @@ static int run(int argc, char **argv) {
   bool test_card = false, svc_stats = false, swkbd_cancel = false, jit_fallbacks = false;
   uint64_t jit_fallbacks_from = 0;
   uint32_t jit_hot_top = 0;
+  uint32_t cpu_percent = 0;
   const char *swkbd_text = NULL;
   Input_Event inputs[MAX_INPUT_EVENTS];
   uint32_t input_count = 0;
@@ -1317,6 +1319,8 @@ static int run(int argc, char **argv) {
     } else if (!strcmp(argv[i], "--jit-hot") && has_value) {
       jit_hot_top = (uint32_t)strtoul(argv[++i], NULL, 0);
       jit_set_hot_profile(true);
+    } else if (!strcmp(argv[i], "--cpu-speed") && has_value) { /* virtual CPU clock, % of 1.02 GHz */
+      cpu_percent = (uint32_t)strtoul(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--jit-threshold") && has_value) { /* interpreted runs before compiling */
       jit_set_hot_threshold((uint32_t)strtoul(argv[++i], NULL, 0));
     } else if (!strcmp(argv[i], "--jit-no-calls")) {
@@ -1468,6 +1472,7 @@ static int run(int argc, char **argv) {
   }
   emulator_set_poll_coalescing(&emu, poll_coalescing);
   emulator_set_pin_ideal_cores(&emu, pin_ideal_cores);
+  if (cpu_percent) emulator_set_cpu_percent(&emu, cpu_percent);
   if (host_cores) {
     const uint32_t cores = emulator_set_host_cores(&emu, host_cores);
     fprintf(stderr, "voland-cli: %u host core(s) for guest threads\n", cores);
@@ -1643,7 +1648,7 @@ static int run(int argc, char **argv) {
       savestate_to = 0;
     }
     if (progress_every && slices % progress_every == 0) fprintf(stderr, "voland-cli: slice %llu\n", (unsigned long long)slices);
-    if (input_count) apply_input(inputs, input_count, slices);
+    apply_input(inputs, input_count, slices); /* player 1 is connected from the start, as on the web */
     emu.renderer.trace_draws = slices >= trace_start && slices - trace_start < trace_length;
     const uint64_t ticks_before = emu.scheduler.ticks, run_before = emu.scheduler.run_counter;
     if (free_from && slices == free_from) {
@@ -2145,7 +2150,7 @@ static void usage(void) {
   fprintf(stderr,
           "usage: voland-cli run <file.nca|file.nro> [options]\n"
           "  running:   --backend interpreter|jit|noop  --budget N  --max-slices N\n"
-          "             --host-cores N [--pin-ideal-cores]  --sdmc DIR  --mods DIR  --restore-save FILE.vsave\n"
+          "             --host-cores N [--pin-ideal-cores]  --cpu-speed PERCENT  --sdmc DIR  --mods DIR  --restore-save FILE.vsave\n"
           "             --input SLICE:BUTTONS_HEX:SLICES (repeatable; hold buttons)\n"
           "             --swkbd TEXT | --swkbd-cancel  --font FILE.ttf\n"
           "  output:    --dump-frame FILE.ppm [--dump-frames-every N]  --dump-audio FILE\n"

@@ -593,6 +593,7 @@ static Error use_backend(Emulator* emulator, const CPU_Backend* backend) {
   emulator->scheduler.parallel = emulator->parallel;
   emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
   emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;
+  if (emulator->cpu_percent) scheduler_set_cpu_percent(&emulator->scheduler, emulator->cpu_percent);
   if (cores && backend->supports_multicore) (void)emulator_set_host_cores(emulator, cores);
   log_info("[emulator] CPU backend for this program: %s", backend->name);
   return OK;
@@ -623,6 +624,7 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
   emulator->scheduler.parallel = emulator->parallel;
   emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
   emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;
+  if (emulator->cpu_percent) scheduler_set_cpu_percent(&emulator->scheduler, emulator->cpu_percent);
   Sched_Thread *main_thread = scheduler_new_thread(&emulator->scheduler);
   SWITCH_ASSERT_ALWAYS(main_thread != NULL, "empty scheduler has a slot");
   main_thread->thread.cpu_state = emulator->cpu_state;
@@ -1015,6 +1017,13 @@ void emulator_set_pin_ideal_cores(Emulator* emulator, bool on) {
   if (!emulator) return;
   emulator->pin_ideal_cores = on;
   emulator->scheduler.pin_ideal = on;
+}
+
+void emulator_set_cpu_percent(Emulator* emulator, uint32_t percent) {
+  if (!emulator) return;
+  emulator->cpu_percent = percent;
+  scheduler_set_cpu_percent(&emulator->scheduler, percent);
+  log_info("[emulator] virtual CPU at %u%% of 1.02 GHz", emulator->scheduler.cpu_percent);
 }
 
 #ifdef SWITCH_CPU_BACKEND_JIT

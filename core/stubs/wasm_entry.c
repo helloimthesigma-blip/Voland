@@ -68,6 +68,7 @@ EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
 EXPORT void emulator_set_frame_skip_ffi(uint32_t frames);
 EXPORT void emulator_set_gpu_mode_ffi(uint32_t on);
 EXPORT void emulator_set_gpu_compression_ffi(uint32_t mask);
+EXPORT void emulator_set_cpu_percent_ffi(uint32_t percent);
 EXPORT uint32_t emulator_set_host_cores_ffi(uint32_t cores);
 EXPORT uint32_t emulator_set_gpu_async_ffi(uint32_t on);
 EXPORT uint32_t emulator_set_render_workers_ffi(uint32_t count);
@@ -632,6 +633,12 @@ EXPORT void emulator_set_gpu_mode_ffi(uint32_t on)
 EXPORT void emulator_set_gpu_compression_ffi(uint32_t mask)
 {
   if (g_initialised) raster3d_set_gpu_compression(&g_emulator.renderer, mask);
+}
+
+/* The virtual CPU clock, % of the Switch's (emulator_set_cpu_percent). */
+EXPORT void emulator_set_cpu_percent_ffi(uint32_t percent)
+{
+  if (g_initialised) emulator_set_cpu_percent(&g_emulator, percent);
 }
 
 /* pl:u's font (§1.6: a font the platform may ship, never Nintendo's).

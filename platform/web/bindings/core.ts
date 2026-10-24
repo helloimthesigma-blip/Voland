@@ -54,6 +54,8 @@ export interface SwitchCoreExports {
   readonly _emulator_set_gpu_mode_ffi:     (on: number) => void;
   /** GPU_COMPRESSION_* bits: block-compressed textures the GPU samples upload as they are. */
   readonly _emulator_set_gpu_compression_ffi: (mask: number) => void;
+  /** The virtual CPU clock, % of the Switch's 1.02 GHz (100-800). */
+  readonly _emulator_set_cpu_percent_ffi: (percent: number) => void;
   readonly _emulator_set_host_cores_ffi:   (cores: number) => number; /* cores in effect */
   readonly _emulator_set_gpu_async_ffi:    (on: number) => number;    /* 1: asynchronous GPU on */
   readonly _emulator_set_render_workers_ffi: (count: number) => number; /* workers in effect */

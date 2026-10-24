@@ -96,6 +96,7 @@ typedef struct Scheduler {
    * wall time - racing ahead would expire the guest's timeouts on them. */
   uint64_t time_limit;
   uint64_t cycle_remainder; /* sub-tick cycles carried between runs */
+  uint32_t cpu_percent;     /* virtual CPU clock, % of SCHEDULER_CPU_HZ (scheduler_set_cpu_percent) */
   uint64_t run_counter;
   uint64_t wait_counter;
   uint64_t lone_yields;     /* yields slept to the next wake (scheduler_alone) */
@@ -141,6 +142,15 @@ typedef enum Scheduler_Status {
 } Scheduler_Status;
 
 void scheduler_init(Scheduler *sched, const CPU_Backend *backend);
+
+/* The virtual CPU's clock as a percentage of the Switch's (100 = 1.02 GHz,
+ * clamped to SCHEDULER_CPU_PERCENT_MIN..MAX): more guest instructions per
+ * virtual second, for titles whose threads share one host core (the
+ * serial scheduler) while the host has time to spare. Guest timers are
+ * unchanged. */
+#define SCHEDULER_CPU_PERCENT_MIN 100u
+#define SCHEDULER_CPU_PERCENT_MAX 800u
+void scheduler_set_cpu_percent(Scheduler *sched, uint32_t percent);
 
 /* Allocates a slot for a thread. NULL when full. The caller fills
  * `thread`, `handle` and sets the state. */

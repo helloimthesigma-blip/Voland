@@ -160,6 +160,7 @@ typedef struct Emulator
   bool no_poll_coalescing; /* emulator_set_poll_coalescing(false); survives reloads */
   bool free_running;   /* emulator_set_free_running; with host cores only */
   bool pin_ideal_cores; /* emulator_set_pin_ideal_cores; survives reloads */
+  uint32_t cpu_percent; /* emulator_set_cpu_percent (0 = default); survives reloads */
   /* Wall-clock pacing (emulator_set_pacing): virtual time never falls
    * behind wall time since the origin. */
   bool pacing;
@@ -272,6 +273,10 @@ void emulator_set_poll_coalescing(Emulator *emulator, bool on);
 /* Pinned cores (docs/PARALLEL.md "Pinned cores"): with host cores, every
  * thread runs only on its ideal core's host core. Off by default. */
 void emulator_set_pin_ideal_cores(Emulator *emulator, bool on);
+
+/* The virtual CPU clock in percent of the Switch's (scheduler_set_cpu_percent):
+ * more guest work per virtual second where the host keeps up. */
+void emulator_set_cpu_percent(Emulator *emulator, uint32_t percent);
 
 /* Mods (§19, hle/loader/mods.h). The platform binds a read callback once,
  * then lists the enabled mods' files (highest priority first) before each
