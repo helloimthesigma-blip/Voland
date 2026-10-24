@@ -269,15 +269,23 @@ interface CpuPerf {
   gpuLockMs: number;
   /** Times the guest waited for the GPU thread to catch up (latency bound). */
   gpuLatencyStalls: number;
+  /** JIT regions compiled, evicted, trimmed, code generations, stale regions, install ms. */
+  jitCompiled: number;
+  jitEvicted: number;
+  jitTrimmed: number;
+  jitGenerations: number;
+  jitStale: number;
+  jitInstallMs: number;
   /** Renderer counters (emulator_render_stats_ffi), by name. */
   render: Record<string, number>;
 }
 const perf: CpuPerf = {
   startedMs: 0, slices: 0, sliceMs: 0, yieldMs: 0, bursts: 0,
-  fileReads: 0, fileReadBytes: 0, fileReadMs: 0, fileChunks: 0, ticks: 0, svcs: 0, gpuBytes: 0, gpuStalls: 0, streamWaitMs: 0, frames: 0, gpuLockMs: 0, gpuLatencyStalls: 0, render: {},
+  fileReads: 0, fileReadBytes: 0, fileReadMs: 0, fileChunks: 0, ticks: 0, svcs: 0, gpuBytes: 0, gpuStalls: 0, streamWaitMs: 0, frames: 0, gpuLockMs: 0, gpuLatencyStalls: 0, jitCompiled: 0, jitEvicted: 0, jitTrimmed: 0, jitGenerations: 0, jitStale: 0,
+  jitInstallMs: 0, render: {},
 };
 (globalThis as unknown as { __VOLAND_CPU_PERF__: CpuPerf }).__VOLAND_CPU_PERF__ = perf;
-const PERF_COUNTERS = 8;
+const PERF_COUNTERS = 14;
 let perfBuffer = 0;
 let lastBurstEnd = 0;
 
@@ -314,6 +322,12 @@ function refreshCorePerf(): void {
     perf.frames = Number(values[5] ?? 0n);
     perf.gpuLockMs = Number(values[6] ?? 0n) / 1e6;
     perf.gpuLatencyStalls = Number(values[7] ?? 0n);
+    perf.jitCompiled = Number(values[8] ?? 0n);
+    perf.jitEvicted = Number(values[9] ?? 0n);
+    perf.jitTrimmed = Number(values[10] ?? 0n);
+    perf.jitGenerations = Number(values[11] ?? 0n);
+    perf.jitStale = Number(values[12] ?? 0n);
+    perf.jitInstallMs = Number(values[13] ?? 0n) / 1e6;
   }
   {
     const stats = new BigUint64Array(coreMemory.buffer, Number(core._emulator_render_stats_ffi()), RENDER_STAT_NAMES.length);
@@ -1287,6 +1301,12 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
       withCString(msg.text, (pointer) => sdCore._emulator_text_respond_ffi(pointer, msg.accepted ? 1 : 0));
     }
     textRequestShown = false;
+    return;
+  }
+
+  if (msg.type === "set-jit-async") {
+    (globalThis as { volandJitAsync?: boolean }).volandJitAsync = msg.on;
+    log("info", `JIT compiles ${msg.on ? "off-thread" : "synchronously"}`);
     return;
   }
 

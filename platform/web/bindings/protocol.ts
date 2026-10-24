@@ -28,6 +28,9 @@ export type MainToCPUMessage =
   /* ?cpuspeed=N: the virtual CPU clock in percent of the Switch's (null:
    * the per-title default). */
   | { readonly type: "set-cpu-speed"; readonly percent: number | null }
+  /* ?jitasync=1: the JIT compiles regions off-thread (docs/JIT.md "Sync vs
+   * async compile"); before the first compile. */
+  | { readonly type: "set-jit-async"; readonly on: boolean }
   | { readonly type: "load-game"; readonly file: File }
   /* Copy files onto the emulated SD card (§15): .nro files go to /switch/
    * (where homebrew menus look), anything else to the root. Answered by

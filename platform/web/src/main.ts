@@ -346,6 +346,9 @@ async function boot(): Promise<BootResult | null> {
               msg.textureCompression & 2 ? "ASTC" : ""})`);
           }
         }
+        if (new URLSearchParams(location.search).get("jitasync") === "1") {
+          cpuWorker.postMessage({ type: "set-jit-async", on: true } satisfies MainToCPUMessage);
+        }
         /* ?cpuspeed=N: the virtual CPU clock, % of the Switch's. */
         const cpuSpeed = new URLSearchParams(location.search).get("cpuspeed");
         if (cpuSpeed !== null && Number.isFinite(Number(cpuSpeed))) {

@@ -693,6 +693,8 @@ async function main() {
     console.log(`  stream waits    ${(d("streamWaitMs") / 1000).toFixed(1)} s`);
     console.log(`  GPU stalls      ${d("gpuStalls")}  (${(d("gpuBytes") / 1048576 / wallS).toFixed(1)} MiB/s streamed)`);
     console.log(`  GPU lock waits  ${(d("gpuLockMs") / 1000).toFixed(2)} s; latency stalls ${d("gpuLatencyStalls")}`);
+    console.log(`  JIT             ${d("jitCompiled")} regions compiled (${(d("jitInstallMs") / 1000).toFixed(2)} s installing), ` +
+                `${d("jitEvicted")} evicted (${d("jitTrimmed")} trimmed), ${d("jitGenerations")} generations, ${d("jitStale")} stale`);
     const cpuS = end.cpuS - warm.cpuS;
     console.log(`  CPU s           ${cpuS.toFixed(1)} (${(cpuS / Math.max(1e-9, d("ticks") / TICKS_PER_SECOND)).toFixed(2)} CPU s per virtual s)`);
     results.window = {

@@ -16,6 +16,9 @@
 #include "gpu/framebuffer.h"
 #include "hle/kernel/parallel.h"
 #include "hle/loader/byte_source.h"
+#if defined(SWITCH_CPU_BACKEND_JIT)
+#include "cpu/backends/jit/jit.h"
+#endif
 
 #include <stddef.h>
 #include <stdio.h>
@@ -458,16 +461,19 @@ EXPORT uint64_t emulator_virtual_ticks_ffi(void)
  * producer waited for the GPU worker), host ns spent in those waits,
  * pictures the game presented, host ns guest ioctls waited for the GPU
  * thread's lock (command processing), times the guest waited for the GPU
- * thread to catch up (nvdrv_bound_gpu_latency). */
+ * thread to catch up (nvdrv_bound_gpu_latency), then the JIT's regions
+ * compiled, evicted, trimmed (live cap), code generations seen, stale
+ * regions, and host ns installing modules. */
 enum {
   PERF_TICKS, PERF_SVCS, PERF_GPU_BYTES, PERF_GPU_STALLS, PERF_STREAM_WAIT_NS, PERF_FRAMES, PERF_GPU_LOCK_WAIT_NS,
-  PERF_GPU_LATENCY_STALLS, PERF_COUNT
+  PERF_GPU_LATENCY_STALLS, PERF_JIT_COMPILED, PERF_JIT_EVICTED, PERF_JIT_TRIMMED, PERF_JIT_GENERATIONS, PERF_JIT_STALE,
+  PERF_JIT_INSTALL_NS, PERF_COUNT
 };
 
 EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity)
 {
   if (!g_initialised || out == 0) return 0;
-  const uint64_t values[PERF_COUNT] = {
+  uint64_t values[PERF_COUNT] = {
     [PERF_TICKS] = g_emulator.scheduler.ticks,
     [PERF_SVCS] = g_emulator.hle.svc_call_count,
     [PERF_GPU_BYTES] = g_emulator.gpu_stream.bytes,
@@ -477,6 +483,15 @@ EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity)
     [PERF_GPU_LOCK_WAIT_NS] = gpu_thread_lock_wait_ns(&g_emulator.gpu_thread),
     [PERF_GPU_LATENCY_STALLS] = g_emulator.nvdrv.stalls_for_latency,
   };
+#if defined(SWITCH_CPU_BACKEND_JIT)
+  const Jit_Stats *j = jit_stats(); /* the JIT's regions: compiled, dropped (evicted / trimmed / stale), install time */
+  values[PERF_JIT_COMPILED] = j->blocks_compiled;
+  values[PERF_JIT_EVICTED] = j->evictions;
+  values[PERF_JIT_TRIMMED] = j->trimmed;
+  values[PERF_JIT_GENERATIONS] = j->generations;
+  values[PERF_JIT_STALE] = j->stale;
+  values[PERF_JIT_INSTALL_NS] = j->sync_install_ns;
+#endif
   const uint32_t count = capacity < PERF_COUNT ? capacity : PERF_COUNT;
   memcpy((void *)(uintptr_t)out, values, count * sizeof(uint64_t));
   return count;
