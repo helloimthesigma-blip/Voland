@@ -160,6 +160,10 @@ static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); 
 /* Global memory a GPU vertex program reads (wgsl_find_globals) is copied
  * into the draw's data, all buffers together at most this many bytes. */
 #define GPU_GLOBAL_BYTES (256u << 10)
+#define RASTER_GLOBALS_UNKNOWN 0u /* Raster3d_Program.globals_state */
+#define RASTER_GLOBALS_NONE 1u
+#define RASTER_GLOBALS_FOUND 2u
+#define RASTER_GLOBALS_REFUSED 3u
 #define GPU_DATA_STORAGE                                                                                           \
   (((size_t)WGSL_DRAW_CONSTANT_WORDS + (size_t)2u * SM_CBUF_SLOTS * (CBUF_SLOT_BYTES / 4u) + 2u) * 4u +            \
    GPU_GLOBAL_BYTES + 2u * 4u * WGSL_MAX_GLOBALS * 4u)
@@ -899,6 +903,7 @@ static const Sm_Program *program_get(Raster3d *r, uint64_t address, const Gpu_Me
     }
   }
   sm_program_decode(r->program_bytes, extent, address, &slot->program);
+  slot->globals_state = RASTER_GLOBALS_UNKNOWN;
   if (r->on_program_decoded) r->on_program_decoded(r->on_program_user, &slot->program);
   slot->valid = true;
   slot->validated = r->submission;
@@ -3693,36 +3698,64 @@ static uint32_t cbuf_words_read(const Sm_Program *program, const Sm_Env *env, ui
   return (bytes + 3u) / 4u;
 }
 
+/* A graphics program's storage buffers, from the per-program cache
+ * (Raster3d_Program; ctx->vs / ctx->ps come from program_get): NULL when
+ * it reads none, else the cache entry with globals_state FOUND or
+ * REFUSED (addresses not traced to a constant buffer). The analysis scans
+ * the whole program, too slow to repeat per draw. */
+_Static_assert(RASTER_PROGRAM_GLOBALS == WGSL_MAX_GLOBALS, "the program cache holds every global buffer");
+
+static const Raster3d_Program *program_globals(const Sm_Program *program) {
+  Raster3d_Program *p = (Raster3d_Program *)((uint8_t *)(uintptr_t)program - offsetof(Raster3d_Program, program));
+  if (p->globals_state == RASTER_GLOBALS_UNKNOWN) {
+    p->globals_state = RASTER_GLOBALS_NONE;
+    if (wgsl_reads_globals(program)) {
+      static Wgsl_Globals found; /* draws are prepared on one thread */
+      const bool ok = program->header.stage == SM_STAGE_PIXEL ? wgsl_find_pixel_globals(program, &found)
+                                                              : wgsl_find_globals(program, &found);
+      p->globals_state = ok ? RASTER_GLOBALS_FOUND : RASTER_GLOBALS_REFUSED;
+      p->global_count = ok ? (uint8_t)found.count : 0u;
+      for (uint32_t k = 0; k < p->global_count; k++) {
+        p->global_slot[k] = found.slot[k];
+        p->global_offset[k] = found.offset[k];
+      }
+    }
+  }
+  return p->globals_state == RASTER_GLOBALS_NONE ? NULL : p;
+}
+
 /* Each storage buffer the vertex program reads: NVN's descriptor in the
  * constant buffer is {address low, address high, size}. Too large or
  * unbound buffers keep the vertices on the CPU (env_global_read). */
 static uint64_t g_vs_cpu_globals;
 
 static bool gpu_plan_globals(Draw_Context *ctx, Gpu_Draw *g, uint64_t *words) {
-  Wgsl_Globals found;
-  if (!wgsl_find_globals(ctx->vs, &found)) {
+  g->global_count = 0;
+  const Raster3d_Program *found = program_globals(ctx->vs);
+  if (!found) return true;
+  if (found->globals_state != RASTER_GLOBALS_FOUND) {
     if (!g_vs_cpu_globals++)
       log_warn("[gpu] vertices on the CPU: program %llx reads global memory through addresses not traced to a "
                "constant buffer", (unsigned long long)ctx->vs->address);
     return false;
   }
   uint64_t total = 0;
-  for (uint32_t k = 0; k < found.count; k++) {
-    const uint64_t at = ctx->cbuf_address[0][found.slot[k]];
+  for (uint32_t k = 0; k < found->global_count; k++) {
+    const uint64_t at = ctx->cbuf_address[0][found->global_slot[k]];
     uint32_t desc[3];
-    if (!at || !ctx->mem->read(ctx->mem->user, at + found.offset[k], desc, sizeof(desc))) return false;
+    if (!at || !ctx->mem->read(ctx->mem->user, at + found->global_offset[k], desc, sizeof(desc))) return false;
     g->global_base[k] = (uint64_t)desc[0] | (uint64_t)desc[1] << 32;
     g->global_size[k] = desc[2];
     total += ((uint64_t)desc[2] + 7u) & ~(uint64_t)3u;
     if (!g->global_base[k] || !desc[2] || total > GPU_GLOBAL_BYTES) {
       if (!g_vs_cpu_globals++)
         log_warn("[gpu] vertices on the CPU: program %llx: global buffer of %u bytes at 0x%llx (c%u[0x%x])",
-                 (unsigned long long)ctx->vs->address, desc[2], (unsigned long long)g->global_base[k], found.slot[k],
-                 found.offset[k]);
+                 (unsigned long long)ctx->vs->address, desc[2], (unsigned long long)g->global_base[k],
+                 found->global_slot[k], found->global_offset[k]);
       return false;
     }
   }
-  g->global_count = found.count;
+  g->global_count = found->global_count;
   *words += total / 4u;
   return true;
 }
@@ -3734,27 +3767,43 @@ static uint64_t g_ps_globals_refused;
 
 static bool gpu_plan_pixel_globals(Draw_Context *ctx, Gpu_Draw *g) {
   g->ps_global_count = 0;
-  Wgsl_Globals found;
-  if (!wgsl_find_pixel_globals(ctx->ps, &found)) return true; /* the translation reports it */
+  const Raster3d_Program *found = program_globals(ctx->ps);
+  if (!found || found->globals_state != RASTER_GLOBALS_FOUND) return true; /* the translation reports it */
   uint64_t total = 0;
   for (uint32_t k = 0; k < g->global_count; k++) total += ((uint64_t)g->global_size[k] + 7u) & ~(uint64_t)3u;
-  for (uint32_t k = 0; k < found.count; k++) {
-    const uint64_t at = ctx->cbuf_address[1][found.slot[k]];
+  for (uint32_t k = 0; k < found->global_count; k++) {
+    const uint64_t at = ctx->cbuf_address[1][found->global_slot[k]];
     uint32_t desc[3];
-    if (!at || !ctx->mem->read(ctx->mem->user, at + found.offset[k], desc, sizeof(desc))) return false;
+    if (!at || !ctx->mem->read(ctx->mem->user, at + found->global_offset[k], desc, sizeof(desc))) return false;
     g->ps_global_base[k] = (uint64_t)desc[0] | (uint64_t)desc[1] << 32;
     g->ps_global_size[k] = desc[2];
     total += ((uint64_t)desc[2] + 7u) & ~(uint64_t)3u;
     if (!g->ps_global_base[k] || !desc[2] || total > GPU_GLOBAL_BYTES) {
       if (!g_ps_globals_refused++)
         log_warn("[gpu] pixel program %llx not drawn: its global buffer of %u bytes at 0x%llx (c%u[0x%x]) does not fit",
-                 (unsigned long long)ctx->ps->address, desc[2], (unsigned long long)g->ps_global_base[k], found.slot[k],
-                 found.offset[k]);
+                 (unsigned long long)ctx->ps->address, desc[2], (unsigned long long)g->ps_global_base[k],
+                 found->global_slot[k], found->global_offset[k]);
+      g->ps_global_count = 0;
       return false;
     }
   }
-  g->ps_global_count = found.count;
+  g->ps_global_count = found->global_count;
   return true;
+}
+
+/* Words the pixel program's storage buffers will take in the draw's data
+ * (gpu_plan_pixel_globals plans them later): its descriptors' sizes. */
+static uint64_t pixel_global_words(Draw_Context *ctx) {
+  const Raster3d_Program *found = program_globals(ctx->ps);
+  if (!found || found->globals_state != RASTER_GLOBALS_FOUND) return 0;
+  uint64_t words = 0;
+  for (uint32_t k = 0; k < found->global_count; k++) {
+    const uint64_t at = ctx->cbuf_address[1][found->global_slot[k]];
+    uint32_t desc[3] = {0, 0, 0};
+    if (at) (void)ctx->mem->read(ctx->mem->user, at + found->global_offset[k], desc, sizeof(desc));
+    words += (uint64_t)desc[2] / 4u + 2u;
+  }
+  return words;
 }
 
 /* Copies global buffers into the draw's data at `*words`, filling their
@@ -3803,7 +3852,7 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
     st->cpu_vs_bindless++;
     return;
   }
-  if (wgsl_reads_globals(ctx->vs) && !gpu_plan_globals(ctx, g, &words)) {
+  if (!gpu_plan_globals(ctx, g, &words)) {
     st->cpu_vs_globals++;
     return;
   }
@@ -3819,7 +3868,7 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
     return;
   }
   /* Room for the pixel program's global buffers (planned later). */
-  if (wgsl_reads_globals(ctx->ps)) words += GPU_GLOBAL_BYTES / 4u;
+  words += pixel_global_words(ctx);
   if (words > GPU_DATA_WINDOW_WORDS) {
     st->cpu_vs_window++;
     if (!g_vs_cpu_window++) log_warn("[gpu] vertices on the CPU: constant buffers of %llu words", (unsigned long long)words);
@@ -4180,7 +4229,7 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
   }
   desc->mrt = rs->mrt;
   /* Its global memory, copied with the draw's data. */
-  if (wgsl_reads_globals(ctx->ps) && !gpu_plan_pixel_globals(ctx, g)) return false;
+  if (!gpu_plan_pixel_globals(ctx, g)) return false;
   /* The shader. */
   g->shader_id = gpu_shader_for(r, ctx->ps, desc);
   if (g->shader_id == GPU_SHADER_FAILED) return false;

@@ -103,10 +103,19 @@ typedef struct Raster3d_Surface {
   uint8_t *pixels;  /* width * bytes_per_pixel per row */
 } Raster3d_Surface;
 
+#define RASTER_PROGRAM_GLOBALS 4u /* = WGSL_MAX_GLOBALS */
+
 typedef struct Raster3d_Program {
   bool valid;
   uint32_t validated;  /* submission counter when last checked */
   uint32_t last_used;
+  /* Its storage buffers (wgsl_find_globals / _pixel_globals), worked out
+   * once per decode: RASTER_GLOBALS_* state, then descriptor slots and
+   * offsets in the constant buffers. */
+  uint8_t globals_state;
+  uint8_t global_count;
+  uint8_t global_slot[RASTER_PROGRAM_GLOBALS];
+  uint16_t global_offset[RASTER_PROGRAM_GLOBALS];
   Sm_Program program;
 } Raster3d_Program;
 
