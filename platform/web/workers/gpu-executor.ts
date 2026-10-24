@@ -279,6 +279,23 @@ function f32Bits(v: number): number {
   return b.getUint32(0, true);
 }
 
+/** A render pass's state as the draws left it (GpuExecutor.drawState). */
+interface DrawState {
+  pass: GPURenderPassEncoder | null;
+  pipeline: GPURenderPipeline | null;
+  vertexBuffer: GPUBuffer | null;
+  indexBuffer: GPUBuffer | null;
+  blend: readonly number[];
+  stencil: number;
+  scissorOrigin: number;
+  scissorSize: number;
+}
+
+function emptyDrawState(pass: GPURenderPassEncoder | null): DrawState {
+  return { pass, pipeline: null, vertexBuffer: null, indexBuffer: null, blend: [NaN, NaN, NaN, NaN], stencil: -1,
+    scissorOrigin: -1, scissorSize: -1 };
+}
+
 export class GpuExecutor {
   readonly stats: ExecutorStats = { draws: 0, dispatches: 0, passes: 0, submits: 0, pipelines: 0, prewarmed: 0, presents: 0, errors: 0, shadows: 0, copies: 0 };
   private readonly textures = new Map<number, Tex>();
@@ -1043,12 +1060,30 @@ export class GpuExecutor {
     return s;
   }
 
+  /* What the current pass already has set, so a draw sends only what
+   * changed: draw-heavy titles (TOTK: ~25k draws a frame) are limited by
+   * the commands each draw costs. Anything else that sets state on a pass
+   * calls invalidateDrawState(). */
+  private drawState: DrawState = emptyDrawState(null);
+
+  private stateFor(pass: GPURenderPassEncoder): DrawState {
+    if (this.drawState.pass !== pass) this.drawState = emptyDrawState(pass);
+    return this.drawState;
+  }
+
+  private invalidateDrawState(): void { this.drawState = emptyDrawState(null); }
+
   private scissor(pass: GPURenderPassEncoder, rect: readonly number[]): boolean {
     const [w, h] = this.passSize;
     const x0 = Math.max(0, rect[0] ?? 0), y0 = Math.max(0, rect[1] ?? 0);
     const x1 = Math.min(w, (rect[0] ?? 0) + (rect[2] ?? 0)), y1 = Math.min(h, (rect[1] ?? 0) + (rect[3] ?? 0));
     if (x1 <= x0 || y1 <= y0) return false;
+    const st = this.stateFor(pass);
+    const origin = x0 + 65536 * y0, size = (x1 - x0) + 65536 * (y1 - y0);
+    if (st.scissorOrigin === origin && st.scissorSize === size) return true;
     pass.setScissorRect(x0, y0, x1 - x0, y1 - y0);
+    st.scissorOrigin = origin;
+    st.scissorSize = size;
     return true;
   }
 
@@ -1118,14 +1153,17 @@ export class GpuExecutor {
     const colorFormats = colorIds.map((id) => (id ? this.textures.get(id)?.format ?? null : null));
     const { pipeline, layout } = this.drawPipeline(d, module, textures, filtered, colorFormats, depthId ? depthTex : undefined);
     /* Vertices and data (a flush may happen in between: stage both first). */
-    if (this.vertexUsed + Math.ceil(vertices.byteLength / 16) * 16 + indexBytes > VERTEX_BUFFER_BYTES ||
+    if (this.vertexUsed + stride + Math.ceil(vertices.byteLength / 16) * 16 + indexBytes > VERTEX_BUFFER_BYTES ||
         Math.ceil(this.dataUsed / DATA_ALIGN) * DATA_ALIGN + Math.max(data?.byteLength ?? 0, DATA_WINDOW_BYTES) > DATA_BUFFER_BYTES) {
       this.flush();
     }
     const dataOffset = this.stageData(data ?? new Uint8Array(16), DATA_WINDOW_BYTES);
-    const vertexOffset = this.vertexUsed;
+    /* Vertices start on a whole vertex, so the buffer stays bound for the
+     * pass and the draw names its first vertex (pulled stages count from
+     * vertex 0: they bind at the offset instead). */
+    const vertexOffset = pulled ? this.vertexUsed : Math.ceil(this.vertexUsed / stride) * stride;
     this.vertexStaging.set(vertices, vertexOffset);
-    this.vertexUsed += Math.ceil(vertices.byteLength / 16) * 16;
+    this.vertexUsed = vertexOffset + Math.ceil(vertices.byteLength / 16) * 16;
     /* Indices ride in the same buffer, after this draw's vertices. */
     const indexOffset = this.vertexUsed;
     if (indices) this.vertexStaging.set(indices, indexOffset);
@@ -1150,16 +1188,40 @@ export class GpuExecutor {
       });
       this.bindGroups.set(key, group);
     }
-    pass.setPipeline(pipeline);
-    pass.setBindGroup(0, group, [dataOffset]);
-    if (vertices.byteLength) pass.setVertexBuffer(0, this.vertexBuffer, vertexOffset, vertices.byteLength);
-    pass.setBlendConstant({ r: d.blendConstant[0] ?? 0, g: d.blendConstant[1] ?? 0, b: d.blendConstant[2] ?? 0, a: d.blendConstant[3] ?? 0 });
-    pass.setStencilReference(d.stencilRef);
+    const st = this.stateFor(pass);
+    if (st.pipeline !== pipeline) {
+      pass.setPipeline(pipeline);
+      st.pipeline = pipeline;
+    }
+    pass.setBindGroup(0, group, [dataOffset]); /* the data offset moves every draw */
+    let firstVertex = 0;
+    if (vertices.byteLength && pulled) {
+      pass.setVertexBuffer(0, this.vertexBuffer, vertexOffset, vertices.byteLength);
+      st.vertexBuffer = null;
+    } else if (vertices.byteLength) {
+      if (st.vertexBuffer !== this.vertexBuffer) {
+        pass.setVertexBuffer(0, this.vertexBuffer);
+        st.vertexBuffer = this.vertexBuffer;
+      }
+      firstVertex = vertexOffset / stride;
+    }
+    const b = d.blendConstant;
+    if (st.blend[0] !== b[0] || st.blend[1] !== b[1] || st.blend[2] !== b[2] || st.blend[3] !== b[3]) {
+      pass.setBlendConstant({ r: b[0] ?? 0, g: b[1] ?? 0, b: b[2] ?? 0, a: b[3] ?? 0 });
+      st.blend = [b[0] ?? 0, b[1] ?? 0, b[2] ?? 0, b[3] ?? 0];
+    }
+    if (st.stencil !== d.stencilRef) {
+      pass.setStencilReference(d.stencilRef);
+      st.stencil = d.stencilRef;
+    }
     if (indices) {
-      pass.setIndexBuffer(this.vertexBuffer, "uint32", indexOffset, indices.byteLength);
-      pass.drawIndexed(d.indexCount);
+      if (st.indexBuffer !== this.vertexBuffer) {
+        pass.setIndexBuffer(this.vertexBuffer, "uint32");
+        st.indexBuffer = this.vertexBuffer;
+      }
+      pass.drawIndexed(d.indexCount, 1, indexOffset / 4, firstVertex);
     } else {
-      pass.draw(d.vertexCount);
+      pass.draw(d.vertexCount, 1, firstVertex);
     }
     this.stats.draws++;
   }
@@ -1195,6 +1257,7 @@ export class GpuExecutor {
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, this.device.createBindGroup({ layout, entries: [{ binding: 0, resource: { buffer: this.dataBuffer, offset, size: 16 } }] }));
     pass.draw(3);
+    this.invalidateDrawState();
   }
 
   private clearDepth(c: Clear): void {
@@ -1231,6 +1294,7 @@ export class GpuExecutor {
     pass.setBindGroup(0, this.device.createBindGroup({ layout, entries: [{ binding: 0, resource: { buffer: this.dataBuffer, offset, size: 16 } }] }));
     if (stencil !== null) pass.setStencilReference(stencil);
     pass.draw(3);
+    this.invalidateDrawState();
   }
 
   /** Draws `src`'s rectangle into a pass already targeting the destination. */
@@ -1257,6 +1321,7 @@ export class GpuExecutor {
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, this.device.createBindGroup({ layout, entries: bind }));
     pass.draw(3);
+    this.invalidateDrawState();
   }
 
   private copy(c: Copy): void {
@@ -1300,6 +1365,7 @@ export class GpuExecutor {
         { binding: 1, resource: src.sampleView },
       ] }));
       pass.draw(3);
+      this.invalidateDrawState();
       return;
     }
     if (!pass || !this.scissor(pass, c.dstRect)) return;
