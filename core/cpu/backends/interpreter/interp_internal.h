@@ -243,4 +243,22 @@ static inline uint32_t *interp_exclusive_seq_slot(uint64_t address) {
   return &interp_exclusive_seq[(address >> INTERP_EXCLUSIVE_GRANULE_BITS) & (INTERP_EXCLUSIVE_SEQ_SLOTS - 1u)];
 }
 
+/* The sequence's top bit is a lock: a store-exclusive claims it (one
+ * compare-and-swap that also checks the sequence its load saw), does its
+ * memory compare-and-swap, and releases it bumped if it stored. Checking
+ * and swapping separately let another core pop, pop and re-push a list
+ * head in between - the ABA this exists to fail (Tears of the Kingdom's
+ * resource loaders then shared a block: file data over a live object). A
+ * claim that finds the lock held fails the store, as hardware may. */
+#define INTERP_EXCLUSIVE_SEQ_LOCK 0x80000000u
+static inline bool interp_exclusive_claim(uint32_t *seq, uint32_t seen) {
+  uint32_t expected = seen;
+  return !(seen & INTERP_EXCLUSIVE_SEQ_LOCK) &&
+         __atomic_compare_exchange_n(seq, &expected, seen | INTERP_EXCLUSIVE_SEQ_LOCK, false, __ATOMIC_ACQ_REL,
+                                     __ATOMIC_ACQUIRE);
+}
+static inline void interp_exclusive_release(uint32_t *seq, uint32_t seen, bool stored) {
+  __atomic_store_n(seq, stored ? (seen + 1u) & ~INTERP_EXCLUSIVE_SEQ_LOCK : seen, __ATOMIC_RELEASE);
+}
+
 #endif /* SWITCH_CPU_BACKENDS_INTERPRETER_INTERP_INTERNAL_H */

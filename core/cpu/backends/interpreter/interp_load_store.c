@@ -322,12 +322,13 @@ static Interp_Status store_exclusive_shared(Interp_State *s, uint64_t address, u
                                             bool pair, uint32_t t, uint32_t t2, uint32_t rs) {
   uint32_t *seq = interp_exclusive_seq_slot(address);
   bool pass = s->exclusive_valid && s->exclusive_address == address && s->exclusive_size == total &&
-              __atomic_load_n(seq, __ATOMIC_ACQUIRE) == s->exclusive_seq;
+              interp_exclusive_claim(seq, s->exclusive_seq);
   VMM_Fault fault;
   if (pass) {
     /* Aligned to `total` (checked by the caller), so within one page. */
     uint8_t *host = vmm_translate_inline(s->l1, address, VMM_PERM_W, &fault);
     if (!host) {
+      interp_exclusive_release(seq, s->exclusive_seq, false);
       s->fault_address = fault.gva;
       return INTERP_FAULT;
     }
@@ -335,7 +336,7 @@ static Interp_Status store_exclusive_shared(Interp_State *s, uint64_t address, u
     store_le(data, xreg(s, t), element);
     if (pair) store_le(data + element, xreg(s, t2), element);
     pass = interp_compare_and_swap(host, s->exclusive_value, data, total);
-    if (pass) __atomic_fetch_add(seq, 1u, __ATOMIC_RELEASE);
+    interp_exclusive_release(seq, s->exclusive_seq, pass);
   } else {
     /* Hardware still checks translation on a failing store-exclusive. */
     uint8_t probe;

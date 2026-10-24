@@ -354,17 +354,18 @@ static Interp_Status load_store_extra(A32_State *a, uint32_t insn) {
 static Interp_Status store_exclusive_shared(A32_State *a, uint32_t address, uint32_t size, uint32_t rd, uint32_t rt) {
   uint32_t *seq = interp_exclusive_seq_slot(address); /* the ABA check (interp_internal.h) */
   bool pass = a->s.exclusive_valid && a->s.exclusive_address == address && a->s.exclusive_size == size &&
-              __atomic_load_n(seq, __ATOMIC_ACQUIRE) == a->s.exclusive_seq;
+              interp_exclusive_claim(seq, a->s.exclusive_seq);
   if (pass) {
     VMM_Fault fault;
     uint8_t *host = vmm_translate_inline(a->s.l1, address, VMM_PERM_W, &fault);
     if (!host) {
+      interp_exclusive_release(seq, a->s.exclusive_seq, false);
       a->s.fault_address = fault.gva;
       return INTERP_FAULT;
     }
     const uint32_t v[2] = {a32_reg(a, rt), size == 8u ? a32_reg(a, rt + 1u) : 0u};
     pass = interp_compare_and_swap(host, a->s.exclusive_value, v, size);
-    if (pass) __atomic_fetch_add(seq, 1u, __ATOMIC_RELEASE);
+    interp_exclusive_release(seq, a->s.exclusive_seq, pass);
   }
   a->s.exclusive_valid = false;
   a32_set_reg(a, rd, pass ? 0u : 1u);

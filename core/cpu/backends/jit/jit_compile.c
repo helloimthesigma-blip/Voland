@@ -4670,7 +4670,9 @@ static uint32_t log2_size(uint32_t size) { return size == 8u ? 3u : size == 4u ?
 
 /* i32.atomic.load / i32.atomic.rmw.add (threads proposal, 0xFE prefix). */
 #define WASM_ATOMIC_I32_LOAD 0x10u
+#define WASM_ATOMIC_I32_STORE 0x17u
 #define WASM_ATOMIC_I32_RMW_ADD 0x1Eu
+#define WASM_ATOMIC_I32_RMW_CMPXCHG 0x48u
 
 /* i64 on the stack: the address of L_ADDR's granule sequence
  * (interp_exclusive_seq_slot). */
@@ -4693,9 +4695,25 @@ static void emit_atomic_i32(Ctx *c, uint32_t opcode) {
   wasm_uleb(c->b, 0);
 }
 
+/* Releases the granule's sequence the store-exclusive claimed: bumped if
+ * L_PASS (it stored), else as the load saw it (interp_exclusive_release). */
+static void emit_exclusive_release(Ctx *c, bool stored_from_pass) {
+  emit_exclusive_seq_address(c);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_EXCLUSIVE_SEQ);
+  if (stored_from_pass) {
+    lget(c, L_PASS);
+    op(c, WASM_OP_I32_ADD);
+    i32c(c, (int32_t)~INTERP_EXCLUSIVE_SEQ_LOCK);
+    op(c, WASM_OP_I32_AND);
+  }
+  emit_atomic_i32(c, WASM_ATOMIC_I32_STORE);
+}
+
 /* Multicore STXR / STLXR of one register (the interpreter's
  * store_exclusive_shared, inline): it passes iff this thread's monitor is
- * set on this address and size and memory still holds what the LDXR read
+ * set on this address and size, it claims the granule's sequence as its
+ * load saw it, and memory still holds what the LDXR read
  * (state->exclusive_value) - one host compare-and-swap, seq_cst, so a
  * store by another core in between makes it fail rather than be lost.
  * Unmapped or read-only pages leave through the interpreter, which faults
@@ -4712,11 +4730,26 @@ static void emit_store_exclusive_shared(Ctx *c, uint32_t element, uint32_t t, ui
   i32c(c, element);
   op(c, WASM_OP_I32_EQ);
   op(c, WASM_OP_I32_AND);
-  emit_exclusive_seq_address(c); /* no store-exclusive succeeded on the granule since the load */
-  emit_atomic_i32(c, WASM_ATOMIC_I32_LOAD);
+  hint(c, true);
+  open_if(c, WASM_BLOCK_VOID); /* the monitor holds this address and size */
+  /* Claim the granule's sequence (interp_exclusive_claim): unlocked when
+   * the load saw it, and still what it saw - one compare-and-swap. */
+  emit_exclusive_seq_address(c);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_EXCLUSIVE_SEQ);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_EXCLUSIVE_SEQ);
+  i32c(c, (int32_t)INTERP_EXCLUSIVE_SEQ_LOCK);
+  op(c, WASM_OP_I32_OR);
+  emit_atomic_i32(c, WASM_ATOMIC_I32_RMW_CMPXCHG);
   lget(c, L_STATE);
   mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_EXCLUSIVE_SEQ);
   op(c, WASM_OP_I32_EQ);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_EXCLUSIVE_SEQ);
+  i32c(c, (int32_t)INTERP_EXCLUSIVE_SEQ_LOCK);
+  op(c, WASM_OP_I32_AND);
+  op(c, WASM_OP_I32_EQZ);
   op(c, WASM_OP_I32_AND);
   hint(c, true);
   open_if(c, WASM_BLOCK_VOID);
@@ -4736,18 +4769,19 @@ static void emit_store_exclusive_shared(Ctx *c, uint32_t element, uint32_t t, ui
     lget(c, L_STATE);
     mem(c, load_opcode(ACCESS_LOAD_ZERO, element), ALIGN_1, OFF_EXCLUSIVE_VALUE);
     op(c, WASM_OP_I64_EQ);
-    ltee(c, L_PASS);
-    open_if(c, WASM_BLOCK_VOID); /* stored: bump the granule's sequence */
-    emit_exclusive_seq_address(c);
-    i32c(c, 1);
-    emit_atomic_i32(c, WASM_ATOMIC_I32_RMW_ADD);
-    op(c, WASM_OP_DROP);
-    end_(c);
+    lset(c, L_PASS);
+    emit_exclusive_release(c, true); /* bumped iff it stored */
     br(c, done);
-    end_(c); /* $slow */
+    end_(c); /* $slow: release unchanged, then the interpreter redoes it */
+    emit_exclusive_release(c, false);
     leave_via_interpreter(c);
     end_(c); /* $done */
   }
+  else_(c); /* another store-exclusive got there first */
+  i32c(c, 0);
+  lset(c, L_PASS);
+  emit_load_address(c, 1u);
+  end_(c);
   else_(c);
   i32c(c, 0);
   lset(c, L_PASS);
