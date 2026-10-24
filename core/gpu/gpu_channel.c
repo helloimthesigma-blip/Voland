@@ -258,6 +258,22 @@ static void dma_semaphore(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t launc
   if (!mem->write(mem->user, va, release, type == LAUNCH_SEMAPHORE_ONE_WORD ? 4u : sizeof(release))) ch->faults++;
 }
 
+#define DMA_FAULT_LOG_LIMIT 8u
+
+/* A copy that stopped part way: the first few are logged (a texture left
+ * partly unwritten shows as garbage or magenta later). */
+static void dma_fault(Gpu_Channel *ch, const char *what, const Dma_Surface *src, const Dma_Surface *dst, uint32_t length,
+                      uint32_t lines, uint32_t at_line) {
+  static uint32_t logged;
+  ch->faults++;
+  if (logged++ >= DMA_FAULT_LOG_LIMIT) return;
+  log_warn("[gpu] copy engine stopped (%s) at line %u of %u: %llx (%s, pitch %u, width %u, origin %u,%u) -> %llx (%s, "
+           "pitch %u, width %u, origin %u,%u), %u bytes a line",
+           what, at_line, lines, (unsigned long long)src->base, src->pitch_linear ? "pitch" : "block", src->pitch,
+           src->width_bytes, src->origin_x, src->origin_y, (unsigned long long)dst->base, dst->pitch_linear ? "pitch" : "block",
+           dst->pitch, dst->width_bytes, dst->origin_x, dst->origin_y, length);
+}
+
 static void dma_launch(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t launch) {
   if (mem->renderer) {
     /* The copy may read what the 3D engine drew, or overwrite what it
@@ -294,17 +310,17 @@ static void dma_launch(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t launch) 
       for (uint64_t done = 0; done < src_bytes;) {
         const uint32_t n = (uint32_t)(src_bytes - done < GPU_LINE_BYTES ? src_bytes - done : GPU_LINE_BYTES);
         if (!mem->read(mem->user, src.base + done, ch->line, n) || !mem->write(mem->user, dst.base + done, ch->line, n)) {
-          ch->faults++;
+          dma_fault(ch, "unmapped 1D range", &src, &dst, length, lines, (uint32_t)(done / GPU_LINE_BYTES));
           break;
         }
         done += n;
       }
     } else if (src_bytes > GPU_LINE_BYTES || dst_bytes > GPU_LINE_BYTES) {
-      ch->faults++;
+      dma_fault(ch, "line longer than the staging line", &src, &dst, length, lines, 0);
     } else {
       for (uint32_t y = 0; y < lines; y++) {
         if (!surface_line(ch, mem, &src, y, ch->line, (uint32_t)src_bytes, false)) {
-          ch->faults++;
+          dma_fault(ch, "source unmapped", &src, &dst, length, lines, y);
           break;
         }
         uint8_t *out = ch->line;
@@ -315,7 +331,7 @@ static void dma_launch(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t launch) 
           out = ch->line_out;
         }
         if (!surface_line(ch, mem, &dst, y, out, (uint32_t)dst_bytes, true)) {
-          ch->faults++;
+          dma_fault(ch, "destination unmapped", &src, &dst, length, lines, y);
           break;
         }
       }
