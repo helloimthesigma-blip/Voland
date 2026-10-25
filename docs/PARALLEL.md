@@ -615,3 +615,13 @@ a better thread can.
   `SleepThread(-1)` and sleep 20 us / 15 ms between bursts.
   `voland-cli --pacing` paces the CLI, but the CLI does not wait wall time
   between idle slices.
+- Paced native A/B (`voland-cli --pacing`, 4 wall minutes). With the old
+  rule TOTK reaches 3D (166 shaders) by 178 s virtual. With priority first
+  it presents ~20x more often (19723 vs 924 binder transactions) and reads
+  less data. Its high-priority threads keep the one host thread busy at
+  60 Hz, the lower-priority loaders get what is left, and under pacing
+  idle time is no longer fast-forwarded to make up for it.
+  - A faithful pick must charge a poller's spinning to its own guest core
+    only. The two-level pick tried that and still stalled in the browser.
+  - Next: dump which leader runs per core during the stall (VOLAND_RUN_TRACE
+    with --pacing) before trying again.
