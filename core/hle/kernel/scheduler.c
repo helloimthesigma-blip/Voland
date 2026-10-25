@@ -509,7 +509,7 @@ static int32_t pick_rotating(Scheduler *sched) {
       for (uint32_t c = 0; c < THREAD_CORE_COUNT; c++)
         if ((mask >> c) & 1u) own |= (uint64_t)1 << (c < cores ? c : cores - 1u);
       if (!((own >> g) & 1u)) continue;
-      if (best < 0 || better(t, &sched->threads[best], false, 0)) best = (int32_t)i;
+      if (best < 0 || leads_core(t, &sched->threads[best], false, 0)) best = (int32_t)i;
     }
     if (best >= 0) {
       turn = g + 1u;

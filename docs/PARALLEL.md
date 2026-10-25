@@ -643,3 +643,10 @@ old pick.
   leading its core forever. Before: about 3 of 4 runs crashed.
 - Silksong, Celeste, Mario Kart 8 and Animal Crossing on three cores: the
   same presents and CPU time within noise.
+
+**Deterministic repro of the residual TOTK crash** (2026-10-25):
+`VOLAND_SERIAL_ROTATE` now orders each core's threads like the parallel pick
+(`leads_core`, priority first). `VOLAND_BUDGET_JITTER=3
+VOLAND_SERIAL_ROTATE=3 voland-cli ... --host-cores 0` crashes identically at
+slice 577966: CreateAndDeleteThread in `RelocationTable::Relocate` with a
+null object (sdk+0x7d934 reading 0x4). Seed 0 runs clean to 900k slices.
