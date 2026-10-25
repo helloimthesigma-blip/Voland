@@ -591,3 +591,27 @@ passes `VOLAND_PAGE_QUERY` through to the page.
 - The pacing change above is deliberate: more guest work per virtual
   second. A title that measures its own CPU time against the tick counter
   sees two cores' worth.
+
+## Pollers and priority (tried, reverted 2026-10-25)
+
+The pick puts a thread marked polling (`Sched_Thread.spinning`: short runs
+ending in a yield) after every working thread, whatever the priorities.
+That deviates from Horizon: on one core a lower priority never runs while
+a better thread can.
+
+- **Priority first, polling only as a tie-break** (5955d7b, reverted): Animal
+  Crossing got past a native-only stall. There, main (core 0, priority 44),
+  marked polling, lost to a priority-45 core-0 worker that cleared the job
+  manager's completion event main then waited on forever. But Tears of
+  the Kingdom in the browser never finished loading under wall-clock
+  pacing (18 shaders, black, presenting at 55 fps).
+- **A two-level per-core pick** (a leader per guest core by priority, then
+  working leaders before polling ones): the same TOTK result.
+- Without pacing (`?pacing=0`) both reach TOTK's 3D (368 shaders, 3.0 fps).
+  Natively, serial TOTK makes 99 presents by 300k slices with them vs ~60.
+  `VOLAND_SERIAL_ROTATE=3` no longer crashes with them either. So the
+  open question is how pacing's time jumps starve TOTK's lower-priority
+  workers when pollers keep their priority. TOTK's pollers yield with
+  `SleepThread(-1)` and sleep 20 us / 15 ms between bursts.
+  `voland-cli --pacing` paces the CLI, but the CLI does not wait wall time
+  between idle slices.

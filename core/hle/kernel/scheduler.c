@@ -206,16 +206,11 @@ void scheduler_expire_timeouts(Scheduler *sched) {
 /* Is `t` a better pick than `b`? With an affine core, home threads win
  * ties of priority before round-robin order does. */
 static bool better(const Sched_Thread *t, const Sched_Thread *b, bool affine, uint32_t core) {
-  if (t->thread.priority != b->thread.priority) return t->thread.priority < b->thread.priority;
-  /* Among equal priorities, a thread that is only polling for work
-   * (Sched_Thread.spinning) goes after the ones doing work: a yield puts a
-   * Switch thread at the back of its priority, and equal priorities are
-   * not time-sliced, so it would not poll every rotation. Not past a
-   * better priority - Animal Crossing's main thread (priority 44), marked
-   * polling, used to lose to a priority-45 worker of its own core that
-   * cleared the event main then waited on forever - and only as a
-   * tie-break, which keeps the order transitive. */
+  /* A thread that is only polling for work (Sched_Thread.spinning) runs
+   * when nothing that does work can: on the Switch it would spin on a core
+   * of its own instead of taking turns with the threads that feed it. */
   if (t->spinning != b->spinning) return !t->spinning;
+  if (t->thread.priority != b->thread.priority) return t->thread.priority < b->thread.priority;
   if (affine) {
     const bool t_home = t->last_core == core, b_home = b->last_core == core;
     if (t_home != b_home) return t_home;
