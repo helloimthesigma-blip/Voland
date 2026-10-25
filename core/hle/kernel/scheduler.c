@@ -276,6 +276,59 @@ static bool solo(const Sched_Thread *t) {
   return false;
 }
 
+/* With parallel cores, the pick follows the Switch's per-core rule:
+ * 1. Each guest core's leader: its best runnable thread by priority (a
+ *    lower priority never runs on a core while a better thread there can),
+ *    then working before polling (a yield goes to the back of its
+ *    priority), then a thread already on this host core, then round-robin.
+ * 2. Among the leaders this host core may run: working before polling,
+ *    then the same order.
+ * The serial pick (better(), below) instead lets a poller's own-core
+ * lower priorities run - on one host thread a Switch core's polling would
+ * otherwise eat the other cores' time (docs/PARALLEL.md "Pollers and
+ * priority"). On parallel cores that cost is gone, and Tears of the
+ * Kingdom's loader, which counts on the per-core rule, mostly stopped
+ * crashing: on three cores 7 of 9 runs clean, 1 crash, 1 stall at boot,
+ * vs about 3 of 4 crashing before. Silksong, Celeste, Mario Kart 8 and
+ * Animal Crossing run the same (docs/PARALLEL.md). */
+static bool leads_core(const Sched_Thread *t, const Sched_Thread *b, bool affine, uint32_t core) {
+  if (t->thread.priority != b->thread.priority) return t->thread.priority < b->thread.priority;
+  if (t->spinning != b->spinning) return !t->spinning;
+  if (affine) {
+    const bool t_home = t->last_core == core, b_home = b->last_core == core;
+    if (t_home != b_home) return t_home;
+  }
+  return t->last_run < b->last_run;
+}
+
+static bool better_leader(const Sched_Thread *t, const Sched_Thread *b, bool affine, uint32_t core) {
+  if (t->spinning != b->spinning) return !t->spinning;
+  return leads_core(t, b, affine, core);
+}
+
+static int32_t pick_leaders(const Scheduler *sched, bool affine, uint32_t core, bool busy) {
+  int32_t leader[THREAD_CORE_COUNT];
+  for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++) leader[g] = -1;
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    const Sched_Thread *t = &sched->threads[i];
+    if (t->state != THREAD_STATE_RUNNABLE || t->paused || t->on_core) continue;
+    if (busy && solo(t)) continue;
+    const uint64_t mask = guest_cores_of(t);
+    for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++)
+      if (((mask >> g) & 1u) && (leader[g] < 0 || leads_core(t, &sched->threads[leader[g]], affine, core)))
+        leader[g] = (int32_t)i;
+  }
+  int32_t best = -1;
+  for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++) {
+    const int32_t i = leader[g];
+    if (i < 0 || i == best) continue;
+    const Sched_Thread *t = &sched->threads[i];
+    if (affine && !scheduler_runs_on(sched, t, core)) continue;
+    if (best < 0 || better_leader(t, &sched->threads[best], affine, core)) best = i;
+  }
+  return best;
+}
+
 static int32_t pick(Scheduler *sched, bool affine, uint32_t core) {
   int32_t best = -1;
   bool busy = false;
@@ -287,6 +340,7 @@ static int32_t pick(Scheduler *sched, bool affine, uint32_t core) {
       busy = true;
     }
   }
+  if (sched->host_cores > 1u) return pick_leaders(sched, affine, core, busy);
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     const Sched_Thread *t = &sched->threads[i];
     if (t->state != THREAD_STATE_RUNNABLE || t->paused || t->on_core) continue;

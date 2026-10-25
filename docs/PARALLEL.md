@@ -630,3 +630,16 @@ a better thread can.
     CPU the loaders need, and loading crawls. The old rule throttled it by
     accident, demoting main as a "poller". The faithful fix is several host
     cores, which for TOTK waits on the multicore crash.
+
+**Parallel cores use the per-core rule** (2026-10-25). With two or more host
+cores the pick takes each guest core's leader by priority first (then
+working before polling, then home core, round-robin). Among the leaders a
+host core may run, working ones come before pollers. Serial keeps the
+old pick.
+
+- Tears of the Kingdom, three cores, 300k slices: 7 of 9 runs clean
+  (~1430-1475 presents), 1 loader crash, 1 stall at boot. The stall was a
+  CreateAndDeleteThread busy-polling `TryPeekLightMessageQueue` with no SVC,
+  leading its core forever. Before: about 3 of 4 runs crashed.
+- Silksong, Celeste, Mario Kart 8 and Animal Crossing on three cores: the
+  same presents and CPU time within noise.
