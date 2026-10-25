@@ -394,14 +394,14 @@ const DEFAULT_HOST_CORES = Math.max(
   1, Math.min(MAX_DEFAULT_HOST_CORES, (self.navigator.hardwareConcurrency || 4) - HOST_THREADS_RESERVED));
 /** Cores chosen with ?cores=N (set-host-cores); null = the default. */
 let requestedHostCores: number | null = null;
-/** Titles the default runs on the serial scheduler:
- * - Super Smash Bros. Ultimate: its guest threads hand work to each other
- *   so tightly that, with the GPU thread beside them, parallel cores mostly
- *   wait (fight: 18-22 fps serial, 9.5 on three cores).
- * (Tears of the Kingdom left the list with the per-core pick: on three
- * cores it now gets ~3x serial's progress per virtual second, and 3 of 3
- * browser runs went clean - natively 7 of 9; ?cores=0 if it misbehaves.) */
-const SERIAL_TITLES: ReadonlySet<string> = new Set(["01006A800016E000"]);
+/** Titles the default runs on the serial scheduler. None since the per-core
+ * pick (docs/PARALLEL.md "Pollers and priority"); ?cores=0 if one misbehaves:
+ * - Super Smash Bros. Ultimate was here (fights 18-22 fps serial, 9.5 on
+ *   three cores); now three cores win: fights 22-27 fps vs 12-21 serial
+ *   (random stages; pacing off), and the game runs faster.
+ * - Tears of the Kingdom: ~3x serial's progress per virtual second on three
+ *   cores; 3 of 3 browser runs clean (natively 7 of 9). */
+const SERIAL_TITLES: ReadonlySet<string> = new Set();
 /** The virtual CPU clock by title (percent of the Switch's 1.02 GHz): a
  * serial title whose threads share one core gets more instructions per
  * virtual second where the host keeps up. ?cpuspeed=N overrides. */
