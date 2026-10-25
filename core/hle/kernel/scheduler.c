@@ -235,7 +235,19 @@ bool scheduler_runs_on(const Scheduler *sched, const Sched_Thread *t, uint32_t c
   return false;
 }
 
+static uint32_t rotate_cores(void);
+
 uint32_t scheduler_guest_core(const Scheduler *sched, const Sched_Thread *t) {
+  const uint32_t rotation = sched->host_cores <= 1u ? rotate_cores() : 0u;
+  if (rotation) { /* VOLAND_SERIAL_ROTATE: the guest core whose turn it runs in */
+    const uint64_t mask = guest_cores_of(t);
+    const uint32_t ideal = t->thread.preferred_core;
+    const uint32_t slot = t->last_core;
+    if (((mask >> ideal) & 1u) && (ideal < rotation ? ideal : rotation - 1u) == slot) return ideal;
+    for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++)
+      if (((mask >> g) & 1u) && (g < rotation ? g : rotation - 1u) == slot) return g;
+    return ideal;
+  }
   if (sched->host_cores <= 1u || !t->on_core) return t->thread.preferred_core;
   const uint64_t mask = guest_cores_of(t);
   if (((mask >> t->thread.preferred_core) & 1u) && t->thread.preferred_core % sched->host_cores == t->last_core)
@@ -513,6 +525,7 @@ static int32_t pick_rotating(Scheduler *sched) {
     }
     if (best >= 0) {
       turn = g + 1u;
+      sched->threads[best].last_core = g; /* the core it runs on, for GetCurrentProcessorNumber */
       return best;
     }
   }
