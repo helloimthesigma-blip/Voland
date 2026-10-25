@@ -123,8 +123,11 @@ static uint32_t gen_cond_select(void) {
          (pick(16) << 12) | (pick(4) == 0 ? 1u << 11 : 0) | (pick(2) << 10) | (reg() << 5) | dst();
 }
 static uint32_t gen_dp_two_source(void) {
-  static const uint32_t opcodes[8] = {0x02, 0x03, 0x08, 0x09, 0x0A, 0x0B, 0x10, 0x16};
-  return (pick(2) << 31) | (0xD6u << 21) | (reg() << 16) | (opcodes[pick(8)] << 10) | (reg() << 5) | dst();
+  /* All eight CRC32{,C}{B,H,W,X}: the width picks hit and miss the one
+   * defined form of each (X wants sf = 1, the others sf = 0). */
+  static const uint32_t opcodes[14] = {0x02, 0x03, 0x08, 0x09, 0x0A, 0x0B, 0x10,
+                                       0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17};
+  return (pick(2) << 31) | (0xD6u << 21) | (reg() << 16) | (opcodes[pick(14)] << 10) | (reg() << 5) | dst();
 }
 static uint32_t gen_dp_one_source(void) {
   return (pick(2) << 31) | (1u << 30) | (0xD6u << 21) | (pick(6) << 10) | (reg() << 5) | dst();

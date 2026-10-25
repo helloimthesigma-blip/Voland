@@ -1477,10 +1477,77 @@ static bool c_dp_three_source(Ctx *c, uint32_t insn) {
   }
 }
 
+/* CRC32 / CRC32C tables (bit-reflected, as the interpreter's crc32_update):
+ * byte at a time, crc = (crc >> 8) ^ T[(crc ^ byte) & 0xff]. Built on first
+ * use; a racing second build writes the same values. */
+#define CRC32_POLY_REFLECTED 0xEDB88320u
+#define CRC32C_POLY_REFLECTED 0x82F63B78u
+static uint32_t g_crc_tables[2][256];
+static const uint32_t *crc_table(bool castagnoli) {
+  static bool built;
+  if (!__atomic_load_n(&built, __ATOMIC_ACQUIRE)) {
+    for (uint32_t t = 0; t < 2u; t++) {
+      const uint32_t poly = t ? CRC32C_POLY_REFLECTED : CRC32_POLY_REFLECTED;
+      for (uint32_t i = 0; i < 256u; i++) {
+        uint32_t crc = i;
+        for (int b = 0; b < 8; b++) crc = (crc >> 1) ^ (poly & (0u - (crc & 1u)));
+        g_crc_tables[t][i] = crc;
+      }
+    }
+    __atomic_store_n(&built, true, __ATOMIC_RELEASE);
+  }
+  return g_crc_tables[castagnoli ? 1 : 0];
+}
+
+/* CRC32{,C}{B,H,W,X}: Wd = crc(Wn, low 1/2/4/8 bytes of Rm). Unrolled
+ * table steps instead of leaving through the interpreter (Tears of the
+ * Kingdom hashes its resource names with CRC32B: ~390k interpreter
+ * round trips per 50k slices). */
+static bool c_crc32(Ctx *c, uint32_t insn) {
+  const bool sf = bit(insn, 31);
+  const uint32_t opcode = bits(insn, 15, 10), size = opcode & 3u;
+  if ((size == 3u) != sf) return false; /* undefined: the interpreter raises it */
+  const uint64_t table = (uint64_t)(uintptr_t)crc_table((opcode & 4u) != 0);
+  get_x(c, bits(insn, 9, 5));
+  i64c(c, 0xFFFFFFFFu);
+  op(c, WASM_OP_I64_AND);
+  lset(c, L_T0); /* crc */
+  get_x(c, bits(insn, 20, 16));
+  lset(c, L_T1); /* data */
+  for (uint32_t i = 0; i < (1u << size); i++) {
+    /* T[(crc ^ data >> 8i) & 0xff] */
+    lget(c, L_T0);
+    lget(c, L_T1);
+    if (i) {
+      i64c(c, 8u * i);
+      op(c, WASM_OP_I64_SHR_U);
+    }
+    op(c, WASM_OP_I64_XOR);
+    i64c(c, 0xFFu);
+    op(c, WASM_OP_I64_AND);
+    i64c(c, 2u);
+    op(c, WASM_OP_I64_SHL);
+    i64c(c, table);
+    op(c, WASM_OP_I64_ADD);
+    mem(c, WASM_OP_I32_LOAD, ALIGN_4, 0);
+    op(c, WASM_OP_I64_EXTEND_I32_U);
+    /* ^ (crc >> 8) */
+    lget(c, L_T0);
+    i64c(c, 8u);
+    op(c, WASM_OP_I64_SHR_U);
+    op(c, WASM_OP_I64_XOR);
+    lset(c, L_T0);
+  }
+  lget(c, L_T0);
+  set_x(c, bits(insn, 4, 0));
+  return true;
+}
+
 static bool c_dp_two_source(Ctx *c, uint32_t insn) {
   if (bit(insn, 29)) return false;
   const bool sf = bit(insn, 31);
   const uint32_t opcode = bits(insn, 15, 10);
+  if (opcode >= 0x10u && opcode <= 0x17u) return c_crc32(c, insn);
   get_xw(c, bits(insn, 9, 5), sf);
   lset(c, L_T0);
   get_xw(c, bits(insn, 20, 16), sf);

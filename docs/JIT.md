@@ -657,6 +657,10 @@ shows it next to the backend name.
   that FPCR and on no subnormal input or result. TOTK under Node: direct
   SIMD&FP calls 751 M -> 77 M, 255 -> 211 s to the same slice.
   Store-exclusives need the same address and size in every mode.
+- **0.5.2** (2026-10-25) - CRC32 and CRC32C (B/H/W/X) compile inline:
+  unrolled byte-at-a-time table steps instead of a round trip through
+  the interpreter. TOTK hashes its resource names with CRC32B; under Node
+  to 250k slices its "other" interpreter fallbacks went 3.85 M -> 0.
 
 ## What a region costs on V8
 
