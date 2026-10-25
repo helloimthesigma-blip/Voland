@@ -623,5 +623,10 @@ a better thread can.
   idle time is no longer fast-forwarded to make up for it.
   - A faithful pick must charge a poller's spinning to its own guest core
     only. The two-level pick tried that and still stalled in the browser.
-  - Next: dump which leader runs per core during the stall (VOLAND_RUN_TRACE
-    with --pacing) before trying again.
+  - The run trace under pacing shows nothing deadlocked: TOTK's
+    priority-56 background loaders run full slices of real parsing work.
+    Faithful priorities simply let main run the loading screen at ~55 fps,
+    as on its own Switch core. On one host thread that frame loop eats the
+    CPU the loaders need, and loading crawls. The old rule throttled it by
+    accident, demoting main as a "poller". The faithful fix is several host
+    cores, which for TOTK waits on the multicore crash.
