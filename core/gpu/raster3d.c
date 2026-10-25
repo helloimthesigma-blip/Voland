@@ -5543,6 +5543,7 @@ typedef struct Compute_Profile {
   uint32_t cpu_runs;
   uint32_t written;  /* bit per window the CPU runs wrote */
   bool gpu_failed;   /* does not translate, or cannot be bound */
+  bool mirror_logged; /* a window could not be mirrored (said once) */
 } Compute_Profile;
 static Compute_Profile g_compute_profiles[COMPUTE_PROFILES];
 static uint32_t g_compute_profile_next;
@@ -5600,6 +5601,10 @@ static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute
   const uint32_t threads = launch->block[0] * launch->block[1] * launch->block[2];
   if (threads > WGSL_CS_MAX_INVOCATIONS || launch->shared_bytes > WGSL_CS_MAX_SHARED_BYTES ||
       program_samples_textures(program)) {
+    log_info("[gpu] compute program %08x stays on the CPU: %s", program->hash,
+             threads > WGSL_CS_MAX_INVOCATIONS        ? "too many threads per block"
+             : launch->shared_bytes > WGSL_CS_MAX_SHARED_BYTES ? "too much shared memory"
+                                                               : "it samples textures");
     prof->gpu_failed = true;
     return false;
   }
@@ -5615,7 +5620,13 @@ static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute
    * them all, then resolve each against the final set. */
   for (uint32_t k = 0; k < n; k++) {
     uint32_t offset = 0;
-    if (!gpu_mirror_window(r->gpu, mem, win[k].base, win[k].bytes, r->submission, &offset)) return false;
+    if (!gpu_mirror_window(r->gpu, mem, win[k].base, win[k].bytes, r->submission, &offset)) {
+      if (!prof->mirror_logged)
+        log_info("[gpu] compute program %08x runs on the CPU: window %u (0x%llx, %u bytes) cannot be mirrored",
+                 program->hash, k, (unsigned long long)win[k].base, win[k].bytes);
+      prof->mirror_logged = true;
+      return false;
+    }
   }
   for (uint32_t k = 0; k < n; k++) {
     uint32_t offset = 0;
@@ -5638,6 +5649,7 @@ static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute
   desc.window_count = mirrors;
   const uint32_t shader = gpu_shader_for(r, program, &desc);
   if (shader == GPU_SHADER_FAILED) {
+    log_info("[gpu] compute program %08x stays on the CPU: its WGSL does not translate", program->hash);
     prof->gpu_failed = true;
     return false;
   }
