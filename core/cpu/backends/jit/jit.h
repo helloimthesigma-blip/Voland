@@ -58,7 +58,7 @@ void jit_set_span_calls(bool enabled);
 
 /* The JIT's version, shared by CPU_BACKEND_JIT (A64) and
  * CPU_BACKEND_A32_JIT (the UI shows it; docs/JIT.md "Versions"). */
-#define JIT_VERSION "0.5.2"
+#define JIT_VERSION "0.5.3"
 
 /* Interpreted executions of a block before it is compiled. */
 void jit_set_hot_threshold(uint32_t executions);

@@ -512,6 +512,7 @@ static Jit_Thread *thread_jit(void) {
 /* Fallback profile: open addressing over masked encodings. */
 #define FALLBACK_SLOTS 4096u
 #define FALLBACK_OPCODE_MASK 0xFFE0FC00u /* drops Rd, Rn, Rm */
+#define FALLBACK_FP_MASK 0xFFFFFC00u     /* SIMD&FP: 20:16 hold opcode bits (FRINT*, FCVT* modes) */
 static bool g_fallback_profile;
 static uint32_t g_fallback_key[FALLBACK_SLOTS];
 static uint64_t g_fallback_count[FALLBACK_SLOTS];
@@ -520,7 +521,10 @@ static uint32_t g_fast_key[FALLBACK_SLOTS];
 
 void jit_set_fallback_profile(bool enabled) { g_fallback_profile = enabled; }
 
-static uint32_t fallback_key(uint32_t insn) { return (insn & FALLBACK_OPCODE_MASK) | 1u; /* never 0: 0 = empty */ }
+static uint32_t fallback_key(uint32_t insn) {
+  const uint32_t mask = (bits(insn, 27, 25) == 0x7u) ? FALLBACK_FP_MASK : FALLBACK_OPCODE_MASK;
+  return (insn & mask) | 1u; /* never 0: 0 = empty */
+}
 
 void jit_note_fast_path(uint32_t insn) {
   const uint32_t key = fallback_key(insn);

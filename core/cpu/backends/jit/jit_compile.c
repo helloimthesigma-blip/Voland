@@ -2399,11 +2399,21 @@ static void emit_fpcr_mode(Ctx *c, bool fz_safe) {
     emit_fpcr_default(c);
     return;
   }
+  /* FPCR 0 or FZ alone: the not-subnormal checks make both exact, so code
+   * shared by threads in either mode keeps its fast arms. */
   lget(c, L_STATE);
   mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPCR);
-  i32c(c, (int32_t)FPCR_FZ_ONLY);
-  op(c, WASM_OP_I32_EQ);
+  i32c(c, (int32_t)~FPCR_FZ_ONLY);
+  op(c, WASM_OP_I32_AND);
+  op(c, WASM_OP_I32_EQZ);
 }
+
+/* Some thread of the title has run with FPCR = FZ alone: from then on every
+ * region compiles FZ-capable guards, whatever FPCR its compiling thread
+ * had (Tears of the Kingdom mixes FZ and default threads over shared
+ * code: a region compiled under FPCR 0 sent its FZ callers to the exact
+ * arm every time). */
+static bool g_fz_seen;
 
 /* Under FZ only: AND the i32 on the stack with "local is not subnormal"
  * (zero, normal, infinite or NaN). Nothing when FZ is not compiled in. */
@@ -3029,23 +3039,48 @@ static void emit_truncation_in_range(Ctx *c, uint32_t local, bool dbl, bool to64
   op(c, WASM_OP_I32_AND);
 }
 
-/* FCVTZS/FCVTZU (general, or fixed point: the value times 2^fbits first,
- * exact or infinite - and then out of range). */
-static void emit_fp_to_int(Ctx *c, bool sf, bool is_unsigned, bool dbl, uint32_t rn, uint32_t rd, uint32_t fbits) {
+/* Rounding to an integral value: the wasm op for a rounding mode (FCVT's
+ * rmode, FRINT's opcode bits), or 0 for one wasm lacks (ties away). */
+#define FP_ROUND_NEAREST 0u /* ties to even */
+#define FP_ROUND_UP 1u
+#define FP_ROUND_DOWN 2u
+#define FP_ROUND_ZERO 3u
+static uint8_t fp_round_op(uint32_t mode, bool dbl) {
+  static const uint8_t ops[2][4] = {{WASM_OP_F32_NEAREST, WASM_OP_F32_CEIL, WASM_OP_F32_FLOOR, WASM_OP_F32_TRUNC},
+                                    {WASM_OP_F64_NEAREST, WASM_OP_F64_CEIL, WASM_OP_F64_FLOOR, WASM_OP_F64_TRUNC}};
+  return mode < 4u ? ops[dbl][mode] : 0u;
+}
+
+/* FCVT{N,P,M,Z}{S,U} (general; fixed point only by truncation: the value
+ * times 2^fbits first, exact or infinite - and then out of range). The
+ * value is rounded in its mode first (exact if that changed nothing), then
+ * converted - exactly, being integral - when in range. */
+static void emit_fp_to_int_rounded(Ctx *c, bool sf, bool is_unsigned, bool dbl, uint32_t rn, uint32_t rd,
+                                   uint32_t fbits, uint32_t mode) {
   const uint32_t a = fp_result_local(dbl);
+  const uint8_t round = fp_round_op(mode, dbl);
   load_fp(c, rn, dbl);
   if (fbits) {
     fp_power_of_two(c, dbl, (int32_t)fbits);
     op(c, dbl ? WASM_OP_F64_MUL : WASM_OP_F32_MUL);
   }
   lset(c, a);
-  lget(c, a); /* exact: no fraction to drop */
-  op(c, dbl ? WASM_OP_F64_TRUNC : WASM_OP_F32_TRUNC);
+  lget(c, a); /* exact: rounding changed nothing */
+  op(c, round);
   lget(c, a);
   op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
   set_exactness(c);
+  /* FZ: a subnormal input is a flushed zero (IDC, not IXC) - checked on
+   * the input, which rounds up or down to +-1 */
+  i32c(c, 1);
+  if (!fbits) and_not_subnormal(c, a, dbl);
+  if (mode != FP_ROUND_ZERO) {
+    lget(c, a);
+    op(c, round);
+    lset(c, a);
+  }
   emit_truncation_in_range(c, a, dbl, sf, is_unsigned);
-  if (!fbits) and_not_subnormal(c, a, dbl); /* FZ: a subnormal input is a flushed zero (IDC, not IXC) */
+  op(c, WASM_OP_I32_AND);
   emit_fp_env_ok_exact_as(c, fbits == 0);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
@@ -3066,6 +3101,33 @@ static void emit_fp_to_int(Ctx *c, bool sf, bool is_unsigned, bool dbl, uint32_t
   sync_x(&sync, rn);
   sync_x(&sync, rd);
   fp_else_exact(c, &sync);
+}
+
+/* FCVTZS/FCVTZU (general, or fixed point). */
+static void emit_fp_to_int(Ctx *c, bool sf, bool is_unsigned, bool dbl, uint32_t rn, uint32_t rd, uint32_t fbits) {
+  emit_fp_to_int_rounded(c, sf, is_unsigned, dbl, rn, rd, fbits, FP_ROUND_ZERO);
+}
+
+/* FRINT{N,P,M,Z,I} (scalar): native rounding when the input is neither a
+ * NaN (quieting, IOC) nor, under FZ, subnormal (flushed: +-0, IDC). They
+ * raise no other exception (FRINTX, which signals inexact, and FRINTA,
+ * ties away, are left to the exact path). */
+static void emit_fp_round_integral(Ctx *c, bool dbl, uint32_t rn, uint32_t rd, uint32_t mode) {
+  const uint32_t a = fp_result_local(dbl);
+  load_fp(c, rn, dbl);
+  ltee(c, a);
+  lget(c, a);
+  op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ); /* not a NaN */
+  and_not_subnormal(c, a, dbl);
+  emit_fpcr_mode(c, true);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  lget(c, a);
+  op(c, fp_round_op(mode, dbl));
+  lset(c, a);
+  store_fp_local(c, rd, dbl, a);
+  Sync none = {0};
+  fp_else_exact(c, &none);
 }
 
 /* Scalar FP with a native fast path; false: not one of these forms. */
@@ -3128,8 +3190,8 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
       emit_int_to_fp(c, sf, opcode == 3, dbl, rn, rd, 0);
       return true;
     }
-    if ((opcode == 0 || opcode == 1) && rmode == 3) { /* FCVTZS / FCVTZU: truncation, in range only */
-      emit_fp_to_int(c, sf, opcode == 1, dbl, rn, rd, 0);
+    if (opcode == 0 || opcode == 1) { /* FCVT{N,P,M,Z}{S,U}: in range only */
+      emit_fp_to_int_rounded(c, sf, opcode == 1, dbl, rn, rd, 0, rmode);
       return true;
     }
     return false;
@@ -3153,6 +3215,12 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
       return true;
     case 3: /* FSQRT */
       emit_fp_arith(c, dbl, 0, false, rn, 0, rd);
+      return true;
+    case 8: case 9: case 10: case 11: /* FRINTN, FRINTP, FRINTM, FRINTZ */
+      emit_fp_round_integral(c, dbl, rn, rd, opcode - 8u);
+      return true;
+    case 15: /* FRINTI: FPCR's rounding mode - nearest under the guard (FPCR 0 or FZ alone) */
+      emit_fp_round_integral(c, dbl, rn, rd, FP_ROUND_NEAREST);
       return true;
     case 4: case 5: { /* FCVT between single and double */
       const uint32_t to = opcode & 3u;
@@ -5705,7 +5773,9 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     analysis.link = link;
     analysis.discover = true;
     analysis.a32 = link->aarch32;
-    analysis.fz = source->fpcr == FPCR_FZ_ONLY;
+    if (source->fpcr == FPCR_FZ_ONLY && !__atomic_load_n(&g_fz_seen, __ATOMIC_RELAXED))
+      __atomic_store_n(&g_fz_seen, true, __ATOMIC_RELAXED);
+    analysis.fz = source->fpcr == FPCR_FZ_ONLY || __atomic_load_n(&g_fz_seen, __ATOMIC_RELAXED);
     analysis.source = source;
     analysis.max_blocks = max_blocks;
     analysis.max_block_insns = max_block_insns;

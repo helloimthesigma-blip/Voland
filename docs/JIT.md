@@ -661,6 +661,15 @@ shows it next to the backend name.
   unrolled byte-at-a-time table steps instead of a round trip through
   the interpreter. TOTK hashes its resource names with CRC32B; under Node
   to 250k slices its "other" interpreter fallbacks went 3.85 M -> 0.
+- **0.5.3** (2026-10-25) - FZ fast arms accept FPCR 0 too (the
+  not-subnormal checks make both exact), and once any thread has run with
+  FZ every region compiles FZ-capable guards. TOTK mixes FZ and default
+  threads over shared code, and a region compiled under the other mode
+  sent every call to the exact arm. Also FRINT{N,P,M,Z,I} and
+  FCVT{N,P,M}{S,U} have fast arms, and the fallback profile keeps SIMD&FP
+  opcode bits 20:16. TOTK under Node to 250k slices: direct SIMD&FP
+  calls 23.1 M -> 4.2 M. Its gloom-scene fps did not move (3.4), so
+  those calls were not that scene's cost.
 
 ## What a region costs on V8
 
