@@ -5383,6 +5383,23 @@ static bool compute_write_unlocked(void *user, uint64_t va, const void *src, uin
   return ok;
 }
 
+/* What keeps a compute program off the GPU among its instructions, or NULL. */
+static const char *program_cpu_only_reason(const Sm_Program *program) {
+  bool tex = false, sust = false, atom = false, bindless = false;
+  for (uint32_t i = 0; i < program->word_count; i++) {
+    const uint32_t op = program->insns[i].op;
+    if (op >= SM_OP_TEX && op <= SM_OP_TXD) tex = true;
+    if (op == SM_OP_TEX_B) bindless = true;
+    if (op == SM_OP_SUST) sust = true;
+    if (op == SM_OP_ATOM || op == SM_OP_RED) atom = true;
+  }
+  if (sust) return "it stores to surfaces (SUST)";
+  if (atom) return "it uses global atomics (ATOM/RED)";
+  if (bindless) return "it samples bindless textures (TEX.B)";
+  if (tex) return "it samples textures";
+  return NULL;
+}
+
 static bool program_samples_textures(const Sm_Program *program) {
   for (uint32_t i = 0; i < program->word_count; i++) {
     const uint32_t op = program->insns[i].op;
@@ -5604,7 +5621,7 @@ static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute
     log_info("[gpu] compute program %08x stays on the CPU: %s", program->hash,
              threads > WGSL_CS_MAX_INVOCATIONS        ? "too many threads per block"
              : launch->shared_bytes > WGSL_CS_MAX_SHARED_BYTES ? "too much shared memory"
-                                                               : "it samples textures");
+                                                               : program_cpu_only_reason(program));
     prof->gpu_failed = true;
     return false;
   }
