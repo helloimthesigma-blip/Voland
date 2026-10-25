@@ -1,6 +1,7 @@
 #include "hle/services/audio/audren.h"
 
 #include <math.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "audio/audio_ring.h"
@@ -530,6 +531,32 @@ static void parse_voice(Audren_Renderer *s, HLE_Context *c, const uint8_t *p, ui
   }
 }
 
+/* Diagnostics: VOLAND_AUDREN_VOICES=N - every N updates, how the voices
+ * stand (in use, playing, by format; wave buffers pending and consumed). */
+static void log_voices(const Audren_Renderer *s) {
+  static int parsed;
+  static uint32_t every, updates;
+  if (!parsed) {
+    parsed = 1;
+    every = getenv("VOLAND_AUDREN_VOICES") ? (uint32_t)strtoul(getenv("VOLAND_AUDREN_VOICES"), NULL, 0) : 0u;
+  }
+  if (!every || ++updates % every) return;
+  uint32_t used = 0, playing = 0, pending = 0, by_format[8] = {0};
+  uint64_t consumed = 0;
+  for (uint32_t i = 0; i < AUDREN_MAX_VOICES; i++) {
+    const Audren_Voice *v = &s->voices[i];
+    if (!v->used) continue;
+    used++;
+    if (v->state != VOICE_STOPPED && v->state != VOICE_PAUSED) playing++;
+    if (v->format < 8u) by_format[v->format]++;
+    pending += v->pending;
+    consumed += v->consumed;
+  }
+  log_info("[audren] voices: %u used, %u playing (pcm16 %u, adpcm %u, other %u), %u buffers pending, %llu consumed",
+           used, playing, by_format[PCM_INT16], by_format[PCM_ADPCM], used - by_format[PCM_INT16] - by_format[PCM_ADPCM],
+           pending, (unsigned long long)consumed);
+}
+
 static void parse_mix(Audren_Renderer *s, const uint8_t *p, uint32_t index) {
   if (index >= AUDREN_MAX_MIXES) return;
   Audren_Mix *m = &s->mixes[index];
@@ -628,6 +655,7 @@ static uint32_t request_update(Audren_Renderer *s, HLE_Context *c, const uint8_t
   }
   /* Voices. */
   for (uint32_t i = 0; i < voice_count; i++, at += VOICE_IN_BYTES) parse_voice(s, c, in + at, i);
+  log_voices(s);
   for (uint32_t i = 0; i < voice_count; i++, o += VOICE_OUT_BYTES) {
     if (i >= AUDREN_MAX_VOICES) continue;
     Audren_Voice *v = &s->voices[i];
