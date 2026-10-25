@@ -9,7 +9,7 @@ up on more titles. Where they stand (October 2026, browser, Chromium):
 | Hollow Knight | title, menus, saved games and new games (through the intro movie into King's Pass) play at real speed. The new-game intro used to stall after 13 pictures: an all-zero unused voice entry stopped the movie audio's voice 0, so its buffers never drained (fixed 2026-10-22) |
 | Celeste | title, file select and gameplay; ~100 fps unpaced |
 | Super Smash Bros. Ultimate | matches with correct colours and saves, 18-22 fps in a fight; the VP9 opening movie plays in the browser (2026-10-23) |
-| Mario Kart 8 Deluxe (32-bit) | whole races, ~23 fps on three cores; occasional black tiles in multicore runs |
+| Mario Kart 8 Deluxe (32-bit) | whole races, ~21-23 fps on three cores |
 | Nine Sols | title, file select, the VP8 opening cinematic, gameplay and dialogue, ~22 fps. Speech bubbles render since 2026-10-24: the atlas (ASTC 12x12, 512x512) is read straight from the asset file in GOB blocks of 8 although its header says 16 - level 0's block height shrinks to the image like every level's |
 | Animal Crossing: New Horizons | boots, presents and draws 3D (92M triangles by 2M slices), but its own UI fade stays at black (c3 = (0,0,0,1) on a white BC4 pane); needs the NG word list 2 system file (0100000000000823). Ruled out so far: controller applet result, focus messages, clock snapshot, preselected user, nfp, unimplemented commands |
 | The Legend of Zelda: Tears of the Kingdom | plays its opening in the browser: title cards, then the descent with Zelda's subtitles (WebGPU, serial scheduler, ~4-10 fps). Its pixel programs read storage buffers (LDG): since 2026-10-23 those translate for the GPU (address from an NVN descriptor by IADD or MOV, or a register's single definition), so the torch-lit opening draws instead of skipping ~60% of its GPU draws; 2 programs whose address differs per branch remain. It runs serial by default (`SERIAL_TITLES` in the CPU worker): on parallel cores the cutscene stalls (no subtitles) and runs sometimes crash or exit ~15-18 s in - a race not found yet (not the kernel's mutex words, which are CAS-updated, nor barriers; guest core affinity did not fix it). The JIT keeps at most 32768 regions installed per core, or the tab ran out of memory at ~200k. Speed (2026-10-24): ~2.6 fps in the gloom scene, bound by host CPU - two thirds the guest's own code (JIT, one core), a third waiting for the GPU thread (96% of its draws shade vertices on the CPU: small draws over 64 KB constant buffers, and untraced global memory); not shading, draw-call commands, compile churn or the CPU clock. The multicore fault recurs in its two "CreateAndDeleteThread" workers (an object with an entry count but a null entry array, ~115-155k slices natively); the exclusive-monitor ABA window it pointed at is closed but was not the cause. BCn/ASTC textures upload compressed on GPUs that sample them, which removed its "larger than the texture cache" misses |
@@ -43,16 +43,16 @@ titles).
 
 ## 2. Known gaps
 
-- **Parallel cores:** Mario Kart 8 Deluxe draws blocky black screen-space
-  tiles on three cores (serial is clean; a synchronous GPU makes them
-  worse), and Tears of the Kingdom corrupts its resource data there (hence
-  serial by default). One open multicore bug is suspected; ruled out: the
-  kernel's mutex words, barriers, same-core concurrency (affinity is now
-  enforced), LL/SC ABA (now checked), GPU semaphore acquires, the async GPU,
-  GPU compute, threads moving between cores. Mario Kart's tiles appear at
-  the start of a race and look timing-dependent. Pinning each thread to its
-  ideal core (`?pincores=1`, docs/PARALLEL.md "Pinned cores") made Tears of
-  the Kingdom fail less often in a few runs; it does not remove the tiles.
+- **Parallel cores:** the open multicore bug was the pick letting a
+  lower-priority thread run on a core while a better thread there could -
+  something a Switch core never does, and a "polling" thread was treated
+  as idle. With parallel cores the pick now follows the per-core rule
+  (docs/PARALLEL.md "Pollers and priority"):
+  - Mario Kart 8 Deluxe's black tiles at the start of a race are gone (two
+    three-core browser races clean; every earlier one had them).
+  - Tears of the Kingdom mostly stopped corrupting its resource data on
+    three cores: 7 of 9 runs clean, with 1 crash and 1 stall at boot. It
+    stays serial by default.
 
 - **Video:** NVDEC decodes H.264, VP8 and VP9 (through WebCodecs; VP9
   headers are rebuilt from the picture setup and NVDEC's probability
