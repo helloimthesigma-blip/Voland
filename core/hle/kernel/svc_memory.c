@@ -301,20 +301,29 @@ void hle_svc_unmap_physical_memory(HLE_Context *context, CPU_State *cpu_state) {
   }
   /* Release the backing in maximal physically contiguous runs (page by
    * page, scattered single frees exhaust the allocator's freelist). */
+  /* One query per region, not per page: a query walks to its region's end,
+   * so page by page cost quadratic time (Tears of the Kingdom releases
+   * runs of hundreds of pages, hundreds of times). */
   uint64_t run_pa = 0, run_pages = 0;
-  for (uint64_t offset = 0; offset < size; offset += VMM_PAGE_SIZE) {
+  for (uint64_t at = base; at < base + size;) {
     VMM_Region_Info info;
-    if (!error_is_ok(vmm_query(context->vmm, base + offset, &info)) || !info.is_mapped || !(info.perms & VMM_PERM_R))
-      continue;
-    const uint64_t pa = page_pa_of(context->vmm, base + offset);
-    (void)vmm_unmap(context->vmm, base + offset, VMM_PAGE_SIZE);
-    if (run_pages && pa == run_pa + (run_pages << VMM_PAGE_BITS)) {
-      run_pages++;
-      continue;
+    if (!error_is_ok(vmm_query(context->vmm, at, &info))) break;
+    const uint64_t region_end = info.base_gva + info.size;
+    const uint64_t end = region_end < base + size && region_end > at ? region_end : base + size;
+    if (info.is_mapped && (info.perms & VMM_PERM_R)) {
+      for (uint64_t page = at; page < end; page += VMM_PAGE_SIZE) {
+        const uint64_t pa = page_pa_of(context->vmm, page);
+        if (run_pages && pa == run_pa + (run_pages << VMM_PAGE_BITS)) {
+          run_pages++;
+          continue;
+        }
+        if (run_pages) free_run(context->vmm, context->pages, run_pa, run_pages);
+        run_pa = pa;
+        run_pages = 1;
+      }
+      (void)vmm_unmap(context->vmm, at, end - at);
     }
-    if (run_pages) free_run(context->vmm, context->pages, run_pa, run_pages);
-    run_pa = pa;
-    run_pages = 1;
+    at = end;
   }
   if (run_pages) free_run(context->vmm, context->pages, run_pa, run_pages);
   regs->x[0] = HLE_RESULT_SUCCESS;
