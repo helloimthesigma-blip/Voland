@@ -398,11 +398,10 @@ let requestedHostCores: number | null = null;
  * - Super Smash Bros. Ultimate: its guest threads hand work to each other
  *   so tightly that, with the GPU thread beside them, parallel cores mostly
  *   wait (fight: 18-22 fps serial, 9.5 on three cores).
- * - Tears of the Kingdom: on parallel cores its opening cutscene stalls
- *   (no subtitles, the camera never moves on), and runs sometimes crash or
- *   exit ~15-18 s in - a race not found yet (docs/NEW_GAMES.md). Serial
- *   plays the opening. */
-const SERIAL_TITLES: ReadonlySet<string> = new Set(["01006A800016E000", "0100F2C0115B6000"]);
+ * (Tears of the Kingdom left the list with the per-core pick: on three
+ * cores it now gets ~3x serial's progress per virtual second, and 3 of 3
+ * browser runs went clean - natively 7 of 9; ?cores=0 if it misbehaves.) */
+const SERIAL_TITLES: ReadonlySet<string> = new Set(["01006A800016E000"]);
 /** The virtual CPU clock by title (percent of the Switch's 1.02 GHz): a
  * serial title whose threads share one core gets more instructions per
  * virtual second where the host keeps up. ?cpuspeed=N overrides. */
@@ -423,10 +422,10 @@ let pollCoalescing = true;
  * only on its ideal core's host core (docs/PARALLEL.md "Pinned cores"). */
 let pinIdealCores = false;
 /** Titles whose guest threads may run on any host core by default (free
- * placement, docs/PARALLEL.md "Free placement"). None yet: Tears of the
- * Kingdom gets ~24 frames per virtual second on three cores placed freely
- * (~11 with affinity enforced) but still crashes ~15 s in on a third of
- * runs, so it stays serial (?cores=3&placement=free to try it). */
+ * placement, docs/PARALLEL.md "Free placement"). None: with affinity
+ * enforced the per-core pick keeps a guest core's threads in priority
+ * order, which Tears of the Kingdom's loader needs; free placement would
+ * let them run at once again (?placement=free to try it). */
 const FREE_PLACEMENT_TITLES: ReadonlySet<string> = new Set();
 /** ?placement=free|strict (set-free-placement); null = the title's default. */
 let requestedFreePlacement: boolean | null = null;

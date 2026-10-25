@@ -51,8 +51,10 @@ titles).
   - Mario Kart 8 Deluxe's black tiles at the start of a race are gone (two
     three-core browser races clean; every earlier one had them).
   - Tears of the Kingdom mostly stopped corrupting its resource data on
-    three cores: 7 of 9 runs clean, with 1 crash and 1 stall at boot. It
-    stays serial by default.
+    three cores: 7 of 9 native runs clean, with 1 crash and 1 stall at
+    boot, and 3 of 3 browser runs clean. It now runs on three cores by
+    default: ~3x serial's progress per virtual second (1300 frames by 150 s
+    virtual vs 400) at 3.3 fps. `?cores=0` goes back to serial.
 
 - **Video:** NVDEC decodes H.264, VP8 and VP9 (through WebCodecs; VP9
   headers are rebuilt from the picture setup and NVDEC's probability
