@@ -8,6 +8,7 @@
  *   0x08 CreateThread          X1 entry, X2 arg, X3 stack top, W4 prio, W5 core (-2 = default) -> W1 handle
  *   0x09 StartThread           W0 handle
  *   0x0A ExitThread
+ *   0x36 SynchronizePreemptionState (TLS preemption flag; tls.h)
  *   0x0B SleepThread           X0 ns (0/-1/-2: yield)
  *   0x0C GetThreadPriority     W1 handle -> W1 priority
  *   0x0D SetThreadPriority     W0 handle, W1 priority
@@ -62,6 +63,7 @@ void hle_svc_get_thread_priority(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_set_thread_priority(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_get_thread_core_mask(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_set_thread_core_mask(HLE_Context *context, CPU_State *cpu_state);
+void hle_svc_synchronize_preemption_state(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_get_current_processor_number(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_wait_synchronization(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_cancel_synchronization(HLE_Context *context, CPU_State *cpu_state);

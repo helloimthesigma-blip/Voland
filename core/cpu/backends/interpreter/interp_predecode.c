@@ -828,6 +828,8 @@ CPU_ExitReason interp_predecode_execute(Interp_State *s, uint64_t cycle_budget) 
   uint32_t grace = 0;
   CPU_ExitReason exit_reason = CPU_EXIT_CYCLES_ELAPSED;
   while (interp_predecode_run_block(s, cycle_budget, &grace, &exit_reason)) {
+    /* Preempted (request_stop): the budget ends here, exclusive grace and all. */
+    if (__atomic_load_n(&s->stop_requested, __ATOMIC_RELAXED)) cycle_budget = s->cycles_consumed;
   }
   return exit_reason;
 }

@@ -48,6 +48,13 @@
 #define TLS_BLOCKS_PER_PAGE ((uint32_t)(VMM_PAGE_SIZE / TLS_BLOCK_BYTES)) /* 8 */
 /* The IPC command buffer is the first 0x100 bytes of a block (§12). */
 #define TLS_IPC_COMMAND_BUFFER_BYTES ((uint64_t)0x100)
+/* Horizon's user-mode preemption disable, right after the command buffer:
+ * a u16 count the thread raises around spinlocks and per-core data (the
+ * kernel never preempts it while nonzero), and a u16 flag the kernel sets
+ * when it deferred a preemption - the thread then calls
+ * SynchronizePreemptionState (SVC 0x36) once its count is back to 0. */
+#define TLS_PREEMPTION_DISABLE_COUNT ((uint64_t)0x100)
+#define TLS_PREEMPTION_DEFERRED ((uint64_t)0x102)
 /* 64 pages * 8 blocks = 512 threads per process. */
 #define TLS_MAX_PAGES ((uint32_t)64)
 #define TLS_MAX_BLOCKS (TLS_MAX_PAGES * TLS_BLOCKS_PER_PAGE)

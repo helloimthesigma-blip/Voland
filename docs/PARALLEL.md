@@ -663,3 +663,20 @@ early (126k slices, the same null object) - about the old rate, so time
 slicing explains the deterministic repro but not all of the parallel crash.
 Higher-priority wakes still wait for the end of a slice on parallel cores
 (Horizon preempts at once).
+
+**Preemption disable in TLS** (2026-10-26, always on). TOTK's SDK
+spinlocks raise the u16 at TLS+0x100 while held, and Horizon never
+preempts a thread while it is nonzero: it sets TLS+0x102 and the thread
+calls SynchronizePreemptionState (SVC 0x36) when its count is back to 0.
+Voland preempted such threads at the end of a slice, so a spinlock holder
+could be switched out with a better thread on its core spinning for the
+lock (with immediate preemption, below, every early TOTK run stalled
+that way). Now a slice that ends with the count nonzero lets the thread
+run on, first on its core, and sets the flag; a wake does not stop it
+either. tests/guest/preemptoff.s checks it at budgets down to 7 cycles.
+
+**`VOLAND_PREEMPT=1`** (opt-in): on parallel cores a woken thread better
+than the one running as its guest core stops that run at once
+(`CPU_Backend.request_stop`, within a block) instead of at the end of the
+slice. TOTK with it and `VOLAND_HOLD_CORE`: 138-174 presents per 100k
+slices vs 100-142 without.

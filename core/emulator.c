@@ -569,7 +569,7 @@ Error emulator_create_with_backend(Emulator* out, const CPU_Backend* backend) {
   sm_registry_init(&out->sm);
   hle_context_init(&out->hle, out->cpu_backend, out->vmm, &out->process, &out->pages,
                    &out->sessions, &out->sm);
-  scheduler_init(&out->scheduler, out->cpu_backend);
+  scheduler_init(&out->scheduler, out->cpu_backend, out->vmm);
   out->hle.scheduler = &out->scheduler;
   out->hle.events = &out->events;
   out->rtc = TIME_DEFAULT_RTC;
@@ -642,7 +642,7 @@ static Error use_backend(Emulator* emulator, const CPU_Backend* backend) {
   emulator->hle.cpu_backend = backend;
   backend->set_svc_handler(state, hle_on_svc);
   backend->set_undefined_handler(state, hle_on_undefined);
-  scheduler_init(&emulator->scheduler, backend);
+  scheduler_init(&emulator->scheduler, backend, emulator->vmm);
   emulator->scheduler.parallel = emulator->parallel;
   emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
   emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;
@@ -674,7 +674,7 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
   }
   /* The main thread joins the scheduler: it wraps the Emulator's own
    * CPU_State, and its bootstrap handle (0x8000) now names it. */
-  scheduler_init(&emulator->scheduler, emulator->cpu_backend);
+  scheduler_init(&emulator->scheduler, emulator->cpu_backend, emulator->vmm);
   emulator->scheduler.parallel = emulator->parallel;
   emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
   emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;
@@ -943,7 +943,7 @@ void emulator_unload_program(Emulator* emulator) {
     Sched_Thread* t = &emulator->scheduler.threads[i];
     if (t->state != THREAD_STATE_FREE && t->owns_cpu_state) thread_destroy(&env, &t->thread);
   }
-  scheduler_init(&emulator->scheduler, emulator->cpu_backend);
+  scheduler_init(&emulator->scheduler, emulator->cpu_backend, emulator->vmm);
   emulator->scheduler.parallel = emulator->parallel;
   emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
   emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;

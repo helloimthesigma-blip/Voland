@@ -1937,7 +1937,13 @@ static int run(int argc, char **argv) {
             (unsigned long long)ps.slices, (unsigned long long)ps.cycles, (unsigned long long)ps.span,
             ps.span ? (double)ps.cycles / (double)ps.span : 0.0,
             ps.slices ? 100.0 * (double)ps.shared_slices / (double)ps.slices : 0.0);
+    if (emu.scheduler.preemptions)
+      fprintf(stderr, "voland-cli: parallel: %llu runs preempted by a better woken thread\n",
+              (unsigned long long)emu.scheduler.preemptions);
   }
+  if (emu.scheduler.preemptions_deferred)
+    fprintf(stderr, "voland-cli: %llu preemptions deferred (preemption disabled in TLS)\n",
+            (unsigned long long)emu.scheduler.preemptions_deferred);
   uint32_t width = 0, height = 0;
   const uint64_t frame_hash = newest_frame_hash(&width, &height);
   static const char *const k_status[] = {"running", "idle", "exited", "crashed", "deadlock", "not loaded"};

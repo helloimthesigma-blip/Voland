@@ -536,11 +536,17 @@ static void flush_cycles(Ctx *c) {
   }
 }
 
-/* L_ROOM from the state. */
+/* L_ROOM from the state: budget - cycles, or 0 once request_stop zeroed
+ * the budget under a run already past it (never a wrapped huge room). */
 static void compute_room(Ctx *c) {
   state_load64(c, OFF_BUDGET);
   state_load64(c, OFF_CYCLES);
   op(c, WASM_OP_I64_SUB);
+  i64c(c, 0);
+  state_load64(c, OFF_BUDGET);
+  state_load64(c, OFF_CYCLES);
+  op(c, WASM_OP_I64_GT_U);
+  op(c, WASM_OP_SELECT);
   lset(c, L_ROOM);
 }
 

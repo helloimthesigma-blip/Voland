@@ -954,11 +954,14 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
   if (async_compile_possible()) finish_pending(t, s, interp_code_generation());
   s->cycles_consumed = 0;
   s->exclusive_valid = false; /* a potential context switch (§7) */
-  j->cycle_budget = cycle_budget;
+  __atomic_store_n(&s->stop_requested, 0u, __ATOMIC_RELAXED);
+  __atomic_store_n(&j->cycle_budget, cycle_budget, __ATOMIC_RELAXED);
   j->thread_cache = (uint64_t)(uintptr_t)t->cache; /* the guest thread may have moved cores */
   uint32_t grace = 0;
   CPU_ExitReason exit_reason = CPU_EXIT_CYCLES_ELAPSED;
   for (;;) {
+    /* Preempted (request_stop): the budget ends here. */
+    if (__atomic_load_n(&s->stop_requested, __ATOMIC_RELAXED)) cycle_budget = s->cycles_consumed;
     const uint64_t generation = interp_code_generation();
     if (generation != t->generation) {
       t->generation = generation;
@@ -1003,6 +1006,15 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
       return exit_reason;
     }
   }
+}
+
+/* Compiled code chains regions while they fit j->cycle_budget (read from
+ * the state at every chain): zero ends the chain at the next region; the
+ * dispatcher then sees the flag. */
+static void jit_request_stop(CPU_State *state) {
+  Jit_State *j = (Jit_State *)state;
+  __atomic_store_n(&j->interp.stop_requested, 1u, __ATOMIC_RELAXED);
+  __atomic_store_n(&j->cycle_budget, 0u, __ATOMIC_RELAXED);
 }
 
 static CPU_State *jit_create(VMM_Context *vmm, void *userdata) {
@@ -1057,6 +1069,7 @@ const CPU_Backend CPU_BACKEND_JIT = {
     .create = jit_create,
     .destroy = jit_destroy,
     .run = jit_run,
+    .request_stop = jit_request_stop,
     .step = jit_step,
     .get_fault_address = jit_get_fault_address,
     .get_cycles_consumed = jit_get_cycles_consumed,
@@ -1110,6 +1123,7 @@ const CPU_Backend CPU_BACKEND_A32_JIT = {
     .create = a32_jit_create,
     .destroy = jit_destroy,
     .run = jit_run,
+    .request_stop = jit_request_stop,
     .step = a32_jit_step,
     .get_fault_address = jit_get_fault_address,
     .get_cycles_consumed = jit_get_cycles_consumed,

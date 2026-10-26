@@ -312,6 +312,7 @@ static CPU_ExitReason run_reference(Interp_State *s, uint64_t cycle_budget) {
       grace++;
     }
     if (!interp_run_one(s, &exit_reason)) return exit_reason;
+    if (__atomic_load_n(&s->stop_requested, __ATOMIC_RELAXED)) cycle_budget = s->cycles_consumed;
   }
 }
 
@@ -324,7 +325,12 @@ static CPU_ExitReason interp_run(CPU_State *state, uint64_t cycle_budget) {
   /* Entering run() is a potential context switch: the monitor of
    * whatever ran before is gone (§7). */
   s->exclusive_valid = false;
+  __atomic_store_n(&s->stop_requested, 0u, __ATOMIC_RELAXED);
   return interp_predecode_enabled() ? interp_predecode_execute(s, cycle_budget) : run_reference(s, cycle_budget);
+}
+
+static void interp_request_stop(CPU_State *state) {
+  __atomic_store_n(&as_interp(state)->stop_requested, 1u, __ATOMIC_RELAXED);
 }
 
 static CPU_ExitReason interp_step(CPU_State *state) {
@@ -440,6 +446,7 @@ const CPU_Backend CPU_BACKEND_INTERPRETER = {
     .create = interp_create,
     .destroy = interp_destroy,
     .run = interp_run,
+    .request_stop = interp_request_stop,
     .step = interp_step,
     .get_fault_address = interp_get_fault_address,
     .get_cycles_consumed = interp_get_cycles_consumed,

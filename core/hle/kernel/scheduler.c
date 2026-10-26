@@ -6,6 +6,7 @@
 #include "common/log.h"
 #include "hle/hle.h"
 #include "hle/kernel/parallel.h"
+#include "hle/kernel/tls.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -17,8 +18,9 @@
 #define TICKS_PER_CYCLE_DENOMINATOR(sched) (SCHEDULER_CPU_HZ / 100000u * (sched)->cpu_percent / 100u)
 #define SCHEDULER_CPU_PERCENT_DEFAULT 100u
 
-void scheduler_init(Scheduler *sched, const CPU_Backend *backend) {
+void scheduler_init(Scheduler *sched, const CPU_Backend *backend, VMM_Context *vmm) {
   memset(sched, 0, sizeof(*sched));
+  sched->vmm = vmm;
   sched->poll_coalescing = true;
   sched->time_limit = SCHEDULER_WAIT_FOREVER;
   sched->backend = backend;
@@ -88,6 +90,48 @@ static CPU_Register_File *regs_of(Sched_Thread *thread, const CPU_Backend *backe
   return backend->get_register_file(thread->thread.cpu_state);
 }
 
+/* A thread inside a preemption-disabled region (TLS count nonzero): the
+ * kernel lets it run on and marks the preemption deferred. */
+static bool preemption_disabled(const Scheduler *sched, const Sched_Thread *t) {
+  uint16_t count = 0;
+  return sched->vmm && t->thread.tls_gva &&
+         error_is_ok(vmm_read16(sched->vmm, t->thread.tls_gva + TLS_PREEMPTION_DISABLE_COUNT, &count)) && count != 0;
+}
+
+static void defer_preemption(Scheduler *sched, const Sched_Thread *t) {
+  (void)vmm_write16(sched->vmm, t->thread.tls_gva + TLS_PREEMPTION_DEFERRED, 1u);
+  sched->preemptions_deferred++;
+}
+
+static bool preempt_on_wake(const Scheduler *sched) {
+  static int parsed;
+  static bool on;
+  if (!parsed) {
+    parsed = 1;
+    on = getenv("VOLAND_PREEMPT") != NULL;
+  }
+  return on && sched->host_cores > 1u;
+}
+
+/* Parallel cores: a woken thread better than the one running as its guest
+ * core preempts it at once, as on Horizon, instead of at the end of the
+ * slice (docs/PARALLEL.md). Under the kernel lock. */
+static void preempt_for(Scheduler *sched, const Sched_Thread *woken) {
+  if (!preempt_on_wake(sched) || !sched->backend || !sched->backend->request_stop) return;
+  const uint32_t core = scheduler_guest_core(sched, woken);
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    Sched_Thread *r = &sched->threads[i];
+    if (!r->on_core || r == woken || r->thread.priority <= woken->thread.priority) continue;
+    if (scheduler_guest_core(sched, r) != core) continue;
+    if (preemption_disabled(sched, r)) {
+      defer_preemption(sched, r);
+      continue;
+    }
+    sched->backend->request_stop(r->thread.cpu_state);
+    sched->preemptions++;
+  }
+}
+
 void scheduler_wake(Scheduler *sched, Sched_Thread *thread, uint32_t result) {
   forget_coalescing(sched, thread);
   thread->state = THREAD_STATE_RUNNABLE;
@@ -95,6 +139,7 @@ void scheduler_wake(Scheduler *sched, Sched_Thread *thread, uint32_t result) {
   thread->wake_at = SCHEDULER_WAIT_FOREVER;
   thread->wait_handle_count = 0;
   regs_of(thread, sched->backend)->x[0] = result;
+  preempt_for(sched, thread);
 }
 
 void scheduler_exit_thread(Scheduler *sched, Sched_Thread *thread, const CPU_Backend *backend) {
@@ -206,6 +251,7 @@ void scheduler_expire_timeouts(Scheduler *sched) {
 /* Is `t` a better pick than `b`? With an affine core, home threads win
  * ties of priority before round-robin order does. */
 static bool better(const Sched_Thread *t, const Sched_Thread *b, bool affine, uint32_t core) {
+  if (t->no_preempt != b->no_preempt) return t->no_preempt;
   /* A thread that is only polling for work (Sched_Thread.spinning) runs
    * when nothing that does work can: on the Switch it would spin on a core
    * of its own instead of taking turns with the threads that feed it. */
@@ -314,6 +360,7 @@ static bool solo(const Sched_Thread *t) {
  * vs about 3 of 4 crashing before. Silksong, Celeste, Mario Kart 8 and
  * Animal Crossing run the same (docs/PARALLEL.md). */
 static bool leads_core(const Sched_Thread *t, const Sched_Thread *b, bool affine, uint32_t core) {
+  if (t->no_preempt != b->no_preempt) return t->no_preempt;
   if (t->thread.priority != b->thread.priority) return t->thread.priority < b->thread.priority;
   if (t->held != b->held) return t->held;
   if (t->spinning != b->spinning) return !t->spinning;
@@ -326,6 +373,7 @@ static bool leads_core(const Sched_Thread *t, const Sched_Thread *b, bool affine
 
 /* Leaders of different guest cores: holding a core is no claim on another. */
 static bool better_leader(const Sched_Thread *t, const Sched_Thread *b, bool affine, uint32_t core) {
+  if (t->no_preempt != b->no_preempt) return t->no_preempt;
   if (t->spinning != b->spinning) return !t->spinning;
   if (t->thread.priority != b->thread.priority) return t->thread.priority < b->thread.priority;
   if (affine) {
@@ -446,6 +494,11 @@ Scheduler_Status scheduler_finish_run(Scheduler *sched, const CPU_Backend *backe
    * priorities never time-slice; yields and wakes go to the back. */
   thread->last_run = ++sched->run_counter;
   thread->held = hold_core(sched) && exit_reason == CPU_EXIT_CYCLES_ELAPSED && thread->state == THREAD_STATE_RUNNABLE;
+  /* Its budget ran out inside a preemption-disabled region: Horizon would
+   * not have switched away, so it runs on (and is told it was deferred). */
+  thread->no_preempt = exit_reason == CPU_EXIT_CYCLES_ELAPSED && thread->state == THREAD_STATE_RUNNABLE &&
+                       preemption_disabled(sched, thread);
+  if (thread->no_preempt) defer_preemption(sched, thread);
   thread->cycles_run += cycles;
   if (exit_reason != CPU_EXIT_SVC) thread->spinning = false; /* it ran its budget: real work */
   if (!thread->spinning) sched->work_epoch++;

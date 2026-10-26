@@ -75,6 +75,12 @@ struct CPU_Backend
    * boundaries when the budget expires. Never runs to completion. */
   CPU_ExitReason (*run)(CPU_State *state, uint64_t cycle_budget);
   CPU_ExitReason (*step)(CPU_State *state);
+  /* From another host thread: end `state`'s current run() soon (within a
+   * block), as if its budget had run out - how a higher-priority thread
+   * preempts a running one at once (docs/PARALLEL.md). Safe to call at
+   * any time; a request that finds no run in progress is dropped at the
+   * next run(). NULL: the run ends at its budget. */
+  void (*request_stop)(CPU_State *state);
 
   /* Exit details, valid after run()/step() returns. */
   uint64_t (*get_fault_address)(CPU_State *state);   /* CPU_EXIT_FAULT */

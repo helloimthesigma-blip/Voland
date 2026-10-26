@@ -670,6 +670,12 @@ shows it next to the backend name.
   opcode bits 20:16. TOTK under Node to 250k slices: direct SIMD&FP
   calls 23.1 M -> 4.2 M. Its gloom-scene fps did not move (3.4), so
   those calls were not that scene's cost.
+- **0.5.4** (2026-10-26) - `request_stop`: another host thread can end a
+  run early (a better thread preempting it on parallel cores). The flag
+  is checked by the dispatcher; the state's `cycle_budget` drops to 0 so a
+  chain of compiled regions stops at the next region, and a region's
+  entry room is clamped to 0 instead of wrapping when the budget is
+  already behind.
 
 ## What a region costs on V8
 

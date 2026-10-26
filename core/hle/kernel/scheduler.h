@@ -24,6 +24,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "common/vmm.h"
 #include "cpu/cpu.h"
 #include "hle/kernel/thread.h"
 
@@ -78,6 +79,7 @@ typedef struct Sched_Thread {
   uint64_t work_epoch_seen; /* Scheduler.work_epoch when it was last picked */
   uint64_t last_run;        /* round-robin stamp */
   bool held;                /* its budget preempted it: first among its core's equal priorities (VOLAND_HOLD_CORE) */
+  bool no_preempt;          /* its slice ended with preemption disabled (TLS): it runs on before anything else */
   uint64_t cycles_run;      /* guest cycles it has run (diagnostics: where guest time goes) */
 } Sched_Thread;
 
@@ -86,6 +88,9 @@ typedef struct Parallel Parallel; /* hle/kernel/parallel.h */
 typedef struct Scheduler {
   Sched_Thread threads[SCHEDULER_MAX_THREADS];
   const CPU_Backend *backend; /* set by scheduler_init's caller; reaches woken threads' registers */
+  VMM_Context *vmm;         /* threads' TLS (preemption disable) */
+  uint64_t preemptions_deferred; /* slice ends and wakes that found preemption disabled */
+  uint64_t preemptions;     /* runs a better woken thread stopped early (VOLAND_PREEMPT) */
   uint64_t ticks;           /* virtual time */
   /* The earliest time a device (vsync) will signal something, or
    * SCHEDULER_WAIT_FOREVER. Set by the Emulator before each tick: when
@@ -149,7 +154,7 @@ typedef enum Scheduler_Status {
   SCHEDULER_CRASHED,   /* svcBreak or a fault the HLE could not resolve */
 } Scheduler_Status;
 
-void scheduler_init(Scheduler *sched, const CPU_Backend *backend);
+void scheduler_init(Scheduler *sched, const CPU_Backend *backend, VMM_Context *vmm);
 
 /* The virtual CPU's clock as a percentage of the Switch's (100 = 1.02 GHz,
  * clamped to SCHEDULER_CPU_PERCENT_MIN..MAX): more guest instructions per

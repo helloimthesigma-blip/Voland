@@ -23,6 +23,7 @@
 #include "guest/yieldspin.inc"
 #include "guest/busyfeed.inc"
 #include "guest/polls.inc"
+#include "guest/preemptoff.inc"
 #include "hle/kernel/parallel.h"
 
 #include <pthread.h>
@@ -55,6 +56,7 @@ static const Program k_programs[] = {
     {"yieldspin", k_guest_yieldspin, sizeof(k_guest_yieldspin), "flag seen"},
     {"busyfeed", k_guest_busyfeed, sizeof(k_guest_busyfeed), "job taken"},
     {"polls", k_guest_polls, sizeof(k_guest_polls), "picked up promptly"},
+    {"preemptoff", k_guest_preemptoff, sizeof(k_guest_preemptoff), "counter 600"},
 };
 #define PROGRAM_COUNT (sizeof(k_programs) / sizeof(k_programs[0]))
 #define MAX_SLICES 20000000ull

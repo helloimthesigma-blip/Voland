@@ -9,6 +9,7 @@
 #include "hle/kernel/handle_table.h"
 #include "hle/kernel/scheduler.h"
 #include "hle/kernel/thread.h"
+#include "hle/kernel/tls.h"
 
 #include <string.h>
 
@@ -171,6 +172,18 @@ void hle_svc_set_thread_core_mask(HLE_Context *c, CPU_State *s) {
     t->thread.preferred_core = highest;
   }
   r->x[0] = HLE_RESULT_SUCCESS;
+}
+
+/* SynchronizePreemptionState (void): the thread left its preemption-disabled
+ * region after the kernel deferred a preemption; the flag clears and, as
+ * every SVC ends the run, the scheduler picks again. */
+void hle_svc_synchronize_preemption_state(HLE_Context *c, CPU_State *s) {
+  Sched_Thread *t = current(c, s);
+  if (t) {
+    t->no_preempt = false;
+    if (t->thread.tls_gva) (void)vmm_write16(c->vmm, t->thread.tls_gva + TLS_PREEMPTION_DEFERRED, 0u);
+  }
+  /* void: no result, X0 is left as it was. */
 }
 
 void hle_svc_get_current_processor_number(HLE_Context *c, CPU_State *s) {
