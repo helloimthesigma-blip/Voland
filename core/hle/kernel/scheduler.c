@@ -114,7 +114,10 @@ static bool preempt_on_wake(const Scheduler *sched) {
   static bool on;
   if (!parsed) {
     parsed = 1;
-    on = switch_on("VOLAND_PREEMPT");
+    /* Opt-in (=1): on by default, Tears of the Kingdom crashed in 2 of 4
+     * browser runs (JIT) vs 0 of 3 without it (docs/PARALLEL.md). */
+    const char *v = getenv("VOLAND_PREEMPT");
+    on = v && strcmp(v, "1") == 0;
   }
   return on && sched->host_cores > 1u;
 }
