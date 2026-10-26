@@ -2075,8 +2075,9 @@ readonly servers?: readonly {
 
 | Format | Library |
 |---|---|
-| `.zip` | fflate (pure JS) |
-| `.7z` / `.rar` | libarchive.wasm |
+| `.zip` | own reader (`workers/mod-store.ts`; stored / deflate via the browser's `DecompressionStream`) |
+| `.7z` | own reader (`workers/sevenzip.ts`; Copy / LZMA / LZMA2, BCJ x86 / ARM64; no encryption) |
+| `.rar` | not supported (unpack first) |
 
 Extract to OPFS on install. Large packs (>500MB) stay as Filesystem Access handles and are read directly — never copied.
 

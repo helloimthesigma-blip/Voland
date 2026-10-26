@@ -14,6 +14,7 @@ test("saved order first, the rest by name", () => {
 
 test("mod names and archive paths cannot escape their folder", () => {
   assert.equal(safeModName("60 FPS.zip"), "60 FPS");
+  assert.equal(safeModName("HD Pack.7z"), "HD Pack");
   assert.equal(safeModName("a/b:c"), "a_b_c");
   assert.equal(safeModName(".."), "mod");
   assert.deepEqual(safeParts("../../romfs/./a\\b.bin"), ["romfs", "a", "b.bin"]);

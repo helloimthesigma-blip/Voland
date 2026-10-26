@@ -1,5 +1,5 @@
 /**
- * Mods (§19): install mod folders or .zip archives for a game, turn them
+ * Mods (§19): install mod folders or .zip / .7z archives for a game, turn them
  * on and off, set which wins when two change the same file, and toggle the
  * running game's cheats. Voland ships no mods and links to no mod sites;
  * it reads the usual layouts (romfs/, exefs/, cheats/, *.ips, *.pchtxt,
@@ -8,7 +8,8 @@
  */
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import {
-  type ModFileSource, type ModInfo, installMod, listMods, moveMod, removeMod, safeParts, setModEnabled, zipFiles,
+  ARCHIVE_PATTERN, type ModFileSource, type ModInfo, archiveFiles, installMod, listMods, moveMod, removeMod, safeParts,
+  setModEnabled,
 } from "@workers/mod-store";
 import { titleNames } from "../saves";
 import { type RunningMods, runningMods, setCheatEnabled, subscribeRunningMods } from "../mods";
@@ -90,8 +91,8 @@ function ModsPanel() {
     }
   };
 
-  const installZips = async (files: readonly File[]): Promise<void> => {
-    for (const zip of files) await install(zip.name, zipFiles(zip));
+  const installArchives = async (files: readonly File[]): Promise<void> => {
+    for (const archive of files) await install(archive.name, archiveFiles(archive.name, archive));
   };
 
   /* A game update or DLC: each decrypted NCA is a mod of its own. */
@@ -105,14 +106,14 @@ function ModsPanel() {
       if (entry.isDirectory) {
         const files = await entryFiles(entry, "");
         await install(entry.name, files.map((f) => ({ path: safeParts(f.path).slice(1).join("/"), data: f.data })));
-      } else if (/\.zip$/i.test(entry.name)) {
+      } else if (ARCHIVE_PATTERN.test(entry.name)) {
         const [file] = await entryFiles(entry, "");
-        if (file) await install(entry.name, zipFiles(file.data));
+        if (file) await install(entry.name, archiveFiles(entry.name, file.data));
       } else if (/\.nca$/i.test(entry.name)) {
         const [file] = await entryFiles(entry, "");
         if (file) await install(entry.name, [{ path: entry.name, data: file.data }]);
       } else {
-        setNote(`${entry.name}: drop a mod folder, a .zip archive or an update / DLC .nca.`);
+        setNote(`${entry.name}: drop a mod folder, a .zip / .7z archive or an update / DLC .nca.`);
       }
     }
   };
@@ -146,12 +147,12 @@ function ModsPanel() {
                    }} />
           </label>
           <label class="voland-load-button voland-load-secondary">
-            Add .zip
-            <input type="file" hidden accept=".zip" multiple data-testid="mods-add-zip"
+            Add .zip / .7z
+            <input type="file" hidden accept=".zip,.7z" multiple data-testid="mods-add-zip"
                    onChange={(e) => {
                      const files = Array.from(e.currentTarget.files ?? []);
                      e.currentTarget.value = "";
-                     void installZips(files);
+                     void installArchives(files);
                    }} />
           </label>
           <label class="voland-load-button voland-load-secondary">
@@ -164,7 +165,7 @@ function ModsPanel() {
                    }} />
           </label>
         </div>
-        <small>Or drop mod folders / .zip files here. Updates and DLC are their decrypted .nca files. Mods higher in the list win when two change the same file. Changes apply the next time you load the game.</small>
+        <small>Or drop mod folders / .zip / .7z files here. Updates and DLC are their decrypted .nca files. Mods higher in the list win when two change the same file. Changes apply the next time you load the game.</small>
         <Show when={busy()}>{(text) => <p class="voland-load-note">{text()}</p>}</Show>
         <Show when={note()}>{(text) => <p class="voland-load-note">{text()}</p>}</Show>
         <ul class="voland-mod-list">

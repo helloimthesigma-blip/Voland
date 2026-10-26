@@ -9,8 +9,11 @@
  *
  * Used from both the page (install, list, reorder) and the CPU worker
  * (collect the enabled mods' files before a load). Zip archives are read
- * here too, with the browser's own DecompressionStream - no library.
+ * here too, with the browser's own DecompressionStream - no library;
+ * 7z archives by ./sevenzip.ts.
  */
+import { sevenZipFiles } from "./sevenzip.ts";
+
 const MODS_DIRECTORY = "mods";
 const CONFIG_FILE = ".voland-mods.json";
 
@@ -168,7 +171,7 @@ export async function recordModSource(titleId: string, name: string, source: Mod
 
 /** A folder or archive name made safe as one OPFS component. Pure. */
 export function safeModName(name: string): string {
-  const cleaned = name.replace(/\.(zip)$/i, "").replace(/[\/\\:*?"<>|\u0000-\u001f]/g, "_").trim();
+  const cleaned = name.replace(/\.(zip|7z)$/i, "").replace(/[\/\\:*?"<>|\u0000-\u001f]/g, "_").trim();
   return cleaned.length > 0 && cleaned !== "." && cleaned !== ".." ? cleaned.slice(0, 120) : "mod";
 }
 
@@ -330,4 +333,13 @@ export async function zipEntryData(zip: Blob, entry: ZipEntry): Promise<Blob> {
 /** The archive's files as install sources. */
 export async function* zipFiles(zip: Blob): AsyncGenerator<ModFileSource> {
   for (const entry of await zipEntries(zip)) yield { path: entry.path, data: await zipEntryData(zip, entry) };
+}
+
+/** Archive names the Mods panel unpacks (.zip and .7z). */
+export const ARCHIVE_PATTERN = /\.(zip|7z)$/i;
+
+/** An archive's files as install sources, the reader chosen by the
+ * file name's extension (.7z, otherwise zip). */
+export function archiveFiles(name: string, archive: Blob): AsyncGenerator<ModFileSource> {
+  return /\.7z$/i.test(name) ? sevenZipFiles(archive) : zipFiles(archive);
 }

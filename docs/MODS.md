@@ -34,8 +34,8 @@ Patches and cheats from all enabled mods apply.
 Open **Mods** in the side panel:
 
 1. Load the game once, so Voland knows its title id.
-2. Choose the game, then **Add mod folder** or **Add .zip**, or drop mod
-   folders and `.zip` files onto the panel. Mods are copied into the
+2. Choose the game, then **Add mod folder** or **Add .zip / .7z**, or drop
+   mod folders and `.zip` / `.7z` files onto the panel. Mods are copied into the
    browser's private storage (OPFS) for that game.
 3. Tick or untick mods, and use ▲ / ▼ to set priority.
 4. Load the game again. Mod changes apply at the next load.
@@ -43,8 +43,11 @@ Open **Mods** in the side panel:
    Cheats switch on and off immediately.
 
 Zip archives can use "stored" or "deflate" compression (what nearly every
-zip tool writes), including zip64 for archives over 4 GB. 7z and rar
-archives need to be unpacked first, or re-packed as zip.
+zip tool writes), including zip64 for archives over 4 GB. 7z archives can
+use LZMA2 (7-Zip's default), LZMA or no compression, solid or not, with
+the x86 / ARM64 branch filters; encrypted (password) 7z archives and other
+7z methods (PPMd, BZip2, BCJ2, ...) are not supported. Rar archives need
+to be unpacked first, or re-packed as zip or 7z.
 
 ## On the command line
 
@@ -82,7 +85,7 @@ Voland" links a repository's site can offer). Voland ships with none.
   used. Its error message says so.
 - For the chosen game, the panel lists the repository's mods with their
   version, type and size. **Install** downloads the archive and checks its
-  SHA-256 against the repository's before unpacking it (zip only). It
+  SHA-256 against the repository's before unpacking it (zip or 7z). It
   records where the mod came from, so newer versions show **Update**.
 - Executable patches and cheats name the build id they were made for.
   Until the game has been loaded in this session, they are listed as "load

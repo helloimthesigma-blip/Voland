@@ -14,6 +14,7 @@
  * the game's build is shown and the entry is not installable.
  */
 import { installMod, recordModSource, safeModName, zipFiles } from "./mod-store.ts";
+import { sevenZipFiles } from "./sevenzip.ts";
 
 export const MANIFEST_FILE = "repository.json";
 const SUPPORTED_SCHEMAS = new Set([1, 2]);
@@ -157,6 +158,8 @@ function hex(bytes: ArrayBuffer): string {
   return Array.from(new Uint8Array(bytes), (b) => b.toString(16).padStart(2, "0")).join("");
 }
 
+const SEVEN_ZIP_MAGIC = [0x37, 0x7a, 0xbc, 0xaf, 0x27, 0x1c];
+
 /** Downloads, verifies and installs one entry. Returns the files written. */
 export async function installEntry(manifest: RepoManifest, entry: RepoEntry,
                                    onProgress?: (text: string) => void): Promise<number> {
@@ -175,12 +178,14 @@ export async function installEntry(manifest: RepoManifest, entry: RepoEntry,
     throw new Error(`${entry.name}: the download does not match the repository's SHA-256 - not installed`);
   }
   const archive = new Blob([bytes]);
-  const head = new Uint8Array(bytes, 0, Math.min(4, bytes.byteLength));
-  if (!(head[0] === 0x50 && head[1] === 0x4b)) {
-    throw new Error(`${entry.name}: only .zip archives can be unpacked in the browser (re-pack 7z/rar as zip)`);
+  const head = new Uint8Array(bytes, 0, Math.min(6, bytes.byteLength));
+  const isZip = head[0] === 0x50 && head[1] === 0x4b;
+  const is7z = SEVEN_ZIP_MAGIC.every((b, i) => head[i] === b);
+  if (!isZip && !is7z) {
+    throw new Error(`${entry.name}: only .zip and .7z archives can be unpacked in the browser (re-pack rar as zip)`);
   }
   const modName = safeModName(entry.name);
-  const written = await installMod(entry.titleId, modName, zipFiles(archive),
+  const written = await installMod(entry.titleId, modName, is7z ? sevenZipFiles(archive) : zipFiles(archive),
                                    (n) => onProgress?.(`Installing ${entry.name}: ${n} file(s)...`));
   await recordModSource(entry.titleId, modName, { repo: manifest.url, modId: entry.modId, version: entry.version });
   return written;
