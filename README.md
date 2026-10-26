@@ -19,7 +19,7 @@ full game speed, at a stable ~15 fps on a fast desktop.
 - **Game saves that persist.** Each game's save directory lives in your browser.
   Browse it, drag files in, back it up and restore it.
 - **Game library.** Load a game once, then launch it from a tile with one click.
-- **Mods, updates and DLC.** Drop in mod folders or zips: replaced game files
+- **Mods, updates and DLC.** Drop in mod folders, .zip or .7z archives: replaced game files
   (LayeredFS), IPS and pchtxt patches, replacement executables, Atmosphere
   cheats you can toggle while playing, and decrypted game-update and DLC NCAs. Voland ships no mods; see [docs/MODS.md](docs/MODS.md).
 - **Remappable controls.** Keyboard or any standard gamepad, rebound from the
