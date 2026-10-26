@@ -90,6 +90,12 @@ static CPU_Register_File *regs_of(Sched_Thread *thread, const CPU_Backend *backe
   return backend->get_register_file(thread->thread.cpu_state);
 }
 
+/* An environment switch that is on unless set to "0" (A/B runs). */
+static bool switch_on(const char *name) {
+  const char *v = getenv(name);
+  return !v || strcmp(v, "0") != 0;
+}
+
 /* A thread inside a preemption-disabled region (TLS count nonzero): the
  * kernel lets it run on and marks the preemption deferred. */
 static bool preemption_disabled(const Scheduler *sched, const Sched_Thread *t) {
@@ -108,7 +114,7 @@ static bool preempt_on_wake(const Scheduler *sched) {
   static bool on;
   if (!parsed) {
     parsed = 1;
-    on = getenv("VOLAND_PREEMPT") != NULL;
+    on = switch_on("VOLAND_PREEMPT");
   }
   return on && sched->host_cores > 1u;
 }
@@ -288,7 +294,7 @@ static bool hold_core(const Scheduler *sched) {
   static bool on;
   if (!parsed) {
     parsed = 1;
-    on = getenv("VOLAND_HOLD_CORE") != NULL;
+    on = switch_on("VOLAND_HOLD_CORE");
   }
   return on && (sched->host_cores > 1u || rotate_cores());
 }
@@ -489,7 +495,7 @@ Scheduler_Status scheduler_finish_run(Scheduler *sched, const CPU_Backend *backe
     const uint64_t end = start_ticks + cycles * TICKS_PER_CYCLE_NUMERATOR / TICKS_PER_CYCLE_DENOMINATOR(sched);
     if (end > sched->ticks) sched->ticks = end;
   }
-  /* VOLAND_HOLD_CORE (experiment): a thread its budget preempted keeps the
+  /* VOLAND_HOLD_CORE (=0 turns it off): a thread its budget preempted keeps the
    * front of its priority on its core, as on Horizon, where equal
    * priorities never time-slice; yields and wakes go to the back. */
   thread->last_run = ++sched->run_counter;

@@ -651,7 +651,7 @@ VOLAND_SERIAL_ROTATE=3 voland-cli ... --host-cores 0` crashes identically at
 slice 577966: CreateAndDeleteThread in `RelocationTable::Relocate` with a
 null object (sdk+0x7d934 reading 0x4). Seed 0 runs clean to 900k slices.
 
-**`VOLAND_HOLD_CORE=1`** (2026-10-26, opt-in): a thread its budget
+**`VOLAND_HOLD_CORE`** (2026-10-26, on by default; `=0` turns it off): a thread its budget
 preempted stays first among its own guest core's equal priorities, as on
 Horizon, where equal priorities never time-slice (a thread keeps its core
 until it waits or yields; yields and wakes go to the back). Leaders of
@@ -675,8 +675,16 @@ that way). Now a slice that ends with the count nonzero lets the thread
 run on, first on its core, and sets the flag; a wake does not stop it
 either. tests/guest/preemptoff.s checks it at budgets down to 7 cycles.
 
-**`VOLAND_PREEMPT=1`** (opt-in): on parallel cores a woken thread better
+**`VOLAND_PREEMPT`** (on by default; `=0` turns it off): on parallel cores a woken thread better
 than the one running as its guest core stops that run at once
 (`CPU_Backend.request_stop`, within a block) instead of at the end of the
 slice. TOTK with it and `VOLAND_HOLD_CORE`: 138-174 presents per 100k
 slices vs 100-142 without.
+
+**Both on by default** (2026-10-26). A/B on three host cores, 200k slices,
+defaults vs `VOLAND_HOLD_CORE=0 VOLAND_PREEMPT=0`: Hollow Knight 65601 vs
+64682 draws, Animal Crossing and Smash both run on, Mario Kart 8 stops at
+the same pre-existing fault (slice ~62k, no input) in both modes. Celeste
+and Silksong first looked starved (332 vs 4031 draws), but repeat runs of
+the old mode land on the same 332: whether a load finishes inside the
+window varies run to run, not by mode.
