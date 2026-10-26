@@ -50,7 +50,8 @@
  *                                    the result is
  *                                    DIR/job.done.<pid>. DIR/quit ends the server.
  *                                    Iterating on a late scene without replaying.
- *       --font FILE                  the TTF/OTF pl:u serves as the system font
+ *       --font FILE                  the TTF/OTF pl:u serves as the system font (default: the
+ *                                    web build's NotoSans, from the source tree)
  *       --savestate-check N:M        save state at slice N, run to M, restore it and run
  *                                    to M again: the frame hash and virtual time must match
  *       --svc-stats                  print per-SVC call counts at the end
@@ -1530,6 +1531,10 @@ static int run(int argc, char **argv) {
     fprintf(stderr, "voland-cli: SD card seeded with %d files from %s\n", imported, sdmc);
   }
   static uint8_t *font;
+#ifdef VOLAND_CLI_DEFAULT_FONT
+  /* Games abort when pl:u has no font (Animal Crossing svcBreaks at boot). */
+  if (!font_path && access(VOLAND_CLI_DEFAULT_FONT, R_OK) == 0) font_path = VOLAND_CLI_DEFAULT_FONT;
+#endif
   if (font_path) {
     FILE *f = fopen(font_path, "rb");
     long size = 0;
