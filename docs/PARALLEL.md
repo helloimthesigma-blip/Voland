@@ -650,3 +650,16 @@ old pick.
 VOLAND_SERIAL_ROTATE=3 voland-cli ... --host-cores 0` crashes identically at
 slice 577966: CreateAndDeleteThread in `RelocationTable::Relocate` with a
 null object (sdk+0x7d934 reading 0x4). Seed 0 runs clean to 900k slices.
+
+**`VOLAND_HOLD_CORE=1`** (2026-10-26, opt-in): a thread its budget
+preempted stays first among its own guest core's equal priorities, as on
+Horizon, where equal priorities never time-slice (a thread keeps its core
+until it waits or yields; yields and wakes go to the back). Leaders of
+different guest cores still take turns. With it the deterministic repro
+(`JITTER=3 ROTATE=3`, and seed 7) runs clean to 700k slices (575-606
+presents; without it: crash at 577966, 413 presents). On three host cores
+6 of 7 runs were clean to 400k slices (~1800-1900 presents), 1 crashed
+early (126k slices, the same null object) - about the old rate, so time
+slicing explains the deterministic repro but not all of the parallel crash.
+Higher-priority wakes still wait for the end of a slice on parallel cores
+(Horizon preempts at once).

@@ -237,6 +237,16 @@ bool scheduler_runs_on(const Scheduler *sched, const Sched_Thread *t, uint32_t c
 
 static uint32_t rotate_cores(void);
 
+static bool hold_core(const Scheduler *sched) {
+  static int parsed;
+  static bool on;
+  if (!parsed) {
+    parsed = 1;
+    on = getenv("VOLAND_HOLD_CORE") != NULL;
+  }
+  return on && (sched->host_cores > 1u || rotate_cores());
+}
+
 uint32_t scheduler_guest_core(const Scheduler *sched, const Sched_Thread *t) {
   const uint32_t rotation = sched->host_cores <= 1u ? rotate_cores() : 0u;
   if (rotation) { /* VOLAND_SERIAL_ROTATE: the guest core whose turn it runs in */
@@ -305,6 +315,7 @@ static bool solo(const Sched_Thread *t) {
  * Animal Crossing run the same (docs/PARALLEL.md). */
 static bool leads_core(const Sched_Thread *t, const Sched_Thread *b, bool affine, uint32_t core) {
   if (t->thread.priority != b->thread.priority) return t->thread.priority < b->thread.priority;
+  if (t->held != b->held) return t->held;
   if (t->spinning != b->spinning) return !t->spinning;
   if (affine) {
     const bool t_home = t->last_core == core, b_home = b->last_core == core;
@@ -313,9 +324,15 @@ static bool leads_core(const Sched_Thread *t, const Sched_Thread *b, bool affine
   return t->last_run < b->last_run;
 }
 
+/* Leaders of different guest cores: holding a core is no claim on another. */
 static bool better_leader(const Sched_Thread *t, const Sched_Thread *b, bool affine, uint32_t core) {
   if (t->spinning != b->spinning) return !t->spinning;
-  return leads_core(t, b, affine, core);
+  if (t->thread.priority != b->thread.priority) return t->thread.priority < b->thread.priority;
+  if (affine) {
+    const bool t_home = t->last_core == core, b_home = b->last_core == core;
+    if (t_home != b_home) return t_home;
+  }
+  return t->last_run < b->last_run;
 }
 
 static int32_t pick_leaders(const Scheduler *sched, bool affine, uint32_t core, bool busy) {
@@ -424,7 +441,11 @@ Scheduler_Status scheduler_finish_run(Scheduler *sched, const CPU_Backend *backe
     const uint64_t end = start_ticks + cycles * TICKS_PER_CYCLE_NUMERATOR / TICKS_PER_CYCLE_DENOMINATOR(sched);
     if (end > sched->ticks) sched->ticks = end;
   }
+  /* VOLAND_HOLD_CORE (experiment): a thread its budget preempted keeps the
+   * front of its priority on its core, as on Horizon, where equal
+   * priorities never time-slice; yields and wakes go to the back. */
   thread->last_run = ++sched->run_counter;
+  thread->held = hold_core(sched) && exit_reason == CPU_EXIT_CYCLES_ELAPSED && thread->state == THREAD_STATE_RUNNABLE;
   thread->cycles_run += cycles;
   if (exit_reason != CPU_EXIT_SVC) thread->spinning = false; /* it ran its budget: real work */
   if (!thread->spinning) sched->work_epoch++;
