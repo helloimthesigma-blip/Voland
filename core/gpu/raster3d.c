@@ -6,6 +6,7 @@
 #include "gpu/raster3d.h"
 
 #include <math.h>
+#include <stdatomic.h>
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -1476,8 +1477,11 @@ static void env_texture_batch(void *user, const Sm_Tex_Request *requests, Sm_Mas
 
 /* Shader global memory (LDG/STG): guest memory is shared with the other
  * bands, so accesses are serialised. */
+static void compute_note_read(uint64_t va, uint32_t size);
+
 static bool env_global_read(void *user, uint64_t va, void *out, uint32_t size) {
   const Draw_Context *ctx = ((const Tex_Resolver *)user)->ctx;
+  compute_note_read(va, size);
   workers_lock(&ctx->r->workers);
   const bool ok = ctx->mem->read(ctx->mem->user, va, out, size);
   workers_unlock(&ctx->r->workers);
@@ -5389,6 +5393,7 @@ typedef struct Compute_Job {
 
 static bool compute_read_unlocked(void *user, uint64_t va, void *out, uint32_t size) {
   const Draw_Context *ctx = ((const Tex_Resolver *)user)->ctx;
+  compute_note_read(va, size);
   return ctx->mem->read(ctx->mem->user, va, out, size);
 }
 
@@ -5579,6 +5584,7 @@ typedef struct Compute_Profile {
   bool gpu_failed;   /* does not translate, or cannot be bound */
   bool mirror_logged; /* a window could not be mirrored (said once) */
   bool textures_logged; /* its textures were described (once) */
+  bool reads_outside;   /* a CPU run read global memory outside its windows */
 } Compute_Profile;
 static Compute_Profile g_compute_profiles[COMPUTE_PROFILES];
 static uint32_t g_compute_profile_next;
@@ -5626,6 +5632,21 @@ static uint32_t compute_windows(const Compute_Launch *launch, const Gpu_Memory *
   return n;
 }
 
+/* While a profiled dispatch runs here: its windows, and whether it read
+ * global memory outside them - on the GPU such reads see zeros (TOTK's
+ * particle programs read a buffer no storage descriptor names). */
+static const Compute_Window *g_read_windows;
+static uint32_t g_read_window_count;
+static atomic_bool g_read_outside;
+
+static void compute_note_read(uint64_t va, uint32_t size) {
+  const Compute_Window *w = g_read_windows;
+  if (!w) return;
+  for (uint32_t k = 0; k < g_read_window_count; k++)
+    if (va >= w[k].base && va + size <= w[k].base + w[k].bytes) return;
+  atomic_store(&g_read_outside, true);
+}
+
 static uint32_t cbuf_words_read(const Sm_Program *program, const Sm_Env *env, uint32_t slot);
 static uint32_t gpu_shader_for(Raster3d *r, const Sm_Program *program, const Wgsl_Program_Desc *desc);
 
@@ -5640,6 +5661,12 @@ static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute
              threads > WGSL_CS_MAX_INVOCATIONS        ? "too many threads per block"
              : launch->shared_bytes > WGSL_CS_MAX_SHARED_BYTES ? "too much shared memory"
                                                                : program_cpu_only_reason(program));
+    prof->gpu_failed = true;
+    return false;
+  }
+  if (prof->reads_outside) {
+    log_info("[gpu] compute program %08x stays on the CPU: it reads global memory outside its storage buffers",
+             program->hash);
     prof->gpu_failed = true;
     return false;
   }
@@ -5708,22 +5735,9 @@ static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute
     }
     desc.binding_of[probe.pc[i]] = (uint8_t)b;
   }
-  /* 3D textures stay on the CPU: TOTK's particle programs that sample a
-   * 32^3 noise volume give wrong results on the GPU (purple embers) - not
-   * the hardware sampler, nor the TEXS coordinates (open). */
-  const uint64_t tic_pool = addr40(regs[REG_TEX_HEADER_POOL], regs[REG_TEX_HEADER_POOL + 1u]);
-  for (uint32_t i = 0; i < probe.count; i++) {
-    uint32_t tic[8] = {0};
-    (void)mem->read(mem->user, tic_pool + (uint64_t)(probe.handle[i] & TIC_INDEX_MASK) * TEX_HEADER_BYTES, tic, sizeof(tic));
-    Tex_Header h;
-    tex_header_parse(tic, &h);
-    if (h.type != TEX_TYPE_3D) continue;
-    log_info("[gpu] compute program %08x stays on the CPU: it samples a 3D texture", program->hash);
-    prof->gpu_failed = true;
-    return false;
-  }
   if (desc.texture_count && !prof->textures_logged) {
     prof->textures_logged = true;
+    const uint64_t tic_pool = addr40(regs[REG_TEX_HEADER_POOL], regs[REG_TEX_HEADER_POOL + 1u]);
     for (uint32_t i = 0; i < probe.count; i++) {
       uint32_t tic[8] = {0};
       (void)mem->read(mem->user, tic_pool + (uint64_t)(probe.handle[i] & TIC_INDEX_MASK) * TEX_HEADER_BYTES, tic, sizeof(tic));
@@ -6025,7 +6039,8 @@ void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t 
   const uint32_t threads = launch->block[0] * launch->block[1] * launch->block[2];
   const uint32_t group_count = (threads + SM_LANES - 1u) / SM_LANES;
   const uint32_t blocks = launch->grid[0] * launch->grid[1] * launch->grid[2];
-  if (r->compute_capture) r->compute_capture(r->compute_capture_user, launch, address, env, mem, false);
+  if (r->compute_capture) r->compute_capture(r->compute_capture_user, launch, address, env, addr40(regs[REG_TEX_HEADER_POOL], regs[REG_TEX_HEADER_POOL + 1u]),
+                         addr40(regs[REG_SAMPLER_POOL], regs[REG_SAMPLER_POOL + 1u]), mem, false);
   Compute_Profile *prof = compute_profile(program);
   if (compute_on_gpu(r, program, launch, env, regs, mem, prof)) {
     r->stats.compute_threads += (uint64_t)threads * blocks;
@@ -6051,6 +6066,13 @@ void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t 
     }
   }
   ctx.resolver.count = 0; /* from here it records what the dispatch itself samples */
+  Compute_Window read_windows[WGSL_CS_MAX_WINDOWS];
+  const bool profiling = r->gpu && prof->cpu_runs < COMPUTE_PROFILE_RUNS;
+  if (profiling) {
+    g_read_window_count = compute_windows(launch, mem, read_windows);
+    atomic_store(&g_read_outside, false);
+    g_read_windows = read_windows;
+  }
   Compute_Job job = {program, launch, env, &r->workers, threads, group_count, blocks, 0};
   bool faulted = false;
   if (r->workers.count > 1u && blocks > 1u && group_count <= COMPUTE_WORKER_GROUPS && !program_samples_textures(program)) {
@@ -6067,7 +6089,12 @@ void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t 
   } else {
     for (uint32_t b = 0; b < blocks && !faulted; b++) faulted = !compute_block(&job, env, b, groups, states);
   }
-  if (r->compute_capture) r->compute_capture(r->compute_capture_user, launch, address, env, mem, true);
+  if (profiling) {
+    g_read_windows = NULL;
+    if (atomic_load(&g_read_outside)) prof->reads_outside = true;
+  }
+  if (r->compute_capture) r->compute_capture(r->compute_capture_user, launch, address, env, addr40(regs[REG_TEX_HEADER_POOL], regs[REG_TEX_HEADER_POOL + 1u]),
+                         addr40(regs[REG_SAMPLER_POOL], regs[REG_SAMPLER_POOL + 1u]), mem, true);
   r->stats.compute_threads += (uint64_t)threads * blocks;
   r->stats.compute_dispatches++;
   if (faulted) r->stats.compute_faults++;

@@ -235,8 +235,12 @@ write is read back as vertex streams (269 of 276 MB in a fight).
   with its parameters at `WGSL_DRAW_TEXTURE_PARAMS`, and a SAMPLER
   binding where a hardware sampler applies. Compute has no derivatives,
   so implicit levels of detail take level 0, which is what the reference
-  does for compute. Programs sampling 3D textures stay on the CPU for now
-  (TOTK's particle programs give wrong results on the GPU; open).
+  does for compute.
+- **Reads outside the windows.** The profiling CPU runs also note global
+  reads that land outside every window. A program that makes them stays
+  on the CPU, because on the GPU those reads would see zeros. TOTK's
+  particle programs read a buffer that no storage descriptor names, and
+  their embers turned purple.
 - **Windows.** NVN puts each storage buffer's {address, size} at
   c[0][0x310 + 16 k]. They are read from guest memory: the program's copy
   of c[0] ends where its reads end, which is often before a size. A size
@@ -264,7 +268,12 @@ write is read back as vertex streams (269 of 276 MB in a fight).
 - **Checks.**
   - `tests/wgsl_compute_test` writes vectors, both synthetic (global
     memory, wide accesses, shared memory across a barrier) and, locally,
-    dispatches captured from a title (`VOLAND_COMPUTE_CAPTURE`).
+    dispatches captured from a title (`VOLAND_COMPUTE_CAPTURE`). A
+    capture (VCC2) also holds the textures the program names: each
+    handle's header, sampler and guest bytes. The interpreter samples
+    them decoded, and the vector carries them as RGBA32 layers for
+    WebGPU. Replaying a capture must reproduce the title's result
+    exactly before its vector is written.
   - `tools/compute-vectors.mjs` runs the vectors on WebGPU and compares
     every window word with the interpreter's result.
   - `tools/vertex-pull-vectors.mjs` decodes every case from D and from R.

@@ -39,7 +39,10 @@ try {
     const got = await page.evaluate(async (v) => {
       const adapter = await navigator.gpu.requestAdapter();
       if (!adapter) throw new Error("no WebGPU adapter");
-      const device = await adapter.requestDevice();
+      /* Captured textures arrive as RGBA32 layers; sampling them as "float" needs the feature. */
+      const device = await adapter.requestDevice({
+        requiredFeatures: adapter.features.has("float32-filterable") ? ["float32-filterable"] : [],
+      });
       device.pushErrorScope("validation");
       const module = device.createShaderModule({ code: v.code });
       const info = await module.getCompilationInfo();
@@ -60,6 +63,15 @@ try {
       windows.forEach((b, k) => {
         if (v.code.includes(`var<storage, read_write> G${k}:`)) entries.push({ binding: v.window_binding + k, resource: { buffer: b } });
       });
+      for (const t of v.textures ?? []) {
+        const format = t.kind === "uint" ? "rgba32uint" : t.kind === "sint" ? "rgba32sint" : "rgba32float";
+        const texture = device.createTexture({
+          size: [t.width, t.height, t.layers], format, usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+        });
+        device.queue.writeTexture({ texture }, new Uint32Array(t.texels), { bytesPerRow: 16 * t.width, rowsPerImage: t.height },
+          [t.width, t.height, t.layers]);
+        if (v.code.includes(`var T${t.binding - 1}:`)) entries.push({ binding: t.binding, resource: texture.createView({ dimension: "2d-array" }) });
+      }
       const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
       const encoder = device.createCommandEncoder();
       const pass = encoder.beginComputePass();

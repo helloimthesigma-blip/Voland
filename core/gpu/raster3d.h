@@ -243,9 +243,11 @@ typedef struct Raster3d {
   bool trace_draws;          /* log every draw's state and result (diagnostics) */
   bool trace_compute; /* log the first dispatches (voland-cli: VOLAND_COMPUTE_TRACE) */
   /* Diagnostics (voland-cli VOLAND_COMPUTE_CAPTURE): called before and
-   * after a dispatch runs, to record its inputs and outputs. */
+   * after a dispatch runs, to record its inputs and outputs (with its
+   * texture header and sampler pools' GPU addresses). */
   void (*compute_capture)(void *user, const Compute_Launch *launch, uint64_t program_address,
-                          const struct Sm_Env *env, const struct Gpu_Memory *mem, bool after);
+                          const struct Sm_Env *env, uint64_t tic_pool, uint64_t tsc_pool,
+                          const struct Gpu_Memory *mem, bool after);
   void *compute_capture_user;
   bool skip_draws;           /* frame skip: draws and clears are not rasterised */
   /* Diagnostics: called with every newly decoded texture (may be NULL). */

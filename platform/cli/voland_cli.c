@@ -102,6 +102,8 @@
 #include "gpu/gpu_records.h"
 #include "gpu/gpu_stream.h"
 #include "gpu/wgsl.h"
+#include "gpu/maxwell_shader.h"
+#include "gpu/texture.h"
 #include "hle/loader/nca_parse.h"
 #include "hle/loader/nro.h"
 #include "hle/loader/romfs.h"
@@ -1226,6 +1228,7 @@ static void gpu_stream_wait(void *user, volatile int32_t *word, int32_t expected
 #define CAPTURE_SSBO_DESC 0x310u
 #define CAPTURE_UNSIZED (1u << 20)
 #define CAPTURE_CODE_BYTES 0x8000u
+#define CAPTURE_CODE_CHUNK 0x100u
 #define CAPTURE_PROGRAMS 8u
 typedef struct Capture_State {
   const char *dir;
@@ -1262,8 +1265,59 @@ static void capture_windows(const Compute_Launch *launch, const Gpu_Memory *mem,
   }
 }
 
+/* The textures the program's texture instructions name (handles from the
+ * texture constant buffer; TEX.B ones are not known here): each handle,
+ * its header and sampler words and the guest bytes the header covers. */
+#define CAPTURE_TEXTURES 16u
+#define CAPTURE_TEXTURE_BYTES (16u << 20)
+#define CAPTURE_TIC_MASK 0xfffffu   /* a handle's header index */
+#define CAPTURE_TSC_SHIFT 20u       /* its sampler index */
+#define CAPTURE_TSC_MASK 0xfffu
+#define CAPTURE_CBUF_INDEX_SHIFT 36u /* a texture instruction's handle word in the texture constant buffer */
+#define CAPTURE_CBUF_INDEX_MASK 0x1fffu
+static void capture_textures(const uint8_t *code, const Sm_Env *env, uint64_t tic_pool, uint64_t tsc_pool,
+                             const Gpu_Memory *mem, FILE *f) {
+  static uint8_t bytes[SM_SPH_BYTES + CAPTURE_CODE_BYTES];
+  static Sm_Program program;
+  memset(bytes, 0, SM_SPH_BYTES);
+  memcpy(bytes + SM_SPH_BYTES, code, CAPTURE_CODE_BYTES);
+  const uint32_t extent = sm_program_extent(bytes, sizeof(bytes));
+  sm_program_decode(bytes, extent ? extent : sizeof(bytes), 0, &program);
+  uint32_t handles[CAPTURE_TEXTURES], count = 0;
+  const uint32_t slot = env->texture_cbuf_slot;
+  for (uint32_t pc = 0; pc < program.word_count; pc++) {
+    const uint32_t op = program.insns[pc].op;
+    if (op < SM_OP_TEX || op > SM_OP_TXD || slot >= SM_CBUF_SLOTS || !env->cbuf[slot]) continue;
+    const uint32_t offset = (uint32_t)((program.insns[pc].raw >> CAPTURE_CBUF_INDEX_SHIFT) & CAPTURE_CBUF_INDEX_MASK) * 4u;
+    uint32_t handle = 0;
+    if (offset + 4u <= env->cbuf_size[slot]) memcpy(&handle, env->cbuf[slot] + offset, sizeof(handle));
+    uint32_t i = 0;
+    while (i < count && handles[i] != handle) i++;
+    if (i == count && count < CAPTURE_TEXTURES) handles[count++] = handle;
+  }
+  fwrite(&slot, 4, 1, f);
+  fwrite(&count, 4, 1, f);
+  static uint8_t raw[CAPTURE_TEXTURE_BYTES];
+  for (uint32_t i = 0; i < count; i++) {
+    uint32_t tic[8] = {0}, tsc[8] = {0};
+    (void)mem->read(mem->user, tic_pool + (uint64_t)(handles[i] & CAPTURE_TIC_MASK) * TEX_HEADER_BYTES, tic, sizeof(tic));
+    (void)mem->read(mem->user, tsc_pool + (uint64_t)((handles[i] >> CAPTURE_TSC_SHIFT) & CAPTURE_TSC_MASK) * TEX_SAMPLER_BYTES, tsc, sizeof(tsc));
+    Tex_Header h;
+    tex_header_parse(tic, &h);
+    const uint64_t want = tex_read_bytes(&h);
+    const uint32_t n = want <= sizeof(raw) ? (uint32_t)want : 0u;
+    memset(raw, 0, n);
+    if (n) (void)mem->read(mem->user, h.address, raw, n);
+    fwrite(&handles[i], 4, 1, f);
+    fwrite(tic, sizeof(tic), 1, f);
+    fwrite(tsc, sizeof(tsc), 1, f);
+    fwrite(&n, 4, 1, f);
+    fwrite(raw, 1, n, f);
+  }
+}
+
 static void compute_capture(void *user, const Compute_Launch *launch, uint64_t address, const Sm_Env *env,
-                            const Gpu_Memory *mem, bool after) {
+                            uint64_t tic_pool, uint64_t tsc_pool, const Gpu_Memory *mem, bool after) {
   Capture_State *c = (Capture_State *)user;
   bool match = false;
   for (uint32_t i = 0; i < c->program_count; i++) match = match || (address & 0xffffffu) == c->program[i];
@@ -1274,13 +1328,15 @@ static void compute_capture(void *user, const Compute_Launch *launch, uint64_t a
     snprintf(path, sizeof(path), "%s/capture-%u.bin", c->dir, c->written);
     c->f = fopen(path, "wb");
     if (!c->f) return;
-    fwrite("VCC1", 1, 4, c->f);
+    fwrite("VCC2", 1, 4, c->f); /* VCC1 + textures after the constant buffers */
     const uint32_t head[8] = {launch->block[0], launch->block[1], launch->block[2], launch->grid[0],
                               launch->grid[1], launch->grid[2], launch->shared_bytes, CAPTURE_CODE_BYTES};
     fwrite(head, sizeof(head), 1, c->f);
     static uint8_t code[CAPTURE_CODE_BYTES];
     memset(code, 0, sizeof(code));
-    (void)mem->read(mem->user, address, code, sizeof(code));
+    /* In pieces: a program near the end of its mapping fails one read of the whole window. */
+    for (uint32_t at = 0; at < sizeof(code) && mem->read(mem->user, address + at, code + at, CAPTURE_CODE_CHUNK);)
+      at += CAPTURE_CODE_CHUNK;
     fwrite(code, 1, sizeof(code), c->f);
     uint32_t slots = 0;
     for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++) slots += env->cbuf[s] ? 1u : 0u;
@@ -1291,6 +1347,7 @@ static void compute_capture(void *user, const Compute_Launch *launch, uint64_t a
       fwrite(&env->cbuf_size[s], 4, 1, c->f);
       fwrite(env->cbuf[s], 1, env->cbuf_size[s], c->f);
     }
+    capture_textures(code, env, tic_pool, tsc_pool, mem, c->f);
     capture_windows(launch, mem, c->f);
     return;
   }

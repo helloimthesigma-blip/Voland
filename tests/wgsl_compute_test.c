@@ -23,6 +23,7 @@
 #include <string.h>
 
 #include "gpu/maxwell_shader.h"
+#include "gpu/texture.h"
 #include "gpu/wgsl.h"
 
 /* ---- assembler (field layouts as tests/raster3d_test.c) ----------- */
@@ -136,10 +137,15 @@ static bool window_at(uint64_t va, uint32_t size, uint32_t *k, uint32_t *rel) {
   return false;
 }
 
+static uint64_t g_read_misses, g_last_read_miss;
 static bool g_read(void *user, uint64_t va, void *out, uint32_t size) {
   (void)user;
   uint32_t k, rel;
-  if (!window_at(va, size, &k, &rel)) return false;
+  if (!window_at(va, size, &k, &rel)) {
+    g_read_misses++;
+    g_last_read_miss = va;
+    return false;
+  }
   memcpy(out, g_window[k] + rel, size);
   return true;
 }
@@ -158,6 +164,55 @@ static bool g_write(void *user, uint64_t va, const void *src, uint32_t size) {
   return true;
 }
 
+/* A capture's textures (VCC2): decoded for the reference, and written to
+ * the vector as RGBA32 layers for WebGPU. */
+#define MAX_TEXTURES 16u
+#define TEX_CBUF_INDEX_SHIFT 36u /* a texture instruction's handle word in the texture constant buffer */
+#define TEX_CBUF_INDEX_MASK 0x1fffu
+typedef struct Capture_Texture {
+  uint32_t handle;
+  Tex_Header header;
+  Tex_Sampler sampler;
+  Tex_Image image;
+  uint8_t *decoded;
+} Capture_Texture;
+static Capture_Texture g_tex[MAX_TEXTURES];
+static uint32_t g_tex_count, g_tex_slot;
+
+static const Capture_Texture *texture_of(uint32_t handle) {
+  for (uint32_t i = 0; i < g_tex_count; i++)
+    if (g_tex[i].handle == handle && g_tex[i].image.valid) return &g_tex[i];
+  return NULL;
+}
+
+/* raster3d's texture_request on a captured texture. */
+static void capture_texture(void *user, const Sm_Tex_Request *req, uint32_t out[4]) {
+  (void)user;
+  const Capture_Texture *t = texture_of(req->handle);
+  out[0] = out[1] = out[2] = 0;
+  out[3] = 0x3f800000u;
+  if (!t) return;
+  const Tex_Image *img = &t->image;
+  switch (req->kind) {
+  case SM_TEX_FETCH: tex_fetch(img, req->icoords, (int32_t)req->layer, out); break;
+  case SM_TEX_GATHER:
+    tex_gather(img, &t->sampler, req->coords, req->layer, req->gather_component, req->dref, req->shadow,
+               req->has_offset ? req->offset : NULL, out);
+    break;
+  case SM_TEX_QUERY_DIMS:
+    out[0] = img->width;
+    out[1] = img->height;
+    out[2] = img->header.type == TEX_TYPE_3D ? img->header.depth : img->layers;
+    out[3] = img->header.levels;
+    break;
+  case SM_TEX_QUERY_LOD: out[0] = out[1] = out[2] = out[3] = 0; break;
+  default:
+    tex_sample(img, &t->sampler, req->coords, req->layer, req->dref, req->shadow, req->has_offset ? req->offset : NULL,
+               out);
+    break;
+  }
+}
+
 static Sm_Thread g_groups[MAX_GROUPS];
 static Sm_Group_State g_states[MAX_GROUPS];
 
@@ -172,6 +227,8 @@ static void reference(const uint32_t block[3], const uint32_t grid[3], uint32_t 
   }
   env.global_read = g_read;
   env.global_write = g_write;
+  env.texture = capture_texture;
+  env.texture_cbuf_slot = g_tex_slot;
   env.shared = g_shared;
   env.shared_bytes = shared_bytes;
   const uint32_t threads = block[0] * block[1] * block[2], groups = (threads + SM_LANES - 1u) / SM_LANES;
@@ -253,11 +310,31 @@ static void finish(const char *name, const uint32_t block[3], const uint32_t gri
   for (uint32_t i = 0; i < 3u; i++) desc.block[i] = (uint16_t)block[i];
   desc.shared_bytes = shared_bytes;
   desc.window_count = g_windows;
-  /* Textures stay unbound on both sides: (0, 0, 0, 1), as the reference
-   * reads with no texture hook - a captured program's other instructions
-   * are still compared. */
+  /* Textures: one binding per captured handle, as compute_on_gpu binds
+   * them (no hardware samplers: RGBA32 layers); without one, unbound on
+   * both sides, (0, 0, 0, 1). */
   memset(desc.binding_of, WGSL_NO_BINDING, sizeof(desc.binding_of));
   desc.texture_count = 0;
+  desc.hw_sample_mask = 0;
+  uint32_t bound[MAX_TEXTURES];
+  for (uint32_t pc = 0; pc < g_prog.word_count && g_tex_slot < SM_CBUF_SLOTS; pc++) {
+    const uint32_t op = g_prog.insns[pc].op;
+    if (op < SM_OP_TEX || op > SM_OP_TXD) continue;
+    const uint32_t offset = (uint32_t)((g_prog.insns[pc].raw >> TEX_CBUF_INDEX_SHIFT) & TEX_CBUF_INDEX_MASK) * 4u;
+    uint32_t handle = 0;
+    if (offset + 4u <= g_cbuf_bytes[g_tex_slot]) memcpy(&handle, g_cbuf[g_tex_slot] + offset, 4);
+    const Capture_Texture *t = texture_of(handle);
+    if (!t) continue;
+    uint32_t b = 0;
+    while (b < desc.texture_count && bound[b] != (uint32_t)(t - g_tex)) b++;
+    if (b == desc.texture_count) {
+      bound[b] = (uint32_t)(t - g_tex);
+      const uint8_t type = t->header.data_type[0];
+      desc.sample_type[b] = type == TEX_DATA_UINT ? WGSL_SAMPLE_UINT : type == TEX_DATA_SINT ? WGSL_SAMPLE_SINT : WGSL_SAMPLE_FLOAT;
+      desc.texture_count++;
+    }
+    desc.binding_of[pc] = (uint8_t)b;
+  }
   const Wgsl_Result r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   if (!r.ok) fprintf(stderr, "[wgsl_compute_test] %s: %s\n", name, r.reason);
   CHECK(r.ok);
@@ -265,6 +342,24 @@ static void finish(const char *name, const uint32_t block[3], const uint32_t gri
   for (uint32_t k = 0; k < g_windows; k++) memcpy(g_window_before[k], g_window[k], g_window_bytes[k]);
   if (!g_after_given) reference(block, grid, shared_bytes);
   build_data();
+  for (uint32_t b = 0; b < desc.texture_count; b++) { /* gpu_bind_texture's parameter words */
+    const Tex_Header *h = &g_tex[bound[b]].header;
+    const Tex_Sampler *sm = &g_tex[bound[b]].sampler;
+    uint32_t *pw = g_data + WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEX_PARAM_WORDS * b;
+    const bool cube = h->type == TEX_TYPE_CUBE || h->type == TEX_TYPE_CUBE_ARRAY;
+    pw[WGSL_TEXP_FLAGS] = ((h->normalized || cube) ? WGSL_TEXP_SCALE : 0u) |
+                          (sm->mag_filter == 2u && desc.sample_type[b] == WGSL_SAMPLE_FLOAT ? WGSL_TEXP_LINEAR : 0u) |
+                          (cube ? WGSL_TEXP_CUBE : 0u) | (sm->depth_compare ? WGSL_TEXP_DEPTH_COMPARE : 0u) |
+                          (h->type == TEX_TYPE_3D ? WGSL_TEXP_3D : 0u);
+    pw[WGSL_TEXP_WRAP] = (uint32_t)sm->wrap[0] | ((uint32_t)sm->wrap[1] << 4) | ((uint32_t)sm->wrap[2] << 8);
+    pw[WGSL_TEXP_SWIZZLE] = (uint32_t)h->swizzle[0] | ((uint32_t)h->swizzle[1] << 4) | ((uint32_t)h->swizzle[2] << 8) |
+                            ((uint32_t)h->swizzle[3] << 12);
+    pw[WGSL_TEXP_LEVELS] = h->levels;
+    pw[WGSL_TEXP_COMPARE] = sm->compare_func;
+    float f = sm->lod_bias;
+    memcpy(&pw[WGSL_TEXP_LOD_BIAS], &f, 4);
+    for (uint32_t c = 0; c < 4u; c++) memcpy(&pw[WGSL_TEXP_BORDER + c], &sm->border[c], 4);
+  }
   g_vectors++;
   fprintf(stderr, "[wgsl_compute_test] %s\n", name);
   if (!g_dir) return;
@@ -285,6 +380,21 @@ static void finish(const char *name, const uint32_t block[3], const uint32_t gri
     if (k) fprintf(f, ",");
     write_words(f, g_window_before[k], g_window_bytes[k]);
   }
+  fprintf(f, "],\"textures\":[");
+  for (uint32_t b = 0; b < desc.texture_count; b++) {
+    const Tex_Image *img = &g_tex[bound[b]].image;
+    static const char *const kinds[] = {"float", "uint", "sint"};
+    fprintf(f, "%s{\"binding\":%u,\"kind\":\"%s\",\"width\":%u,\"height\":%u,\"layers\":%u,\"texels\":[", b ? "," : "",
+            WGSL_TEXTURE_BINDING_BASE + b, kinds[desc.sample_type[b]], img->width, img->height, img->layers);
+    for (uint32_t l = 0; l < img->layers; l++)
+      for (uint32_t y = 0; y < img->height; y++)
+        for (uint32_t x = 0; x < img->width; x++) {
+          uint32_t texel[4];
+          tex_texel(img, x, y, l, texel);
+          fprintf(f, "%s%u,%u,%u,%u", l || y || x ? "," : "", texel[0], texel[1], texel[2], texel[3]);
+        }
+    fprintf(f, "]}");
+  }
   fprintf(f, "],\"expected\":[");
   for (uint32_t k = 0; k < g_windows; k++) {
     if (k) fprintf(f, ",");
@@ -300,6 +410,8 @@ static void finish(const char *name, const uint32_t block[3], const uint32_t gri
 #define SSBO_DESC_BYTES 16u
 
 static void reset_inputs(uint32_t seed) {
+  g_tex_count = 0;
+  g_tex_slot = SM_CBUF_SLOTS;
   memset(g_cbuf, 0, sizeof(g_cbuf));
   for (uint32_t s2 = 0; s2 < SM_CBUF_SLOTS; s2++) g_cbuf_bytes[s2] = CBUF_BYTES;
   g_cbuf_used = 1u;
@@ -476,7 +588,8 @@ static void capture_vector(const char *path, uint32_t index) {
   CHECK(f != NULL);
   char magic[4];
   uint32_t head[8];
-  CHECK(read_exact(f, magic, 4) && !memcmp(magic, "VCC1", 4) && read_exact(f, head, sizeof(head)));
+  CHECK(read_exact(f, magic, 4) && (!memcmp(magic, "VCC1", 4) || !memcmp(magic, "VCC2", 4)) &&
+        read_exact(f, head, sizeof(head)));
   static uint8_t code[0x8000];
   CHECK(head[7] <= sizeof(code) && read_exact(f, code, head[7]));
   memset(g_bytes, 0, sizeof(g_bytes));
@@ -495,6 +608,31 @@ static void capture_vector(const char *path, uint32_t index) {
     g_cbuf_bytes[s2] = bytes;
     g_cbuf_used |= 1u << s2;
   }
+  for (uint32_t i = 0; i < g_tex_count; i++) free(g_tex[i].decoded);
+  memset(g_tex, 0, sizeof(g_tex));
+  g_tex_count = 0;
+  g_tex_slot = SM_CBUF_SLOTS;
+  if (!memcmp(magic, "VCC2", 4)) { /* the textures it names: handle, header, sampler, guest bytes */
+    uint32_t count = 0;
+    CHECK(read_exact(f, &g_tex_slot, 4) && read_exact(f, &count, 4) && count <= MAX_TEXTURES);
+    tex_init_tables();
+    for (uint32_t i = 0; i < count; i++) {
+      Capture_Texture *t = &g_tex[g_tex_count++];
+      uint32_t tic[8], tsc[8], n = 0;
+      CHECK(read_exact(f, &t->handle, 4) && read_exact(f, tic, sizeof(tic)) && read_exact(f, tsc, sizeof(tsc)) &&
+            read_exact(f, &n, 4));
+      uint8_t *raw = malloc(n ? n : 1u);
+      CHECK(raw != NULL && read_exact(f, raw, n));
+      tex_header_parse(tic, &t->header);
+      tex_sampler_parse(tsc, &t->sampler);
+      t->decoded = malloc((size_t)tex_decoded_bytes(&t->header) + 1u);
+      CHECK(t->decoded != NULL);
+      if (!n || !tex_decode(&t->header, raw, t->decoded, &t->image)) t->image.valid = false;
+      fprintf(stderr, "[wgsl_compute_test] texture %08x: type %u %ux%ux%u fmt 0x%x%s\n", t->handle, t->header.type,
+              t->header.width, t->header.height, t->header.depth, t->header.format, t->image.valid ? "" : " (not decoded)");
+      free(raw);
+    }
+  }
   static uint8_t after[WGSL_CS_MAX_WINDOWS][MAX_WINDOW_BYTES];
   for (uint32_t pass = 0; pass < 2u; pass++) {
     uint32_t count = 0;
@@ -511,8 +649,9 @@ static void capture_vector(const char *path, uint32_t index) {
   /* The interpreter on the captured inputs gives the captured result. */
   for (uint32_t k = 0; k < g_windows; k++) memcpy(g_window_before[k], g_window[k], g_window_bytes[k]);
   reference(block, grid, head[6]);
-  fprintf(stderr, "[wgsl_compute_test] capture: %llu writes, %llu outside the windows (last 0x%llx); windows:", (unsigned long long)g_writes,
-          (unsigned long long)g_write_misses, (unsigned long long)g_last_miss);
+  fprintf(stderr, "[wgsl_compute_test] capture: %llu writes, %llu outside the windows (last 0x%llx), %llu reads outside (last 0x%llx); windows:",
+          (unsigned long long)g_writes, (unsigned long long)g_write_misses, (unsigned long long)g_last_miss,
+          (unsigned long long)g_read_misses, (unsigned long long)g_last_read_miss);
   for (uint32_t k = 0; k < g_windows; k++) {
     uint32_t changed = 0, vs_title = 0;
     for (uint32_t i = 0; i < g_window_bytes[k]; i += 4u) {
@@ -523,11 +662,11 @@ static void capture_vector(const char *path, uint32_t index) {
             g_window_bytes[k], changed, vs_title);
   }
   fprintf(stderr, "\n");
-  /* (Not with textures: the replay leaves them unbound - see finish.) */
+  /* (Not when its textures were not captured: they read unbound.) */
   bool samples = false;
   for (uint32_t i = 0; i < g_prog.word_count; i++)
     samples = samples || (g_prog.insns[i].op >= SM_OP_TEX && g_prog.insns[i].op <= SM_OP_TXD);
-  for (uint32_t k = 0; k < g_windows && !samples; k++) CHECK(!memcmp(g_window[k], after[k], g_window_bytes[k]));
+  for (uint32_t k = 0; k < g_windows && (!samples || g_tex_count); k++) CHECK(!memcmp(g_window[k], after[k], g_window_bytes[k]));
   /* The title's run left this frame's result where last frame's already
    * was: the windows the program writes start filled with a sentinel
    * instead, so every word it writes shows. */
