@@ -226,8 +226,17 @@ write is read back as vertex streams (269 of 276 MB in a fight).
   invocation runs to the barrier or its end, the workgroup meets at
   `workgroupBarrier` in uniform control flow, and a `workgroupUniformLoad`
   count of the waiting invocations decides whether another phase runs.
-  Shared memory (LDS/STS) is `var<workgroup>`. Textures, warp votes and
-  shuffles stay on the CPU path.
+  Shared memory (LDS/STS) is `var<workgroup>`. Warp votes, shuffles,
+  surface stores (SUST), global atomics, bindless textures (TEX.B) and
+  TMML stay on the CPU path.
+- **Textures.** A program's texture instructions bind as a draw's do:
+  their handles come from the texture constant buffer (the static probe),
+  one TEXTURE binding per distinct handle at `WGSL_TEXTURE_BINDING_BASE + i`
+  with its parameters at `WGSL_DRAW_TEXTURE_PARAMS`, and a SAMPLER
+  binding where a hardware sampler applies. Compute has no derivatives,
+  so implicit levels of detail take level 0, which is what the reference
+  does for compute. Programs sampling 3D textures stay on the CPU for now
+  (TOTK's particle programs give wrong results on the GPU; open).
 - **Windows.** NVN puts each storage buffer's {address, size} at
   c[0][0x310 + 16 k]. They are read from guest memory: the program's copy
   of c[0] ends where its reads end, which is often before a size. A size
@@ -250,7 +259,8 @@ write is read back as vertex streams (269 of 276 MB in a fight).
 - **Executor.** A BUFFER_WRITE to a buffer the unsubmitted commands use
   flushes them first, as texture writes do. A COMPUTE record ends the open
   render pass, and its pipeline has an explicit layout: the data with a
-  dynamic offset, then one storage entry per window.
+  dynamic offset, one storage entry per window, then the textures and
+  samplers as a draw's.
 - **Checks.**
   - `tests/wgsl_compute_test` writes vectors, both synthetic (global
     memory, wide accesses, shared memory across a barrier) and, locally,

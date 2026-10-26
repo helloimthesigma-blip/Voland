@@ -607,6 +607,9 @@ export class GpuExecutor {
     let at = COMPUTE_BYTES;
     let data: Uint8Array | null = null;
     const windows: { binding: number; buffer: GPUBuffer }[] = [];
+    const textureIds: number[] = [];
+    const filtered: boolean[] = [];
+    const samplerStates = new Map<number, number>();
     for (let i = 0; i < c.bindingCount; i++) {
       const kind = v.getUint32(at, true);
       const binding = v.getUint32(at + 4, true);
@@ -623,8 +626,27 @@ export class GpuExecutor {
           return;
         }
         windows.push({ binding, buffer });
+      } else if (kind === BIND_TEXTURE) {
+        textureIds.push(id);
+        filtered.push((bytes & BIND_FILTERED) !== 0);
+      } else if (kind === BIND_SAMPLER) {
+        samplerStates.set(binding, id);
       }
     }
+    /* Textures it samples, as a draw's (bindings 1 + i, samplers after). */
+    const textures: Tex[] = [];
+    for (const id of textureIds) {
+      const t = this.textures.get(id);
+      if (!t) {
+        this.warnOnce(`texture ${id}`, `dispatch samples unknown texture ${id}`);
+        return;
+      }
+      if (this.mipsStale.has(t.texture)) this.buildMips(t);
+      this.materialize(id);
+      this.touched.add(t.texture);
+      textures.push(t);
+    }
+    const kinds = textures.map((t, i) => (filtered[i] ? "F" : t.sampleType));
     /* A window the shader declares but the dispatch does not bind would
      * fail the pipeline - and with it every command buffer using it (a
      * whole frame, black). Bind an empty stand-in and say so once. */
@@ -639,15 +661,22 @@ export class GpuExecutor {
       windows.push({ binding, buffer: stand });
     }
     windows.sort((a, b) => a.binding - b.binding);
-    const key = `cs:${c.shaderId}:${windows.map((w) => w.binding).join(",")}`;
+    const key = `cs:${c.shaderId}:${windows.map((w) => w.binding).join(",")}:${kinds.join(",")}`;
     let cached = this.computePipelines.get(key);
     if (!cached) {
-      const layout = this.device.createBindGroupLayout({
-        entries: [
-          { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage", hasDynamicOffset: true } },
-          ...windows.map((w) => ({ binding: w.binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } })),
-        ],
+      const entries: GPUBindGroupLayoutEntry[] = [
+        { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: "read-only-storage", hasDynamicOffset: true } },
+        ...windows.map((w) => ({ binding: w.binding, visibility: GPUShaderStage.COMPUTE, buffer: { type: "storage" as const } })),
+      ];
+      kinds.forEach((kind, i) => {
+        const hw = kind === "F";
+        entries.push({
+          binding: 1 + i, visibility: GPUShaderStage.COMPUTE,
+          texture: { sampleType: hw ? "float" : kind as GPUTextureSampleType, viewDimension: "2d-array" },
+        });
+        if (hw) entries.push({ binding: 1 + MAX_TEXTURES + i, visibility: GPUShaderStage.COMPUTE, sampler: { type: "filtering" } });
       });
+      const layout = this.device.createBindGroupLayout({ entries });
       const pipeline = this.device.createComputePipeline({
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
         compute: { module, entryPoint: "cs" },
@@ -666,6 +695,8 @@ export class GpuExecutor {
       entries: [
         { binding: 0, resource: { buffer: this.dataBuffer, offset: 0, size: DATA_WINDOW_BYTES } },
         ...windows.map((w) => ({ binding: w.binding, resource: { buffer: w.buffer } })),
+        ...textures.map((t, i) => ({ binding: 1 + i, resource: t.sampleView })),
+        ...[...samplerStates].map(([binding, state]) => ({ binding, resource: this.sampler(state) })),
       ],
     });
     const pass = this.ensureEncoder().beginComputePass();

@@ -1217,18 +1217,20 @@ static void gpu_stream_wait(void *user, volatile int32_t *word, int32_t expected
 
 /* VOLAND_COMPUTE_CAPTURE=DIR (with VOLAND_COMPUTE_CAPTURE_PROGRAM=HEX, the
  * program address's low 24 bits, and VOLAND_COMPUTE_CAPTURE_SKIP=N): the
- * first few matching dispatches' program, constant buffers and storage
+ * first few matching dispatches' program (a comma-separated list), constant buffers and storage
  * buffers before and after, as DIR/capture-<n>.bin - real inputs for
  * tests/wgsl_compute_test. Windows are c[0][0x310 + 16 k]'s {base, size}
  * descriptors (NVN's); a size of 0 captures CAPTURE_UNSIZED bytes. */
-#define CAPTURE_MAX 3u
+#define CAPTURE_MAX 8u
 #define CAPTURE_WINDOWS 6u
 #define CAPTURE_SSBO_DESC 0x310u
 #define CAPTURE_UNSIZED (1u << 20)
 #define CAPTURE_CODE_BYTES 0x8000u
+#define CAPTURE_PROGRAMS 8u
 typedef struct Capture_State {
   const char *dir;
-  uint32_t program;
+  uint32_t program[CAPTURE_PROGRAMS]; /* VOLAND_COMPUTE_CAPTURE_PROGRAM: a comma-separated list */
+  uint32_t program_count;
   uint32_t skip;
   uint32_t seen, written;
   FILE *f;
@@ -1263,7 +1265,9 @@ static void capture_windows(const Compute_Launch *launch, const Gpu_Memory *mem,
 static void compute_capture(void *user, const Compute_Launch *launch, uint64_t address, const Sm_Env *env,
                             const Gpu_Memory *mem, bool after) {
   Capture_State *c = (Capture_State *)user;
-  if ((address & 0xffffffu) != c->program) return;
+  bool match = false;
+  for (uint32_t i = 0; i < c->program_count; i++) match = match || (address & 0xffffffu) == c->program[i];
+  if (!match) return;
   if (!after) {
     if (c->written >= CAPTURE_MAX || c->seen++ < c->skip) return;
     char path[1024];
@@ -1507,7 +1511,11 @@ static int run(int argc, char **argv) {
   emu.renderer.no_gpu_compute = no_gpu_compute;
   if (getenv("VOLAND_COMPUTE_CAPTURE")) {
     g_capture.dir = getenv("VOLAND_COMPUTE_CAPTURE");
-    g_capture.program = getenv("VOLAND_COMPUTE_CAPTURE_PROGRAM") ? (uint32_t)strtoul(getenv("VOLAND_COMPUTE_CAPTURE_PROGRAM"), NULL, 16) : 0u;
+    for (const char *at = getenv("VOLAND_COMPUTE_CAPTURE_PROGRAM"); at && *at && g_capture.program_count < CAPTURE_PROGRAMS;) {
+      char *end = NULL;
+      g_capture.program[g_capture.program_count++] = (uint32_t)strtoul(at, &end, 16);
+      at = end && *end == ',' ? end + 1 : NULL;
+    }
     g_capture.skip = getenv("VOLAND_COMPUTE_CAPTURE_SKIP") ? (uint32_t)strtoul(getenv("VOLAND_COMPUTE_CAPTURE_SKIP"), NULL, 0) : 0u;
     emu.renderer.compute_capture = compute_capture;
     emu.renderer.compute_capture_user = &g_capture;

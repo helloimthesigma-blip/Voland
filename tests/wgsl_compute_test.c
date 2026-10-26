@@ -253,6 +253,11 @@ static void finish(const char *name, const uint32_t block[3], const uint32_t gri
   for (uint32_t i = 0; i < 3u; i++) desc.block[i] = (uint16_t)block[i];
   desc.shared_bytes = shared_bytes;
   desc.window_count = g_windows;
+  /* Textures stay unbound on both sides: (0, 0, 0, 1), as the reference
+   * reads with no texture hook - a captured program's other instructions
+   * are still compared. */
+  memset(desc.binding_of, WGSL_NO_BINDING, sizeof(desc.binding_of));
+  desc.texture_count = 0;
   const Wgsl_Result r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   if (!r.ok) fprintf(stderr, "[wgsl_compute_test] %s: %s\n", name, r.reason);
   CHECK(r.ok);
@@ -384,9 +389,22 @@ static void structural(void) {
   desc.window_count = 1;
   const Wgsl_Result r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   CHECK(r.ok && strstr(g_text, "workgroupBarrier") != NULL && strstr(g_text, "workgroupUniformLoad") != NULL);
-  /* A texture instruction stays on the CPU. */
+  /* A texture instruction binds its texture and samples level 0 (no
+   * derivatives in compute); TMML stays on the CPU. */
   const uint64_t tex[] = {(0xd800ull << 48) | GUARD | (1ull << 53) | (4ull << 50), EXIT()};
   build(tex, 2);
+  wgsl_default_desc(&g_prog, &desc);
+  desc.stage = SM_STAGE_COMPUTE;
+  desc.block[0] = 32;
+  desc.block[1] = desc.block[2] = 1;
+  desc.window_count = 1;
+  CHECK(wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text)).ok);
+  CHECK(strstr(g_text, "var T0: texture_2d_array<f32>") != NULL);
+  const char *entry = strstr(g_text, "@compute");
+  CHECK(entry != NULL && strstr(entry, "t0_lod(") == NULL);
+  const uint64_t tmml[] = {(0xdf58ull << 48) | GUARD, EXIT()};
+  build(tmml, 2);
+  CHECK(g_prog.insns[1].op == SM_OP_TMML);
   CHECK(!wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text)).ok);
 }
 
@@ -495,14 +513,29 @@ static void capture_vector(const char *path, uint32_t index) {
   reference(block, grid, head[6]);
   fprintf(stderr, "[wgsl_compute_test] capture: %llu writes, %llu outside the windows (last 0x%llx); windows:", (unsigned long long)g_writes,
           (unsigned long long)g_write_misses, (unsigned long long)g_last_miss);
-  for (uint32_t k = 0; k < g_windows; k++) fprintf(stderr, " 0x%llx+0x%x", (unsigned long long)g_window_base[k], g_window_bytes[k]);
+  for (uint32_t k = 0; k < g_windows; k++) {
+    uint32_t changed = 0, vs_title = 0;
+    for (uint32_t i = 0; i < g_window_bytes[k]; i += 4u) {
+      changed += memcmp(g_window[k] + i, g_window_before[k] + i, 4) != 0;
+      vs_title += memcmp(g_window[k] + i, after[k] + i, 4) != 0;
+    }
+    fprintf(stderr, " 0x%llx+0x%x (%u words changed, %u differ from the title's)", (unsigned long long)g_window_base[k],
+            g_window_bytes[k], changed, vs_title);
+  }
   fprintf(stderr, "\n");
-  for (uint32_t k = 0; k < g_windows; k++) CHECK(!memcmp(g_window[k], after[k], g_window_bytes[k]));
+  /* (Not with textures: the replay leaves them unbound - see finish.) */
+  bool samples = false;
+  for (uint32_t i = 0; i < g_prog.word_count; i++)
+    samples = samples || (g_prog.insns[i].op >= SM_OP_TEX && g_prog.insns[i].op <= SM_OP_TXD);
+  for (uint32_t k = 0; k < g_windows && !samples; k++) CHECK(!memcmp(g_window[k], after[k], g_window_bytes[k]));
   /* The title's run left this frame's result where last frame's already
    * was: the windows the program writes start filled with a sentinel
    * instead, so every word it writes shows. */
   bool written[WGSL_CS_MAX_WINDOWS] = {false};
-  for (uint32_t k = 0; k < g_windows; k++) {
+  /* A program that samples textures (its replay differs from the title's
+   * anyway) starts from the captured windows: particle buffers are read
+   * and rewritten, and a sentinel would change what it does. */
+  for (uint32_t k = 0; k < g_windows && !samples; k++) {
     for (uint32_t j = 0; j < g_windows; j++) memcpy(g_window[j], g_window_before[j], g_window_bytes[j]);
     for (uint32_t i = 0; i < g_window_bytes[k] / 4u; i++) memcpy(g_window[k] + 4u * i, &(uint32_t){CAPTURE_SENTINEL}, 4);
     reference(block, grid, head[6]);

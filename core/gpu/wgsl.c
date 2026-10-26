@@ -806,7 +806,8 @@ typedef enum Lod_Mode { LOD_ZERO, LOD_EXPLICIT, LOD_AUTO, LOD_BIAS } Lod_Mode;
 
 static Ex lod_expr(Tr *t, uint32_t b, Lod_Mode mode, Ex value, Ex c, Ex layer) {
   if (mode == LOD_EXPLICIT) return ex("F(%s)", value.s);
-  if (t->vertex) return mode == LOD_BIAS ? ex("F(%s)", value.s) : ex("0.0"); /* no derivatives: level 0 */
+  if (t->vertex || t->compute) /* no derivatives: level 0 */
+    return mode == LOD_BIAS ? ex("F(%s)", value.s) : ex("0.0");
   if (mode == LOD_ZERO || !t->uniform_flow || t->guarded) return ex("0.0");
   if (mode == LOD_BIAS) return ex("(t%u_lod(%s, %s) + F(%s))", b, c.s, layer.s, value.s);
   return ex("t%u_lod(%s, %s)", b, c.s, layer.s);
@@ -2579,7 +2580,7 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
       const uint16_t op = program->insns[pc].op;
       if (op == SM_OP_KIL || op == SM_OP_IPA || op == SM_OP_SHFL || op == SM_OP_FSWZADD || op == SM_OP_VOTE ||
           op == SM_OP_ALD || op == SM_OP_AST || op == SM_OP_OUT || op == SM_OP_LD || op == SM_OP_ST ||
-          is_texture_op(op))
+          op == SM_OP_TEX_B || op == SM_OP_TMML) /* textures sample level 0, as a vertex stage's */
         fail(t, "%s in a compute program", sm_op_name((Sm_Op)op));
     }
   }

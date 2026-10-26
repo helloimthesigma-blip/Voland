@@ -4168,6 +4168,14 @@ static uint32_t gpu_texture_levels_of(const Raster3d *r, const Raster3d_Gpu_Surf
   return 1u;
 }
 
+/* Layers of the GPU texture `id` (diagnostics; a surface: 1). */
+static uint32_t gpu_texture_layers_of(const Raster3d *r, const Raster3d_Gpu_Surface *surface, uint32_t id) {
+  if (surface || !id) return 1u;
+  for (uint32_t i = 0; i < RASTER_TEXTURES; i++)
+    if (r->textures[i].valid && r->textures[i].gpu_id == id) return r->textures[i].gpu_layers;
+  return 0u;
+}
+
 /* Runs the pixel program once (one lane, at a vertex) to learn which
  * texture handle each texture instruction uses - bindless handles come
  * from registers - then builds the WGSL descriptor, the shader and the
@@ -4284,6 +4292,94 @@ static bool vs_samples_textures(const Sm_Program *vs) {
   return false;
 }
 
+/* Binds texture `handle` (its TIC/TSC from the pools in `regs`) as binding
+ * `b`: its GPU texture and sampler, sample type and parameter words in
+ * `data`. False when it cannot be bound (no header, an unsupported format). */
+static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t *regs, uint32_t handle, uint32_t b,
+                             Wgsl_Program_Desc *desc, uint32_t *data, uint32_t *texture_id, uint32_t *sampler_state) {
+  const uint64_t tic_pool = addr40(regs[REG_TEX_HEADER_POOL], regs[REG_TEX_HEADER_POOL + 1u]);
+  const uint64_t tsc_pool = addr40(regs[REG_SAMPLER_POOL], regs[REG_SAMPLER_POOL + 1u]);
+  const uint32_t tic_index = handle & 0xfffffu;
+  const uint32_t tsc_index = (regs[REG_SAMPLER_BINDING] & 1u) ? tic_index : (handle >> 20) & 0xfffu;
+  uint32_t tic[8], tsc[8];
+  if (!tic_pool || !mem->read(mem->user, tic_pool + (uint64_t)tic_index * TEX_HEADER_BYTES, tic, sizeof(tic)))
+    return false;
+  Tex_Header h;
+  tex_header_parse(tic, &h);
+  Tex_Sampler s;
+  memset(&s, 0, sizeof(s));
+  s.mag_filter = 1;
+  if (tsc_pool && mem->read(mem->user, tsc_pool + (uint64_t)tsc_index * TEX_SAMPLER_BYTES, tsc, sizeof(tsc)))
+    tex_sampler_parse(tsc, &s);
+  uint32_t id = 0, sample_type = WGSL_SAMPLE_FLOAT, gpu_format = 0;
+  Raster3d_Gpu_Surface *surf = gpu_surface_at(r, h.address, h.width);
+  if (surf && surf->stale) {
+    /* Sampled after a CPU / copy-engine write (SSBU copies each movie
+     * frame into textures it once cleared as targets): the written
+     * rows first, or the draw samples the old GPU contents. */
+    gpu_surface_upload_range(r, surf, mem, surf->stale_lo, surf->stale_hi);
+    surf->stale = false;
+  }
+  const uint32_t gathered = surf ? gpu_gather_slices(r, &h, surf) : 0u;
+  if (gathered) {
+    id = gathered;
+    gpu_format = surf->gpu_format;
+  } else if (surf) {
+    bool is_signed = false;
+    id = surf->id;
+    gpu_format = surf->gpu_format;
+    if (gpu_format_is_int(surf->gpu_format, &is_signed)) sample_type = is_signed ? WGSL_SAMPLE_SINT : WGSL_SAMPLE_UINT;
+  } else {
+    gpu_note_partial_surface(r, &h);
+    Raster3d_Texture *tex = texture_load(r, tic, mem, false);
+    if (!tex) return false;
+    id = gpu_texture(r, tex);
+    gpu_format = tex->gpu_format;
+    if (h.data_type[0] == TEX_DATA_UINT) sample_type = WGSL_SAMPLE_UINT;
+    if (h.data_type[0] == TEX_DATA_SINT) sample_type = WGSL_SAMPLE_SINT;
+  }
+  /* A hardware sampler where it gives the reference's result. */
+  const bool cube_map = h.type == TEX_TYPE_CUBE || h.type == TEX_TYPE_CUBE_ARRAY;
+  if (sample_type == WGSL_SAMPLE_FLOAT && !cube_map && gpu_format_filterable(gpu_format) && s.wrap[0] <= 2u &&
+      s.wrap[1] <= 2u) {
+    desc->hw_sample_mask |= 1u << b;
+    /* Minification follows magnification on one level (the
+     * reference's single filter); mip chains use the TSC's own. */
+    const bool mips = gpu_texture_levels_of(r, surf, id) > 1u;
+    const bool min_linear = mips ? s.min_filter == 2u : s.mag_filter == 2u;
+    sampler_state[b] = (s.mag_filter == 2u ? GPU_SAMPLER_LINEAR : 0u) | (min_linear ? GPU_SAMPLER_MIN_LINEAR : 0u) |
+                          (s.mip_filter == TEX_MIP_LINEAR ? GPU_SAMPLER_MIP_LINEAR : 0u) |
+                          ((uint32_t)s.wrap[0] << GPU_SAMPLER_WRAP_SHIFT(0)) |
+                          ((uint32_t)s.wrap[1] << GPU_SAMPLER_WRAP_SHIFT(1)) |
+                          ((uint32_t)(s.wrap[2] <= 2u ? s.wrap[2] : 2u) << GPU_SAMPLER_WRAP_SHIFT(2));
+  }
+  texture_id[b] = id;
+  desc->sample_type[b] = (uint8_t)sample_type;
+  uint32_t *p = data + WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEX_PARAM_WORDS * b;
+  const bool cube = h.type == TEX_TYPE_CUBE || h.type == TEX_TYPE_CUBE_ARRAY;
+  p[WGSL_TEXP_FLAGS] = ((h.normalized || cube) ? WGSL_TEXP_SCALE : 0u) |
+                       (s.mag_filter == 2u && sample_type == WGSL_SAMPLE_FLOAT ? WGSL_TEXP_LINEAR : 0u) |
+                       (cube ? WGSL_TEXP_CUBE : 0u) | (s.depth_compare ? WGSL_TEXP_DEPTH_COMPARE : 0u) |
+                       (h.type == TEX_TYPE_3D ? WGSL_TEXP_3D : 0u);
+  p[WGSL_TEXP_WRAP] = (uint32_t)s.wrap[0] | ((uint32_t)s.wrap[1] << 4) | ((uint32_t)s.wrap[2] << 8);
+  p[WGSL_TEXP_SWIZZLE] = (uint32_t)h.swizzle[0] | ((uint32_t)h.swizzle[1] << 4) | ((uint32_t)h.swizzle[2] << 8) |
+                         ((uint32_t)h.swizzle[3] << 12);
+  p[WGSL_TEXP_LEVELS] = h.levels;
+  p[WGSL_TEXP_COMPARE] = s.compare_func;
+  /* Sampled inside a GOB-padded target: the texture's own size. */
+  p[WGSL_TEXP_SIZE] = surf && (surf->width != h.width || surf->height != h.height)
+                          ? (h.width & 0xffffu) | ((h.height & 0xffffu) << 16)
+                          : 0u;
+  /* Level selection (textures with a mip chain only; the shader
+   * clamps to the levels the GPU texture has). */
+  if (s.mip_filter > TEX_MIP_NONE && s.min_filter == 2u) p[WGSL_TEXP_FLAGS] |= WGSL_TEXP_MIN_LINEAR;
+  p[WGSL_TEXP_LOD_BIAS] = u32f(s.lod_bias);
+  p[WGSL_TEXP_MIN_LOD] = u32f(s.mip_filter > TEX_MIP_NONE ? s.min_lod : 0.0f);
+  p[WGSL_TEXP_MAX_LOD] = u32f(s.mip_filter > TEX_MIP_NONE ? s.max_lod : 0.0f);
+  for (uint32_t c = 0; c < 4; c++) p[WGSL_TEXP_BORDER + c] = u32f(s.border[c]);
+  return true;
+}
+
 /* The draw's textures, shader, constants and constant buffers from the
  * texture instructions' handles (probe). */
 static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe) {
@@ -4307,94 +4403,14 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
   uint32_t *data = r->gpu_data;
   memset(data, 0, WGSL_DRAW_CONSTANT_WORDS * 4u);
   uint32_t handles[WGSL_MAX_TEXTURES];
-  const uint32_t *regs = ctx->regs;
-  const uint64_t tic_pool = addr40(regs[REG_TEX_HEADER_POOL], regs[REG_TEX_HEADER_POOL + 1u]);
-  const uint64_t tsc_pool = addr40(regs[REG_SAMPLER_POOL], regs[REG_SAMPLER_POOL + 1u]);
   for (uint32_t i = 0; i < probe->count; i++) {
     uint32_t b = 0;
     while (b < desc->texture_count && handles[b] != probe->handle[i]) b++;
     if (b == desc->texture_count) {
       if (b >= WGSL_MAX_TEXTURES) continue;
       const uint32_t handle = probe->handle[i];
-      const uint32_t tic_index = handle & 0xfffffu;
-      const uint32_t tsc_index = (regs[REG_SAMPLER_BINDING] & 1u) ? tic_index : (handle >> 20) & 0xfffu;
-      uint32_t tic[8], tsc[8];
-      if (!tic_pool || !ctx->mem->read(ctx->mem->user, tic_pool + (uint64_t)tic_index * TEX_HEADER_BYTES, tic, sizeof(tic)))
-        continue;
-      Tex_Header h;
-      tex_header_parse(tic, &h);
-      Tex_Sampler s;
-      memset(&s, 0, sizeof(s));
-      s.mag_filter = 1;
-      if (tsc_pool && ctx->mem->read(ctx->mem->user, tsc_pool + (uint64_t)tsc_index * TEX_SAMPLER_BYTES, tsc, sizeof(tsc)))
-        tex_sampler_parse(tsc, &s);
-      uint32_t id = 0, sample_type = WGSL_SAMPLE_FLOAT, gpu_format = 0;
-      Raster3d_Gpu_Surface *surf = gpu_surface_at(r, h.address, h.width);
-      if (surf && surf->stale) {
-        /* Sampled after a CPU / copy-engine write (SSBU copies each movie
-         * frame into textures it once cleared as targets): the written
-         * rows first, or the draw samples the old GPU contents. */
-        gpu_surface_upload_range(r, surf, ctx->mem, surf->stale_lo, surf->stale_hi);
-        surf->stale = false;
-      }
-      const uint32_t gathered = surf ? gpu_gather_slices(r, &h, surf) : 0u;
-      if (gathered) {
-        id = gathered;
-        gpu_format = surf->gpu_format;
-      } else if (surf) {
-        bool is_signed = false;
-        id = surf->id;
-        gpu_format = surf->gpu_format;
-        if (gpu_format_is_int(surf->gpu_format, &is_signed)) sample_type = is_signed ? WGSL_SAMPLE_SINT : WGSL_SAMPLE_UINT;
-      } else {
-        gpu_note_partial_surface(r, &h);
-        Raster3d_Texture *tex = texture_load(r, tic, ctx->mem, false);
-        if (!tex) continue;
-        id = gpu_texture(r, tex);
-        gpu_format = tex->gpu_format;
-        if (h.data_type[0] == TEX_DATA_UINT) sample_type = WGSL_SAMPLE_UINT;
-        if (h.data_type[0] == TEX_DATA_SINT) sample_type = WGSL_SAMPLE_SINT;
-      }
-      /* A hardware sampler where it gives the reference's result. */
-      const bool cube_map = h.type == TEX_TYPE_CUBE || h.type == TEX_TYPE_CUBE_ARRAY;
-      if (sample_type == WGSL_SAMPLE_FLOAT && !cube_map && gpu_format_filterable(gpu_format) && s.wrap[0] <= 2u &&
-          s.wrap[1] <= 2u) {
-        desc->hw_sample_mask |= 1u << b;
-        /* Minification follows magnification on one level (the
-         * reference's single filter); mip chains use the TSC's own. */
-        const bool mips = gpu_texture_levels_of(r, surf, id) > 1u;
-        const bool min_linear = mips ? s.min_filter == 2u : s.mag_filter == 2u;
-        g->sampler_state[b] = (s.mag_filter == 2u ? GPU_SAMPLER_LINEAR : 0u) | (min_linear ? GPU_SAMPLER_MIN_LINEAR : 0u) |
-                              (s.mip_filter == TEX_MIP_LINEAR ? GPU_SAMPLER_MIP_LINEAR : 0u) |
-                              ((uint32_t)s.wrap[0] << GPU_SAMPLER_WRAP_SHIFT(0)) |
-                              ((uint32_t)s.wrap[1] << GPU_SAMPLER_WRAP_SHIFT(1)) |
-                              ((uint32_t)(s.wrap[2] <= 2u ? s.wrap[2] : 2u) << GPU_SAMPLER_WRAP_SHIFT(2));
-      }
+      if (!gpu_bind_texture(r, ctx->mem, ctx->regs, handle, b, desc, data, g->texture_id, g->sampler_state)) continue;
       handles[b] = handle;
-      g->texture_id[b] = id;
-      desc->sample_type[b] = (uint8_t)sample_type;
-      uint32_t *p = data + WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEX_PARAM_WORDS * b;
-      const bool cube = h.type == TEX_TYPE_CUBE || h.type == TEX_TYPE_CUBE_ARRAY;
-      p[WGSL_TEXP_FLAGS] = ((h.normalized || cube) ? WGSL_TEXP_SCALE : 0u) |
-                           (s.mag_filter == 2u && sample_type == WGSL_SAMPLE_FLOAT ? WGSL_TEXP_LINEAR : 0u) |
-                           (cube ? WGSL_TEXP_CUBE : 0u) | (s.depth_compare ? WGSL_TEXP_DEPTH_COMPARE : 0u) |
-                           (h.type == TEX_TYPE_3D ? WGSL_TEXP_3D : 0u);
-      p[WGSL_TEXP_WRAP] = (uint32_t)s.wrap[0] | ((uint32_t)s.wrap[1] << 4) | ((uint32_t)s.wrap[2] << 8);
-      p[WGSL_TEXP_SWIZZLE] = (uint32_t)h.swizzle[0] | ((uint32_t)h.swizzle[1] << 4) | ((uint32_t)h.swizzle[2] << 8) |
-                             ((uint32_t)h.swizzle[3] << 12);
-      p[WGSL_TEXP_LEVELS] = h.levels;
-      p[WGSL_TEXP_COMPARE] = s.compare_func;
-      /* Sampled inside a GOB-padded target: the texture's own size. */
-      p[WGSL_TEXP_SIZE] = surf && (surf->width != h.width || surf->height != h.height)
-                              ? (h.width & 0xffffu) | ((h.height & 0xffffu) << 16)
-                              : 0u;
-      /* Level selection (textures with a mip chain only; the shader
-       * clamps to the levels the GPU texture has). */
-      if (s.mip_filter > TEX_MIP_NONE && s.min_filter == 2u) p[WGSL_TEXP_FLAGS] |= WGSL_TEXP_MIN_LINEAR;
-      p[WGSL_TEXP_LOD_BIAS] = u32f(s.lod_bias);
-      p[WGSL_TEXP_MIN_LOD] = u32f(s.mip_filter > TEX_MIP_NONE ? s.min_lod : 0.0f);
-      p[WGSL_TEXP_MAX_LOD] = u32f(s.mip_filter > TEX_MIP_NONE ? s.max_lod : 0.0f);
-      for (uint32_t c = 0; c < 4; c++) p[WGSL_TEXP_BORDER + c] = u32f(s.border[c]);
       desc->texture_count++;
     }
     if (probe->vertex[i]) g->vs_desc.binding_of[probe->pc[i]] = (uint8_t)b;
@@ -5396,7 +5412,7 @@ static const char *program_cpu_only_reason(const Sm_Program *program) {
   if (sust) return "it stores to surfaces (SUST)";
   if (atom) return "it uses global atomics (ATOM/RED)";
   if (bindless) return "it samples bindless textures (TEX.B)";
-  if (tex) return "it samples textures";
+  (void)tex; /* plain sampling binds the textures (compute_on_gpu) */
   return NULL;
 }
 
@@ -5554,6 +5570,7 @@ static void compute_task(void *user, uint32_t index, uint32_t count) {
 #define COMPUTE_SSBO_DESC_BYTES 16u
 #define COMPUTE_UNSIZED_BYTES (1u << 20) /* a storage buffer left unsized: up to this much of its mapping */
 
+#define TIC_INDEX_MASK 0xfffffu /* a texture handle's header index; the sampler sits above */
 typedef struct Compute_Profile {
   uint64_t address;
   uint32_t hash, bytes;
@@ -5561,6 +5578,7 @@ typedef struct Compute_Profile {
   uint32_t written;  /* bit per window the CPU runs wrote */
   bool gpu_failed;   /* does not translate, or cannot be bound */
   bool mirror_logged; /* a window could not be mirrored (said once) */
+  bool textures_logged; /* its textures were described (once) */
 } Compute_Profile;
 static Compute_Profile g_compute_profiles[COMPUTE_PROFILES];
 static uint32_t g_compute_profile_next;
@@ -5613,11 +5631,11 @@ static uint32_t gpu_shader_for(Raster3d *r, const Sm_Program *program, const Wgs
 
 /* The dispatch on the GPU; false: it runs here. */
 static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute_Launch *launch, const Sm_Env *env,
-                           const Gpu_Memory *mem, Compute_Profile *prof) {
+                           const uint32_t *regs, const Gpu_Memory *mem, Compute_Profile *prof) {
   if (!r->gpu || r->no_gpu_compute || prof->gpu_failed || prof->cpu_runs < COMPUTE_PROFILE_RUNS) return false;
   const uint32_t threads = launch->block[0] * launch->block[1] * launch->block[2];
   if (threads > WGSL_CS_MAX_INVOCATIONS || launch->shared_bytes > WGSL_CS_MAX_SHARED_BYTES ||
-      program_samples_textures(program)) {
+      program_cpu_only_reason(program)) {
     log_info("[gpu] compute program %08x stays on the CPU: %s", program->hash,
              threads > WGSL_CS_MAX_INVOCATIONS        ? "too many threads per block"
              : launch->shared_bytes > WGSL_CS_MAX_SHARED_BYTES ? "too much shared memory"
@@ -5664,16 +5682,69 @@ static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute
   for (uint32_t i = 0; i < 3u; i++) desc.block[i] = (uint16_t)launch->block[i];
   desc.shared_bytes = launch->shared_bytes;
   desc.window_count = mirrors;
+  /* The data: texture parameters, the window table (each window as its
+   * whole mirror, so the WGSL's offsets index the bound buffer), then the
+   * constant buffers. */
+  uint32_t *data = r->gpu_data;
+  memset(data, 0, WGSL_DRAW_CONSTANT_WORDS * 4u);
+  /* Textures: one binding per distinct handle, as a draw's. */
+  static Gpu_Probe probe;
+  probe.count = 0;
+  (void)gpu_static_probe_append(program, env, false, &probe);
+  memset(desc.binding_of, WGSL_NO_BINDING, sizeof(desc.binding_of));
+  desc.texture_count = 0;
+  desc.hw_sample_mask = 0;
+  uint32_t handles[WGSL_MAX_TEXTURES], texture_id[WGSL_MAX_TEXTURES], sampler_state[WGSL_MAX_TEXTURES];
+  for (uint32_t i = 0; i < probe.count; i++) {
+    uint32_t b = 0;
+    while (b < desc.texture_count && handles[b] != probe.handle[i]) b++;
+    if (b == desc.texture_count) {
+      if (b >= WGSL_MAX_TEXTURES) continue;
+      sampler_state[b] = 0;
+      /* Unbound, the instruction would read a constant: the CPU samples it instead. */
+      if (!gpu_bind_texture(r, mem, regs, probe.handle[i], b, &desc, data, texture_id, sampler_state)) return false;
+      handles[b] = probe.handle[i];
+      desc.texture_count++;
+    }
+    desc.binding_of[probe.pc[i]] = (uint8_t)b;
+  }
+  /* 3D textures stay on the CPU: TOTK's particle programs that sample a
+   * 32^3 noise volume give wrong results on the GPU (purple embers) - not
+   * the hardware sampler, nor the TEXS coordinates (open). */
+  const uint64_t tic_pool = addr40(regs[REG_TEX_HEADER_POOL], regs[REG_TEX_HEADER_POOL + 1u]);
+  for (uint32_t i = 0; i < probe.count; i++) {
+    uint32_t tic[8] = {0};
+    (void)mem->read(mem->user, tic_pool + (uint64_t)(probe.handle[i] & TIC_INDEX_MASK) * TEX_HEADER_BYTES, tic, sizeof(tic));
+    Tex_Header h;
+    tex_header_parse(tic, &h);
+    if (h.type != TEX_TYPE_3D) continue;
+    log_info("[gpu] compute program %08x stays on the CPU: it samples a 3D texture", program->hash);
+    prof->gpu_failed = true;
+    return false;
+  }
+  if (desc.texture_count && !prof->textures_logged) {
+    prof->textures_logged = true;
+    for (uint32_t i = 0; i < probe.count; i++) {
+      uint32_t tic[8] = {0};
+      (void)mem->read(mem->user, tic_pool + (uint64_t)(probe.handle[i] & TIC_INDEX_MASK) * TEX_HEADER_BYTES, tic, sizeof(tic));
+      Tex_Header h;
+      tex_header_parse(tic, &h);
+      const Raster3d_Gpu_Surface *surf = gpu_surface_at(r, h.address, h.width);
+      log_info("[gpu] compute program %08x (at %llx) on the GPU: %s at %u, binding %u: type %u %ux%ux%u fmt 0x%x levels %u "
+               "@%llx layout %u%s%s id %u layers %u",
+               program->hash, (unsigned long long)program->address, sm_op_name((Sm_Op)program->insns[probe.pc[i]].op), probe.pc[i],
+               desc.binding_of[probe.pc[i]], h.type, h.width, h.height, h.depth, h.format, h.levels,
+               (unsigned long long)h.address, h.layout,
+               (desc.hw_sample_mask >> desc.binding_of[probe.pc[i]]) & 1u ? " (sampler)" : "", surf ? " SURFACE" : "",
+               texture_id[desc.binding_of[probe.pc[i]]], gpu_texture_layers_of(r, surf, texture_id[desc.binding_of[probe.pc[i]]]));
+    }
+  }
   const uint32_t shader = gpu_shader_for(r, program, &desc);
   if (shader == GPU_SHADER_FAILED) {
     log_info("[gpu] compute program %08x stays on the CPU: its WGSL does not translate", program->hash);
     prof->gpu_failed = true;
     return false;
   }
-  /* The data: the window table (each window as its whole mirror, so the
-   * WGSL's offsets index the bound buffer), then the constant buffers. */
-  uint32_t *data = r->gpu_data;
-  memset(data, 0, WGSL_DRAW_CONSTANT_WORDS * 4u);
   for (uint32_t m = 0; m < mirrors; m++) {
     uint32_t *w = data + WGSL_CS_WINDOWS + WGSL_CS_WINDOW_WORDS * m;
     w[0] = (uint32_t)mirror_va[m];
@@ -5691,9 +5762,13 @@ static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute
     words += count;
   }
   if (words & 1u) data[words++] = 0;
-  const uint32_t bytes = (uint32_t)sizeof(Gpu_Rec_Compute) + (uint32_t)sizeof(Gpu_Rec_Binding) * (1u + mirrors) + words * 4u;
+  const uint32_t textures = desc.texture_count;
+  uint32_t samplers = 0;
+  for (uint32_t i = 0; i < textures; i++) samplers += (desc.hw_sample_mask >> i) & 1u;
+  const uint32_t binding_count = 1u + mirrors + textures + samplers;
+  const uint32_t bytes = (uint32_t)sizeof(Gpu_Rec_Compute) + (uint32_t)sizeof(Gpu_Rec_Binding) * binding_count + words * 4u;
   uint8_t *p = gpu_stream_begin(r->gpu, GPU_REC_COMPUTE, bytes);
-  const Gpu_Rec_Compute c = {shader, {launch->grid[0], launch->grid[1], launch->grid[2]}, 1u + mirrors};
+  const Gpu_Rec_Compute c = {shader, {launch->grid[0], launch->grid[1], launch->grid[2]}, binding_count};
   memcpy(p, &c, sizeof(c));
   p += sizeof(c);
   const Gpu_Rec_Binding db = {GPU_BIND_DATA, WGSL_DATA_BINDING, words * 4u, 0};
@@ -5705,6 +5780,17 @@ static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute
     const Gpu_Rec_Binding wb = {GPU_BIND_BUFFER, WGSL_CS_WINDOW_BINDING_BASE + m, 0, ids[m]};
     memcpy(p, &wb, sizeof(wb));
     p += sizeof(wb);
+  }
+  for (uint32_t i = 0; i < textures; i++) {
+    const bool hw = (desc.hw_sample_mask >> i) & 1u;
+    const Gpu_Rec_Binding tb = {GPU_BIND_TEXTURE, WGSL_TEXTURE_BINDING_BASE + i, hw ? GPU_BIND_FILTERED : 0u,
+                                texture_id[i]};
+    memcpy(p, &tb, sizeof(tb));
+    p += sizeof(tb);
+    if (!hw) continue;
+    const Gpu_Rec_Binding sb = {GPU_BIND_SAMPLER, WGSL_SAMPLER_BINDING_BASE + i, 0, sampler_state[i]};
+    memcpy(p, &sb, sizeof(sb));
+    p += sizeof(sb);
   }
   gpu_stream_end(r->gpu);
   for (uint32_t k = 0; k < n; k++)
@@ -5739,7 +5825,6 @@ static void compute_cpu_wrote(const Compute_Launch *launch, const Gpu_Memory *me
  * ranges unchanged skips the dispatch. */
 #define COMPUTE_MEMOS 16u
 #define COMPUTE_MEMO_POSITIONS 16u
-#define TIC_INDEX_MASK 0xfffffu /* a texture handle's header index; the sampler sits above */
 #define COMPUTE_MEMO_CBUF_BYTES 0x10000u /* a constant buffer at most (indirect reads: the whole of it) */
 #define SR_CLOCK_FIRST 0x50u /* SR_CLOCKLO .. SR_GLOBALTIMERHI */
 #define SR_CLOCK_LAST 0x53u
@@ -5942,7 +6027,7 @@ void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t 
   const uint32_t blocks = launch->grid[0] * launch->grid[1] * launch->grid[2];
   if (r->compute_capture) r->compute_capture(r->compute_capture_user, launch, address, env, mem, false);
   Compute_Profile *prof = compute_profile(program);
-  if (compute_on_gpu(r, program, launch, env, mem, prof)) {
+  if (compute_on_gpu(r, program, launch, env, regs, mem, prof)) {
     r->stats.compute_threads += (uint64_t)threads * blocks;
     r->stats.compute_dispatches++;
     return;
