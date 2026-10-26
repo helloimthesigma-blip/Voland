@@ -77,6 +77,14 @@ struct Gpu_Stream;
  * MK8DX keeps well over 64 (light-probe faces and their mips at 32x32
  * and below, plus the frame's 1080p targets). */
 #define RASTER_GPU_SURFACES 2048u
+/* GPU mode: the most bytes sampled textures' GPU copies may hold. Past it
+ * the least recently used copies are dropped (re-uploaded from guest
+ * memory if sampled again). A guard, not a squeeze: on Apple silicon GPU
+ * memory is system memory, and 2048 cached textures are unbounded in
+ * bytes. TOTK's first scenes keep ~1.5GB (223 textures); at a 1GB budget
+ * they re-uploaded 20x as much (21.7GB per 300 presents vs 1.1GB).
+ * Render targets are not counted: they hold pixels nothing else has. */
+#define RASTER_GPU_TEXTURE_BUDGET_BYTES ((uint64_t)2048 * 1024 * 1024)
 #define RASTER_GPU_SURFACE_BUCKETS 4096u /* the address index over them (a power of two) */
 #define RASTER_GPU_SHADERS 1024u
 #define RASTER_GPU_GATHERS 8u /* 3D textures assembled from slice render targets */
@@ -138,6 +146,7 @@ typedef struct Raster3d_Texture {
   uint32_t gpu_id;
   uint64_t gpu_hash;
   uint32_t gpu_width, gpu_height, gpu_layers, gpu_format, gpu_levels;
+  uint64_t gpu_bytes;    /* its GPU copy's size (RASTER_GPU_TEXTURE_BUDGET_BYTES) */
 } Raster3d_Texture;
 
 /* GPU mode: a render target that lives only on the GPU (its guest memory
@@ -172,6 +181,7 @@ typedef struct Raster3d_Gpu_Stats {
   uint64_t shaders;
   uint64_t untranslated_draws;
   uint64_t texture_uploads;
+  uint64_t texture_budget_drops; /* GPU copies dropped for RASTER_GPU_TEXTURE_BUDGET_BYTES */
   uint64_t upload_bytes;
   uint64_t surfaces;
   uint64_t presents;
@@ -232,6 +242,7 @@ typedef struct Raster3d {
   uint8_t *texture_pool;    /* RASTER_TEXTURE_POOL_BYTES: decoded texels, LRU-evicted blocks */
   uint8_t *texture_raw;     /* RASTER_TEXTURE_RAW_BYTES: one texture's guest bytes while it decodes */
   uint32_t draw_serial;
+  uint64_t gpu_texture_bytes; /* sum of the cached textures' gpu_bytes */
   uint32_t texture_epoch;    /* decoded textures re-validate against guest memory once per epoch (frame) */
   uint8_t *cbuf_data;       /* 2 stages x SM_CBUF_SLOTS x 64 KiB */
   Sm_Thread *thread;        /* one invocation's state (vertex work; band 0) */

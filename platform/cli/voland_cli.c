@@ -1630,6 +1630,11 @@ static int run(int argc, char **argv) {
     /* VOLAND_GPU_MIPMAPS=0: level 0 only, as the software reference (for
      * comparing replays with --dump-frame output pixel for pixel). */
     if (getenv("VOLAND_GPU_MIPMAPS") && !strcmp(getenv("VOLAND_GPU_MIPMAPS"), "0")) emu.renderer.gpu_mipmaps = false;
+    /* VOLAND_GPU_COMPRESSION=MASK: the compressed formats the device
+     * samples (gpu_records.h GPU_COMPRESSION_*; 3 = BC and ASTC, as Chrome
+     * on Apple silicon), so the stream matches a browser's. */
+    if (getenv("VOLAND_GPU_COMPRESSION"))
+      raster3d_set_gpu_compression(&emu.renderer, (uint32_t)strtoul(getenv("VOLAND_GPU_COMPRESSION"), NULL, 0));
     /* VOLAND_CPU_VERTICES=1: vertex programs on the CPU (the old path), to compare. */
     if (getenv("VOLAND_CPU_VERTICES")) emu.renderer.cpu_vertices = true;
     if (no_vertex_pull || getenv("VOLAND_NO_VERTEX_PULL")) emu.renderer.no_vertex_pull = true;
@@ -1855,13 +1860,15 @@ static int run(int argc, char **argv) {
     const Raster3d_Gpu_Stats *gs = &emu.renderer.gpu_stats;
     fprintf(stderr,
             "voland-cli: GPU stream: %llu records (%llu MB); %llu draws, %llu triangles, %llu shaders, %llu untranslated "
-            "draws, %llu texture uploads (%llu MB), %llu surfaces, %llu presents, %llu copies, %llu MB re-hashed\n",
+            "draws, %llu texture uploads (%llu MB), %llu surfaces, %llu presents, %llu copies, %llu MB re-hashed; "
+            "textures %llu MB on the GPU, %llu dropped over budget\n",
             (unsigned long long)g_gpu_records, (unsigned long long)(g_gpu_stream.bytes >> 20),
             (unsigned long long)gs->draws, (unsigned long long)gs->triangles, (unsigned long long)gs->shaders,
             (unsigned long long)gs->untranslated_draws, (unsigned long long)gs->texture_uploads,
             (unsigned long long)(gs->upload_bytes >> 20), (unsigned long long)gs->surfaces,
             (unsigned long long)gs->presents, (unsigned long long)gs->copies,
-            (unsigned long long)(gs->hashed_bytes >> 20));
+            (unsigned long long)(gs->hashed_bytes >> 20), (unsigned long long)(emu.renderer.gpu_texture_bytes >> 20),
+            (unsigned long long)gs->texture_budget_drops);
     fprintf(stderr,
             "voland-cli: GPU texture re-hash: %llu whole hashes; MB new %llu, unsampled %llu, sample changed %llu, "
             "periodic %llu, forced by writes %llu\n",

@@ -3139,6 +3139,35 @@ static void gpu_create(Raster3d *r, uint32_t id, uint32_t format, uint32_t width
   gpu_stream_write(r->gpu, GPU_REC_TEXTURE_CREATE, &c, sizeof(c));
 }
 
+/* `t`'s new GPU copy holds `bytes`: counted, then least recently used
+ * copies dropped (dead slots' first) until the total fits the budget. A
+ * dropped texture's slot is invalidated, so its next use loads it again.
+ * Never `t` itself or a texture the current draw samples. */
+static void gpu_texture_account(Raster3d *r, Raster3d_Texture *t, uint64_t bytes) {
+  r->gpu_texture_bytes = r->gpu_texture_bytes - t->gpu_bytes + bytes;
+  t->gpu_bytes = bytes;
+  while (r->gpu_texture_bytes > RASTER_GPU_TEXTURE_BUDGET_BYTES) {
+    Raster3d_Texture *victim = NULL;
+    uint32_t victim_age = 0;
+    for (uint32_t i = 0; i < RASTER_TEXTURES; i++) {
+      Raster3d_Texture *v = &r->textures[i];
+      if (v == t || !v->gpu_id || (v->valid && v->last_used == r->draw_serial)) continue;
+      const uint32_t age = v->valid ? v->last_used : 0u;
+      if (!victim || age < victim_age) {
+        victim = v;
+        victim_age = age;
+      }
+    }
+    if (!victim) return; /* the current draw holds the rest */
+    gpu_destroy(r, victim->gpu_id);
+    victim->gpu_id = 0;
+    victim->valid = false;
+    r->gpu_texture_bytes -= victim->gpu_bytes;
+    victim->gpu_bytes = 0;
+    r->gpu_stats.texture_budget_drops++;
+  }
+}
+
 /* Uploads rows of tightly packed texels in records that fit the stream. */
 /* Rows [y0, y0 + height) of texture `id` from `rows` (row 0 = y0). */
 static void gpu_write_rows_at(Raster3d *r, uint32_t id, uint32_t width, uint32_t y0, uint32_t height, uint32_t layer,
@@ -3189,7 +3218,11 @@ static uint32_t gpu_native_format(const Raster3d *r, const Tex_Header *h) {
     return GPU_FMT_NONE;
   if (h->layout != TEX_LAYOUT_BLOCK_LINEAR && h->layout != TEX_LAYOUT_PITCH) return GPU_FMT_NONE;
   uint32_t bytes = 0, bw = 0, bh = 0;
-  if (!tex_format_info(h->format, &bytes, &bw, &bh) || bw == 1u || h->width % bw || h->height % bh) return GPU_FMT_NONE;
+  if (!tex_format_info(h->format, &bytes, &bw, &bh) || bw == 1u) return GPU_FMT_NONE;
+  if (h->width % bw || h->height % bh) {
+    log_debug("[gpu] texture %ux%u fmt 0x%02x: not whole %ux%u blocks, decoded", h->width, h->height, h->format, bw, bh);
+    return GPU_FMT_NONE;
+  }
   const bool bc = (r->gpu_compression & GPU_COMPRESSION_BC) != 0, srgb = h->srgb;
   const bool snorm = h->data_type[0] == TEX_DATA_SNORM;
   switch (h->format) {
@@ -3203,7 +3236,11 @@ static uint32_t gpu_native_format(const Raster3d *r, const Tex_Header *h) {
   case TEX_FORMAT_BC7U: return bc ? (srgb ? GPU_FMT_BC7_SRGB : GPU_FMT_BC7_UNORM) : GPU_FMT_NONE;
   default: break;
   }
-  if (!(r->gpu_compression & GPU_COMPRESSION_ASTC) || h->data_type[0] != TEX_DATA_UNORM) return GPU_FMT_NONE;
+  if (!(r->gpu_compression & GPU_COMPRESSION_ASTC)) return GPU_FMT_NONE;
+  if (h->data_type[0] != TEX_DATA_UNORM) {
+    log_debug("[gpu] texture %ux%u fmt 0x%02x: data type %u, decoded", h->width, h->height, h->format, h->data_type[0]);
+    return GPU_FMT_NONE;
+  }
   for (uint32_t i = 0; i < GPU_ASTC_FOOTPRINTS; i++)
     if (k_astc_formats[i] == h->format) return GPU_FMT_ASTC_FIRST + 2u * i + (srgb ? 1u : 0u);
   return GPU_FMT_NONE;
@@ -3266,6 +3303,7 @@ static bool gpu_texture_native(Raster3d *r, Raster3d_Texture *t, const Tex_Heade
     gpu_destroy(r, t->gpu_id);
     t->gpu_id = gpu_new_id(r);
     gpu_create(r, t->gpu_id, format, h->width, h->height, layers, GPU_USAGE_SAMPLED, levels);
+    gpu_texture_account(r, t, stride * layers);
     t->gpu_width = h->width;
     t->gpu_height = h->height;
     t->gpu_layers = layers;
@@ -3596,6 +3634,16 @@ static bool image_is_rgba16f(const Tex_Image *img) {
   return true;
 }
 
+/* A decoded texture's GPU size: its texels, a third more for a mip chain. */
+static uint64_t gpu_decoded_bytes(uint32_t format, uint32_t width, uint32_t height, uint32_t layers, uint32_t levels) {
+  const uint64_t texel = format == GPU_FMT_RGBA16_FLOAT                                ? 8u
+                         : format == GPU_FMT_RGBA32_FLOAT || format == GPU_FMT_RGBA32_UINT ||
+                                   format == GPU_FMT_RGBA32_SINT                       ? 16u
+                                                                                       : 4u;
+  const uint64_t base = texel * width * height * layers;
+  return levels > 1u ? base + base / 3u : base;
+}
+
 static uint32_t gpu_texture(Raster3d *r, Raster3d_Texture *t) {
   if (t->native) return t->gpu_id; /* gpu_texture_native uploaded it with the load */
   const Tex_Image *img = &t->image;
@@ -3619,6 +3667,7 @@ static uint32_t gpu_texture(Raster3d *r, Raster3d_Texture *t) {
     gpu_destroy(r, t->gpu_id);
     t->gpu_id = gpu_new_id(r);
     gpu_create(r, t->gpu_id, format, img->width, img->height, layers, GPU_USAGE_SAMPLED, levels);
+    gpu_texture_account(r, t, gpu_decoded_bytes(format, img->width, img->height, layers, levels));
     t->gpu_width = img->width;
     t->gpu_height = img->height;
     t->gpu_layers = layers;

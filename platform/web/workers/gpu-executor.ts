@@ -122,6 +122,19 @@ export interface DebugTarget {
 }
 /* Debug readback skips small targets (probes, LUTs): later scenes have thousands. */
 const DEBUG_MIN_TEXELS = 256 * 256;
+/* A memory report (textures by kind, storage buffers) every this many presents. */
+const MEMORY_REPORT_PRESENTS = 300;
+/** Approximate bytes per texel of a format (block-compressed: per texel of its blocks). */
+function texelBytes(format: GPUTextureFormat): number {
+  if (format.startsWith("bc1") || format.startsWith("bc4")) return 0.5;
+  if (isCompressedFormat(format)) return 1;
+  if (format.startsWith("rgba32")) return 16;
+  if (format.startsWith("rgba16") || format.startsWith("rg32")) return 8;
+  if (format.startsWith("r8") && !format.startsWith("r8g")) return 1;
+  if (format.startsWith("rg8") || format.startsWith("r16") || format === "depth16unorm") return 2;
+  if (format === "depth32float-stencil8") return 8;
+  return 4;
+}
 const DEBUG_TEXEL_BYTES: Readonly<Record<string, number>> = {
   "rgba8unorm": 4, "rgba8unorm-srgb": 4, "bgra8unorm": 4, "rgb10a2unorm": 4, "rgba16float": 8, "rg11b10ufloat": 4, "r16float": 2,
 };
@@ -343,6 +356,7 @@ export class GpuExecutor {
   private readonly objectIds = new WeakMap<object, number>();
   private nextObjectId = 1;
   private readonly warned = new Set<string>();
+  private uploadedBytes = 0; /* queue writes since the last memory report */
 
   constructor(private readonly device: GPUDevice, private readonly host: ExecutorHost) {
     for (let i = 0; i < BUFFER_SETS; i++) {
@@ -732,6 +746,7 @@ export class GpuExecutor {
       { bytesPerRow: w.bytesPerRow, rowsPerImage: w.height },
       { width: w.width, height: w.height, depthOrArrayLayers: 1 },
     );
+    this.uploadedBytes += w.dataBytes;
     if (t.levels > 1) this.mipsStale.add(t.texture);
   }
 
@@ -749,6 +764,7 @@ export class GpuExecutor {
       { bytesPerRow: w.bytesPerRow },
       { width: w.width, height: w.height, depthOrArrayLayers: 1 },
     );
+    this.uploadedBytes += w.dataBytes;
   }
 
   private shader(v: DataView, payload: Uint8Array): void {
@@ -1424,6 +1440,31 @@ export class GpuExecutor {
     this.blit(pass, src, target.format, p.rect, [0, 0, target.width, target.height], flags);
     this.flush();
     this.stats.presents++;
+    if (this.stats.presents % MEMORY_REPORT_PRESENTS === 0) this.reportMemory();
     this.host.presented(width, height);
+  }
+
+  /** Diagnostics: what the GPU holds (estimated from sizes and formats). */
+  private reportMemory(): void {
+    let render = 0, sampled = 0, renderCount = 0, sampledCount = 0;
+    const byFormat = new Map<string, number>();
+    for (const t of this.textures.values()) {
+      const base = t.width * t.height * t.layers * texelBytes(t.format);
+      const bytes = t.levels > 1 ? base + base / 3 : base;
+      if (t.renderView) { render += bytes; renderCount++; continue; }
+      sampled += bytes;
+      sampledCount++;
+      const kind = t.format.startsWith("astc") ? "astc" : t.format.startsWith("bc") ? "bc" : t.format;
+      byFormat.set(kind, (byFormat.get(kind) ?? 0) + bytes);
+    }
+    let buffers = 0;
+    for (const b of this.buffers.values()) buffers += b.size;
+    const mb = (n: number): string => (n / (1024 * 1024)).toFixed(0);
+    this.host.log("info", `GPU memory: render targets ${mb(render)} MB (${renderCount}), textures ${mb(sampled)} MB ` +
+      `(${sampledCount}), storage buffers ${mb(buffers)} MB (${this.buffers.size}), shadows ${this.shadows.size}, ` +
+      `${this.pipelines.size} pipelines, ${this.modulesByHash.size} shader modules, ${mb(this.uploadedBytes)} MB texture ` +
+      `uploads in the last ${MEMORY_REPORT_PRESENTS} presents; textures by format: ` +
+      [...byFormat].sort((a, b) => b[1] - a[1]).map(([f, n]) => `${f} ${mb(n)} MB`).join(", "));
+    this.uploadedBytes = 0;
   }
 }
