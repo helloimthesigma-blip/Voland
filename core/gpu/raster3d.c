@@ -742,6 +742,14 @@ static void gpu_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, 
 void raster3d_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, uint32_t clear) {
   if (!r || !r->ready || r->skip_draws) return;
   r->stats.clears++;
+  if (r->trace_draws) { /* VOLAND_TRACE_DRAWS: clears in draw order */
+    const uint32_t *rt = regs + REG_RT;
+    log_info("[gpu] clear %llu: bits 0x%x control 0x%x rt0 %llx %ux%u select 0x%x scissor 0x%x 0x%x value %08x %08x %08x %08x",
+             (unsigned long long)r->stats.clears, clear, regs[REG_CLEAR_CONTROL],
+             (unsigned long long)addr40(rt[0], rt[1]), rt[2], rt[3], regs[REG_CT_SELECT], regs[REG_SCISSOR + 1u],
+             regs[REG_SCISSOR + 2u], regs[REG_CLEAR_COLOR], regs[REG_CLEAR_COLOR + 1u], regs[REG_CLEAR_COLOR + 2u],
+             regs[REG_CLEAR_COLOR + 3u]);
+  }
   if (r->gpu) {
     gpu_clear(r, regs, mem, clear);
     return;
