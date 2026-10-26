@@ -147,6 +147,7 @@ typedef struct Raster3d_Texture {
   uint64_t gpu_hash;
   uint32_t gpu_width, gpu_height, gpu_layers, gpu_format, gpu_levels;
   uint64_t gpu_bytes;    /* its GPU copy's size (RASTER_GPU_TEXTURE_BUDGET_BYTES) */
+  bool gpu_padded;       /* native, and its GPU texture is whole blocks larger than the image */
 } Raster3d_Texture;
 
 /* GPU mode: a render target that lives only on the GPU (its guest memory

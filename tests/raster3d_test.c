@@ -412,13 +412,14 @@ static void texture_state(void) {
 
 /* texture_state's binding, its TIC an 8x8 DXT1 (BC1) pitch texture: 2x2
  * blocks of 8 bytes, rows 32 bytes apart, each block's bytes its index. */
+static uint32_t g_bc1_size = 8u; /* texture_state_bc1's width and height */
 static void texture_state_bc1(void) {
   texture_state();
   uint32_t tic[8];
   memcpy(tic, g_gpu + (TIC_POOL - GPU_BASE), sizeof(tic));
   tic[0] = (tic[0] & ~0x7fu) | 0x24u;   /* DXT1 */
-  tic[4] = (8u - 1u) | (1u << 23);       /* width-1, 2D */
-  tic[5] = (8u - 1u) | (1u << 31);       /* height-1, normalized */
+  tic[4] = (g_bc1_size - 1u) | (1u << 23); /* width-1, 2D */
+  tic[5] = (g_bc1_size - 1u) | (1u << 31); /* height-1, normalized */
   memcpy(g_gpu + (TIC_POOL - GPU_BASE), tic, sizeof(tic));
   for (uint32_t b = 0; b < 4u; b++) memset(g_gpu + (TEXELS - GPU_BASE) + (b / 2u) * 32u + (b % 2u) * 8u, (int)(b + 1u), 8);
 }
@@ -706,6 +707,7 @@ typedef struct Seen_Draw {
   uint32_t resident_binding;    /* the last draw's BUFFER binding (its buffer id), 0: none */
   /* Stream version 8: compressed textures uploaded as they are. */
   uint32_t last_texture_format, level_writes;
+  uint32_t last_texture_width, last_texture_height;
   Gpu_Rec_Texture_Write_Level first_level_write;
   uint8_t first_level_bytes[16];
 } Seen_Draw;
@@ -719,6 +721,8 @@ static void stream_drain(Seen_Draw *seen) {
       Gpu_Rec_Texture_Create c;
       memcpy(&c, rec.payload, sizeof(c));
       seen->last_texture_format = c.format;
+      seen->last_texture_width = c.width;
+      seen->last_texture_height = c.height;
     }
     if (rec.type == GPU_REC_TEXTURE_WRITE_LEVEL && rec.payload_bytes >= sizeof(Gpu_Rec_Texture_Write_Level) + 16u) {
       if (!seen->level_writes++) {
@@ -838,6 +842,24 @@ static void test_gpu_compressed_upload(Raster3d *r) {
         w->height, w->bytes_per_row, w->data_bytes);
   CHECK(seen.first_level_bytes[0] == 1u && seen.first_level_bytes[8] == 2u, "blocks as they are (%u %u)",
         seen.first_level_bytes[0], seen.first_level_bytes[8]);
+  uint32_t whole_size;
+  memcpy(&whole_size, g_seen_data + 4u * (WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEXP_SIZE), sizeof(whole_size));
+  CHECK(seen.last_texture_width == 8u && seen.last_texture_height == 8u && whole_size == 0u,
+        "whole blocks: an 8x8 texture at the GPU texture's size (%ux%u, size word %08x)", seen.last_texture_width,
+        seen.last_texture_height, whole_size);
+  /* A 6x6 image is not whole 4x4 blocks: an 8x8 BC1 texture (the guest's
+   * blocks cover it), sampled as 6x6, with the shader's filtering. */
+  g_bc1_size = 6u;
+  memset(g_gpu + (TEXELS - GPU_BASE), 3, 8);
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  uint32_t size_word;
+  memcpy(&size_word, g_seen_data + 4u * (WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEXP_SIZE), sizeof(size_word));
+  CHECK(seen.last_texture_format == GPU_FMT_BC1_UNORM && seen.last_texture_width == 8u &&
+            seen.last_texture_height == 8u && seen.first_level_write.width == 8u,
+        "6x6 BC1: BC1 texture %ux%u (format %u), level write %u wide", seen.last_texture_width,
+        seen.last_texture_height, seen.last_texture_format, seen.first_level_write.width);
+  CHECK(size_word == (6u | (6u << 16)), "6x6 BC1: sampled at 6x6 (size word %08x)", size_word);
+  g_bc1_size = 8u;
   /* The same texture changed, on a device without BCn: decoded. */
   memset(g_gpu + (TEXELS - GPU_BASE), 9, 8);
   raster3d_set_gpu_compression(r, 0);

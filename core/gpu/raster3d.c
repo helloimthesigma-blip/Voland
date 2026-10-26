@@ -3209,8 +3209,9 @@ static const uint8_t k_astc_formats[GPU_ASTC_FOOTPRINTS] = {0x40, 0x50, 0x41, 0x
                                                             0x44, 0x56, 0x57, 0x53, 0x45, 0x54, 0x46};
 
 /* The GPU format a texture uploads to undecoded, or GPU_FMT_NONE: BCn /
- * ASTC the device samples, 2D (array, cube) images whose size is whole
- * blocks (WebGPU's rule), LDR ASTC only. */
+ * ASTC the device samples, 2D (array, cube) images, LDR ASTC only. An
+ * image that is not whole blocks gets a GPU texture that is (WebGPU's
+ * rule; gpu_texture_native), sampled at the image's own size. */
 static uint32_t gpu_native_format(const Raster3d *r, const Tex_Header *h) {
   if (!r->gpu || !r->gpu_compression) return GPU_FMT_NONE;
   if (h->type != TEX_TYPE_2D && h->type != TEX_TYPE_2D_NO_MIPMAP && h->type != TEX_TYPE_2D_ARRAY &&
@@ -3219,10 +3220,6 @@ static uint32_t gpu_native_format(const Raster3d *r, const Tex_Header *h) {
   if (h->layout != TEX_LAYOUT_BLOCK_LINEAR && h->layout != TEX_LAYOUT_PITCH) return GPU_FMT_NONE;
   uint32_t bytes = 0, bw = 0, bh = 0;
   if (!tex_format_info(h->format, &bytes, &bw, &bh) || bw == 1u) return GPU_FMT_NONE;
-  if (h->width % bw || h->height % bh) {
-    log_debug("[gpu] texture %ux%u fmt 0x%02x: not whole %ux%u blocks, decoded", h->width, h->height, h->format, bw, bh);
-    return GPU_FMT_NONE;
-  }
   const bool bc = (r->gpu_compression & GPU_COMPRESSION_BC) != 0, srgb = h->srgb;
   const bool snorm = h->data_type[0] == TEX_DATA_SNORM;
   switch (h->format) {
@@ -3300,10 +3297,15 @@ static bool gpu_texture_native(Raster3d *r, Raster3d_Texture *t, const Tex_Heade
   const bool same = t->gpu_id && t->native && t->gpu_width == h->width && t->gpu_height == h->height &&
                     t->gpu_layers == layers && t->gpu_format == format && t->gpu_levels == levels;
   if (!same) {
+    /* Whole blocks: the guest's blocks cover the padding too (they hold
+     * the image's edge region). The shader samples the image's own size
+     * (WGSL_TEXP_SIZE), so the padding is never addressed. */
+    const uint32_t width = (h->width + bw - 1u) / bw * bw, height = (h->height + bh - 1u) / bh * bh;
     gpu_destroy(r, t->gpu_id);
     t->gpu_id = gpu_new_id(r);
-    gpu_create(r, t->gpu_id, format, h->width, h->height, layers, GPU_USAGE_SAMPLED, levels);
+    gpu_create(r, t->gpu_id, format, width, height, layers, GPU_USAGE_SAMPLED, levels);
     gpu_texture_account(r, t, stride * layers);
+    t->gpu_padded = width != h->width || height != h->height;
     t->gpu_width = h->width;
     t->gpu_height = h->height;
     t->gpu_layers = layers;
@@ -4373,6 +4375,7 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
   if (tsc_pool && mem->read(mem->user, tsc_pool + (uint64_t)tsc_index * TEX_SAMPLER_BYTES, tsc, sizeof(tsc)))
     tex_sampler_parse(tsc, &s);
   uint32_t id = 0, sample_type = WGSL_SAMPLE_FLOAT, gpu_format = 0;
+  bool padded = false; /* a block-compressed image inside a whole-block GPU texture */
   Raster3d_Gpu_Surface *surf = gpu_surface_at(r, h.address, h.width);
   if (surf && surf->stale) {
     /* Sampled after a CPU / copy-engine write (SSBU copies each movie
@@ -4395,14 +4398,16 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
     Raster3d_Texture *tex = texture_load(r, tic, mem, false);
     if (!tex) return false;
     id = gpu_texture(r, tex);
+    padded = tex->native && tex->gpu_padded;
     gpu_format = tex->gpu_format;
     if (h.data_type[0] == TEX_DATA_UINT) sample_type = WGSL_SAMPLE_UINT;
     if (h.data_type[0] == TEX_DATA_SINT) sample_type = WGSL_SAMPLE_SINT;
   }
-  /* A hardware sampler where it gives the reference's result. */
+  /* A hardware sampler where it gives the reference's result (not on a
+   * padded texture: it would wrap and clamp at the padding's edge). */
   const bool cube_map = h.type == TEX_TYPE_CUBE || h.type == TEX_TYPE_CUBE_ARRAY;
-  if (sample_type == WGSL_SAMPLE_FLOAT && !cube_map && gpu_format_filterable(gpu_format) && s.wrap[0] <= 2u &&
-      s.wrap[1] <= 2u) {
+  if (sample_type == WGSL_SAMPLE_FLOAT && !cube_map && !padded && gpu_format_filterable(gpu_format) &&
+      s.wrap[0] <= 2u && s.wrap[1] <= 2u) {
     desc->hw_sample_mask |= 1u << b;
     /* Minification follows magnification on one level (the
      * reference's single filter); mip chains use the TSC's own. */
@@ -4427,8 +4432,9 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
                          ((uint32_t)h.swizzle[3] << 12);
   p[WGSL_TEXP_LEVELS] = h.levels;
   p[WGSL_TEXP_COMPARE] = s.compare_func;
-  /* Sampled inside a GOB-padded target: the texture's own size. */
-  p[WGSL_TEXP_SIZE] = surf && (surf->width != h.width || surf->height != h.height)
+  /* Sampled inside a GOB-padded target or a whole-block compressed
+   * texture: the texture's own size. */
+  p[WGSL_TEXP_SIZE] = padded || (surf && (surf->width != h.width || surf->height != h.height))
                           ? (h.width & 0xffffu) | ((h.height & 0xffffu) << 16)
                           : 0u;
   /* Level selection (textures with a mip chain only; the shader
