@@ -3,7 +3,7 @@
  * on and off, set which wins when two change the same file, and toggle the
  * running game's cheats. Voland ships no mods and links to no mod sites;
  * it reads the usual layouts (romfs/, exefs/, cheats/, *.ips, *.pchtxt,
- * atmosphere/contents/<title id>/...). Mod changes apply at the next load;
+ * atmosphere/contents/<title id>/...) and game-update / DLC NCAs. Mod changes apply at the next load;
  * cheats switch at once.
  */
 import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
@@ -94,6 +94,11 @@ function ModsPanel() {
     for (const zip of files) await install(zip.name, zipFiles(zip));
   };
 
+  /* A game update or DLC: each decrypted NCA is a mod of its own. */
+  const installNcas = async (files: readonly File[]): Promise<void> => {
+    for (const nca of files) await install(nca.name, [{ path: nca.name, data: nca }]);
+  };
+
   const onDrop = async (items: DataTransferItemList): Promise<void> => {
     const entries = Array.from(items).map((item) => item.webkitGetAsEntry()).filter((e): e is FileSystemEntry => e !== null);
     for (const entry of entries) {
@@ -103,8 +108,11 @@ function ModsPanel() {
       } else if (/\.zip$/i.test(entry.name)) {
         const [file] = await entryFiles(entry, "");
         if (file) await install(entry.name, zipFiles(file.data));
+      } else if (/\.nca$/i.test(entry.name)) {
+        const [file] = await entryFiles(entry, "");
+        if (file) await install(entry.name, [{ path: entry.name, data: file.data }]);
       } else {
-        setNote(`${entry.name}: drop a mod folder or a .zip archive.`);
+        setNote(`${entry.name}: drop a mod folder, a .zip archive or an update / DLC .nca.`);
       }
     }
   };
@@ -146,8 +154,17 @@ function ModsPanel() {
                      void installZips(files);
                    }} />
           </label>
+          <label class="voland-load-button voland-load-secondary">
+            Add update / DLC
+            <input type="file" hidden accept=".nca" multiple data-testid="mods-add-nca"
+                   onChange={(e) => {
+                     const files = Array.from(e.currentTarget.files ?? []);
+                     e.currentTarget.value = "";
+                     void installNcas(files);
+                   }} />
+          </label>
         </div>
-        <small>Or drop mod folders / .zip files here. Mods higher in the list win when two change the same file. Changes apply the next time you load the game.</small>
+        <small>Or drop mod folders / .zip files here. Updates and DLC are their decrypted .nca files. Mods higher in the list win when two change the same file. Changes apply the next time you load the game.</small>
         <Show when={busy()}>{(text) => <p class="voland-load-note">{text()}</p>}</Show>
         <Show when={note()}>{(text) => <p class="voland-load-note">{text()}</p>}</Show>
         <ul class="voland-mod-list">
