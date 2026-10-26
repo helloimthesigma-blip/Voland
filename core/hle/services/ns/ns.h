@@ -84,12 +84,18 @@ typedef struct Ns_State {
   const uint8_t *nacp;      /* NS_CONTROL_NACP_BYTES, or NULL */
   const uint8_t *icon;      /* JPEG, or NULL */
   uint32_t icon_size;
+  /* Installed add-on content: indices (id - the aoc base id), the
+   * Emulator's (ns_set_addons). */
+  const uint32_t *aoc_indices;
+  uint32_t aoc_count;
 } Ns_State;
 
 void ns_init(Ns_State *state);
 Error ns_register(Ns_State *state, SM_Registry *registry);
 /* Lists `title_id` as installed; `nacp`/`icon` stay owned by the caller
  * and must outlive the process. */
+/* The add-on content aoc:u lists (`count` indices, owned by the caller). */
+void ns_set_addons(Ns_State *state, const uint32_t *indices, uint32_t count);
 void ns_set_loaded_title(Ns_State *state, uint64_t title_id, const uint8_t *nacp, const uint8_t *icon,
                          uint32_t icon_size);
 

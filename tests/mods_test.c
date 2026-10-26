@@ -231,6 +231,8 @@ static void test_normalize(void) {
   expect_norm("exefs/DEADBEEF01020304.ips", "exefs/MyMod/DEADBEEF01020304.ips");
   expect_norm("patches/60fps.pchtxt", "exefs/MyMod/60fps.pchtxt");
   expect_norm("atmosphere\\contents\\0100a12300000000\\cheats\\DEADBEEF01020304.txt", "cheats/MyMod/DEADBEEF01020304.txt");
+  expect_norm("update/0100A12300000800.nca", "nca/MyMod/0100A12300000800.nca");
+  expect_norm("romfs/Data/x.nca", "romfs/Data/x.nca"); /* a game file, not an update */
   expect_norm("readme.txt", NULL);
   expect_norm("romfs", NULL);
 }

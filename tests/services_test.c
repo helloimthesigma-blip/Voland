@@ -466,6 +466,28 @@ static void test_fs(void) {
     g_emu.fs.program_id = saved_program;
   }
   (void)call_ex(fsp, 200, NULL, 0, NULL, FS_RESULT_TARGET_NOT_FOUND);
+  {
+    /* Add-on content (fs_set_addons): OpenDataStorageByDataId serves its RomFS. */
+    static const uint8_t dlc[] = "add-on romfs";
+    const Byte_Source romfs = byte_source_from_memory(dlc, sizeof(dlc));
+    const uint64_t ids[1] = {0x0100abcd00021001ull};
+    fs_set_addons(&g_emu.fs, ids, &romfs, 1);
+    const struct { uint8_t space, pad[7]; uint64_t id; } by_id = {1, {0}, ids[0]};
+    const uint32_t storage = object(fsp, 202, &by_id, sizeof(by_id));
+    CHECK(test_le64(call(storage, 4, NULL, 0, NULL).data) == sizeof(dlc));
+    const struct { uint64_t offset, size; } read_in = {4, 3};
+    Test_Ipc_Message rx;
+    memset(&rx, 0, sizeof(rx));
+    rx.receives[0] = (Test_Ipc_Buffer){SCRATCH(0x6100), 3, 0};
+    rx.receive_count = 1;
+    CHECK(call(storage, 0, &read_in, sizeof(read_in), &rx).result == 0);
+    char dlc_back[3] = {0};
+    CHECK_OK(vmm_read_block(g_emu.vmm, SCRATCH(0x6100), dlc_back, 3));
+    CHECK(memcmp(dlc_back, "on ", 3) == 0);
+    const struct { uint8_t space, pad[7]; uint64_t id; } other = {1, {0}, ids[0] + 1u};
+    (void)call_ex(fsp, 202, &other, sizeof(other), NULL, FS_RESULT_TARGET_NOT_FOUND);
+    fs_set_addons(&g_emu.fs, NULL, NULL, 0);
+  }
   /* IDeviceOperator: SD card in, no game card. */
   const uint32_t device = object(fsp, 400, NULL, 0);
   CHECK(call(device, 0, NULL, 0, NULL).data[0] == 1);
@@ -937,6 +959,23 @@ static void test_sdk_startup_services(void) {
   const uint32_t aoc = service("aoc:u");
   Test_Ipc_Reply r = call(aoc, 2, NULL, 0, NULL);
   CHECK(test_le32(r.data) == 0);
+  {
+    /* Installed add-ons (ns_set_addons): counted, listed from an offset. */
+    static const uint32_t indices[3] = {1, 3, 7};
+    ns_set_addons(&g_emu.ns, indices, 3);
+    CHECK(test_le32(call(aoc, 2, NULL, 0, NULL).data) == 3);
+    const uint32_t list_in[4] = {1, 5, 0, 0}; /* offset, count, pid */
+    Test_Ipc_Message m;
+    memset(&m, 0, sizeof(m));
+    m.receives[0] = (Test_Ipc_Buffer){SCRATCH(0x6200), 16, 0};
+    m.receive_count = 1;
+    r = call(aoc, 3, list_in, sizeof(list_in), &m);
+    CHECK(test_le32(r.data) == 2);
+    uint32_t listed[2] = {0};
+    CHECK_OK(vmm_read_block(g_emu.vmm, SCRATCH(0x6200), listed, sizeof(listed)));
+    CHECK(listed[0] == 3 && listed[1] == 7);
+    ns_set_addons(&g_emu.ns, NULL, 0);
+  }
   r = call(aoc, 8, NULL, 0, NULL);
   CHECK(r.copy_count == 1);
   const uint32_t policy = 0;

@@ -254,6 +254,13 @@ static HLE_ServiceResult cmd_open_data_storage_by_id(HLE_Context *c, Service_Obj
   Fs_State *s = state_of(self);
   uint64_t data_id = 0;
   (void)ipc_request_read_u64(req, 8, &data_id);
+  for (uint32_t i = 0; i < s->addon_count; i++) {
+    if (s->addon_ids[i] != data_id) continue;
+    s->system_data = s->addon_romfs[i];
+    log_info("[fs] OpenDataStorageByDataId(%016llx): add-on content", (unsigned long long)data_id);
+    (void)ipc_response_push_object(res, &s->storage, FS_STORAGE_SYSTEM_DATA);
+    return HLE_RESULT_SUCCESS;
+  }
   if (system_data_open_user(s->pool, s->sd_root, data_id, &s->system_data)) {
     (void)ipc_response_push_object(res, &s->storage, FS_STORAGE_SYSTEM_DATA);
     return HLE_RESULT_SUCCESS;
@@ -829,5 +836,11 @@ void fs_reset_process(Fs_State *s, const Byte_Source *romfs, uint64_t program_id
   s->commits = 0;
 }
 
+
+void fs_set_addons(Fs_State *s, const uint64_t *ids, const Byte_Source *romfs, uint32_t count) {
+  s->addon_ids = ids;
+  s->addon_romfs = romfs;
+  s->addon_count = count;
+}
 
 Error fs_register(Fs_State *s, SM_Registry *registry) { return sm_registry_add(registry, "fsp-srv", &s->proxy); }

@@ -37,6 +37,8 @@
 #define MODS_MAX_FILES 65536u
 #define MODS_MAX_PATH_BYTES 0x300u
 #define MODS_ARENA_BYTES ((size_t)16 * 1024 * 1024)
+/* Set-path prefix of pre-decrypted NCAs in a mod (game updates). */
+#define MODS_NCA_PREFIX "nca/"
 /* A patch or cheat file is read whole; real ones are a few KB. */
 #define MODS_MAX_TEXT_FILE_BYTES ((uint64_t)4 * 1024 * 1024)
 /* Horizon NSO header: IPS offsets count from the start of the NSO file,
@@ -84,6 +86,7 @@ Error mod_set_add(Mod_Set *set, const char *path, uint64_t size, uint32_t id);
  *                                         ->  exefs/<mod>/<file>
  *   cheats/<id>.txt                       ->  cheats/<mod>/<file>
  *   romfs/x (at any depth)                ->  romfs/x
+ *   any *.nca (a game update)             ->  nca/<mod>/<file>
  * Folder names match case-insensitively; what follows romfs/ keeps its
  * case (RomFS lookups are byte-exact). Patches and cheats keep the mod's
  * name so two mods' files for one build id both apply. Returns false for

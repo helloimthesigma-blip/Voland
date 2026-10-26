@@ -45,6 +45,7 @@
 #define NRO_ASSET_ROMFS_OFFSET 0x28u
 
 static void open_compressed_romfs(Emulator* emulator, uint32_t index);
+static void open_patched_romfs(Emulator* emulator, uint32_t index);
 
 static void release_content_arena(Emulator* emulator) {
   if (!emulator->content_arena_live) return;
@@ -95,6 +96,7 @@ static void layer_romfs_mods(Emulator* emulator) {
 }
 
 static void locate_romfs_base(Emulator* emulator, bool is_nro);
+static void find_addons(Emulator* emulator, uint64_t program_id);
 
 /* Cheats (§19): every cheats/<mod>/<build id>.txt whose id matches main. */
 static void load_cheats(Emulator* emulator) {
@@ -176,6 +178,10 @@ static void locate_romfs_base(Emulator* emulator, bool is_nro) {
     log_info("[emulator] the program NCA has no RomFS section");
     return;
   }
+  if (emulator->update) {
+    open_patched_romfs(emulator, (uint32_t)index);
+    return;
+  }
   if (emulator->content_nca.header.sections[index].has_compression_info) {
     open_compressed_romfs(emulator, (uint32_t)index);
     return;
@@ -188,6 +194,49 @@ static void locate_romfs_base(Emulator* emulator, bool is_nro) {
   emulator->romfs = nca_section_source(&emulator->content_nca, (uint32_t)index);
   log_info("[emulator] RomFS: section %d, %llu bytes", index,
            emulator->romfs ? (unsigned long long)emulator->romfs->size : 0ull);
+}
+
+/* The game update's RomFS: its section's indirect table merges the base
+ * section `index` with the update's own bytes, and the update's hash
+ * layer names where the RomFS sits in that merged view. Leaves
+ * emulator->romfs NULL on any failure (logged). */
+static void open_patched_romfs(Emulator* emulator, uint32_t index) {
+  const NCA_File* update = &emulator->update_nca;
+  const NCA_Section_Info* base = &emulator->content_nca.header.sections[index];
+  const int patch_index = nca_find_section(update, NCA_FS_ROMFS);
+  Error err = OK;
+  if (patch_index < 0) err = ERR(RESULT_NOT_FOUND, "the update has no RomFS section");
+  const NCA_Section_Info* patch = patch_index >= 0 ? &update->header.sections[patch_index] : NULL;
+  if (error_is_ok(err) && !patch->has_patch_info) err = ERR(RESULT_INVALID_ARGUMENT, "the update's RomFS has no patch table");
+  if (error_is_ok(err) && (patch->has_compression_info || base->has_compression_info || base->has_sparse_info))
+    err = ERR(RESULT_NOT_IMPLEMENTED, "a compressed or sparse section under an update");
+  if (error_is_ok(err)) err = byte_source_slice(emulator->content_nca.source, base->offset, base->size, &emulator->update_base_raw);
+  if (error_is_ok(err)) err = byte_source_slice(update->source, patch->offset, patch->size, &emulator->update_patch_raw);
+  uint32_t entries = 0;
+  if (error_is_ok(err))
+    err = nca_indirect_measure(&emulator->update_base_raw.source, &emulator->update_patch_raw.source,
+                               patch->patch_indirect_offset, patch->patch_indirect_size, patch->patch_indirect_header,
+                               &entries);
+  if (error_is_ok(err) && !arena_create(&emulator->content_arena, nca_indirect_arena_bytes(entries)))
+    err = ERR(RESULT_OUT_OF_MEMORY, "no memory for the update's table");
+  if (error_is_ok(err)) {
+    emulator->content_arena_live = true;
+    err = nca_indirect_open(&emulator->romfs_indirect, &emulator->update_base_raw.source,
+                            &emulator->update_patch_raw.source, patch->patch_indirect_offset,
+                            patch->patch_indirect_size, patch->patch_indirect_header, &emulator->content_arena);
+  }
+  if (error_is_ok(err))
+    err = byte_source_slice(&emulator->romfs_indirect.source, patch->data_offset - patch->offset, patch->data_size,
+                            &emulator->romfs_slice);
+  if (!error_is_ok(err)) {
+    /* The update's code expects its own files: no RomFS beats a mismatched one. */
+    log_warn("[emulator] the update's RomFS is unusable: %s", err.message ? err.message : "?");
+    release_content_arena(emulator);
+    return;
+  }
+  emulator->romfs = &emulator->romfs_slice.source;
+  log_info("[emulator] RomFS: base section %u patched by the update, %u entries, %llu bytes", index, entries,
+           (unsigned long long)patch->data_size);
 }
 
 /* A compressed RomFS section: the decompressing view, its data region
@@ -427,6 +476,9 @@ static void reset_process_services(Emulator* emulator) {
   set_init(&emulator->set);
   time_init(&emulator->time, &emulator->shared_memory, emulator->rtc);
   fs_reset_process(&emulator->fs, NULL, 0);
+  emulator->addon_count = 0;
+  fs_set_addons(&emulator->fs, NULL, NULL, 0);
+  ns_set_addons(&emulator->ns, NULL, 0);
   vi_init(&emulator->vi, &emulator->nvdrv, emulator->vi_scratch);
   emulator->vi.frame_skip = emulator->frame_skip;
   network_init(&emulator->network);
@@ -660,6 +712,10 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
   locate_romfs(emulator, is_nro);
   load_cheats(emulator);
   fs_reset_process(&emulator->fs, emulator->romfs, emulator->process.npdm.program_id);
+  if (!is_nro) find_addons(emulator, emulator->process.npdm.program_id);
+  else emulator->addon_count = 0;
+  fs_set_addons(&emulator->fs, emulator->addon_ids, emulator->addon_romfs, emulator->addon_count);
+  ns_set_addons(&emulator->ns, emulator->addon_indices, emulator->addon_count);
   emulator->program_loaded = true;
   log_info("[emulator] program '%s' loaded; main thread armed at pc=0x%010llx",
            emulator->process.npdm.name, (unsigned long long)emulator->process.entry_point);
@@ -668,6 +724,65 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
              emulator->process.npdm.is_64bit_instruction ? "64-bit" : "32-bit", (unsigned)emulator->process.module_count);
   return OK;
 }
+/* The first "nca/" mod file that is a PROGRAM NCA for `program_id`'s
+ * update, into emulator->update / update_nca (NULL if none). */
+static void find_update(Emulator* emulator, uint64_t program_id) {
+  emulator->update = NULL;
+  const Mod_Set* mods = &emulator->mods;
+  if (!mods->live) return;
+  const size_t prefix = strlen(MODS_NCA_PREFIX);
+  for (uint32_t i = 0; i < mods->count; i++) {
+    const Mod_File* f = &mods->files[i];
+    if (f->path_length <= prefix || memcmp(f->path, MODS_NCA_PREFIX, prefix) != 0) continue;
+    NCA_File nca;
+    if (!error_is_ok(nca_open(&f->source, &nca))) {
+      log_warn("mods: %s is not a decrypted NCA; skipped", f->path);
+      continue;
+    }
+    if (nca.header.content_type != NCA_CONTENT_PROGRAM || nca.header.program_id != program_id + EMULATOR_UPDATE_ID_OFFSET) {
+      log_warn("mods: %s (program %016llx) is not this game's update; skipped", f->path,
+               (unsigned long long)nca.header.program_id);
+      continue;
+    }
+    emulator->update_nca = nca;
+    emulator->update = &f->source;
+    log_notice("mods: game update %s", f->path);
+    return;
+  }
+}
+
+/* The mods' DLC: every "nca/" file that is a data NCA in `program_id`'s
+ * add-on range with a plain RomFS, handed to aoc:u and fs-srv. */
+static void find_addons(Emulator* emulator, uint64_t program_id) {
+  emulator->addon_count = 0;
+  const Mod_Set* mods = &emulator->mods;
+  const uint64_t base = (program_id & ~EMULATOR_ADDON_ID_MASK) + EMULATOR_ADDON_BASE_OFFSET;
+  const size_t prefix = strlen(MODS_NCA_PREFIX);
+  for (uint32_t i = 0; mods->live && i < mods->count && emulator->addon_count < EMULATOR_MAX_ADDONS; i++) {
+    const Mod_File* f = &mods->files[i];
+    if (f->path_length <= prefix || memcmp(f->path, MODS_NCA_PREFIX, prefix) != 0) continue;
+    NCA_File* nca = &emulator->addon_nca[emulator->addon_count];
+    if (!error_is_ok(nca_open(&f->source, nca))) continue;
+    const uint64_t id = nca->header.program_id;
+    const bool data = nca->header.content_type == NCA_CONTENT_DATA ||
+                      nca->header.content_type == NCA_CONTENT_PUBLIC_DATA;
+    if (!data || id <= base || id - base > EMULATOR_ADDON_ID_MASK) continue;
+    const int section = nca_find_section(nca, NCA_FS_ROMFS);
+    if (section < 0 || !error_is_ok(nca_probe_section(nca, (uint32_t)section))) {
+      log_warn("mods: add-on %s has no plain RomFS; skipped", f->path);
+      continue;
+    }
+    bool seen = false;
+    for (uint32_t k = 0; k < emulator->addon_count; k++) seen = seen || emulator->addon_ids[k] == id;
+    if (seen) continue; /* a higher-priority mod already brought this one */
+    emulator->addon_ids[emulator->addon_count] = id;
+    emulator->addon_indices[emulator->addon_count] = (uint32_t)(id - base);
+    emulator->addon_romfs[emulator->addon_count] = *nca_section_source(nca, (uint32_t)section);
+    emulator->addon_count++;
+    log_notice("mods: add-on content %016llx from %s", (unsigned long long)id, f->path);
+  }
+}
+
 /* §12 "what load a game actually does", step 1 through 4, with the §1.6
  * encrypted-input diagnosis surfaced before any structural parse. */
 Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
@@ -687,11 +802,19 @@ Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
   if (nca.header.content_type != NCA_CONTENT_PROGRAM) {
     return ERR(RESULT_INVALID_ARGUMENT, "emulator_load_program: not a PROGRAM NCA");
   }
-  const int exefs_index = nca_find_section(&nca, NCA_FS_PARTITION_FS);
+  const int base_romfs = nca_find_section(&nca, NCA_FS_ROMFS);
+  if (base_romfs >= 0 && nca.header.sections[base_romfs].has_patch_info) {
+    return ERR(RESULT_INVALID_ARGUMENT,
+               "emulator_load_program: this NCA is a game update; load the base game and add the update as a mod");
+  }
+  /* A game update brings the newer executables (its ExeFS is whole). */
+  find_update(emulator, nca.header.program_id);
+  const NCA_File* code_nca = emulator->update ? &emulator->update_nca : &nca;
+  const int exefs_index = nca_find_section(code_nca, NCA_FS_PARTITION_FS);
   if (exefs_index < 0) {
     return ERR(RESULT_INVALID_ARGUMENT, "emulator_load_program: PROGRAM NCA has no ExeFS");
   }
-  err = nca_probe_section(&nca, (uint32_t)exefs_index);
+  err = nca_probe_section(code_nca, (uint32_t)exefs_index);
   if (!error_is_ok(err)) return err;
 
   /* The loader arena lives for this call only: ExeFS directory, the npdm
@@ -703,7 +826,7 @@ Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
 
   ExeFS exefs;
   NPDM npdm;
-  err = exefs_open(nca_section_source(&nca, (uint32_t)exefs_index), &scratch, &exefs);
+  err = exefs_open(nca_section_source(code_nca, (uint32_t)exefs_index), &scratch, &exefs);
   if (error_is_ok(err)) {
     const ExeFS_Entry* npdm_entry = exefs_find(&exefs, EXEFS_FILE_NPDM);
     const Mod_File* npdm_mod = mod_set_find(&emulator->mods, "exefs/" EXEFS_FILE_NPDM);

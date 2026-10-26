@@ -65,6 +65,8 @@ struct VertexOut {
 const POLL_MS = 4;
 /* Until the core turns GPU mode on, the stream header is all zeroes. */
 const STREAM_IDLE_POLL_MS = 50;
+/* Longest the stream loop runs without yielding to the message queue. */
+const STREAM_BUSY_YIELD_MS = 500;
 const OPTIONAL_FEATURES: readonly GPUFeatureName[] = [
   "rg11b10ufloat-renderable", "depth32float-stencil8", "float32-filterable", "float32-blendable",
   "texture-compression-bc", "texture-compression-astc",
@@ -140,6 +142,7 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
   });
   activeExecutor = executor;
   attachShaderCache();
+  let yielded = performance.now();
   for (;;) {
     const seen = Atomics.load(words, OFF_WRITE_SIGNAL / 4);
     const write = Number(Atomics.load(wide, OFF_WRITE / 8));
@@ -156,7 +159,15 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
       Atomics.notify(words, OFF_READ_SIGNAL / 4);
     }
     executor.flush();
-    if (Number(Atomics.load(wide, OFF_WRITE / 8)) === write) await waitForChange(words, OFF_WRITE_SIGNAL / 4, seen);
+    if (Number(Atomics.load(wide, OFF_WRITE / 8)) === write) {
+      await waitForChange(words, OFF_WRITE_SIGNAL / 4, seen);
+      yielded = performance.now();
+    } else if (performance.now() - yielded > STREAM_BUSY_YIELD_MS) {
+      /* An unpaced guest keeps the ring full and this loop never waits;
+       * let queued messages (debug-dump-targets) run now and then. */
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      yielded = performance.now();
+    }
   }
 }
 

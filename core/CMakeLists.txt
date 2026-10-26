@@ -88,6 +88,7 @@ set(SWITCH_CORE_SOURCES
   hle/loader/byte_source.c
   hle/loader/nca_parse.c
   hle/loader/nca_compressed.c
+  hle/loader/nca_indirect.c
   hle/loader/exefs.c
   hle/loader/romfs.c
   hle/loader/npdm.c
@@ -150,6 +151,7 @@ set(SWITCH_CORE_PUBLIC_HEADERS
   hle/loader/byte_source.h
   hle/loader/nca_parse.h
   hle/loader/nca_compressed.h
+  hle/loader/nca_indirect.h
   hle/loader/exefs.h
   hle/loader/romfs.h
   hle/loader/npdm.h

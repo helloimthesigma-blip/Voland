@@ -33,6 +33,10 @@
 #define NCA_FS_OFFSET_HASH_DATA ((uint64_t)0x08)
 #define NCA_FS_OFFSET_PATCH_INFO ((uint64_t)0x100)
 #define NCA_FS_PATCH_INFO_SIZE ((uint64_t)0x40)
+/* PatchInfo: two { offset u64, size u64, bucket header 0x10 } tables. */
+#define NCA_PATCH_OFFSET_INDIRECT ((uint64_t)0x00)
+#define NCA_PATCH_TABLE_OFFSET_SIZE ((uint64_t)0x08)
+#define NCA_PATCH_TABLE_OFFSET_HEADER ((uint64_t)0x10)
 #define NCA_FS_OFFSET_SPARSE_INFO ((uint64_t)0x148)
 #define NCA_FS_SPARSE_INFO_SIZE ((uint64_t)0x30)
 #define NCA_FS_OFFSET_COMPRESSION_INFO ((uint64_t)0x178)
@@ -166,6 +170,13 @@ static Error parse_section(const uint8_t *header_bytes, uint32_t index,
       !bytes_all_zero(fs_header + NCA_FS_OFFSET_SPARSE_INFO, NCA_FS_SPARSE_INFO_SIZE);
   out->has_compression_info = !bytes_all_zero(
       fs_header + NCA_FS_OFFSET_COMPRESSION_INFO, NCA_FS_COMPRESSION_INFO_SIZE);
+  if (out->has_patch_info) {
+    const uint8_t *pi = fs_header + NCA_FS_OFFSET_PATCH_INFO;
+    const uint8_t *ind = pi + NCA_PATCH_OFFSET_INDIRECT;
+    out->patch_indirect_offset = byte_source_le64(ind);
+    out->patch_indirect_size = byte_source_le64(ind + NCA_PATCH_TABLE_OFFSET_SIZE);
+    memcpy(out->patch_indirect_header, ind + NCA_PATCH_TABLE_OFFSET_HEADER, sizeof(out->patch_indirect_header));
+  }
   if (out->has_compression_info) {
     const uint8_t *ci = fs_header + NCA_FS_OFFSET_COMPRESSION_INFO;
     out->compression_table_offset = byte_source_le64(ci);
@@ -178,7 +189,10 @@ static Error parse_section(const uint8_t *header_bytes, uint32_t index,
   Error err = locate_section_data(fs_header, out->hash_type, out->size,
                                   &relative_offset, &data_size);
   if (!error_is_ok(err)) return err;
-  if (relative_offset > out->size || data_size > out->size - relative_offset) {
+  /* A patch section's data region lies in its patched (virtual) view,
+   * which can outgrow the raw section; it is bounded by nca_indirect. */
+  if (relative_offset > UINT64_MAX - out->offset ||
+      (!out->has_patch_info && (relative_offset > out->size || data_size > out->size - relative_offset))) {
     return ERR(RESULT_INVALID_ARGUMENT, "nca: section data region outside section");
   }
   out->data_offset = out->offset + relative_offset;
@@ -255,6 +269,7 @@ Error nca_open(const Byte_Source *source, NCA_File *out) {
       return ERR(RESULT_INVALID_ARGUMENT, "nca: section extends past content size");
     }
     if (section->has_compression_info) continue; /* read through nca_compressed.h */
+    if (section->has_patch_info) continue;       /* read through nca_indirect.h */
     err = byte_source_slice(source, section->data_offset, section->data_size,
                             &out->section_sources[i]);
     if (!error_is_ok(err)) return err;

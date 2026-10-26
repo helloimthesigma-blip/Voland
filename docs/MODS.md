@@ -12,6 +12,8 @@ contains runs inside the emulated console, never as code in your browser.
 | Game files (LayeredFS) | `romfs/...` | Each file replaces the game's file at the same path, or is added if the game has none. Folders are merged. |
 | Executable patches | `exefs/<build id>.ips`, `exefs_patches/<name>/<build id>.ips` (IPS or IPS32), or any `*.pchtxt` | Applied to the matching executable (`main`, `subsdk*`, `sdk`, `rtld`) as it is loaded. The build id in the file name, or `@nsobid-` in a pchtxt, must match the executable, so a patch for another game version does nothing. |
 | Replacement executables | `exefs/main`, `exefs/subsdk0`..`subsdk9`, `exefs/sdk`, `exefs/rtld`, `exefs/main.npdm` | The file replaces the game's own, or adds a module the game lacks (for example `subsdk9` plus `main.npdm`, which is how code-injection frameworks load). |
+| Game update | any `*.nca` (the update's decrypted program NCA) | The update's executables replace the base game's, and its RomFS is merged over the base game's, as the console does. Only an update for the loaded game is used: its program id must be the game's plus `0x800`. Patches and cheats then need the update's build ids. |
+| DLC | any `*.nca` (each add-on's decrypted data NCA) | The game sees the add-on as installed and reads its files. Add-ons for other games are skipped. |
 | Cheats | `cheats/<build id>.txt` | Atmosphere cheat format. `{Master}` codes always run, `[Named]` cheats can be switched on and off while playing. They run 12 times a second, as on Atmosphere. |
 
 Common folder layouts work as unpacked:
@@ -62,8 +64,10 @@ win). If `DIR` itself contains `romfs/`, `exefs/`, `cheats/` or
   plugin loaders that look in `sd:/...`) need those files on the emulated
   SD card. Add them with **SD card** in the side panel, keeping their
   folder structure.
-- Game updates and DLC are not loaded, so mods built for a game update
-  only work if their build id matches the base game's executable.
+- A game update is used only when added as a mod (above). Loading the
+  update NCA by itself is refused: it needs its base game.
+- Updates and DLC must be pre-decrypted NCAs (docs/DUMP.md), like the
+  game itself.
 - A LayeredFS mod cannot delete a game file, only replace or add one.
 
 ## Mod repositories

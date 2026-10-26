@@ -285,6 +285,32 @@ static void test_unsupported_layouts(void) {
   free_built(&b);
 }
 
+/* PatchInfo is recorded field by field, and a patch section's data region
+ * (a range of its patched view) may outgrow the raw section. */
+static void test_patch_info_recorded(void) {
+  Built b;
+  build_program_nca(&b, NCA_MAGIC_NCA3);
+  uint8_t *pi = fs_header(b.nca.bytes, 0) + FIXTURE_NCA_FS_OFFSET_PATCH_INFO;
+  fixture_put_le64(pi, 0x1000);         /* indirect table offset */
+  fixture_put_le64(pi + 0x08, 0x8000);  /* indirect table size */
+  memcpy(pi + 0x10, "BKTR", 4);
+  pi[0x18] = 5;                          /* bucket entry count */
+  const uint64_t virtual_size = 1ull << 40; /* far past the raw section */
+  fixture_put_le64(fs_header(b.nca.bytes, 0) + FIXTURE_NCA_FS_OFFSET_SHA256_REGIONS + 0x18, virtual_size);
+  Byte_Source src = byte_source_from_memory(b.nca.bytes, b.nca.size);
+  NCA_File nca;
+  CHECK_OK(nca_open(&src, &nca));
+  const NCA_Section_Info *s0 = &nca.header.sections[0];
+  CHECK(s0->has_patch_info);
+  CHECK(s0->patch_indirect_offset == 0x1000 && s0->patch_indirect_size == 0x8000);
+  CHECK(memcmp(s0->patch_indirect_header, "BKTR", 4) == 0 && s0->patch_indirect_header[8] == 5);
+  CHECK(s0->data_offset == s0->offset + HASH_LAYER_BYTES);
+  CHECK(s0->data_size == virtual_size);
+  CHECK(nca_section_source(&nca, 0) == NULL);
+  CHECK(!nca.header.sections[1].has_patch_info && nca.header.sections[1].patch_indirect_size == 0);
+  free_built(&b);
+}
+
 int main(void) {
   test_parse_and_open();
   test_nca2_parses_identically();
@@ -293,6 +319,7 @@ int main(void) {
   test_header_rejections();
   test_open_rejections();
   test_unsupported_layouts();
+  test_patch_info_recorded();
   printf("[nca_parse_test] all tests passed\n");
   return 0;
 }

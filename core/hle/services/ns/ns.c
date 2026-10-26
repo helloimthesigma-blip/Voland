@@ -361,8 +361,9 @@ static const Service_Command k_ncm_database_commands[] = {
 
 /* ---- aoc:u (add-on content) --------------------------------------- */
 
-/* No add-on content is installed: counts and lists are empty; the base
- * id is the application's (id & ~0xfff) + 0x1000, as the system derives it. */
+/* Add-on content is what ns_set_addons listed (the mods' DLC NCAs); the
+ * base id is the application's (id & ~0xfff) + 0x1000, as the system
+ * derives it. */
 static HLE_ServiceResult cmd_aoc_base_id(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                          IPC_Response *res) {
   (void)c;
@@ -386,12 +387,31 @@ static HLE_ServiceResult cmd_aoc_purchase_manager(HLE_Context *c, Service_Object
   return HLE_RESULT_SUCCESS;
 }
 
-static HLE_ServiceResult cmd_aoc_none(HLE_Context *c, Service_Object *self, const IPC_Request *req,
-                                      IPC_Response *res) {
+static HLE_ServiceResult cmd_aoc_count(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                       IPC_Response *res) {
   (void)c;
-  (void)self;
   (void)req;
-  (void)ipc_response_push_u32(res, 0);
+  (void)ipc_response_push_u32(res, state_of(self)->aoc_count);
+  return HLE_RESULT_SUCCESS;
+}
+
+/* {u32 offset, u32 count, u64 pid} -> buffer<u32 index> out, u32 written. */
+static HLE_ServiceResult cmd_aoc_list(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                      IPC_Response *res) {
+  const Ns_State *s = state_of(self);
+  uint32_t offset = 0, count = 0;
+  (void)ipc_request_read_u32(req, 0, &offset);
+  (void)ipc_request_read_u32(req, 4, &count);
+  const IPC_Buffer *buf = service_out_buffer(req, 0);
+  uint32_t written = 0;
+  if (buf && offset < s->aoc_count) {
+    const uint64_t room = buf->size / sizeof(uint32_t);
+    written = s->aoc_count - offset;
+    if (written > count) written = count;
+    if (written > room) written = (uint32_t)room;
+    (void)service_write_out(c, req, 0, s->aoc_indices + offset, (uint64_t)written * sizeof(uint32_t));
+  }
+  (void)ipc_response_push_u32(res, written);
   return HLE_RESULT_SUCCESS;
 }
 
@@ -405,8 +425,8 @@ static HLE_ServiceResult cmd_aoc_no_purchase(HLE_Context *c, Service_Object *sel
 }
 
 static const Service_Command k_aoc_commands[] = {
-    {2, cmd_aoc_none, "CountAddOnContent"},
-    {3, cmd_aoc_none, "ListAddOnContent"},
+    {2, cmd_aoc_count, "CountAddOnContent"},
+    {3, cmd_aoc_list, "ListAddOnContent"},
     {5, cmd_aoc_base_id, "GetAddOnContentBaseId"},
     {7, service_cmd_ok, "PrepareAddOnContent"},
     {8, cmd_aoc_event, "GetAddOnContentListChangedEvent"},
@@ -491,6 +511,11 @@ Error ns_register(Ns_State *s, SM_Registry *registry) {
     if (!error_is_ok(err)) return err;
   }
   return OK;
+}
+
+void ns_set_addons(Ns_State *s, const uint32_t *indices, uint32_t count) {
+  s->aoc_indices = indices;
+  s->aoc_count = count;
 }
 
 void ns_set_loaded_title(Ns_State *s, uint64_t title_id, const uint8_t *nacp, const uint8_t *icon, uint32_t icon_size) {

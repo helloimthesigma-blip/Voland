@@ -223,6 +223,10 @@ bool mods_normalize_path(const char *mod_name, const char *path, uint64_t title_
   if (ends_with_ci(file, file_len, ".ips") || ends_with_ci(file, file_len, ".pchtxt")) {
     return snprintf(out, out_size, "exefs/%s/%.*s", mod, (int)file_len, file) < (int)out_size;
   }
+  /* A pre-decrypted NCA (a game update): the loader checks its program id. */
+  if (ends_with_ci(file, file_len, ".nca")) {
+    return snprintf(out, out_size, MODS_NCA_PREFIX "%s/%.*s", mod, (int)file_len, file) < (int)out_size;
+  }
   return false;
 }
 

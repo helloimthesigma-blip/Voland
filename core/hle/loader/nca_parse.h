@@ -60,8 +60,12 @@
  *            NONE: the whole section is filesystem data
  *          All region/level offsets are relative to the section start.
  *   0x100  patch info                 0x40       nonzero = update NCA that
- *                                                needs its base; recorded,
- *                                                unsupported for now
+ *                                                needs its base: 0x100
+ *                                                indirect table
+ *                                                { offset u64, size u64,
+ *                                                bucket header 0x10 },
+ *                                                read via nca_indirect.h;
+ *                                                the rest is not read
  *   0x148  sparse info                0x30       nonzero = sparse layout;
  *                                                recorded, unsupported
  *   0x178  compression info           0x28       nonzero = compressed
@@ -158,7 +162,10 @@ typedef struct NCA_Section_Info {
 
   /* The filesystem payload (PFS0 or RomFS image) inside the section,
    * located from the hash-layer info. Bytes from NCA start. The pair is
-   * validated to lie within [offset, offset + size). */
+   * validated to lie within [offset, offset + size) - except for a patch
+   * section (has_patch_info), where data_offset - offset and data_size
+   * locate the payload in the PATCHED (virtual) view built by
+   * nca_indirect.h, which may be larger than the raw section. */
   uint64_t data_offset;
   uint64_t data_size;
 
@@ -174,6 +181,11 @@ typedef struct NCA_Section_Info {
   uint64_t compression_table_offset;
   uint64_t compression_table_size;
   uint8_t compression_bucket_header[16];
+  /* PatchInfo (nca_indirect.h): the indirect table, from the section
+   * start, and its bucket-tree header. */
+  uint64_t patch_indirect_offset;
+  uint64_t patch_indirect_size;
+  uint8_t patch_indirect_header[16];
 } NCA_Section_Info;
 
 typedef struct NCA_Header_Info {
@@ -232,7 +244,9 @@ const Byte_Source *nca_section_source(const NCA_File *nca, uint32_t index);
 
 /* The raw bytes of present section `index`'s data region (data_offset,
  * data_size) as a slice written into `out`: a compressed section's
- * stream, read through nca_compressed.h. */
+ * stream, read through nca_compressed.h. (A patch section's indirect
+ * storage instead takes the whole section, [offset, offset + size), for
+ * both base and patch - slice those directly.) */
 Error nca_section_raw(const NCA_File *nca, uint32_t index, Byte_Source_Slice *out);
 
 /* Confirms the section's payload has the structure magic its fs_type

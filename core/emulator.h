@@ -43,6 +43,7 @@
 #include "hle/loader/byte_source.h"
 #include "hle/loader/nca_parse.h"
 #include "hle/loader/nca_compressed.h"
+#include "hle/loader/nca_indirect.h"
 #include "hle/loader/mods.h"
 #include "hle/cheat_vm.h"
 
@@ -55,6 +56,15 @@
 #define EMULATOR_SERVICE_ARENA_BYTES ((size_t)20 * 1024 * 1024)
 #define EMULATOR_ARGV_BYTES 0x800u
 #define EMULATOR_DEFAULT_NRO_PATH "/switch/homebrew.nro"
+
+/* Add-on content (DLC) items a game can have installed; ids are the
+ * game's (id & ~EMULATOR_ADDON_ID_MASK) + EMULATOR_ADDON_BASE_OFFSET +
+ * index, index 1..EMULATOR_ADDON_ID_MASK. */
+#define EMULATOR_MAX_ADDONS 256u
+#define EMULATOR_ADDON_ID_MASK 0xfffull
+#define EMULATOR_ADDON_BASE_OFFSET 0x1000ull
+/* An update's program id is its base game's plus this. */
+#define EMULATOR_UPDATE_ID_OFFSET 0x800ull
 
 typedef struct Emulator
 {
@@ -130,12 +140,30 @@ typedef struct Emulator
    * (created at load, destroyed at unload). */
   Byte_Source_Slice romfs_raw;
   NCA_Compressed romfs_compressed;
+  /* A game update's RomFS (nca_indirect.h): the base and update sections'
+   * raw bytes, merged; its table lives in content_arena. */
+  Byte_Source_Slice update_base_raw;
+  Byte_Source_Slice update_patch_raw;
+  NCA_Indirect romfs_indirect;
   Arena content_arena;
   bool content_arena_live;
   /* Mods (§19, hle/loader/mods.h): the platform's file list, applied at
    * every load - LayeredFS over the RomFS, ExeFS replacements and patches.
    * The layered image's tables live in mods_arena (load to unload). */
   Mod_Set mods;
+  /* A game update among the mods' files (an "nca/" file whose program id
+   * is the base game's + EMULATOR_UPDATE_ID_OFFSET): its ExeFS replaces
+   * the base's, its RomFS patches the base's. NULL: none. */
+  const Byte_Source *update;
+  NCA_File update_nca;
+  /* Add-on content (DLC) among the mods' "nca/" files: data NCAs whose
+   * program id is in this game's add-on range. aoc:u lists them, fs
+   * serves their RomFS. */
+  NCA_File addon_nca[EMULATOR_MAX_ADDONS];
+  uint64_t addon_ids[EMULATOR_MAX_ADDONS];
+  uint32_t addon_indices[EMULATOR_MAX_ADDONS];
+  Byte_Source addon_romfs[EMULATOR_MAX_ADDONS];
+  uint32_t addon_count;
   Arena mods_arena;
   bool mods_arena_live;
   Layered_RomFS layered_romfs;

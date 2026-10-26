@@ -99,6 +99,11 @@ typedef struct Fs_State {
   uint64_t save_commits;         /* bumped on every successful commit snapshot */
   Fs_Bis bis[FS_MAX_BIS_PARTITIONS]; /* empty NAND partitions (§1.6: no NAND image) */
   const Byte_Source *romfs;      /* the program's RomFS bytes, or NULL */
+  /* Installed add-on content (DLC): data ids and their RomFS, served by
+   * OpenDataStorageByDataId. The Emulator's (fs_set_addons). */
+  const uint64_t *addon_ids;
+  const Byte_Source *addon_romfs;
+  uint32_t addon_count;
   Byte_Source system_data;       /* the last system data archive opened (FS_STORAGE_SYSTEM_DATA) */
   uint64_t program_id;           /* the running program's; fills attribute program id 0 */
   Fs_Open_File files[FS_MAX_OPEN_FILES];
@@ -120,6 +125,9 @@ void fs_init(Fs_State *state, Ramfs_Pool *pool);
 /* Per process: closes every open file/directory and sets the RomFS and
  * the program id that save attributes with program id 0 stand for. */
 void fs_reset_process(Fs_State *state, const Byte_Source *romfs, uint64_t program_id);
+/* The add-on content OpenDataStorageByDataId serves (`count` ids and
+ * RomFS sources, owned by the caller until replaced). */
+void fs_set_addons(Fs_State *state, const uint64_t *ids, const Byte_Source *romfs, uint32_t count);
 Error fs_register(Fs_State *state, SM_Registry *registry);
 /* The ramfs root of the save (space, SaveDataAttribute); created when
  * `create` and absent. 0 or an fs result (TargetNotFound, table full). */
