@@ -120,6 +120,8 @@ export interface DebugTarget {
   readonly height: number;
   readonly rgba: Uint8Array;
 }
+/* Debug readback skips small targets (probes, LUTs): later scenes have thousands. */
+const DEBUG_MIN_TEXELS = 256 * 256;
 const DEBUG_TEXEL_BYTES: Readonly<Record<string, number>> = {
   "rgba8unorm": 4, "rgba8unorm-srgb": 4, "bgra8unorm": 4, "rgb10a2unorm": 4, "rgba16float": 8, "rg11b10ufloat": 4, "r16float": 2,
 };
@@ -383,7 +385,7 @@ export class GpuExecutor {
     const out: DebugTarget[] = [];
     for (const [id, t] of this.textures) {
       const texel = DEBUG_TEXEL_BYTES[t.format];
-      if (!t.renderView || !texel) continue;
+      if (!t.renderView || !texel || t.width * t.height < DEBUG_MIN_TEXELS) continue;
       const bytesPerRow = Math.ceil((t.width * texel) / 256) * 256;
       const buffer = this.device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       const enc = this.device.createCommandEncoder();
@@ -1258,7 +1260,7 @@ export class GpuExecutor {
   }
 
   private clear(c: Clear): void {
-    if (this.traceFrame) console.log(`trace clear colour ${c.colorId} depth ${c.depthId} flags ${c.flags}`);
+    if (this.traceFrame) console.log(`trace clear colour ${c.colorId} depth ${c.depthId} flags ${c.flags} rect ${c.rect.join(",")} mask ${c.colorMask} value ${c.color.join(",")}`);
     if (c.flags & CLEAR_COLOR) this.clearColor(c);
     if (c.flags & (CLEAR_DEPTH | CLEAR_STENCIL)) this.clearDepth(c);
   }
