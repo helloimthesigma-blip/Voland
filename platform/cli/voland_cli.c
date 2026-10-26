@@ -18,6 +18,8 @@
  *       --sdmc DIR                   seed the emulated SD card with DIR's contents
  *       --mods DIR                   apply mods (§19): each subfolder of DIR is a mod (romfs/, exefs/, cheats/, *.ips)
  *       --dump-frame FILE            write the newest frame as a binary PPM (P6)
+ *                                    (VOLAND_DUMP_THREADS=1: every guest thread's state and
+ *                                    backtrace at the end of the run)
  *       --frame-skip N               rasterise and show one of every N + 1 frames
  *       --no-poll-coalescing         plain scheduler: pollers re-poll on their own schedule
  *       --cpu-speed PERCENT          virtual CPU clock, % of the Switch's 1.02 GHz (100-800)
@@ -1938,6 +1940,7 @@ static int run(int argc, char **argv) {
           k_status[status], (unsigned long long)slices, (unsigned long long)emu.scheduler.ticks,
           (unsigned long long)emu.hle.svc_call_count);
   if (width) fprintf(stderr, "voland-cli: frame %ux%u fnv1a64=%016llx\n", width, height, (unsigned long long)frame_hash);
+  if (getenv("VOLAND_DUMP_THREADS")) emulator_dump_threads(&emu, true); /* every thread at the end, with backtraces */
   if (emu.nvdrv.captured_submissions || emu.nvdrv.uncaptured_submissions)
     fprintf(stderr, "voland-cli: async GPU: %llu submissions carried their commands (%llu MB), %llu ran in place, %llu latency waits\n",
             (unsigned long long)emu.nvdrv.captured_submissions, (unsigned long long)(emu.nvdrv.captured_bytes >> 20),
