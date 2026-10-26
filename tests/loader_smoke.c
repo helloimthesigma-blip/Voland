@@ -20,6 +20,7 @@
 #include "common/arena.h"
 #include "emulator.h"
 #include "hle/loader/exefs.h"
+#include "hle/loader/nca_indirect.h"
 #include "hle/loader/nca_parse.h"
 #include "hle/loader/npdm.h"
 #include "hle/loader/nso.h"
@@ -37,6 +38,59 @@ static uint8_t k_rtld_text[0x200];
 static uint8_t k_main_text[0x1000 + 40];
 static const char k_main_data[] = "main-data-segment";
 static const char k_texture[] = "texture-bytes";
+
+/* The update NCA, read through the mod set (emulator_mods_bind). */
+static Error read_update(void *user, uint32_t file_id, uint64_t offset, void *out, uint64_t size) {
+  (void)file_id;
+  const Fixture_Buffer *b = (const Fixture_Buffer *)user;
+  if (offset > b->size || size > b->size - offset) return ERR(RESULT_IO_ERROR, "past the update");
+  memcpy(out, b->bytes + offset, (size_t)size);
+  return OK;
+}
+
+/* A game update as the console ships one: its own ExeFS, and a RomFS
+ * section whose indirect table takes the hash-layer prefix from the base
+ * section and everything after it from the update's own bytes. */
+#define UPDATE_HASH_LAYER 0x200u
+#define UPDATE_TABLE_ALIGN 0x4000u
+#define UPDATE_TABLE_NODES 2u
+static void build_update(const Fixture_Buffer *exefs_image, const Fixture_Buffer *romfs_image, Fixture_Buffer *out) {
+  Fixture_Buffer payload;
+  fixture_buffer_init(&payload);
+  fixture_append(&payload, romfs_image->bytes, romfs_image->size);
+  fixture_align(&payload, UPDATE_TABLE_ALIGN);
+  const uint64_t table_in_payload = payload.size;
+  const uint64_t virtual_end = UPDATE_HASH_LAYER + romfs_image->size;
+  const size_t table_at = fixture_append_zeros(&payload, UPDATE_TABLE_NODES * NCA_BUCKET_NODE_BYTES);
+  uint8_t *table = payload.bytes + table_at; /* after the append: it may move the buffer */
+  fixture_put_le32(table + 4, 1); /* L1: one entry set */
+  fixture_put_le64(table + 8, virtual_end);
+  uint8_t *set = table + NCA_BUCKET_NODE_BYTES;
+  fixture_put_le32(set + 4, 2);
+  fixture_put_le64(set + 8, virtual_end);
+  uint8_t *e = set + NCA_BUCKET_HEADER_BYTES;
+  fixture_put_le32(e + 16, NCA_INDIRECT_STORAGE_BASE); /* [0, hash layer) from the base */
+  e += NCA_INDIRECT_ENTRY_BYTES;
+  fixture_put_le64(e, UPDATE_HASH_LAYER);
+  fixture_put_le64(e + 8, UPDATE_HASH_LAYER);
+  fixture_put_le32(e + 16, NCA_INDIRECT_STORAGE_PATCH);
+
+  Fixture_NCA_Section sections[4];
+  memset(sections, 0, sizeof(sections));
+  sections[0] = (Fixture_NCA_Section){true, FIXTURE_NCA_FS_TYPE_PFS0, FIXTURE_NCA_HASH_SHA256, 3, exefs_image, 0x200};
+  sections[1] = (Fixture_NCA_Section){true, FIXTURE_NCA_FS_TYPE_ROMFS, FIXTURE_NCA_HASH_SHA256, 3, &payload,
+                                      UPDATE_HASH_LAYER};
+  fixture_build_nca(NCA_MAGIC_NCA3, 0, PROGRAM_ID + EMULATOR_UPDATE_ID_OFFSET, sections, out);
+  uint8_t *fs = out->bytes + FIXTURE_NCA_OFFSET_FS_HEADERS + FIXTURE_NCA_FS_HEADER_SIZE;
+  fixture_put_le64(fs + FIXTURE_NCA_FS_OFFSET_SHA256_REGIONS + 0x18, romfs_image->size); /* RomFS, not the table */
+  uint8_t *pi = fs + FIXTURE_NCA_FS_OFFSET_PATCH_INFO;
+  fixture_put_le64(pi, UPDATE_HASH_LAYER + table_in_payload);
+  fixture_put_le64(pi + 8, UPDATE_TABLE_NODES * NCA_BUCKET_NODE_BYTES);
+  memcpy(pi + 16, "BKTR", 4);
+  fixture_put_le32(pi + 20, 1); /* version */
+  fixture_put_le32(pi + 24, 2); /* entries */
+  fixture_buffer_free(&payload);
+}
 
 int main(void) {
   /* Build main.npdm, wrap it and two NSO stand-ins in a PFS0, put a RomFS
@@ -213,6 +267,39 @@ int main(void) {
   CHECK(err.code == RESULT_ENCRYPTED_INPUT);
   CHECK(strstr(err.message, "docs/DUMP.md") != NULL);
   CHECK(!emu.program_loaded);
+
+  /* --- A game update added as a mod: its RomFS is the merged one. --- */
+  memcpy(nca_image.bytes + FIXTURE_NCA_OFFSET_MAGIC, "NCA3", 4);
+  static const char k_newer[] = "newer-texture";
+  const Fixture_RomFS_Entry update_entries[] = {
+      {"/textures", true, NULL, 0},
+      {"/textures/sky.tex", false, k_newer, sizeof(k_newer) - 1},
+  };
+  Fixture_Buffer update_romfs, update_image;
+  fixture_build_romfs(update_entries, 2, 0, &update_romfs);
+  build_update(&exefs_image, &update_romfs, &update_image);
+  emulator_mods_bind(&emu, read_update, &update_image);
+  emulator_mods_clear(&emu);
+  CHECK_OK(emulator_mods_add(&emu, "nca/Update/update.nca", update_image.size, 0));
+  CHECK_OK(emulator_load_program(&emu, &file, 0));
+  CHECK(emu.update != NULL && emu.romfs != NULL);
+  arena_reset(&arena);
+  RomFS patched;
+  CHECK_OK(romfs_open(emu.romfs, &arena, &patched));
+  RomFS_File_Entry newer;
+  CHECK_OK(romfs_find_file(&patched, "/textures/sky.tex", &newer));
+  char newer_back[sizeof(k_newer)] = {0};
+  CHECK(newer.data_size == sizeof(k_newer) - 1);
+  CHECK_OK(romfs_read_file(&patched, &newer, 0, newer_back, newer.data_size));
+  CHECK(memcmp(newer_back, k_newer, sizeof(k_newer) - 1) == 0);
+  emulator_unload_program(&emu);
+  /* The update NCA alone is refused, saying how to use it. */
+  Byte_Source update_file = byte_source_from_memory(update_image.bytes, update_image.size);
+  err = emulator_load_program(&emu, &update_file, 0);
+  CHECK(err.code == RESULT_INVALID_ARGUMENT && strstr(err.message, "update") != NULL);
+  emulator_mods_clear(&emu);
+  fixture_buffer_free(&update_image);
+  fixture_buffer_free(&update_romfs);
   emulator_destroy(&emu);
 
   arena_destroy(&arena);

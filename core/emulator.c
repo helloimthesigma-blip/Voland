@@ -734,17 +734,18 @@ static void find_update(Emulator* emulator, uint64_t program_id) {
   for (uint32_t i = 0; i < mods->count; i++) {
     const Mod_File* f = &mods->files[i];
     if (f->path_length <= prefix || memcmp(f->path, MODS_NCA_PREFIX, prefix) != 0) continue;
-    NCA_File nca;
-    if (!error_is_ok(nca_open(&f->source, &nca))) {
+    /* Opened in place: an NCA_File's section slices point into it. */
+    NCA_File* nca = &emulator->update_nca;
+    if (!error_is_ok(nca_open(&f->source, nca))) {
       log_warn("mods: %s is not a decrypted NCA; skipped", f->path);
       continue;
     }
-    if (nca.header.content_type != NCA_CONTENT_PROGRAM || nca.header.program_id != program_id + EMULATOR_UPDATE_ID_OFFSET) {
+    if (nca->header.content_type != NCA_CONTENT_PROGRAM) continue; /* DLC: find_addons */
+    if (nca->header.program_id != program_id + EMULATOR_UPDATE_ID_OFFSET) {
       log_warn("mods: %s (program %016llx) is not this game's update; skipped", f->path,
-               (unsigned long long)nca.header.program_id);
+               (unsigned long long)nca->header.program_id);
       continue;
     }
-    emulator->update_nca = nca;
     emulator->update = &f->source;
     log_notice("mods: game update %s", f->path);
     return;
