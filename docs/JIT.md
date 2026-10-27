@@ -29,7 +29,7 @@ interpreter; it runs on top of it.
 - Cold code runs in the predecoded interpreter
   (`interp_predecode_run_block`). Each block start's execution count is
   kept in a small hashed counter table.
-- When a count reaches the hot threshold (4096 by default;
+- When a count reaches the hot threshold (256 by default;
   `jit_set_hot_threshold`, `voland-cli --jit-threshold N`), the region at
   that PC is compiled to one wasm function and installed.
 - Anything the compiler does not inline is executed by the interpreter,
@@ -394,8 +394,10 @@ The problem was slot conflicts, not capacity: four ways at the old size
 beat a direct-mapped cache four times larger. Virtual time and SVC counts
 were identical in all three runs.
 
-**Hot threshold.** 4096 interpreted executions before compiling (256
-until 2026-10-27). A threshold of 16 compiled about 2.5× the modules of
+**Hot threshold.** 256 interpreted executions before compiling (4096
+briefly on 2026-10-27, reverted: Super Smash Bros. Ultimate crashed at its
+title in 2 of 2 browser runs about 8 minutes in, a null item from a queue
+in subsdk0, against 0 of 1 at 256; under investigation). A threshold of 16 compiled about 2.5× the modules of
 256 for the same guest speed, and module compilation is the JIT's largest
 overhead while games load. Tears of the Kingdom on three cores (Node, the
 same wall time): 4096 got 19% further than 256 with 59% fewer modules and
