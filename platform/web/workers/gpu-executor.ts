@@ -366,6 +366,7 @@ export class GpuExecutor {
   private vertexBytes = 0; /* ... of them vertices and indices */
   private dataBytes = 0; /* ... draw data */
   private poolBytes = 0; /* ... pool chunks */
+  private shaderBytes = 0; /* WGSL text of the modules created */
   private submits = 0;
   /* Draws' constant buffers and global memory (stream version 9). */
   private readonly pool: GPUBuffer;
@@ -818,6 +819,7 @@ export class GpuExecutor {
     if (!module) {
       module = this.device.createShaderModule({ code });
       this.modulesByHash.set(hash, module);
+      this.shaderBytes += code.length;
     }
     this.shaders.set(id, module);
     this.shaderHashes.set(id, hash);
@@ -1497,7 +1499,7 @@ export class GpuExecutor {
     const mb = (n: number): string => (n / (1024 * 1024)).toFixed(0);
     this.host.log("info", `GPU memory: render targets ${mb(render)} MB (${renderCount}), textures ${mb(sampled)} MB ` +
       `(${sampledCount}), storage buffers ${mb(buffers)} MB (${this.buffers.size}), shadows ${this.shadows.size}, ` +
-      `${this.pipelines.size} pipelines, ${this.modulesByHash.size} shader modules; in the last ${MEMORY_REPORT_PRESENTS} ` +
+      `${this.pipelines.size} pipelines, ${this.modulesByHash.size} shader modules (${mb(this.shaderBytes)} MB of WGSL); in the last ${MEMORY_REPORT_PRESENTS} ` +
       `presents ${mb(this.uploadedBytes)} MB texture uploads, ${mb(this.bufferBytes)} MB buffer uploads (vertices ${mb(this.vertexBytes)}, data ${mb(this.dataBytes)}, ` +
       `pool ${mb(this.poolBytes)}), ${this.submits} ` +
       `submits; textures by format: ` +

@@ -136,6 +136,7 @@ function parseArgs(argv) {
     else if (a === "--url-params") opts.urlParams = next();
     else if (a === "--out-dir") opts.outDir = next();
     else if (a === "--shot") opts.shot = next();
+    else if (a === "--memory-dump") opts.memoryDump = next();
     else if (a === "--shots-every") { opts.shotsEvery = Number(next()); opts.shotsDir = next(); }
     else if (a === "--dump-targets-at") { opts.dumpTargetsAt = Number(next()); opts.dumpTargetsDir = next(); }
     else if (a === "--drive") opts.drive = next();
@@ -672,6 +673,28 @@ async function main() {
       fpsSamples.push(await page.evaluate(() => window.__VOLAND_STATS__?.fps ?? 0));
     }
     const end = await sample();
+    /* --memory-dump FILE: a detailed memory-infra trace of every process
+     * (which allocators hold the GPU process's memory, for instance). */
+    if (opts.memoryDump && typeof browser.newBrowserCDPSession === "function") {
+      const cdp = await browser.newBrowserCDPSession();
+      const complete = new Promise((resolve) => cdp.once("Tracing.tracingComplete", resolve));
+      await cdp.send("Tracing.start", {
+        transferMode: "ReturnAsStream",
+        traceConfig: { includedCategories: ["disabled-by-default-memory-infra"], memoryDumpConfig: { triggers: [] } },
+      });
+      await cdp.send("Tracing.requestMemoryDump", { deterministic: true, levelOfDetail: "detailed" });
+      await cdp.send("Tracing.end");
+      const { stream } = await complete;
+      const parts = [];
+      for (;;) {
+        const chunk = await cdp.send("IO.read", { handle: stream });
+        parts.push(chunk.base64Encoded ? Buffer.from(chunk.data, "base64").toString() : chunk.data);
+        if (chunk.eof) break;
+      }
+      await cdp.send("IO.close", { handle: stream });
+      writeFileSync(opts.memoryDump, parts.join(""));
+      console.log(`memory dump: ${opts.memoryDump}`);
+    }
     if (opts.shot) {
       const box = await page.getByTestId("screen").boundingBox();
       if (box) await page.screenshot({ clip: box, path: opts.shot, timeout: SHOT_TIMEOUT_MS });
