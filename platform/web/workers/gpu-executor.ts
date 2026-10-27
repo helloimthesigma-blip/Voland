@@ -356,7 +356,9 @@ export class GpuExecutor {
   private readonly objectIds = new WeakMap<object, number>();
   private nextObjectId = 1;
   private readonly warned = new Set<string>();
-  private uploadedBytes = 0; /* queue writes since the last memory report */
+  private uploadedBytes = 0; /* texture queue writes since the last memory report */
+  private bufferBytes = 0; /* buffer queue writes since the last memory report */
+  private submits = 0;
 
   constructor(private readonly device: GPUDevice, private readonly host: ExecutorHost) {
     for (let i = 0; i < BUFFER_SETS; i++) {
@@ -434,6 +436,8 @@ export class GpuExecutor {
     const t0 = performance.now();
     if (this.vertexUsed) this.device.queue.writeBuffer(this.vertexBuffer, 0, this.vertexStaging, 0, this.vertexUsed);
     if (this.dataUsed) this.device.queue.writeBuffer(this.dataBuffer, 0, this.dataStaging, 0, this.dataUsed);
+    this.bufferBytes += this.vertexUsed + this.dataUsed;
+    this.submits++;
     const t1 = performance.now();
     const cb = this.encoder.finish();
     const t2 = performance.now();
@@ -611,6 +615,7 @@ export class GpuExecutor {
     }
     if (this.touchedBuffers.has(b)) this.flush(); /* earlier commands use the old contents */
     this.device.queue.writeBuffer(b, offset, payload, BUFFER_WRITE_BYTES, bytes);
+    this.bufferBytes += bytes;
   }
 
   private compute(v: DataView, payload: Uint8Array): void {
@@ -1462,9 +1467,12 @@ export class GpuExecutor {
     const mb = (n: number): string => (n / (1024 * 1024)).toFixed(0);
     this.host.log("info", `GPU memory: render targets ${mb(render)} MB (${renderCount}), textures ${mb(sampled)} MB ` +
       `(${sampledCount}), storage buffers ${mb(buffers)} MB (${this.buffers.size}), shadows ${this.shadows.size}, ` +
-      `${this.pipelines.size} pipelines, ${this.modulesByHash.size} shader modules, ${mb(this.uploadedBytes)} MB texture ` +
-      `uploads in the last ${MEMORY_REPORT_PRESENTS} presents; textures by format: ` +
+      `${this.pipelines.size} pipelines, ${this.modulesByHash.size} shader modules; in the last ${MEMORY_REPORT_PRESENTS} ` +
+      `presents ${mb(this.uploadedBytes)} MB texture uploads, ${mb(this.bufferBytes)} MB buffer uploads, ${this.submits} ` +
+      `submits; textures by format: ` +
       [...byFormat].sort((a, b) => b[1] - a[1]).map(([f, n]) => `${f} ${mb(n)} MB`).join(", "));
     this.uploadedBytes = 0;
+    this.bufferBytes = 0;
+    this.submits = 0;
   }
 }
