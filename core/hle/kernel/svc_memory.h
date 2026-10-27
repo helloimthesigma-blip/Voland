@@ -55,16 +55,16 @@
  * MemoryAttribute." Voland's version:
  *   - dst must lie entirely in address_space.stack, every page currently
  *     UNMAPPED.
- *   - src must lie entirely in address_space.heap, every page currently
- *     mapped and host-contiguous (vmm_guest_to_host both validates this
- *     and hands back the host pointer this handler recovers src's
- *     guest_pa from - see svc_memory.c; vmm has no "what guest_pa backs
- *     this gva" accessor, and adding one just for this one caller was
- *     rejected in favor of reusing vmm_guest_to_host + layout_get()
- *     ->guest_ram_base, which is public vmm surface already).
- *   - src is vmm_reprotect()'d to VMM_PERM_NONE (still mapped, no longer
- *     accessible - matches "reprotected to Perm_None"); dst is vmm_map()'d
- *     onto the same guest_pa with VMM_PERM_RW (the heap's own permission).
+ *   - src must lie entirely in address_space.heap (or the alias region,
+ *     or a module's writable data), every page currently mapped RW. It
+ *     need not be one physical run: heap grown and shrunk over time is
+ *     scattered, and each page's guest_pa is recovered on its own
+ *     (vmm_guest_to_host over one page + layout_get()->guest_ram_base;
+ *     vmm has no "what guest_pa backs this gva" accessor).
+ *   - dst is vmm_map()'d page by page onto src's guest_pas with
+ *     VMM_PERM_RW (the heap's own permission); then src is
+ *     vmm_reprotect()'d to VMM_PERM_NONE (still mapped, no longer
+ *     accessible - matches "reprotected to Perm_None").
  *   - the pair is recorded in process->heap_borrows so UnmapMemory can
  *     find it and QueryMemory can answer for either half.
  *   - KNOWN SIMPLIFICATION, flagged for review rather than silently

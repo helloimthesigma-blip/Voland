@@ -340,6 +340,8 @@ static bool range_is_rw(VMM_Context *vmm, uint64_t gva, uint64_t size) {
   return true;
 }
 
+static bool alias_pages(VMM_Context *vmm, uint64_t dst, uint64_t src, uint64_t size, uint32_t perms);
+
 void hle_svc_map_memory(HLE_Context *context, CPU_State *cpu_state) {
   CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
   Process *process = context->process;
@@ -362,6 +364,8 @@ void hle_svc_map_memory(HLE_Context *context, CPU_State *cpu_state) {
                       address_region_contains(&as->alias, src, size) ||
                       (address_region_contains(&as->code, src, size) && range_is_rw(vmm, src, size));
   if (!address_region_contains(&as->stack, dst, size) || !src_ok) {
+    log_warn("[svc] MapMemory(%llx, %llx, %llx): outside the stack/source regions", (unsigned long long)dst,
+             (unsigned long long)src, (unsigned long long)size);
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
     return;
   }
@@ -373,36 +377,35 @@ void hle_svc_map_memory(HLE_Context *context, CPU_State *cpu_state) {
   VMM_Region_Info dst_info;
   Error err = vmm_query(vmm, dst, &dst_info);
   if (!error_is_ok(err) || dst_info.is_mapped || !vmm_run_covers(&dst_info, dst, size)) {
+    log_warn("[svc] MapMemory(%llx, %llx, %llx): destination in use", (unsigned long long)dst, (unsigned long long)src,
+             (unsigned long long)size);
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_STATE;
     return;
   }
 
-  /* Recovers src's backing guest_pa via the host pointer vmm hands back
-   * for a validated, host-contiguous range (svc_memory.h's ABI note: vmm
-   * has no direct gva->guest_pa accessor, and this reuses vmm_guest_to_host
-   * plus layout_get() rather than adding one). The pointer itself is never
-   * kept past this call - only the derived guest_pa integer is - matching
-   * vmm.h's borrow-scope contract. Scoped tightly around just this call
-   * (not the whole handler, and not by hle_on_svc - see hle.c). */
-  vmm_borrow_scope_begin(vmm);
-  void *host_ptr = NULL;
-  err = vmm_guest_to_host(vmm, src, size, VMM_PERM_R, &host_ptr);
-  vmm_borrow_scope_end(vmm);
-  if (!error_is_ok(err)) {
+  /* Horizon wants the source mapped RW (KMemoryState Normal, no
+   * attributes): pages already lent to another MapMemory are not. */
+  if (!range_is_rw(vmm, src, size)) {
+    log_warn("[svc] MapMemory(%llx, %llx, %llx): source not mapped RW", (unsigned long long)dst,
+             (unsigned long long)src, (unsigned long long)size);
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_STATE;
     return;
   }
-  const uint64_t guest_pa = (uint64_t)(uintptr_t)host_ptr - layout_get()->guest_ram_base;
 
-  err = vmm_reprotect(vmm, src, size, VMM_PERM_NONE);
-  SWITCH_ASSERT_ALWAYS(error_is_ok(err), "hle_svc_map_memory: reprotect of validated src failed");
-  err = vmm_map(vmm, dst, guest_pa, size, VMM_PERM_RW);
-  if (!error_is_ok(err)) {
-    const Error undo = vmm_reprotect(vmm, src, size, VMM_PERM_RW);
-    SWITCH_ASSERT_ALWAYS(error_is_ok(undo), "hle_svc_map_memory: rollback reprotect failed");
+  /* Aliased page by page: heap grown and shrunk over time is not one
+   * physical run, and a thread stack straddling two used to fail here
+   * (Smash Bros.' alias-stack check then aborts the game). The alias is
+   * made before the source is hidden, which page_pa_of needs readable. */
+  if (!alias_pages(vmm, dst, src, size, VMM_PERM_RW)) {
+    for (uint64_t off = 0; off < size; off += VMM_PAGE_SIZE) { /* the pages it got to */
+      VMM_Region_Info info;
+      if (error_is_ok(vmm_query(vmm, dst + off, &info)) && info.is_mapped) (void)vmm_unmap(vmm, dst + off, VMM_PAGE_SIZE);
+    }
     regs->x[0] = HLE_RESULT_OUT_OF_MEMORY;
     return;
   }
+  err = vmm_reprotect(vmm, src, size, VMM_PERM_NONE);
+  SWITCH_ASSERT_ALWAYS(error_is_ok(err), "hle_svc_map_memory: reprotect of validated src failed");
 
   process->heap_borrows[process->heap_borrow_count++] =
       (Memory_Borrow){.dst_base = dst, .src_base = src, .size = size};
@@ -432,6 +435,8 @@ void hle_svc_unmap_memory(HLE_Context *context, CPU_State *cpu_state) {
      * real-world caller in the reference SDK) always unmaps the exact
      * triple threadCreate mapped, and no title is known to need more.
      * See svc_memory.h. */
+    log_warn("[svc] UnmapMemory(%llx, %llx, %llx): no such MapMemory", (unsigned long long)dst,
+             (unsigned long long)src, (unsigned long long)size);
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_STATE;
     return;
   }

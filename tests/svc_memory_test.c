@@ -409,6 +409,41 @@ int main(void) {
     set_svc_args3(regs, base + 4 * PAGE, 2 * PAGE, 0);
     hle_on_svc(emu.cpu_state, 0x2d, &emu.hle);
     CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+
+    /* MapMemory from a source that is not one physical run (two pages
+     * committed apart, an unrelated allocation between them): aliased
+     * page by page, as a thread stack in fragmented heap needs. */
+    set_svc_args3(regs, base, PAGE, 0);
+    hle_on_svc(emu.cpu_state, 0x2c, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    uint64_t between_pa = 0;
+    CHECK_OK(page_allocator_allocate(&emu.pages, 1, &between_pa));
+    set_svc_args3(regs, base + PAGE, PAGE, 0);
+    hle_on_svc(emu.cpu_state, 0x2c, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    CHECK_OK(vmm_write32(emu.vmm, base, 0x1111u));
+    CHECK_OK(vmm_write32(emu.vmm, base + PAGE, 0x2222u));
+    const uint64_t split_dst = dst + 16u * PAGE;
+    set_svc_args3(regs, split_dst, base, 2 * PAGE);
+    hle_on_svc(emu.cpu_state, 0x04, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    uint32_t through[2] = {0, 0};
+    CHECK_OK(vmm_read32(emu.vmm, split_dst, &through[0]));
+    CHECK_OK(vmm_read32(emu.vmm, split_dst + PAGE, &through[1]));
+    CHECK(through[0] == 0x1111u && through[1] == 0x2222u);
+    /* A source already lent out is refused. */
+    set_svc_args3(regs, split_dst + 4u * PAGE, base, 2 * PAGE);
+    hle_on_svc(emu.cpu_state, 0x04, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_INVALID_MEMORY_STATE);
+    set_svc_args3(regs, split_dst, base, 2 * PAGE);
+    hle_on_svc(emu.cpu_state, 0x05, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    CHECK_OK(vmm_read32(emu.vmm, base + PAGE, &through[1]));
+    CHECK(through[1] == 0x2222u);
+    set_svc_args3(regs, base, 2 * PAGE, 0);
+    hle_on_svc(emu.cpu_state, 0x2d, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    CHECK_OK(page_allocator_free(&emu.pages, between_pa, 1));
   }
 
   /* A module's writable pages are CodeMutable (nn::ro's module walk
