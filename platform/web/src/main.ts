@@ -372,6 +372,17 @@ async function boot(): Promise<BootResult | null> {
         if (placement === "free" || placement === "strict") {
           cpuWorker.postMessage({ type: "set-free-placement", on: placement === "free" } satisfies MainToCPUMessage);
         }
+        /* ?env=NAME=VALUE;NAME=VALUE: the core's debug environment
+         * variables (docs/PARALLEL.md tools), set before a game loads. */
+        for (const pair of (new URLSearchParams(location.search).get("env") ?? "").split(";")) {
+          const at = pair.indexOf("=");
+          if (at > 0) cpuWorker.postMessage({ type: "set-env", name: pair.slice(0, at), value: pair.slice(at + 1) } satisfies MainToCPUMessage);
+        }
+        /* ?aslr=0: modules at fixed addresses, as voland-cli loads them -
+         * for the PCs debug variables name. */
+        if (new URLSearchParams(location.search).get("aslr") === "0") {
+          cpuWorker.postMessage({ type: "set-aslr", on: false } satisfies MainToCPUMessage);
+        }
         /* ?polls=0: the plain scheduler (no poll coalescing), for A/B runs. */
         if (new URLSearchParams(location.search).get("polls") === "0") {
           cpuWorker.postMessage({ type: "set-poll-coalescing", on: false } satisfies MainToCPUMessage);

@@ -1,3 +1,4 @@
+#define _POSIX_C_SOURCE 200809L /* setenv under -std=c11 */
 /**
  * Thin Emscripten entry point. Exposes the emulator public API as exported
  * C functions so the CPU worker can call into the core over ccall/cwrap.
@@ -17,6 +18,7 @@
 #include "hle/kernel/parallel.h"
 #include "hle/loader/byte_source.h"
 #if defined(SWITCH_CPU_BACKEND_JIT)
+#include "cpu/backends/interpreter/interpreter.h"
 #include "cpu/backends/jit/jit.h"
 #endif
 
@@ -67,6 +69,7 @@ EXPORT uint64_t emulator_distinct_problems_ffi(void);
 EXPORT uint64_t emulator_take_log_events_ffi(void);
 EXPORT uint64_t emulator_render_stats_ffi(void);
 EXPORT void emulator_set_program_path_ffi(uint64_t path);
+EXPORT void emulator_setenv_ffi(uint64_t name, uint64_t value);
 EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
 EXPORT void emulator_set_frame_skip_ffi(uint32_t frames);
 EXPORT void emulator_set_gpu_mode_ffi(uint32_t on);
@@ -509,6 +512,19 @@ EXPORT uint64_t emulator_crash_pc_ffi(void)
 EXPORT void emulator_set_program_path_ffi(uint64_t path)
 {
   if (g_initialised && path) emulator_set_program_path(&g_emulator, (const char *)(uintptr_t)path);
+}
+
+/* Diagnostics (?env=NAME=VALUE;...): an environment variable the core's
+ * debug switches read with getenv (VOLAND_PC_LOG, JIT_NO_TLB, ...), set
+ * before the program loads - most are read once, on first use. */
+EXPORT void emulator_setenv_ffi(uint64_t name, uint64_t value)
+{
+  if (!name || !value) return;
+  const char *key = (const char *)(uintptr_t)name;
+  const int failed = setenv(key, (const char *)(uintptr_t)value, 1);
+  const char *now = getenv(key);
+  log_info("[env] %s=%s%s", key, now ? now : "(unset)", failed ? " (setenv failed)" : "");
+  interp_pc_log_reload();
 }
 
 /* Wall-clock time for the next program (time service, §12). */

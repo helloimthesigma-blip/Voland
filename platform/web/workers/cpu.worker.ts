@@ -561,7 +561,11 @@ async function loadCoreModule(memory: WebAssembly.Memory): Promise<SwitchCoreExp
   return factory({ wasmMemory: memory, volandReadGameFile: readGameFile, volandReadModFile: readModFile, volandGuestOutput: guestOutput });
 }
 
+/** ?aslr=0 (set-aslr): load programs without address-space randomisation. */
+let aslr = true;
+
 function randomAslrSeed(): bigint {
+  if (!aslr) return 0n;
   const words = crypto.getRandomValues(new BigUint64Array(1));
   const seed = words[0] ?? 1n;
   return seed === 0n ? 1n : seed; // 0 disables ASLR (address_space.h)
@@ -1355,6 +1359,17 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   if (msg.type === "set-free-running") {
     freeFromSlice = msg.fromSlice;
     log("info", freeFromSlice > 0 ? `free-running guest cores from slice ${freeFromSlice}` : "free-running guest cores off");
+    return;
+  }
+
+  if (msg.type === "set-aslr") {
+    aslr = msg.on;
+    return;
+  }
+
+  if (msg.type === "set-env") {
+    withCString(msg.name, (name) => withCString(msg.value, (value) => core?._emulator_setenv_ffi(name, value)));
+    log("info", `env ${msg.name}=${msg.value}`);
     return;
   }
 

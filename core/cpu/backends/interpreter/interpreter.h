@@ -35,5 +35,8 @@ void interp_set_read_watch(uint64_t host, uint64_t bytes, Interp_Read_Hook hook,
  * there, to see who was waiting and who was runnable at that moment. */
 typedef void (*Interp_Pc_Hook)(void);
 void interp_set_pc_log_dump(Interp_Pc_Hook hook);
+/* Re-reads the VOLAND_PC_LOG* variables on next use (set after start-up:
+ * the web build's ?env=). */
+void interp_pc_log_reload(void);
 
 #endif /* SWITCH_CPU_BACKENDS_INTERPRETER_INTERPRETER_H */

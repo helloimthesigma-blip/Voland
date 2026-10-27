@@ -316,9 +316,10 @@ static void pc_log_watch_hook(uint64_t pc, uint64_t lr, uint64_t address, uint32
            (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)address, size, (unsigned long long)v,
            (unsigned long long)(g_watch_state ? g_watch_state->tpidrro_el0 : 0u));
 }
+static int g_pc_log_watch = -1, g_pc_log_dump_parsed = -1;
 bool interp_pc_log_watching(void) {
-  static int offset_set = -1;
-  if (offset_set < 0) offset_set = getenv("VOLAND_PC_LOG_WATCH") != NULL;
+  int offset_set = g_pc_log_watch;
+  if (offset_set < 0) g_pc_log_watch = offset_set = getenv("VOLAND_PC_LOG_WATCH") != NULL;
   return offset_set != 0;
 }
 static void pc_log_arm(const Interp_State *s, uint64_t item) {
@@ -330,13 +331,17 @@ static void pc_log_arm(const Interp_State *s, uint64_t item) {
 }
 static Interp_Pc_Hook g_pc_log_dump;
 void interp_set_pc_log_dump(Interp_Pc_Hook hook) { g_pc_log_dump = hook; }
+void interp_pc_log_reload(void) {
+  g_pc_log = -1;
+  g_pc_log_watch = -1;
+  g_pc_log_dump_parsed = -1;
+}
 static void pc_log_dump(uint64_t pc) {
-  static int parsed = -1;
   static uint64_t dump_pc;
-  if (parsed < 0) {
+  if (g_pc_log_dump_parsed < 0) {
     const char *spec = getenv("VOLAND_PC_LOG_DUMP");
     dump_pc = spec ? strtoull(spec, NULL, 0) : 0;
-    parsed = 1;
+    g_pc_log_dump_parsed = 1;
   }
   if (g_pc_log_dump && dump_pc && pc == dump_pc) g_pc_log_dump();
 }

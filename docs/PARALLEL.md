@@ -421,7 +421,9 @@ also watches the 8 bytes at `[x1]+OFF` - loads and stores with pc, lr and
 thread; the JIT's stores take the helper path while it is set, so
 compiled code is watched too) and `VOLAND_PC_LOG_DUMP=PC` (one of the
 logged PCs: voland-cli dumps every thread's state there - on core, held,
-waiting and on what, last core);
+waiting and on what, last core). In the browser these variables come from
+`?env=NAME=VALUE;NAME=VALUE` (set before the game loads), with `?aslr=0`
+so modules sit where voland-cli puts them and the PCs mean the same;
 `VOLAND_TRACE_CALLS` with `VOLAND_TRACE_MATCH_X1=OFF:VALUE` and
 `VOLAND_TRACE_DUMP_MEM=GVA:BYTES:FILE` (memory at a matching call).
 

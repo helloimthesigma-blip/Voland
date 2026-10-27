@@ -45,6 +45,7 @@ export interface SwitchCoreExports {
   /* Homebrew and system setup (v3.41). Strings and bytes live in memory
    * from `_malloc`; the shared font's allocation is never freed. */
   readonly _emulator_set_program_path_ffi: (path: bigint) => void;
+  readonly _emulator_setenv_ffi: (name: bigint, value: bigint) => void;
   readonly _emulator_set_rtc_ffi:          (unixSeconds: bigint) => void;
   readonly _emulator_set_frame_skip_ffi:   (frames: number) => void;
   readonly _emulator_recent_problems_ffi: () => bigint;
