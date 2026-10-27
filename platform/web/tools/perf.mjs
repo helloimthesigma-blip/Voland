@@ -382,6 +382,7 @@ async function main() {
         console.log(`  console: ${m.text()}`);
       /* Parallel guest threads' periodic timing report (docs/PARALLEL.md "Measuring"). */
       if (/\[parallel\] /.test(m.text())) console.log(`  ${m.text().replace(/^\[INFO \] /, "")}`);
+      if (/^\[WARN \] \[threads\]/.test(m.text())) console.log(`  ${m.text()}`);
       if (opts.logMatch && new RegExp(opts.logMatch).test(m.text())) console.log(`  log: ${m.text()}`);
     });
     /* Slices are the recipes' clock, and free-running cores (the page's
@@ -665,10 +666,17 @@ async function main() {
                 `(${(warm.perf.slices / warmupWallS).toFixed(0)} slices/s)`);
 
     const fpsSamples = [];
+    let dumpedAfterCrash = false;
     for (let t = 0; t < opts.seconds; t++) {
       for (let q = 0; q < 4; q++) {
         await sleep(250);
         if (opts.presses.length) await servicePresses(progress(await sample()));
+      }
+      /* A crash while measuring: where every thread stopped, with frames
+       * (logged as [threads] lines), once. */
+      if (!dumpedAfterCrash && (await page.getByTestId("run-state").getAttribute("data-state")) === "crashed") {
+        dumpedAfterCrash = true;
+        await page.evaluate(() => window.__VOLAND_DEBUG__?.dumpThreads(true));
       }
       fpsSamples.push(await page.evaluate(() => window.__VOLAND_STATS__?.fps ?? 0));
     }
