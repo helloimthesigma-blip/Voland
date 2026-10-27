@@ -408,7 +408,9 @@ What the deterministic run showed (tools below):
   the pack's parse), or shared state outside the watched ranges is.
 
 Tools: `VOLAND_RUN_TRACE=FROM:TO` (every serial run: thread, start,
-cycles, exit, pc); `VOLAND_FS_HASH=1` (FNV-1a of every IStorage read);
+cycles, exit, pc); `VOLAND_READ_DELAY_US=N` (voland-cli: each game-file
+read takes N us of host time, like an uncached browser read - 4 Node
+Tears of the Kingdom runs at 3000 did not crash); `VOLAND_FS_HASH=1` (FNV-1a of every IStorage read);
 `VOLAND_WATCH_GUEST=GVA:BYTES` with `VOLAND_WATCH_GUEST_FROM=TICKS` and
 `VOLAND_WATCH_GUEST_SKIP=HANDLE` (guest loads and stores there, with thread
 and tick); `VOLAND_REG_WATCH=LO:HI[:TLS]` with `VOLAND_NO_PREDECODE=1`

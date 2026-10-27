@@ -330,6 +330,15 @@ static void load_mods(Emulator *emu, const char *dir) {
 
 static Error file_read(void *user, uint64_t offset, void *out, uint64_t size) {
   FILE *file = (FILE *)user;
+  /* VOLAND_READ_DELAY_US=N (diagnostics): each read takes N us of host
+   * time, as a browser read of an uncached chunk does - other guest cores
+   * run on meanwhile. */
+  static long delay_us = -1;
+  if (delay_us < 0) delay_us = getenv("VOLAND_READ_DELAY_US") ? atol(getenv("VOLAND_READ_DELAY_US")) : 0;
+  if (delay_us > 0) {
+    const struct timespec pause = {delay_us / 1000000L, (delay_us % 1000000L) * 1000L};
+    nanosleep(&pause, NULL);
+  }
   if (fseek(file, (long)offset, SEEK_SET) != 0) return ERR(RESULT_IO_ERROR, "seek failed");
   if (fread(out, 1, (size_t)size, file) != (size_t)size) return ERR(RESULT_IO_ERROR, "short read");
   return OK;
