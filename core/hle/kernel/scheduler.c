@@ -292,6 +292,9 @@ bool scheduler_runs_on(const Scheduler *sched, const Sched_Thread *t, uint32_t c
 
 static uint32_t rotate_cores(void);
 
+#define SCHEDULER_CRASH_REGS 31u          /* x0-x30, then sp in the last line's fourth column */
+#define SCHEDULER_CRASH_REGS_PER_LINE 4u
+
 static bool hold_core(const Scheduler *sched) {
   static int parsed;
   static bool on;
@@ -522,6 +525,12 @@ Scheduler_Status scheduler_finish_run(Scheduler *sched, const CPU_Backend *backe
               (unsigned long long)thread->thread_id, exit_reason == CPU_EXIT_FAULT ? "fault" : "breakpoint",
               (unsigned long long)backend->get_pc(thread->thread.cpu_state),
               (unsigned long long)backend->get_fault_address(thread->thread.cpu_state));
+    /* Its registers too: the browser shows error lines, not the CLI's dump. */
+    const CPU_Register_File *regs = backend->get_register_file(thread->thread.cpu_state);
+    for (uint32_t r = 0; r < SCHEDULER_CRASH_REGS; r += SCHEDULER_CRASH_REGS_PER_LINE)
+      log_error("[scheduler]   x%u %llx %llx %llx %llx", r, (unsigned long long)regs->x[r],
+                (unsigned long long)regs->x[r + 1u], (unsigned long long)regs->x[r + 2u],
+                (unsigned long long)(r + 3u < SCHEDULER_CRASH_REGS ? regs->x[r + 3u] : regs->sp));
     return SCHEDULER_CRASHED;
   }
   if (sched->process_crashed) return SCHEDULER_CRASHED;
