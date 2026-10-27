@@ -1407,6 +1407,8 @@ static int run(int argc, char **argv) {
       cpu_percent = (uint32_t)strtoul(argv[++i], NULL, 0);
     } else if (!strcmp(argv[i], "--jit-threshold") && has_value) { /* interpreted runs before compiling */
       jit_set_hot_threshold((uint32_t)strtoul(argv[++i], NULL, 0));
+    } else if (!strcmp(argv[i], "--jit-max-live") && has_value) { /* installed regions per host thread */
+      jit_set_max_live_regions((uint32_t)strtoul(argv[++i], NULL, 0));
     } else if (!strcmp(argv[i], "--jit-no-calls")) {
       jit_set_span_calls(false);
     } else if (!strcmp(argv[i], "--jit-fallbacks")) {

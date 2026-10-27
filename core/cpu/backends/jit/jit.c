@@ -57,8 +57,11 @@
  * machine code until it is removed; TOTK compiles ~70k distinct regions
  * per core in its first minutes and the browser tab died at ~200k live
  * ones. Over the cap, regions not entered since the hand last passed are
- * removed until 7/8 of it remain. */
-#define JIT_MAX_LIVE_REGIONS 32768u
+ * removed until 7/8 of it remain. Each live region costs ~35 KB of engine
+ * memory per host thread: TOTK on 3 cores (Node, 400k slices) peaked at
+ * 6.3 GB with 32768, 5.4 GB with 24576 (+8% compiles, same speed) and
+ * 4.4 GB with 16384, which thrashes (6x the compiles). */
+#define JIT_MAX_LIVE_REGIONS 24576u
 #define JIT_MODULE_BYTES (512u * 1024u)
 #define JIT_RECENT_BLOCKS 64u
 
@@ -201,6 +204,9 @@ static uint64_t g_compiled_somewhere[JIT_HIT_COUNTERS]; /* the exact PC, 0 = non
 static uint16_t g_shared_hits[JIT_HIT_COUNTERS];
 
 void jit_set_hot_threshold(uint32_t executions) { g_hot_threshold = executions ? executions : 1u; }
+
+static uint32_t g_max_live = JIT_MAX_LIVE_REGIONS;
+void jit_set_max_live_regions(uint32_t regions) { g_max_live = regions ? regions : JIT_MAX_LIVE_REGIONS; }
 
 static bool g_hot_profile;
 static bool g_span_calls = true;
@@ -725,8 +731,8 @@ static uint32_t g_next_pending_id = 1;
  * count is back under the cap (the cache's own sets only evict on a
  * conflict, so nothing else bounds it). */
 static void trim_live(Jit_Thread *t) {
-  if (t->live <= JIT_MAX_LIVE_REGIONS) return;
-  const uint32_t target = JIT_MAX_LIVE_REGIONS - JIT_MAX_LIVE_REGIONS / 8u;
+  if (t->live <= g_max_live) return;
+  const uint32_t target = g_max_live - g_max_live / 8u;
   for (uint32_t scanned = 0; t->live > target && scanned < 2u * JIT_CACHE_ENTRIES; scanned++) {
     Jit_Entry *e = &t->cache[t->sweep++ % JIT_CACHE_ENTRIES];
     if (!e->function || e->pending) continue;

@@ -63,6 +63,10 @@ void jit_set_span_calls(bool enabled);
 /* Interpreted executions of a block before it is compiled. */
 void jit_set_hot_threshold(uint32_t executions);
 
+/* Installed regions per host thread before the least recently entered
+ * are removed (0: the default, JIT_MAX_LIVE_REGIONS in jit.c). */
+void jit_set_max_live_regions(uint32_t regions);
+
 /* Diagnostics: count interpreter fallbacks per opcode (register fields
  * masked out) and print the commonest `top` to stderr. */
 void jit_set_fallback_profile(bool enabled);
