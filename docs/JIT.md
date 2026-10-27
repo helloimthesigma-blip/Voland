@@ -394,10 +394,13 @@ The problem was slot conflicts, not capacity: four ways at the old size
 beat a direct-mapped cache four times larger. Virtual time and SVC counts
 were identical in all three runs.
 
-**Hot threshold.** 256 interpreted executions before compiling (4096
-briefly on 2026-10-27, reverted: Super Smash Bros. Ultimate crashed at its
-title in 2 of 2 browser runs about 8 minutes in, a null item from a queue
-in subsdk0, against 0 of 1 at 256; under investigation). A threshold of 16 compiled about 2.5× the modules of
+**Hot threshold.** 4096 interpreted executions before compiling. It was
+reverted to 256 for a day on 2026-10-27 when Super Smash Bros. Ultimate
+crashed at its title with 4096; the same crash (a null fence in its movie
+player's frame-status thread) then showed up at 256 on Node too, and its
+cause was NVDEC completing instantly (DESIGN.md §13 note). With that
+fixed, two Node 3-core runs at 4096 ran 200k bursts clean and reached 33%
+more virtual time than 256 in the same wall time. A threshold of 16 compiled about 2.5× the modules of
 256 for the same guest speed, and module compilation is the JIT's largest
 overhead while games load. Tears of the Kingdom on three cores (Node, the
 same wall time): 4096 got 19% further than 256 with 59% fewer modules and

@@ -54,9 +54,10 @@
  * largest overhead while games load. Tears of the Kingdom on 3 cores
  * (Node, equal wall time): 4096 got 19% further than 256 with 59% fewer
  * modules and no evictions at the live cap; 16384 no further than 4096.
- * Back at 256 for now: Super Smash Bros. Ultimate crashed at its title
- * (2 of 2 browser runs, ~8 min in) with 4096 (docs/JIT.md). */
-#define JIT_DEFAULT_HOT_THRESHOLD 256u
+ * Super Smash Bros. Ultimate's crash at a movie change, first blamed on
+ * 4096, happened at 256 too: it was instant NVDEC completion
+ * (docs/JIT.md). */
+#define JIT_DEFAULT_HOT_THRESHOLD 4096u
 /* Installed regions per host thread. Each holds an engine module and its
  * machine code until it is removed; TOTK compiles ~70k distinct regions
  * per core in its first minutes and the browser tab died at ~200k live
