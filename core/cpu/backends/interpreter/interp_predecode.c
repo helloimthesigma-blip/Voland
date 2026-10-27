@@ -794,6 +794,7 @@ bool interp_predecode_run_block(Interp_State *s, uint64_t cycle_budget, uint32_t
     if (b->generation != generation || b->pc != pc) b = build(cache, s, pc, generation);
   }
   const uint32_t count = b ? b->count : 1u;
+  const bool pc_log = interp_pc_log_enabled();
   for (uint32_t i = 0; i < count; i++) {
     /* Exactly the reference loop's budget/grace rule (interpreter.c),
      * before every instruction. */
@@ -807,6 +808,7 @@ bool interp_predecode_run_block(Interp_State *s, uint64_t cycle_budget, uint32_t
     if (!b) return interp_run_one(s, exit_reason); /* uncacheable: one instruction, reference path */
     const Op *op = &b->ops[i];
     const uint64_t at = s->regs.pc;
+    if (pc_log) interp_pc_log_check(s);
     const Interp_Status status = op->fn(s, op);
     if (status == INTERP_CONTINUE) { /* the common case, retired inline */
       s->cycles_consumed++;

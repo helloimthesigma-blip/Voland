@@ -96,6 +96,9 @@ void interp_set_read_watch(uint64_t host, uint64_t bytes, Interp_Read_Hook hook,
   g_interp_watch_bytes = hook ? bytes : 0;
 }
 
+/* The state whose access the watch hook reports (its thread's TLS). */
+static _Thread_local const Interp_State *g_watch_state;
+
 bool interp_read(Interp_State *s, uint64_t address, void *out, uint32_t size) {
   VMM_Fault fault;
   if (vmm_access_crosses_page(address, size)) {
@@ -104,7 +107,10 @@ bool interp_read(Interp_State *s, uint64_t address, void *out, uint32_t size) {
     const uint8_t *host = vmm_translate_inline(s->l1, address, VMM_PERM_R, &fault);
     if (host) {
       memcpy(out, host, size);
-      if (interp_watched(host)) g_interp_watch_hook(s->regs.pc, s->regs.x[30], address, size, out, false);
+      if (interp_watched(host)) {
+        g_watch_state = s;
+        g_interp_watch_hook(s->regs.pc, s->regs.x[30], address, size, out, false);
+      }
       return true;
     }
   }
@@ -120,7 +126,10 @@ bool interp_write(Interp_State *s, uint64_t address, const void *data, uint32_t 
     uint8_t *host = vmm_translate_inline(s->l1, address, VMM_PERM_W, &fault);
     if (host) {
       memcpy(host, data, size);
-      if (interp_watched(host) && g_interp_watch_writes) g_interp_watch_hook(s->regs.pc, s->regs.x[30], address, size, data, true);
+      if (interp_watched(host) && g_interp_watch_writes) {
+        g_watch_state = s;
+        g_interp_watch_hook(s->regs.pc, s->regs.x[30], address, size, data, true);
+      }
       return true;
     }
   }
@@ -260,10 +269,11 @@ static void reg_watch_check(const Interp_State *s, const uint64_t before[31], ui
   }
 }
 
-/* Diagnostics (reference path only - VOLAND_NO_PREDECODE=1):
- * VOLAND_PC_LOG=PC[,PC...] logs the registers each time one of those
+/* Diagnostics: VOLAND_PC_LOG=PC[,PC...] logs the registers each time one of those
  * guest PCs runs, with the words at [x1], [[x1]+0x40] and [x8+0x40] (a
- * queue push's item and a field of it - who hands over a bad pointer). */
+ * queue push's item and a field of it - who hands over a bad pointer).
+ * Every engine: the predecoded loop checks each instruction while it is
+ * set, and the JIT runs those PCs through jit_helper_interpret. */
 #define PC_LOG_MAX 16u
 #define PC_LOG_FIELD 0x40u
 static int g_pc_log = -1;
@@ -276,31 +286,69 @@ static uint64_t pc_log_word(const Interp_State *s, uint64_t address) {
   if (host) memcpy(&v, host, sizeof(v));
   return v;
 }
-static void pc_log_check(const Interp_State *s) {
+bool interp_pc_log_enabled(void) {
   if (g_pc_log < 0) {
+    /* Host threads may race here: each writes the same table, and the
+     * count and flag are published last. */
     const char *spec = getenv("VOLAND_PC_LOG");
-    g_pc_log = spec ? 1 : 0;
-    for (char *end = NULL; spec && *spec && g_pc_log_count < PC_LOG_MAX; spec = *end ? end + 1 : end)
-      g_pc_log_pcs[g_pc_log_count++] = strtoull(spec, &end, 0);
+    uint32_t count = 0;
+    for (char *end = NULL; spec && *spec && count < PC_LOG_MAX; spec = *end ? end + 1 : end)
+      g_pc_log_pcs[count++] = strtoull(spec, &end, 0);
+    g_pc_log_count = count;
+    g_pc_log = count ? 1 : 0;
   }
-  if (!g_pc_log) return;
+  return g_pc_log != 0;
+}
+bool interp_pc_logged(uint64_t pc) {
+  if (!interp_pc_log_enabled()) return false;
+  for (uint32_t i = 0; i < g_pc_log_count; i++)
+    if (g_pc_log_pcs[i] == pc) return true;
+  return false;
+}
+/* VOLAND_PC_LOG_WATCH=OFF: each logged PC also watches the 8 bytes at
+ * [x1]+OFF (the item a queue push hands over) - every load and store of
+ * them is logged, the JIT's stores too (they take the helper path while
+ * this is set). Arming replaces the previous watch. */
+static void pc_log_watch_hook(uint64_t pc, uint64_t lr, uint64_t address, uint32_t size, const void *data, bool write) {
+  uint64_t v = 0;
+  memcpy(&v, data, size < sizeof(v) ? size : sizeof(v));
+  log_warn("[pclog] watched %s pc 0x%llx lr 0x%llx address 0x%llx size %u: %llx (tls 0x%llx)", write ? "store" : "load",
+           (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)address, size, (unsigned long long)v,
+           (unsigned long long)(g_watch_state ? g_watch_state->tpidrro_el0 : 0u));
+}
+bool interp_pc_log_watching(void) {
+  static int offset_set = -1;
+  if (offset_set < 0) offset_set = getenv("VOLAND_PC_LOG_WATCH") != NULL;
+  return offset_set != 0;
+}
+static void pc_log_arm(const Interp_State *s, uint64_t item) {
+  if (!interp_pc_log_watching()) return;
+  const uint64_t at = item + strtoull(getenv("VOLAND_PC_LOG_WATCH"), NULL, 0);
+  VMM_Fault fault;
+  const uint8_t *host = (at & 7u) ? NULL : vmm_translate_inline(s->l1, at, VMM_PERM_R, &fault);
+  if (host) interp_set_read_watch((uint64_t)(uintptr_t)host, sizeof(uint64_t), pc_log_watch_hook, true);
+}
+void interp_pc_log_check(const Interp_State *s) {
+  if (!interp_pc_log_enabled()) return;
   for (uint32_t i = 0; i < g_pc_log_count; i++) {
     if (g_pc_log_pcs[i] != s->regs.pc) continue;
     const uint64_t x1v = pc_log_word(s, s->regs.x[1]);
+    pc_log_arm(s, x1v);
     log_warn("[pclog] pc 0x%llx tls 0x%llx x0 %llx x1 %llx [x1] %llx [[x1]+40] %llx x8 %llx [x8+40] %llx x19 %llx x20 %llx "
-             "x21 %llx x29 %llx",
+             "x21 %llx x29 %llx x30 %llx",
              (unsigned long long)s->regs.pc, (unsigned long long)s->tpidrro_el0, (unsigned long long)s->regs.x[0],
              (unsigned long long)s->regs.x[1], (unsigned long long)x1v,
              (unsigned long long)pc_log_word(s, x1v + PC_LOG_FIELD), (unsigned long long)s->regs.x[8],
              (unsigned long long)pc_log_word(s, s->regs.x[8] + PC_LOG_FIELD), (unsigned long long)s->regs.x[19],
-             (unsigned long long)s->regs.x[20], (unsigned long long)s->regs.x[21], (unsigned long long)s->regs.x[29]);
+             (unsigned long long)s->regs.x[20], (unsigned long long)s->regs.x[21], (unsigned long long)s->regs.x[29],
+             (unsigned long long)s->regs.x[30]);
   }
 }
 
 /* One instruction through the full decoder (the reference path: step()
  * and anything the predecoded path does not cache). */
 bool interp_run_one(Interp_State *s, CPU_ExitReason *exit_reason) {
-  pc_log_check(s);
+  interp_pc_log_check(s);
   if (g_reg_watch < 0) {
     const char *spec = getenv("VOLAND_REG_WATCH");
     char *end = NULL;

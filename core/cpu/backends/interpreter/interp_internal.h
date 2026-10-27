@@ -220,6 +220,13 @@ static inline Interp_Status advance(Interp_State *s) {
 
 /* Call tracing (interpreter.h): the targets, and the hook check. */
 extern uint64_t g_interp_trace_targets[];
+/* VOLAND_PC_LOG (interpreter.c): whether it is set, whether a PC is
+ * listed, and the log line for the instruction about to run. */
+bool interp_pc_log_enabled(void);
+bool interp_pc_logged(uint64_t pc);
+void interp_pc_log_check(const Interp_State *s);
+bool interp_pc_log_watching(void); /* VOLAND_PC_LOG_WATCH: JIT stores take the helper path */
+
 extern uint32_t g_interp_trace_count;
 void interp_trace_call(Interp_State *s, uint64_t target);
 void interp_trace_return(Interp_State *s, uint64_t target);

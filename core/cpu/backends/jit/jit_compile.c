@@ -1874,6 +1874,10 @@ static void tlb_entry(Ctx *c, uint32_t perm, uint32_t *base, uint32_t *delta, bo
 }
 
 static void emit_walk(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) {
+  if (perm == VMM_PERM_W && interp_pc_log_watching()) { /* diagnostics: every store through interp_write */
+    br(c, slow);
+    return;
+  }
   if (no_tlb()) {
     emit_walk_full(c, size, perm, slow);
     return;
@@ -5269,6 +5273,7 @@ static uint32_t a64_mem_base(uint32_t insn) {
 
 static Outcome compile_instruction(Ctx *c, uint32_t insn) {
   if (c->a32) return a32_compile_instruction(c, insn);
+  if (interp_pc_logged(c->pc)) return OUTCOME_END_HELPER; /* VOLAND_PC_LOG: jit_helper_interpret logs it (branches too) */
   switch (bits(insn, 28, 25)) {
   case 0x8: case 0x9: return c_dp_immediate(c, insn) ? OUTCOME_NEXT : OUTCOME_HELPER;
   case 0xA: case 0xB: return c_branch_system(c, insn);

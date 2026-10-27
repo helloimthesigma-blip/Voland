@@ -662,6 +662,7 @@ uint32_t jit_helper_interpret(Jit_State *state, uint32_t insn) {
   count_helper(insn);
   Interp_State *s = &state->interp;
   const uint64_t pc = s->regs.pc;
+  interp_pc_log_check(s);
   CPU_ExitReason exit_reason = CPU_EXIT_CYCLES_ELAPSED;
   if (!interp_retire(s, interp_execute(s, insn), pc, insn, &exit_reason)) {
     state->exit_reason = exit_reason;
