@@ -29,6 +29,11 @@ import {
   BIND_FILTERED,
   BIND_BUFFER,
   VS_RESIDENT_BINDING,
+  POOL_BINDING,
+  POOL_BYTES,
+  POOL_WRAP,
+  POOL_WRITE_BYTES,
+  REC_POOL_WRITE,
   BIND_SAMPLER,
   BIND_TEXTURE,
   BUFFER_WRITE_BYTES,
@@ -358,7 +363,12 @@ export class GpuExecutor {
   private readonly warned = new Set<string>();
   private uploadedBytes = 0; /* texture queue writes since the last memory report */
   private bufferBytes = 0; /* buffer queue writes since the last memory report */
+  private vertexBytes = 0; /* ... of them vertices and indices */
+  private dataBytes = 0; /* ... draw data */
+  private poolBytes = 0; /* ... pool chunks */
   private submits = 0;
+  /* Draws' constant buffers and global memory (stream version 9). */
+  private readonly pool: GPUBuffer;
 
   constructor(private readonly device: GPUDevice, private readonly host: ExecutorHost) {
     for (let i = 0; i < BUFFER_SETS; i++) {
@@ -368,6 +378,21 @@ export class GpuExecutor {
       this.dataBuffers.push(device.createBuffer({ size: DATA_BUFFER_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST }));
     }
     this.linearSampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
+    this.pool = device.createBuffer({ size: POOL_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+  }
+
+  /** A chunk appended to the pool. Unsubmitted commands never read where it
+   * goes, except after a wrap: those are submitted first. */
+  private poolWrite(v: DataView, payload: Uint8Array): void {
+    const offset = v.getUint32(0, true), bytes = v.getUint32(4, true), flags = v.getUint32(8, true);
+    if (offset + bytes > POOL_BYTES || POOL_WRITE_BYTES + bytes > payload.byteLength) {
+      this.warnOnce("pool write", `pool write out of range (${offset}+${bytes})`);
+      return;
+    }
+    if (flags & POOL_WRAP) this.flush();
+    this.device.queue.writeBuffer(this.pool, offset, payload, POOL_WRITE_BYTES, bytes);
+    this.bufferBytes += bytes;
+    this.poolBytes += bytes;
   }
 
   /** One record (the payload after the 8-byte record header). */
@@ -387,6 +412,7 @@ export class GpuExecutor {
       case REC_BUFFER_DESTROY: this.bufferDestroy(view.getUint32(0, true)); break;
       case REC_BUFFER_WRITE: this.bufferWrite(view, payload); break;
       case REC_COMPUTE: this.compute(view, payload); break;
+      case REC_POOL_WRITE: this.poolWrite(view, payload); break;
       default: this.warnOnce(`record ${type}`, `unknown GPU record type ${type}`); break;
     }
   }
@@ -437,6 +463,8 @@ export class GpuExecutor {
     if (this.vertexUsed) this.device.queue.writeBuffer(this.vertexBuffer, 0, this.vertexStaging, 0, this.vertexUsed);
     if (this.dataUsed) this.device.queue.writeBuffer(this.dataBuffer, 0, this.dataStaging, 0, this.dataUsed);
     this.bufferBytes += this.vertexUsed + this.dataUsed;
+    this.vertexBytes += this.vertexUsed;
+    this.dataBytes += this.dataUsed;
     this.submits++;
     const t1 = performance.now();
     const cb = this.encoder.finish();
@@ -1008,6 +1036,7 @@ export class GpuExecutor {
     });
     /* A pulled vertex stage's second source (stream version 6). */
     if (spec.vs?.pull) entries.push({ binding: VS_RESIDENT_BINDING, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } });
+    entries.push({ binding: POOL_BINDING, visibility: dataVisibility, buffer: { type: "read-only-storage" } });
     const layout = this.device.createBindGroupLayout({ entries });
     /* Transformed vertices (position, 1/w, varyings) or, for a GPU vertex
      * stage, the ids and input vectors - every one a vec4<u32>. */
@@ -1238,6 +1267,7 @@ export class GpuExecutor {
           ...textures.map((t, i) => ({ binding: 1 + i, resource: t.sampleView })),
           ...samplers,
           ...(second ? [{ binding: VS_RESIDENT_BINDING, resource: { buffer: second } }] : []),
+          { binding: POOL_BINDING, resource: { buffer: this.pool } },
         ],
       });
       this.bindGroups.set(key, group);
@@ -1468,11 +1498,15 @@ export class GpuExecutor {
     this.host.log("info", `GPU memory: render targets ${mb(render)} MB (${renderCount}), textures ${mb(sampled)} MB ` +
       `(${sampledCount}), storage buffers ${mb(buffers)} MB (${this.buffers.size}), shadows ${this.shadows.size}, ` +
       `${this.pipelines.size} pipelines, ${this.modulesByHash.size} shader modules; in the last ${MEMORY_REPORT_PRESENTS} ` +
-      `presents ${mb(this.uploadedBytes)} MB texture uploads, ${mb(this.bufferBytes)} MB buffer uploads, ${this.submits} ` +
+      `presents ${mb(this.uploadedBytes)} MB texture uploads, ${mb(this.bufferBytes)} MB buffer uploads (vertices ${mb(this.vertexBytes)}, data ${mb(this.dataBytes)}, ` +
+      `pool ${mb(this.poolBytes)}), ${this.submits} ` +
       `submits; textures by format: ` +
       [...byFormat].sort((a, b) => b[1] - a[1]).map(([f, n]) => `${f} ${mb(n)} MB`).join(", "));
     this.uploadedBytes = 0;
     this.bufferBytes = 0;
+    this.vertexBytes = 0;
+    this.dataBytes = 0;
+    this.poolBytes = 0;
     this.submits = 0;
   }
 }

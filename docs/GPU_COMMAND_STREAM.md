@@ -1,4 +1,4 @@
-# GPU command stream (version 8)
+# GPU command stream (version 9)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -75,6 +75,7 @@ means none.
 | 7 | COPY | source id, destination id, source rect, destination rect, filter, destination layer (version 7) |
 | 8 | PRESENT | id, rect, flags (1 flip x, 2 flip y) |
 | 13 | TEXTURE_WRITE_LEVEL | id, mip level, layer, y, width, height (texels, whole blocks), bytes per block row, data bytes; then the block rows (version 8) |
+| 14 | POOL_WRITE | byte offset, bytes, flags (`GPU_POOL_WRAP`), reserved; then the bytes, appended to the pool (version 9) |
 
 ### DRAW
 
@@ -97,8 +98,9 @@ Bindings follow the header:
 
 - **DATA** (kind 1, binding 0): its bytes follow the binding entry. They
   are the draw constants of `wgsl.h` (surface height, flags, alpha test,
-  per-texture sampler state, the constant-buffer table), followed by the
-  constant buffers the program reads.
+  per-texture sampler state, the constant-buffer table). Before version 9
+  the constant buffers the program reads followed them; they are in the
+  pool now (below).
 - **TEXTURE** (kind 2, binding 1 + i): texture id. The pixel program reads
   it with `textureLoad` and does wrap, border, filtering, depth compare
   and swizzle itself, from the draw constants.
@@ -195,11 +197,43 @@ textures undecoded: TEXTURE_CREATE names one of the `GPU_FMT_BC*` /
 `GPU_FMT_ASTC_*` formats (appended after `GPU_FMT_R32_SINT`, in
 gpu-records.ts' order), and every mip level of every layer arrives as
 TEXTURE_WRITE_LEVEL records of deswizzled block rows. The consumer builds
-no mips for these (it cannot render to them). Only 2D, 2D-array and cube
-images whose size is whole blocks qualify (WebGPU's rule); anything else,
-and every texture the CPU itself samples, is still decoded. `?compressed=0`
+no mips for these (it cannot render to them). 2D, 2D-array and cube
+images qualify. WebGPU only creates whole-block textures, so an image
+that is not whole blocks gets a GPU texture rounded up to them (the
+guest's blocks cover the padding); its draws sample at the image's own
+size (`WGSL_TEXP_SIZE`) with no hardware sampler, so wrap and clamp happen
+at the image's edge. Every texture the CPU itself samples is still
+decoded. `?compressed=0`
 turns it off. Version 7 consumers ignore record 13 and never see the new
 formats unless a device reported them.
+
+### The pool (version 9)
+
+A draw's constant buffers and the global memory its programs read
+(`wgsl_find_globals`) no longer ride in its data. They live in one pool,
+a read-only storage buffer of `GPU_POOL_BYTES` (16 MiB) that every draw
+binds at `WGSL_POOL_BINDING`, where its programs read it as `P`:
+
+- **POOL_WRITE** (record 14): `Gpu_Rec_Pool_Write` {offset, bytes, flags,
+  reserved}, then the bytes. Offsets and sizes are multiples of 4.
+- **Tables.** The constant-buffer tables' offsets (`WGSL_DRAW_CBUF_TABLE`,
+  `WGSL_DRAW_VS_CBUF_TABLE`) are words into the pool, and each global
+  buffer's copy offset (word 3 of `WGSL_GLOBAL_WORDS`) is bytes into it.
+  The draw constants themselves stay in the data. Compute is unchanged:
+  its constant buffers are still in its data.
+- **Reuse.** raster3d keeps the pool's contents and, for each
+  constant-buffer slot and global buffer of each stage, where its last
+  chunk is. A chunk equal to that one is not written again; the draw
+  points at it. Tears of the Kingdom repeats 96% of its constant-buffer
+  bytes and 99.7% of its global-memory bytes from one draw to the next,
+  which had been ~38 MB a frame.
+- **Epochs.** Writes only append. Before a draw, if its chunks at their
+  largest might not fit, the pool starts again at offset 0 and nothing
+  older is reused. The first write of an epoch has `GPU_POOL_WRAP`: the
+  consumer submits the commands it holds before applying it, since they
+  read the old contents. Within an epoch nothing is overwritten, so other
+  pool writes go straight to the queue.
+- A new stream (`raster3d_set_gpu`) starts a new epoch.
 
 ### Slices into layers (version 7)
 

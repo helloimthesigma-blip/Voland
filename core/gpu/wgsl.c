@@ -141,13 +141,17 @@ static Ex reg_dst(Tr *t, uint32_t r) {
   return ex("r%u", r);
 }
 
+/* Where a program's constant buffers are: the pool for draws (stream
+ * version 9, WGSL_POOL_BINDING), the data for compute. */
+static const char *cbuf_array(const Tr *t) { return t->compute ? "D" : "P"; }
+
 /* A constant-buffer word at a constant offset: its slot's base and size
  * are read once per invocation (cbB<slot>, cbN<slot>). */
 static Ex cbuf(Tr *t, uint32_t slot, uint32_t byte_offset) {
   if (slot >= SM_CBUF_SLOTS) return ex("0u");
   t->cbuf_slots |= 1u << slot;
   const uint32_t w = byte_offset / 4u;
-  return ex("select(0u, D[cbB%u + %uu], %uu < cbN%u)", slot, w, w, slot);
+  return ex("select(0u, %s[cbB%u + %uu], %uu < cbN%u)", cbuf_array(t), slot, w, w, slot);
 }
 
 static Ex op_b(Tr *t, const Sm_Insn *in) {
@@ -531,7 +535,7 @@ static const char *const k_prelude[] = {
     "fn swz_kb(s: u32) -> f32 { return select(1.0, -1.0, s == 2u); }\n"
     "fn cb(s: u32, i: u32) -> u32 {\n"
     "  let base = D[" "%u" "u + 2u * s]; let size = D[" "%u" "u + 2u * s + 1u];\n"
-    "  if (i < size) { return D[base + i]; } return 0u;\n"
+    "  if (i < size) { return " "%s" "[base + i]; } return 0u;\n"
     "}\n"
     /* Bytes of a constant buffer (LDC): `n` bytes at byte address `a`. */
     "fn cbyte(s: u32, a: u32, n: u32) -> u32 {\n"
@@ -2369,7 +2373,7 @@ static bool find_globals(const Sm_Program *program, bool allow_stg, Wgsl_Globals
 }
 
 /* LDG from buffer k: the 64-bit address relative to its base, in range,
- * read from its copy in D; zeros outside (wgsl_find_globals). */
+ * read from its copy in the pool P; zeros outside (wgsl_find_globals). */
 static void emit_ldg(Tr *t, const Sm_Insn *in, uint32_t pc) {
   const uint64_t w = in->raw;
   const uint32_t k = t->globals.buffer_of[pc];
@@ -2409,9 +2413,9 @@ static void emit_ldg(Tr *t, const Sm_Insn *in, uint32_t pc) {
 
 static const char k_gword[] =
     "fn gword(b: u32) -> u32 {\n"
-    "  let s = (b & 3u) * 8u; let lo = D[b >> 2u];\n"
+    "  let s = (b & 3u) * 8u; let lo = P[b >> 2u];\n"
     "  if (s == 0u) { return lo; }\n"
-    "  return (lo >> s) | (D[(b >> 2u) + 1u] << (32u - s));\n"
+    "  return (lo >> s) | (P[(b >> 2u) + 1u] << (32u - s));\n"
     "}\n";
 
 const char *wgsl_vertex_pull_source(void) { return k_vertex_pull; }
@@ -2634,7 +2638,8 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
     return res;
   }
   for (size_t i = 0; i < sizeof(k_prelude) / sizeof(k_prelude[0]); i++)
-    out_add(&head, k_prelude[i], t->cbt, t->cbt, t->cbt);
+    out_add(&head, k_prelude[i], t->cbt, t->cbt, cbuf_array(t), t->cbt);
+  if (!t->compute) out_add(&head, "@group(0) @binding(%u) var<storage, read> P: array<u32>;\n", WGSL_POOL_BINDING);
   if (!t->vertex && !t->compute) out_add(&head, "%s", k_quad);
   if (t->uses_globals && !t->compute) out_add(&head, "%s", k_gword);
   for (uint32_t i = 0; i < desc->texture_count && i < WGSL_MAX_TEXTURES; i++)

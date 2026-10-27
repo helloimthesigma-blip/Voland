@@ -710,9 +710,14 @@ typedef struct Seen_Draw {
   uint32_t last_texture_width, last_texture_height;
   Gpu_Rec_Texture_Write_Level first_level_write;
   uint8_t first_level_bytes[16];
+  /* Stream version 9: the pool holding draws' constant buffers and global memory. */
+  uint32_t pool_writes, pool_wraps;
+  uint32_t pool_writes_before_last; /* POOL_WRITEs between the previous draw and the last one */
 } Seen_Draw;
 #define SEEN_DATA_BYTES (256u * 1024u)
 static uint8_t g_seen_data[SEEN_DATA_BYTES];
+static uint8_t g_seen_pool[GPU_POOL_BYTES]; /* what the POOL_WRITEs built */
+static uint32_t g_pool_writes_since_draw;
 
 static void stream_drain(Seen_Draw *seen) {
   Gpu_Stream_Record rec;
@@ -752,12 +757,23 @@ static void stream_drain(Seen_Draw *seen) {
       for (size_t i = 0; i + sizeof(k_compute) - 1u <= length && !seen->compute_shader; i++)
         seen->compute_shader = memcmp(text + i, k_compute, sizeof(k_compute) - 1u) == 0;
     }
+    if (rec.type == GPU_REC_POOL_WRITE && rec.payload_bytes >= sizeof(Gpu_Rec_Pool_Write)) {
+      Gpu_Rec_Pool_Write w;
+      memcpy(&w, rec.payload, sizeof(w));
+      if (w.offset + w.bytes <= GPU_POOL_BYTES && sizeof(w) + w.bytes <= rec.payload_bytes)
+        memcpy(g_seen_pool + w.offset, rec.payload + sizeof(w), w.bytes);
+      seen->pool_writes++;
+      if (w.flags & GPU_POOL_WRAP) seen->pool_wraps++;
+      g_pool_writes_since_draw++;
+    }
     if (rec.type == GPU_REC_COMPUTE) seen->computes++;
     if (rec.type == GPU_REC_BUFFER_CREATE) seen->buffer_creates++;
     if (rec.type == GPU_REC_BUFFER_WRITE) seen->buffer_writes++;
     if (rec.type == GPU_REC_DRAW) {
       memcpy(&seen->last, rec.payload, sizeof(Gpu_Rec_Draw));
       seen->count++;
+      seen->pool_writes_before_last = g_pool_writes_since_draw;
+      g_pool_writes_since_draw = 0;
       Gpu_Rec_Binding data;
       memcpy(&data, rec.payload + sizeof(Gpu_Rec_Draw), sizeof(data));
       seen->data_bytes = data.bytes < SEEN_DATA_BYTES ? data.bytes : SEEN_DATA_BYTES;
@@ -799,6 +815,7 @@ static Seen_Draw gpu_draw_once(Raster3d *r, uint32_t front_face_reg) {
 static bool g_gpu_textured; /* gpu_draw_topology: the texturing pixel program */
 static bool g_bc1_texture;  /* ... sampling texture_state_bc1's texture */
 static uint32_t g_ps_override; /* gpu_draw_topology: this pixel program instead (0: none) */
+static bool g_draw_twice;      /* gpu_draw_topology: the same draw again */
 static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_t topology, uint32_t count) {
   static Gpu_Stream stream;
   Seen_Draw seen;
@@ -818,6 +835,7 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
   vertex(3, 1.0f, 1.0f, 1, 0, 0, 1);
   raster3d_begin_submission(r);
   draw_arrays(r, topology, count);
+  if (g_draw_twice) draw_arrays(r, topology, count);
   raster3d_flush(r, &k_mem);
   gpu_stream_publish(&stream);
   stream_drain(&seen);
@@ -980,10 +998,11 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   uint32_t gdesc[WGSL_GLOBAL_WORDS];
   memcpy(gdesc, g_seen_data + 4u * WGSL_DRAW_GLOBALS, sizeof(gdesc));
   float copied[4] = {0};
-  if (gdesc[3] + sizeof(copied) <= vs_ldg.data_bytes) memcpy(copied, g_seen_data + gdesc[3], sizeof(copied));
+  if (gdesc[3] + sizeof(copied) <= GPU_POOL_BYTES) memcpy(copied, g_seen_pool + gdesc[3], sizeof(copied));
   CHECK(gdesc[0] == (uint32_t)SSBO && gdesc[1] == 0u && gdesc[2] == sizeof(ssbo) && copied[0] == 0.25f &&
             copied[3] == 1.0f,
-        "the buffer's descriptor (0x%x, %u bytes at %u) and bytes are in the data", gdesc[0], gdesc[2], gdesc[3]);
+        "the buffer's descriptor (0x%x, %u bytes at pool %u) in the data, its bytes in the pool", gdesc[0], gdesc[2],
+        gdesc[3]);
   /* An unbound buffer (size 0) keeps the vertices on the CPU. */
   put32(CBUF + SSBO_DESC + 8u, 0);
   const Seen_Draw vs_ldg_cpu = gpu_draw_once(r, FRONT_CW_REG);
@@ -997,11 +1016,27 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   const Seen_Draw ps_ldg = gpu_draw_once(r, FRONT_CW_REG);
   memcpy(gdesc, g_seen_data + 4u * WGSL_DRAW_PS_GLOBALS, sizeof(gdesc));
   memset(copied, 0, sizeof(copied));
-  if (gdesc[3] + sizeof(copied) <= ps_ldg.data_bytes) memcpy(copied, g_seen_data + gdesc[3], sizeof(copied));
+  if (gdesc[3] + sizeof(copied) <= GPU_POOL_BYTES) memcpy(copied, g_seen_pool + gdesc[3], sizeof(copied));
   CHECK(ps_ldg.count == 1 && ps_ldg.last.shader_id != 0 && gdesc[0] == (uint32_t)SSBO && gdesc[2] == sizeof(ssbo) &&
             copied[1] == 0.5f,
         "storage-buffer pixel program on the GPU: %u draws, shader %u, buffer 0x%x (%u bytes)", ps_ldg.count,
         ps_ldg.last.shader_id, gdesc[0], gdesc[2]);
+  /* The pool: a new stream's first chunk wraps; the same draw again finds
+   * its chunks unchanged and writes nothing; changed memory is written. */
+  CHECK(ps_ldg.pool_writes >= 1u && ps_ldg.pool_wraps == 1u, "pool: %u writes, %u wraps on a new stream",
+        ps_ldg.pool_writes, ps_ldg.pool_wraps);
+  g_draw_twice = true;
+  const Seen_Draw ps_again = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(ps_again.count == 2u && ps_again.pool_writes_before_last == 0u,
+        "pool: the same draw again writes nothing (%u draws, %u writes before the second)", ps_again.count,
+        ps_again.pool_writes_before_last);
+  g_draw_twice = false;
+  const float changed = 0.75f;
+  memcpy(g_gpu + (SSBO - GPU_BASE) + 4u, &changed, sizeof(changed));
+  const Seen_Draw ps_changed = gpu_draw_once(r, FRONT_CW_REG);
+  memcpy(gdesc, g_seen_data + 4u * WGSL_DRAW_PS_GLOBALS, sizeof(gdesc));
+  memcpy(copied, g_seen_pool + gdesc[3], sizeof(copied));
+  CHECK(ps_changed.count == 1u && copied[1] == 0.75f, "pool: changed global memory is written (%.2f)", copied[1]);
   g_ps_override = PS_LDG_MOV_OFFSET;
   const Seen_Draw ps_mov = gpu_draw_once(r, FRONT_CW_REG);
   memcpy(gdesc, g_seen_data + 4u * WGSL_DRAW_PS_GLOBALS, sizeof(gdesc));

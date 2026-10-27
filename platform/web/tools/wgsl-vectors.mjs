@@ -32,10 +32,9 @@ if (!dir) {
 const vectors = readdirSync(dir)
   .filter((f) => f.endsWith(".json"))
   .sort()
-  .map((f) => {
-    const v = JSON.parse(readFileSync(join(dir, f), "utf8"));
-    return { ...v, code: readFileSync(join(dir, `${v.name}.wgsl`), "utf8") };
-  });
+  .map((f) => JSON.parse(readFileSync(join(dir, f), "utf8")))
+  .filter((v) => typeof v.name === "string") /* vertex_pull.json is tools/vertex-pull-vectors.mjs' */
+  .map((v) => ({ ...v, code: readFileSync(join(dir, `${v.name}.wgsl`), "utf8") }));
 
 const browser = await chromium.launch({
   /* WGSL_VECTORS_GPU=metal: the host GPU (SwiftShader loses its device on some machines). */
@@ -119,11 +118,23 @@ const results = await page.evaluate(
         primitive: { topology: "triangle-list" },
       });
       const entries = [{ binding: 0, resource: { buffer } }];
+      /* Draws read constant buffers from the pool (stream version 9): the vector's data holds them where its
+       * table points, so the same buffer serves as the pool. */
+      const pool = /@binding\((\d+)\) var<storage, read> P:/.exec(v.code);
       if (v.code.includes("var T0:")) entries.push({ binding: 1, resource: tex.createView({ dimension: "2d-array" }) });
       if (v.code.includes("var S0:")) {
         entries.push({ binding: 17, resource: device.createSampler({ magFilter: "linear", minFilter: "linear" }) });
       }
-      const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
+      /* The automatic layout has P only where an entry point reads it. */
+      let group = null;
+      if (pool) {
+        device.pushErrorScope("validation");
+        const withPool = device.createBindGroup({
+          layout: pipeline.getBindGroupLayout(0), entries: [...entries, { binding: Number(pool[1]), resource: { buffer } }],
+        });
+        if (!(await device.popErrorScope())) group = withPool;
+      }
+      group ??= device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries });
       const readback = device.createBuffer({ size: 256, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       const enc = device.createCommandEncoder();
       const pass = enc.beginRenderPass({

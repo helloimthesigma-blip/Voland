@@ -5,7 +5,7 @@
  */
 
 export const GPU_STREAM_MAGIC = 0x55504756;
-export const GPU_STREAM_VERSION = 8;
+export const GPU_STREAM_VERSION = 9;
 export const GPU_STREAM_HEADER_BYTES = 56;
 export const GPU_STREAM_RECORD_HEADER_BYTES = 8;
 export const OFF_MAGIC = 0;
@@ -34,6 +34,12 @@ export const REC_BUFFER_WRITE = 11;
 export const REC_COMPUTE = 12;
 /* Version 8: one mip level as it is (block-compressed textures). */
 export const REC_TEXTURE_WRITE_LEVEL = 13;
+/* Version 9: draws' constant buffers and global memory, appended to one pool
+ * (core/gpu/gpu_records.h Gpu_Rec_Pool_Write: offset, bytes, flags, reserved). */
+export const REC_POOL_WRITE = 14;
+export const POOL_WRITE_BYTES = 16;
+export const POOL_BYTES = 16 * 1024 * 1024;
+export const POOL_WRAP = 1; /* restarts at 0: submit what reads the old contents first */
 
 /* GPU_FMT_* by index. */
 export const FORMATS: readonly (GPUTextureFormat | null)[] = [
@@ -139,6 +145,8 @@ export const BIND_BUFFER = 4; /* read-write storage buffer: texture_id = a BUFFE
 /* core/gpu/wgsl.h WGSL_VS_RESIDENT_BINDING: a pulled vertex program's
  * second source R, a GPU mirror (or an empty buffer when none is bound). */
 export const VS_RESIDENT_BINDING = 39;
+/* core/gpu/wgsl.h WGSL_POOL_BINDING: the pool P every draw binds (version 9). */
+export const POOL_BINDING = 40;
 export const BIND_FILTERED = 1;
 export const SAMPLER_LINEAR = 1;
 export const SAMPLER_MIN_LINEAR = 1 << 7;

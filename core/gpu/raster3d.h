@@ -88,6 +88,10 @@ struct Gpu_Stream;
 #define RASTER_GPU_SURFACE_BUCKETS 4096u /* the address index over them (a power of two) */
 #define RASTER_GPU_SHADERS 1024u
 #define RASTER_GPU_GATHERS 8u /* 3D textures assembled from slice render targets */
+/* Pool chunk keys: each stage's constant-buffer slots, then each stage's
+ * global buffers (at least WGSL_MAX_GLOBALS; raster3d.c checks). */
+#define RASTER_GPU_POOL_GLOBALS 8u
+#define RASTER_GPU_POOL_KEYS (2u * SM_CBUF_SLOTS + 2u * RASTER_GPU_POOL_GLOBALS)
 
 typedef struct Raster3d_Bindings {
   uint64_t address[RASTER_BIND_GROUPS][SM_CBUF_SLOTS];
@@ -196,6 +200,7 @@ typedef struct Raster3d_Gpu_Stats {
   /* Draw record bytes by part: per-draw data (constants and constant
    * buffers), pulled vertex streams, vertices, indices. */
   uint64_t draw_data_bytes, pulled_bytes, vertex_bytes, index_bytes;
+  uint64_t pool_bytes, pool_reused_bytes; /* chunks written to the pool / found there unchanged */
   uint64_t probe_runs;   /* draws whose pixel program ran once on the CPU to find its textures */
   uint64_t bulk_triangles; /* pulled list triangles that skipped the assembler */
   /* Draw inputs a compute dispatch wrote (diagnostics: where compute output goes) */
@@ -292,7 +297,15 @@ typedef struct Raster3d {
   Raster3d_Gpu_Shader *gpu_shaders;  /* RASTER_GPU_SHADERS, open addressing */
   char *gpu_wgsl;                    /* translation buffer */
   uint8_t *gpu_vertices;             /* the current draw's vertices */
-  uint32_t *gpu_data;                /* the current draw's constants + constant buffers */
+  uint32_t *gpu_data;                /* the current draw's constants (+ compute's constant buffers) */
+  /* The GPU pool's contents (GPU_POOL_BYTES, gpu_records.h): appended to,
+   * restarted at 0 in a new epoch when a draw might not fit. */
+  uint32_t *gpu_pool;
+  uint32_t gpu_pool_used; /* words */
+  uint32_t gpu_pool_epoch;
+  struct {
+    uint32_t epoch, at, words;
+  } gpu_pool_last[RASTER_GPU_POOL_KEYS]; /* each constant-buffer slot's / global buffer's last chunk */
   Raster3d_Gpu_Stats gpu_stats;
   /* GPU mode: mipmapped textures get mip chains and pixel programs pick
    * the level from derivatives (a deliberate improvement over the

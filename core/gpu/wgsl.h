@@ -120,6 +120,10 @@
 /* A pulled vertex program's second source: a GPU mirror holding vertex
  * streams a compute dispatch wrote (WGSL_VSI_RESIDENT inputs read it). */
 #define WGSL_VS_RESIDENT_BINDING (WGSL_CS_WINDOW_BINDING_BASE + WGSL_CS_MAX_WINDOWS)
+/* Draws (stream version 9): their constant buffers and global memory, read
+ * as `P` - the constant-buffer table's offsets and WGSL_GLOBAL_WORDS' copy
+ * offsets index this pool, not the data. Compute keeps them in the data. */
+#define WGSL_POOL_BINDING (WGSL_VS_RESIDENT_BINDING + 1u)
 #define WGSL_CS_MAX_INVOCATIONS 256u   /* WebGPU's default maxComputeInvocationsPerWorkgroup */
 #define WGSL_CS_MAX_SHARED_BYTES 16384u /* its default maxComputeWorkgroupStorageSize */
 #define WGSL_VERTEX_ID_LOCATION 0u /* vertex input: vec4<u32>(vertex id, instance id, 0, 0) */

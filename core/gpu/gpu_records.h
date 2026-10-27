@@ -35,7 +35,23 @@ enum {
   /* Version 8: one mip level of a texture, as it is (compressed formats:
    * rows of blocks; the consumer builds no mips for these). */
   GPU_REC_TEXTURE_WRITE_LEVEL, /* Gpu_Rec_Texture_Write_Level + rows */
+  /* Version 9: constant buffers and global memory of draws live in one
+   * pool buffer, each chunk written once while it stays the same. */
+  GPU_REC_POOL_WRITE, /* Gpu_Rec_Pool_Write + bytes */
 };
+
+/* The pool (version 9): a read-only storage buffer of GPU_POOL_BYTES every
+ * draw binds at WGSL_POOL_BINDING. Its writes only ever append, from offset
+ * 0 again after GPU_POOL_WRAP: the consumer submits what it holds before
+ * applying a wrapping write, since those commands read the old contents. */
+#define GPU_POOL_BYTES (16u << 20)
+#define GPU_POOL_WRAP 1u
+typedef struct Gpu_Rec_Pool_Write {
+  uint32_t offset; /* bytes, a multiple of 4 */
+  uint32_t bytes;  /* a multiple of 4 */
+  uint32_t flags;  /* GPU_POOL_WRAP */
+  uint32_t reserved;
+} Gpu_Rec_Pool_Write;
 
 /* Texture formats (the WebGPU format each maps to, in gpu-records.ts). */
 enum {

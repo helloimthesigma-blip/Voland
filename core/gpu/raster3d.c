@@ -168,7 +168,8 @@ static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); 
 #define GPU_DATA_STORAGE                                                                                           \
   (((size_t)WGSL_DRAW_CONSTANT_WORDS + (size_t)2u * SM_CBUF_SLOTS * (CBUF_SLOT_BYTES / 4u) + 2u) * 4u +            \
    GPU_GLOBAL_BYTES + 2u * 4u * WGSL_MAX_GLOBALS * 4u)
-#define STORAGE_BYTES (GPU_DATA_OFFSET + GPU_DATA_STORAGE + 64u)
+#define GPU_POOL_OFFSET ((GPU_DATA_OFFSET + GPU_DATA_STORAGE + 63u) & ~(size_t)63u)
+#define STORAGE_BYTES (GPU_POOL_OFFSET + GPU_POOL_BYTES + 64u)
 
 size_t raster3d_storage_bytes(void) { return STORAGE_BYTES; }
 
@@ -193,6 +194,7 @@ void raster3d_init(Raster3d *r, uint8_t *storage, size_t bytes) {
   r->gpu_wgsl = (char *)(s + GPU_WGSL_OFFSET);
   r->gpu_vertices = s + GPU_VERTICES_OFFSET;
   r->gpu_data = (uint32_t *)(void *)(s + GPU_DATA_OFFSET);
+  r->gpu_pool = (uint32_t *)(void *)(s + GPU_POOL_OFFSET);
   for (uint32_t i = 0; i < 256u; i++) g_unorm8[i] = (float)i / 255.0f;
   tex_init_tables(); /* before any worker samples */
   workers_start(&r->workers, workers_default_count());
@@ -3034,6 +3036,7 @@ static void assemble_end(Raster_State *rs, Vertex_Cache *cache, Assembler *as) {
 /* What one draw's data may hold: the GPU worker binds it through a 2 MiB
  * window (gpu-executor.ts DATA_WINDOW_BYTES). */
 #define GPU_DATA_WINDOW_WORDS ((2u << 20) / 4u)
+#define GPU_POOL_WORDS (GPU_POOL_BYTES / 4u)
 #define GPU_VERTEX_HEADER_BYTES (GPU_VERTEX_HEADER_WORDS * 4u)
 
 void raster3d_set_gpu_compression(Raster3d *r, uint32_t mask) {
@@ -3047,7 +3050,53 @@ void raster3d_set_gpu(Raster3d *r, Gpu_Stream *stream) {
   if (!r->ready) return;
   r->gpu = stream;
   gpu_mirror_reset(NULL); /* the old stream's buffers went with it */
+  r->gpu_pool_used = GPU_POOL_WORDS; /* the next draw starts a new epoch */
   if (stream) log_info("[gpu] WebGPU renderer: draws stream to the GPU worker");
+}
+
+/* The pool (gpu_records.h): a draw's chunks all fit in the epoch they
+ * start in when this much room is left (both stages' constant buffers and
+ * global buffers at their largest). */
+#define GPU_POOL_DRAW_WORDS ((uint32_t)(GPU_DATA_STORAGE / 4u))
+_Static_assert(GPU_POOL_DRAW_WORDS * 2u <= GPU_POOL_WORDS, "a pool epoch holds at least two draws");
+_Static_assert(WGSL_MAX_GLOBALS <= RASTER_GPU_POOL_GLOBALS, "a pool key per global buffer");
+#define GPU_POOL_KEY_VS_CBUF SM_CBUF_SLOTS
+#define GPU_POOL_KEY_VS_GLOBALS (2u * SM_CBUF_SLOTS)
+#define GPU_POOL_KEY_PS_GLOBALS (2u * SM_CBUF_SLOTS + RASTER_GPU_POOL_GLOBALS)
+
+/* Called before a draw's chunks: a new epoch from offset 0 if they might
+ * not fit. Chunks of the old epoch are never found again. */
+static void gpu_pool_reserve(Raster3d *r) {
+  if (r->gpu_pool_used + GPU_POOL_DRAW_WORDS <= GPU_POOL_WORDS) return;
+  r->gpu_pool_used = 0;
+  r->gpu_pool_epoch++;
+}
+
+/* The pool word offset of `n` words: where key's last chunk is when they
+ * are the same, else appended (a POOL_WRITE; the first of an epoch wraps). */
+static uint32_t gpu_pool_put(Raster3d *r, uint32_t key, const uint32_t *words, uint32_t n) {
+  Raster3d_Gpu_Stats *st = &r->gpu_stats;
+  const uint64_t bytes = (uint64_t)n * 4u;
+  if (r->gpu_pool_last[key].epoch == r->gpu_pool_epoch && r->gpu_pool_last[key].words == n &&
+      !memcmp(r->gpu_pool + r->gpu_pool_last[key].at, words, (size_t)bytes)) {
+    st->pool_reused_bytes += bytes;
+    return r->gpu_pool_last[key].at;
+  }
+  const uint32_t at = r->gpu_pool_used;
+  memcpy(r->gpu_pool + at, words, (size_t)bytes);
+  r->gpu_pool_used += n;
+  r->gpu_pool_last[key].epoch = r->gpu_pool_epoch;
+  r->gpu_pool_last[key].at = at;
+  r->gpu_pool_last[key].words = n;
+  st->pool_bytes += bytes;
+  if (r->gpu) {
+    const Gpu_Rec_Pool_Write head = {at * 4u, (uint32_t)bytes, at == 0 ? GPU_POOL_WRAP : 0u, 0u};
+    uint8_t *p = gpu_stream_begin(r->gpu, GPU_REC_POOL_WRITE, (uint32_t)(sizeof(head) + bytes));
+    memcpy(p, &head, sizeof(head));
+    memcpy(p + sizeof(head), words, (size_t)bytes);
+    gpu_stream_end(r->gpu);
+  }
+  return at;
 }
 
 static uint32_t gpu_new_id(Raster3d *r) {
@@ -4064,19 +4113,20 @@ static uint64_t pixel_global_words(Draw_Context *ctx) {
  * descriptor words at `table` (WGSL_DRAW_GLOBALS / _PS_GLOBALS): each
  * buffer's bytes and a word of slack (gword reads two words at an
  * unaligned address). */
-static void gpu_copy_globals(Draw_Context *ctx, uint32_t *data, uint32_t *words, uint32_t table, uint32_t count,
-                             const uint64_t *base, const uint32_t *size) {
+/* Each global buffer's copy goes to the pool (read through `scratch`, one
+ * word past its end for unaligned reads); its table entry has the offset. */
+static void gpu_copy_globals(Draw_Context *ctx, uint32_t *data, uint32_t *scratch, uint32_t table, uint32_t key,
+                             uint32_t count, const uint64_t *base, const uint32_t *size) {
   for (uint32_t k = 0; k < count; k++) {
     uint32_t *at = data + table + WGSL_GLOBAL_WORDS * k;
     at[0] = (uint32_t)base[k];
     at[1] = (uint32_t)(base[k] >> 32);
     at[2] = size[k];
-    at[3] = *words * 4u;
     const uint32_t n = (size[k] + 3u) / 4u + 1u;
-    memset(data + *words, 0, (size_t)n * 4u);
-    if (!ctx->mem->read(ctx->mem->user, base[k], data + *words, size[k]))
-      memset(data + *words, 0, (size_t)n * 4u); /* unreadable: the loads read zeros */
-    *words += n;
+    memset(scratch, 0, (size_t)n * 4u);
+    if (!ctx->mem->read(ctx->mem->user, base[k], scratch, size[k]))
+      memset(scratch, 0, (size_t)n * 4u); /* unreadable: the loads read zeros */
+    at[3] = gpu_pool_put(ctx->r, key + k, scratch, n) * 4u;
   }
 }
 
@@ -4512,16 +4562,17 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
   data[WGSL_DRAW_FLAGS] = rs->lower_left ? WGSL_DRAW_LOWER_LEFT : 0u;
   data[WGSL_DRAW_ALPHA_FUNC] = rs->alpha_test ? 1u + gpu_compare(rs->alpha_func) : 0u;
   data[WGSL_DRAW_ALPHA_REF] = u32f(rs->alpha_ref);
+  /* Constant buffers and global memory go to the pool (stream version 9). */
   uint32_t words = WGSL_DRAW_CONSTANT_WORDS;
+  uint32_t *scratch = data + WGSL_DRAW_CONSTANT_WORDS;
+  gpu_pool_reserve(r);
   const Sm_Env *penv = &ctx->env[1];
   for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++) {
     if (!penv->cbuf[s] || !penv->cbuf_size[s]) continue;
     const uint32_t n = cbuf_words_read(ctx->ps, penv, s);
     if (!n) continue;
-    memcpy(data + words, penv->cbuf[s], (size_t)n * 4u);
-    data[WGSL_DRAW_CBUF_TABLE + 2u * s] = words;
+    data[WGSL_DRAW_CBUF_TABLE + 2u * s] = gpu_pool_put(r, s, (const uint32_t *)(const void *)penv->cbuf[s], n);
     data[WGSL_DRAW_CBUF_TABLE + 2u * s + 1u] = n;
-    words += n;
   }
   if (g->vs_mode) {
     /* The vertex stage's constant buffers and the viewport to_screen applies. */
@@ -4530,12 +4581,12 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
       if (!venv->cbuf[s] || !venv->cbuf_size[s]) continue;
       const uint32_t n = cbuf_words_read(ctx->vs, venv, s);
       if (!n) continue;
-      memcpy(data + words, venv->cbuf[s], (size_t)n * 4u);
-      data[WGSL_DRAW_VS_CBUF_TABLE + 2u * s] = words;
+      data[WGSL_DRAW_VS_CBUF_TABLE + 2u * s] =
+          gpu_pool_put(r, GPU_POOL_KEY_VS_CBUF + s, (const uint32_t *)(const void *)venv->cbuf[s], n);
       data[WGSL_DRAW_VS_CBUF_TABLE + 2u * s + 1u] = n;
-      words += n;
     }
-    gpu_copy_globals(ctx, data, &words, WGSL_DRAW_GLOBALS, g->global_count, g->global_base, g->global_size);
+    gpu_copy_globals(ctx, data, scratch, WGSL_DRAW_GLOBALS, GPU_POOL_KEY_VS_GLOBALS, g->global_count, g->global_base,
+                     g->global_size);
     uint32_t *vp = data + WGSL_DRAW_VIEWPORT;
     for (uint32_t c = 0; c < 3u; c++) {
       vp[WGSL_VP_SCALE + c] = u32f(rs->vp_scale[c]);
@@ -4546,7 +4597,8 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
     vp[WGSL_VP_FLAGS] = rs->viewport_transform ? WGSL_VP_TRANSFORM : 0u;
     vp[WGSL_VP_SWIZZLE] = rs->viewport_swizzle;
   }
-  gpu_copy_globals(ctx, data, &words, WGSL_DRAW_PS_GLOBALS, g->ps_global_count, g->ps_global_base, g->ps_global_size);
+  gpu_copy_globals(ctx, data, scratch, WGSL_DRAW_PS_GLOBALS, GPU_POOL_KEY_PS_GLOBALS, g->ps_global_count,
+                   g->ps_global_base, g->ps_global_size);
   if (words & 1u) data[words++] = 0; /* records stay 8-aligned */
   g->data_words = words;
   return true;
