@@ -260,9 +260,47 @@ static void reg_watch_check(const Interp_State *s, const uint64_t before[31], ui
   }
 }
 
+/* Diagnostics (reference path only - VOLAND_NO_PREDECODE=1):
+ * VOLAND_PC_LOG=PC[,PC...] logs the registers each time one of those
+ * guest PCs runs, with the words at [x1], [[x1]+0x40] and [x8+0x40] (a
+ * queue push's item and a field of it - who hands over a bad pointer). */
+#define PC_LOG_MAX 16u
+#define PC_LOG_FIELD 0x40u
+static int g_pc_log = -1;
+static uint32_t g_pc_log_count;
+static uint64_t g_pc_log_pcs[PC_LOG_MAX];
+static uint64_t pc_log_word(const Interp_State *s, uint64_t address) {
+  uint64_t v = 0;
+  VMM_Fault fault;
+  const uint8_t *host = (address & 7u) ? NULL : vmm_translate_inline(s->l1, address, VMM_PERM_R, &fault);
+  if (host) memcpy(&v, host, sizeof(v));
+  return v;
+}
+static void pc_log_check(const Interp_State *s) {
+  if (g_pc_log < 0) {
+    const char *spec = getenv("VOLAND_PC_LOG");
+    g_pc_log = spec ? 1 : 0;
+    for (char *end = NULL; spec && *spec && g_pc_log_count < PC_LOG_MAX; spec = *end ? end + 1 : end)
+      g_pc_log_pcs[g_pc_log_count++] = strtoull(spec, &end, 0);
+  }
+  if (!g_pc_log) return;
+  for (uint32_t i = 0; i < g_pc_log_count; i++) {
+    if (g_pc_log_pcs[i] != s->regs.pc) continue;
+    const uint64_t x1v = pc_log_word(s, s->regs.x[1]);
+    log_warn("[pclog] pc 0x%llx tls 0x%llx x0 %llx x1 %llx [x1] %llx [[x1]+40] %llx x8 %llx [x8+40] %llx x19 %llx x20 %llx "
+             "x21 %llx x29 %llx",
+             (unsigned long long)s->regs.pc, (unsigned long long)s->tpidrro_el0, (unsigned long long)s->regs.x[0],
+             (unsigned long long)s->regs.x[1], (unsigned long long)x1v,
+             (unsigned long long)pc_log_word(s, x1v + PC_LOG_FIELD), (unsigned long long)s->regs.x[8],
+             (unsigned long long)pc_log_word(s, s->regs.x[8] + PC_LOG_FIELD), (unsigned long long)s->regs.x[19],
+             (unsigned long long)s->regs.x[20], (unsigned long long)s->regs.x[21], (unsigned long long)s->regs.x[29]);
+  }
+}
+
 /* One instruction through the full decoder (the reference path: step()
  * and anything the predecoded path does not cache). */
 bool interp_run_one(Interp_State *s, CPU_ExitReason *exit_reason) {
+  pc_log_check(s);
   if (g_reg_watch < 0) {
     const char *spec = getenv("VOLAND_REG_WATCH");
     char *end = NULL;

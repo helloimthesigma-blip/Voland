@@ -413,6 +413,9 @@ cycles, exit, pc); `VOLAND_FS_HASH=1` (FNV-1a of every IStorage read);
 `VOLAND_WATCH_GUEST_SKIP=HANDLE` (guest loads and stores there, with thread
 and tick); `VOLAND_REG_WATCH=LO:HI[:TLS]` with `VOLAND_NO_PREDECODE=1`
 (instructions that move a register into a range);
+`VOLAND_PC_LOG=PC[,PC...]` with `VOLAND_NO_PREDECODE=1` (registers, and
+the words at `[x1]`, `[[x1]+0x40]` and `[x8+0x40]`, each time one of those
+PCs runs - a queue push and the item it hands over);
 `VOLAND_TRACE_CALLS` with `VOLAND_TRACE_MATCH_X1=OFF:VALUE` and
 `VOLAND_TRACE_DUMP_MEM=GVA:BYTES:FILE` (memory at a matching call).
 
