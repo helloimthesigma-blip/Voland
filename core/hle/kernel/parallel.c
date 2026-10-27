@@ -122,6 +122,7 @@ typedef struct Core {
   pthread_t thread;
   int32_t running;          /* scheduler index of the thread in run(), -1 */
   Core_Time time;
+  uint64_t stall_rng;       /* VOLAND_CORE_STALL's draws */
 } Core;
 
 /* A host call waiting for the driver. */
@@ -314,6 +315,29 @@ static void stop_free_run(Parallel *p, Scheduler_Status status) {
  * run. Devices update on whichever core finds them due; with nothing
  * runnable anywhere, that core takes the serial idle step (a time jump to
  * the next wake). Called and returns with the kernel lock. */
+/* VOLAND_CORE_STALL=ONE_IN:US (diagnostics): after a run, one time in
+ * ONE_IN the host thread sleeps US microseconds with its guest thread
+ * still on the core - as when the host OS takes the core away (a browser
+ * tab shares the machine with the GPU process and the renderer). Guest
+ * time goes on on the other cores meanwhile. */
+static void host_stall(Core *core) {
+  static int parsed;
+  static uint32_t one_in;
+  static long stall_us;
+  if (!parsed) {
+    const char *spec = getenv("VOLAND_CORE_STALL");
+    char *end = NULL;
+    one_in = spec ? (uint32_t)strtoul(spec, &end, 0) : 0u;
+    stall_us = end && *end == ':' ? strtol(end + 1, NULL, 0) : 0;
+    parsed = 1;
+  }
+  if (!one_in || stall_us <= 0) return;
+  core->stall_rng = core->stall_rng * 6364136223846793005ull + 1442695040888963407ull + core->index;
+  if ((core->stall_rng >> 33) % one_in) return;
+  const struct timespec pause = {stall_us / 1000000L, (stall_us % 1000000L) * 1000L};
+  nanosleep(&pause, NULL);
+}
+
 static void run_free_on_core(Parallel *p, Core *core) {
   Scheduler *sched = p->sched;
   const CPU_Backend *backend = p->backend;
@@ -365,6 +389,7 @@ static void run_free_on_core(Parallel *p, Core *core) {
     const uint64_t run_start = timed ? now_ns() : 0;
     const CPU_ExitReason exit_reason = backend->run(thread->thread.cpu_state, p->budget);
     if (timed) core->time.run_ns += (now_ns() - run_start) * PARALLEL_RUN_SAMPLE;
+    host_stall(core);
 
     lock_kernel(p, &core->time.lock_ns);
     p->busy--;

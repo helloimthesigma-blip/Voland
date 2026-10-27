@@ -1012,7 +1012,13 @@ static void dump_modules(Emulator *emu, const char *dir) {
     out = fopen(path, "wb");
     for (uint64_t at = 0; out && at < mod->image_size; at += MODULE_DUMP_CHUNK) {
       const uint64_t n = mod->image_size - at < MODULE_DUMP_CHUNK ? mod->image_size - at : MODULE_DUMP_CHUNK;
-      if (!error_is_ok(vmm_read_block(emu->vmm, mod->base_gva + at, chunk, n))) break;
+      if (!error_is_ok(vmm_read_block(emu->vmm, mod->base_gva + at, chunk, n))) {
+        /* A page it cannot read (a guard, unmapped .bss): page by page,
+         * zeros there, so the dynamic section after it still lands. */
+        for (uint64_t page = 0; page < n; page += VMM_PAGE_SIZE)
+          if (!error_is_ok(vmm_read_block(emu->vmm, mod->base_gva + at + page, chunk + page, VMM_PAGE_SIZE)))
+            memset(chunk + page, 0, VMM_PAGE_SIZE);
+      }
       fwrite(chunk, 1, (size_t)n, out);
     }
     if (out) fclose(out);
