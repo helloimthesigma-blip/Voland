@@ -30,4 +30,10 @@ typedef void (*Interp_Read_Hook)(uint64_t pc, uint64_t lr, uint64_t address, uin
                                  bool write);
 void interp_set_read_watch(uint64_t host, uint64_t bytes, Interp_Read_Hook hook, bool writes);
 
+/* Diagnostics: called when the PC named by VOLAND_PC_LOG_DUMP runs (it
+ * must also be in VOLAND_PC_LOG) - voland-cli dumps every thread's state
+ * there, to see who was waiting and who was runnable at that moment. */
+typedef void (*Interp_Pc_Hook)(void);
+void interp_set_pc_log_dump(Interp_Pc_Hook hook);
+
 #endif /* SWITCH_CPU_BACKENDS_INTERPRETER_INTERPRETER_H */

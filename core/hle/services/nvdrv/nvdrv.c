@@ -851,6 +851,24 @@ static void run_cmdbufs(Nvdrv_State *s, Nv_Fd *f, const uint8_t *d, uint32_t cmd
   }
 }
 
+/* About a 720p frame on the Tegra X1's NVDEC: 2 ms of virtual time. */
+#define NVDEC_FRAME_TICKS (SCHEDULER_TIMER_HZ / 500u)
+
+/* A host1x increment: NVDEC's once its decode time has passed (in order,
+ * behind those already waiting), every other engine's now - and NVDEC's
+ * too when the queue is full or there is no clock. */
+static void engine_complete(Nvdrv_State *s, const Nv_Fd *f, uint32_t id, uint32_t value) {
+  const Scheduler *sched = s->hle ? s->hle->scheduler : NULL;
+  if (f->device != NV_DEVICE_NVDEC || !sched || s->engine_pending_count == NVDRV_ENGINE_PENDING) {
+    syncpoint_complete(&s->syncpoints, id, value);
+    return;
+  }
+  const uint32_t at = (s->engine_pending_head + s->engine_pending_count++) % NVDRV_ENGINE_PENDING;
+  s->engine_pending[at].syncpoint = id;
+  s->engine_pending[at].value = value;
+  s->engine_pending[at].due = sched->ticks + NVDEC_FRAME_TICKS;
+}
+
 /* host1x channel-common ioctls (type 0x00 on nvdec/vic/nvjpg/gpu). */
 static uint32_t channel_common_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint8_t *d, uint32_t size) {
   switch (nr) {
@@ -859,8 +877,11 @@ static uint32_t channel_common_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint
     /* cmdbuf 12 bytes, reloc 16, reloc shift 4, syncpt incr 20 ({id,
      * increments, waitbase, next, prev} - libnx's nvioctl_syncpt_incr),
      * fence threshold 4: threshold i is where incr i's syncpoint lands.
-     * The engines' work itself is not emulated (decoded video is black,
-     * §13): its syncpoints complete at once. */
+     * The engine runs at once, but NVDEC's increments land a frame's
+     * decode time later (engine_complete): Smash Bros.' player closes a
+     * movie as soon as its last frame's fence is reached, and destroys
+     * the frames' fences before its frame-status thread - napping up to
+     * 1 ms after each pop - has read the last one's. */
     const uint64_t incr_at = 16u + (uint64_t)cmdbufs * 12u + (uint64_t)relocs * 20u;
     const uint64_t fence_at = incr_at + (uint64_t)incrs * SUBMIT_INCR_BYTES;
     if (fence_at + (uint64_t)fences * 4u > size) return NV_BAD_PARAMETER;
@@ -871,7 +892,7 @@ static uint32_t channel_common_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint
       uint32_t id = rd32(e);
       if (id == 0 || id >= SYNCPOINT_COUNT) id = own;
       const uint32_t value = syncpoint_add_max(&s->syncpoints, id, rd32(e + 4));
-      syncpoint_complete(&s->syncpoints, id, value);
+      engine_complete(s, f, id, value);
       if (i < fences) wr32(d + fence_at + i * 4u, value);
     }
     f->submissions++;
@@ -1182,8 +1203,19 @@ Error nvdrv_register(Nvdrv_State *state, SM_Registry *registry) {
   return OK;
 }
 
+uint64_t nvdrv_next_wake(const Nvdrv_State *state) {
+  return state->engine_pending_count ? state->engine_pending[state->engine_pending_head].due : UINT64_MAX;
+}
+
 void nvdrv_poll_completions(Nvdrv_State *state, HLE_Context *context) {
   (void)completion_ring_drain(&state->syncpoints);
+  const uint64_t now = context->scheduler ? context->scheduler->ticks : UINT64_MAX;
+  while (state->engine_pending_count && state->engine_pending[state->engine_pending_head].due <= now) {
+    const uint32_t at = state->engine_pending_head;
+    syncpoint_complete(&state->syncpoints, state->engine_pending[at].syncpoint, state->engine_pending[at].value);
+    state->engine_pending_head = (at + 1u) % NVDRV_ENGINE_PENDING;
+    state->engine_pending_count--;
+  }
   for (uint32_t i = 0; i < NVDRV_MAX_EVENTS; i++) {
     Nv_Event_Slot *e = &state->events[i];
     if (!e->waiting || !syncpoint_reached(&state->syncpoints, e->syncpoint, e->threshold)) continue;

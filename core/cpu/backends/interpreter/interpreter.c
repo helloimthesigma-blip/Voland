@@ -328,12 +328,25 @@ static void pc_log_arm(const Interp_State *s, uint64_t item) {
   const uint8_t *host = (at & 7u) ? NULL : vmm_translate_inline(s->l1, at, VMM_PERM_R, &fault);
   if (host) interp_set_read_watch((uint64_t)(uintptr_t)host, sizeof(uint64_t), pc_log_watch_hook, true);
 }
+static Interp_Pc_Hook g_pc_log_dump;
+void interp_set_pc_log_dump(Interp_Pc_Hook hook) { g_pc_log_dump = hook; }
+static void pc_log_dump(uint64_t pc) {
+  static int parsed = -1;
+  static uint64_t dump_pc;
+  if (parsed < 0) {
+    const char *spec = getenv("VOLAND_PC_LOG_DUMP");
+    dump_pc = spec ? strtoull(spec, NULL, 0) : 0;
+    parsed = 1;
+  }
+  if (g_pc_log_dump && dump_pc && pc == dump_pc) g_pc_log_dump();
+}
 void interp_pc_log_check(const Interp_State *s) {
   if (!interp_pc_log_enabled()) return;
   for (uint32_t i = 0; i < g_pc_log_count; i++) {
     if (g_pc_log_pcs[i] != s->regs.pc) continue;
     const uint64_t x1v = pc_log_word(s, s->regs.x[1]);
     pc_log_arm(s, x1v);
+    pc_log_dump(s->regs.pc);
     log_warn("[pclog] pc 0x%llx tls 0x%llx x0 %llx x1 %llx [x1] %llx [[x1]+40] %llx x8 %llx [x8+40] %llx x19 %llx x20 %llx "
              "x21 %llx x29 %llx x30 %llx",
              (unsigned long long)s->regs.pc, (unsigned long long)s->tpidrro_el0, (unsigned long long)s->regs.x[0],

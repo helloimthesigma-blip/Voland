@@ -994,7 +994,9 @@ static void update_devices(Emulator* emulator) {
   {
     const uint64_t vsync = vi_next_wake(&emulator->vi);
     const uint64_t audio = emulator->audren ? audren_next_wake(emulator->audren) : UINT64_MAX;
-    emulator->scheduler.device_wake_at = audio < vsync ? audio : vsync;
+    const uint64_t decode = nvdrv_next_wake(&emulator->nvdrv);
+    const uint64_t first = audio < vsync ? audio : vsync;
+    emulator->scheduler.device_wake_at = decode < first ? decode : first;
   }
 }
 
@@ -1530,8 +1532,10 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
     const uint64_t pc = emulator->cpu_backend->get_pc(th->thread.cpu_state);
     uint64_t offset = 0;
     const char *module = module_of(emulator, pc, &offset);
-    log_warn("[threads] %llu (handle 0x%x, prio %u) %s pc %s+0x%llx", (unsigned long long)th->thread_id, th->handle,
-             th->thread.priority, k_state[th->state], module, (unsigned long long)offset);
+    log_warn("[threads] %llu (handle 0x%x, prio %u) %s%s%s pc %s+0x%llx (last core %u, run %llu)",
+             (unsigned long long)th->thread_id, th->handle, th->thread.priority, k_state[th->state],
+             th->on_core ? " on core" : "", th->held ? " held" : "", module, (unsigned long long)offset, th->last_core,
+             (unsigned long long)th->last_run);
     if (th->state == THREAD_STATE_WAITING) {
       uint32_t word = 0;
       (void)vmm_read32(emulator->vmm, th->wait_address, &word);

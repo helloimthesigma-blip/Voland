@@ -1363,6 +1363,11 @@ static void compute_capture(void *user, const Compute_Launch *launch, uint64_t a
   c->written++;
 }
 
+
+/* VOLAND_PC_LOG_DUMP (interpreter.h): every thread's state at that PC. */
+static Emulator *g_dump_emu;
+static void dump_threads_at_pc(void) { emulator_dump_threads(g_dump_emu, false); }
+
 static int run(int argc, char **argv) {
   if (argc < 1) return EXIT_USAGE;
   const char *path = argv[0];
@@ -1510,6 +1515,8 @@ static int run(int argc, char **argv) {
   Byte_Source source;
   if (!open_source(path, &file, &source)) return EXIT_LOAD_FAILED;
   static Emulator emu;
+  g_dump_emu = &emu;
+  interp_set_pc_log_dump(dump_threads_at_pc);
   Error err = emulator_create_with_backend(&emu, backend);
   if (!error_is_ok(err)) {
     fprintf(stderr, "voland-cli: emulator_create: %s\n", err.message);

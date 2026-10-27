@@ -235,6 +235,37 @@ int main(void) {
   CHECK(ioctl(vic, IOWR(0x00u, 0x01u, 40), d) == 0 && rd32(d + 36) == 2);
   memset(d, 0, sizeof(d));
   CHECK(ioctl(vic, IOWR(0x00u, 0x02u, 8), d) == 0 && rd32(d + 4) != 0 && rd32(d + 4) != syncpoint);
+  CHECK(syncpoint_reached(&g_emu.nvdrv.syncpoints, rd32(d + 4), 2)); /* VIC: at once */
+
+  /* NVDEC: the same submit's increment lands a frame's decode time later -
+   * not reached yet, due at the next device wake, reached after a poll
+   * past it. */
+  {
+    const uint32_t nvdec = open_device("/dev/nvhost-nvdec");
+    CHECK(nvdec != 0xFFFFFFFFu);
+    memset(d, 0, sizeof(d));
+    wr32(d, nvmap);
+    CHECK(ioctl(nvdec, IOW(0x48u, 0x01u, 4), d) == 0);
+    memset(d, 0, sizeof(d));
+    wr32(d + 8, 1); wr32(d + 12, 1);
+    wr32(d + 16, 0); wr32(d + 20, 1);
+    wr32(d + 24, 0xFFFFFFFFu); wr32(d + 28, 0xFFFFFFFFu); wr32(d + 32, 0xFFFFFFFFu);
+    const uint64_t submitted = g_emu.scheduler.ticks;
+    CHECK(ioctl(nvdec, IOWR(0x00u, 0x01u, 40), d) == 0 && rd32(d + 36) == 1);
+    memset(d, 0, sizeof(d));
+    CHECK(ioctl(nvdec, IOWR(0x00u, 0x02u, 8), d) == 0);
+    const uint32_t decode_syncpoint = rd32(d + 4);
+    CHECK(!syncpoint_reached(&g_emu.nvdrv.syncpoints, decode_syncpoint, 1));
+    const uint64_t due = nvdrv_next_wake(&g_emu.nvdrv);
+    CHECK(due > submitted && due != UINT64_MAX);
+    g_emu.scheduler.ticks = due - 1u;
+    nvdrv_poll_completions(&g_emu.nvdrv, &g_emu.hle);
+    CHECK(!syncpoint_reached(&g_emu.nvdrv.syncpoints, decode_syncpoint, 1));
+    g_emu.scheduler.ticks = due;
+    nvdrv_poll_completions(&g_emu.nvdrv, &g_emu.hle);
+    CHECK(syncpoint_reached(&g_emu.nvdrv.syncpoints, decode_syncpoint, 1));
+    CHECK(nvdrv_next_wake(&g_emu.nvdrv) == UINT64_MAX);
+  }
   /* MAP_BUFFER: a 12-byte header, then {handle, address out} - ten maps in
    * 0x5C bytes, as the SDK's video decoder sends them. */
   memset(d, 0, sizeof(d));

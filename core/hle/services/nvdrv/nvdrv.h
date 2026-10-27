@@ -58,6 +58,7 @@
 #define NVDRV_MAX_GPU_MAPPINGS 16384u
 #define NVDRV_MAX_EVENTS 64u
 #define NVDRV_GPU_LATENCY_RING 256u /* queued submissions tracked for nvdrv_bound_gpu_latency */
+#define NVDRV_ENGINE_PENDING 64u    /* NVDEC syncpoint completions waiting for their decode time */
 #define NVDRV_MAX_CHANNELS 8u     /* GPU channels with command processing */
 #define NVDRV_NO_CHANNEL UINT32_MAX
 #define NVDRV_IOCTL_MAX_BYTES 0x4000u /* the 14-bit size field */
@@ -172,6 +173,13 @@ typedef struct Nvdrv_State {
   Mm_Engine vic;
   Mm_Video mm_video;
   uint32_t cmdbuf[NVDRV_MAX_CMDBUF_WORDS];
+  /* NVDEC's syncpoint increments, completed a frame's decode time after
+   * the submit (nvdrv_poll_completions), oldest first. */
+  struct {
+    uint32_t syncpoint, value;
+    uint64_t due; /* virtual ticks */
+  } engine_pending[NVDRV_ENGINE_PENDING];
+  uint32_t engine_pending_head, engine_pending_count;
   /* Async GPU: when each queued submission was made (virtual ticks) and
    * the GPU thread's call count after it (nvdrv_bound_gpu_latency). */
   uint64_t submit_ticks[NVDRV_GPU_LATENCY_RING];
@@ -208,5 +216,9 @@ void nvdrv_bound_gpu_latency(Nvdrv_State *state, uint64_t now_ticks, uint64_t ma
 /* Applies GPU completion-ring records and signals async waiters whose
  * syncpoint threshold was reached. Called every scheduler slice. */
 void nvdrv_poll_completions(Nvdrv_State *state, HLE_Context *context);
+
+/* When the next pending NVDEC completion is due (virtual ticks), or
+ * UINT64_MAX: idle time stops there, as for a vsync. */
+uint64_t nvdrv_next_wake(const Nvdrv_State *state);
 
 #endif /* SWITCH_HLE_SERVICES_NVDRV_NVDRV_H */
