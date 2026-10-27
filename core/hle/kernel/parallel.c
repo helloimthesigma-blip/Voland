@@ -108,7 +108,8 @@ bool parallel_on_core_thread(void) { return false; }
 /* Where a core's host time goes (docs/PARALLEL.md "Measuring"). Written
  * by the core, read racily by the driver's periodic report. */
 typedef struct Core_Time {
-  uint64_t run_ns;          /* inside backend->run */
+  uint64_t run_ns;          /* inside backend->run (sampled: PARALLEL_RUN_SAMPLE) */
+  uint64_t runs;
   uint64_t lock_ns;         /* acquiring the kernel lock between runs */
   uint64_t svc_lock_ns;     /* acquiring it for an SVC */
   uint64_t idle_ns;         /* waiting for a thread to pick within a slice */
@@ -180,6 +181,11 @@ struct Parallel {
 };
 
 #define PARALLEL_REPORT_NS 10000000000ull /* every 10 s of host time */
+
+/* One run in this many is timed and counts for all of them: a host clock
+ * read is a call out to JS in the browser, and a pair per run was ~5% of
+ * Tears of the Kingdom's busy time (a run ends at every SVC). */
+#define PARALLEL_RUN_SAMPLE 16u
 
 static uint64_t now_ns(void) {
   struct timespec ts;
@@ -276,12 +282,13 @@ static uint64_t run_slice_on_core(Parallel *p, Core *core) {
     backend->set_sys_reg(thread->thread.cpu_state, CPU_SYSREG_CNTVCT_EL0, start_ticks);
     pthread_mutex_unlock(&p->kernel);
 
-    const uint64_t run_start = now_ns();
+    const bool timed = core->time.runs++ % PARALLEL_RUN_SAMPLE == 0;
+    const uint64_t run_start = timed ? now_ns() : 0;
     /* Within budget: what is left of it; past it: one more budget's worth
      * at most per run (the next check decides whether to go on). */
     const CPU_ExitReason exit_reason =
         backend->run(thread->thread.cpu_state, used < p->budget ? p->budget - used : p->budget);
-    core->time.run_ns += now_ns() - run_start;
+    if (timed) core->time.run_ns += (now_ns() - run_start) * PARALLEL_RUN_SAMPLE;
 
     lock_kernel(p, &core->time.lock_ns);
     p->busy--;
@@ -354,9 +361,10 @@ static void run_free_on_core(Parallel *p, Core *core) {
     backend->set_sys_reg(thread->thread.cpu_state, CPU_SYSREG_CNTVCT_EL0, start_ticks);
     pthread_mutex_unlock(&p->kernel);
 
-    const uint64_t run_start = now_ns();
+    const bool timed = core->time.runs++ % PARALLEL_RUN_SAMPLE == 0;
+    const uint64_t run_start = timed ? now_ns() : 0;
     const CPU_ExitReason exit_reason = backend->run(thread->thread.cpu_state, p->budget);
-    core->time.run_ns += now_ns() - run_start;
+    if (timed) core->time.run_ns += (now_ns() - run_start) * PARALLEL_RUN_SAMPLE;
 
     lock_kernel(p, &core->time.lock_ns);
     p->busy--;
