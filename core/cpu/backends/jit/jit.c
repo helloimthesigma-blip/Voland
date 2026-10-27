@@ -51,8 +51,10 @@
 /* Interpreted executions before a block is compiled. Measured on
  * a commercial game (docs/JIT.md "Measuring"): 16 compiled ~2.5x the modules of
  * 256 for the same guest speed, and module compilation is the JIT's
- * largest overhead while games load. */
-#define JIT_DEFAULT_HOT_THRESHOLD 256u
+ * largest overhead while games load. Tears of the Kingdom on 3 cores
+ * (Node, equal wall time): 4096 got 19% further than 256 with 59% fewer
+ * modules and no evictions at the live cap; 16384 no further than 4096. */
+#define JIT_DEFAULT_HOT_THRESHOLD 4096u
 /* Installed regions per host thread. Each holds an engine module and its
  * machine code until it is removed; TOTK compiles ~70k distinct regions
  * per core in its first minutes and the browser tab died at ~200k live
