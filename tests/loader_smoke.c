@@ -48,6 +48,15 @@ static Error read_update(void *user, uint32_t file_id, uint64_t offset, void *ou
   return OK;
 }
 
+/* Several mod files, file_id indexing the array. */
+static Error read_files(void *user, uint32_t file_id, uint64_t offset, void *out, uint64_t size) {
+  const Fixture_Buffer *const *files = (const Fixture_Buffer *const *)user;
+  const Fixture_Buffer *b = files[file_id];
+  if (offset > b->size || size > b->size - offset) return ERR(RESULT_IO_ERROR, "past the mod file");
+  memcpy(out, b->bytes + offset, (size_t)size);
+  return OK;
+}
+
 /* A game update as the console ships one: its own ExeFS, and a RomFS
  * section whose indirect table takes the hash-layer prefix from the base
  * section and everything after it from the update's own bytes. */
@@ -300,6 +309,67 @@ int main(void) {
   emulator_mods_clear(&emu);
   fixture_buffer_free(&update_image);
   fixture_buffer_free(&update_romfs);
+
+  /* --- Atmosphere's romfs.bin and exefs.nsp: whole-image replacements,
+   * with loose romfs/ files still layered over the image. --- */
+  static const char k_image_sky[] = "image-sky";
+  static const char k_image_moon[] = "image-moon";
+  static const char k_loose_sky[] = "loose-sky";
+  const Fixture_RomFS_Entry image_entries[] = {
+      {"/textures", true, NULL, 0},
+      {"/textures/sky.tex", false, k_image_sky, sizeof(k_image_sky) - 1},
+      {"/textures/moon.tex", false, k_image_moon, sizeof(k_image_moon) - 1},
+  };
+  Fixture_Buffer romfs_bin, exefs_nsp, loose_sky;
+  fixture_build_romfs(image_entries, 3, 0, &romfs_bin);
+  const Fixture_File nsp_files[] = {
+      {EXEFS_FILE_NPDM, npdm_image.bytes, npdm_image.size},
+      {EXEFS_FILE_RTLD, rtld_nso_image.bytes, rtld_nso_image.size},
+      {EXEFS_FILE_MAIN, main_nso_image.bytes, main_nso_image.size},
+      {"subsdk0", main_nso_image.bytes, main_nso_image.size},
+  };
+  fixture_build_pfs0(nsp_files, 4, &exefs_nsp);
+  memset(&loose_sky, 0, sizeof(loose_sky));
+  fixture_append(&loose_sky, k_loose_sky, sizeof(k_loose_sky) - 1);
+  const Fixture_Buffer *mod_files[] = {&romfs_bin, &exefs_nsp, &loose_sky, &main_nso_image};
+  emulator_mods_bind(&emu, read_files, mod_files);
+  CHECK_OK(emulator_mods_add(&emu, MODS_ROMFS_IMAGE, romfs_bin.size, 0));
+  CHECK_OK(emulator_mods_add(&emu, MODS_EXEFS_IMAGE, exefs_nsp.size, 1));
+  CHECK_OK(emulator_mods_add(&emu, "romfs/textures/sky.tex", loose_sky.size, 2));
+  CHECK_OK(emulator_load_program(&emu, &file, 0));
+  CHECK(emu.process.module_count == 3);
+  CHECK(strcmp(emu.process.modules[2].name, "subsdk0") == 0);
+  arena_reset(&arena);
+  RomFS imaged;
+  CHECK_OK(romfs_open(emu.romfs, &arena, &imaged));
+  RomFS_File_Entry entry;
+  char back[16] = {0};
+  CHECK_OK(romfs_find_file(&imaged, "/textures/sky.tex", &entry));
+  CHECK(entry.data_size == sizeof(k_loose_sky) - 1);
+  CHECK_OK(romfs_read_file(&imaged, &entry, 0, back, entry.data_size));
+  CHECK(memcmp(back, k_loose_sky, entry.data_size) == 0);
+  CHECK_OK(romfs_find_file(&imaged, "/textures/moon.tex", &entry));
+  CHECK(entry.data_size == sizeof(k_image_moon) - 1);
+  CHECK_OK(romfs_read_file(&imaged, &entry, 0, back, entry.data_size));
+  CHECK(memcmp(back, k_image_moon, entry.data_size) == 0);
+  emulator_unload_program(&emu);
+  /* Images that are not what they claim are ignored, not fatal: an NSO
+   * as romfs.bin, and as exefs.nsp. */
+  emulator_mods_clear(&emu);
+  CHECK_OK(emulator_mods_add(&emu, MODS_ROMFS_IMAGE, main_nso_image.size, 3));
+  CHECK_OK(emulator_mods_add(&emu, MODS_EXEFS_IMAGE, main_nso_image.size, 3));
+  CHECK_OK(emulator_load_program(&emu, &file, 0));
+  CHECK(emu.process.module_count == 2);
+  arena_reset(&arena);
+  CHECK_OK(romfs_open(emu.romfs, &arena, &imaged));
+  CHECK_OK(romfs_find_file(&imaged, "/textures/sky.tex", &entry));
+  CHECK(entry.data_size == sizeof(k_texture) - 1);
+  CHECK_CODE(romfs_find_file(&imaged, "/textures/moon.tex", &entry), RESULT_NOT_FOUND);
+  emulator_unload_program(&emu);
+  emulator_mods_clear(&emu);
+  fixture_buffer_free(&loose_sky);
+  fixture_buffer_free(&exefs_nsp);
+  fixture_buffer_free(&romfs_bin);
   emulator_destroy(&emu);
 
   arena_destroy(&arena);

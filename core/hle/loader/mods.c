@@ -220,6 +220,10 @@ bool mods_normalize_path(const char *mod_name, const char *path, uint64_t title_
       return snprintf(out, out_size, "cheats/%s/%.*s", mod, (int)file_len, file) < (int)out_size;
     }
   }
+  /* Atmosphere's whole-image replacements; one per title, so the first
+   * (highest-priority) mod's copy wins like any other path. */
+  if (component_is(file, file_len, MODS_ROMFS_IMAGE)) return snprintf(out, out_size, MODS_ROMFS_IMAGE) < (int)out_size;
+  if (component_is(file, file_len, MODS_EXEFS_IMAGE)) return snprintf(out, out_size, MODS_EXEFS_IMAGE) < (int)out_size;
   if (ends_with_ci(file, file_len, ".ips") || ends_with_ci(file, file_len, ".pchtxt")) {
     return snprintf(out, out_size, "exefs/%s/%.*s", mod, (int)file_len, file) < (int)out_size;
   }

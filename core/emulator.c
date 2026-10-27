@@ -146,8 +146,25 @@ static void run_cheats(Emulator* emulator) {
   cheat_vm_run(&emulator->cheats, &env);
 }
 
+/* A mod's romfs.bin (§19) stands in for the title's RomFS; loose romfs/
+ * files then layer over it. Checked by its header-size field only: the
+ * RomFS reader bounds everything else. */
+static void use_romfs_image_mod(Emulator* emulator) {
+  const Mod_File* image = mod_set_find(&emulator->mods, MODS_ROMFS_IMAGE);
+  if (!image) return;
+  uint8_t word[8];
+  if (image->size < ROMFS_HEADER_SIZE || !error_is_ok(byte_source_read(&image->source, 0, word, sizeof(word))) ||
+      byte_source_le64(word) != ROMFS_HEADER_SIZE) {
+    log_warn("[mods] " MODS_ROMFS_IMAGE " is not a RomFS image; ignored");
+    return;
+  }
+  emulator->romfs = &image->source;
+  log_notice("mods: RomFS replaced by " MODS_ROMFS_IMAGE " (%llu bytes)", (unsigned long long)image->size);
+}
+
 static void locate_romfs(Emulator* emulator, bool is_nro) {
   locate_romfs_base(emulator, is_nro);
+  use_romfs_image_mod(emulator);
   layer_romfs_mods(emulator);
 }
 
@@ -827,7 +844,19 @@ Error emulator_load_program(Emulator* emulator, const Byte_Source* nca_source,
 
   ExeFS exefs;
   NPDM npdm;
-  err = exefs_open(nca_section_source(code_nca, (uint32_t)exefs_index), &scratch, &exefs);
+  /* A mod's exefs.nsp (§19) is a whole ExeFS; loose exefs/ files still
+   * replace its entries in process_bootstrap. */
+  const Mod_File* exefs_mod = mod_set_find(&emulator->mods, MODS_EXEFS_IMAGE);
+  if (exefs_mod) {
+    err = exefs_open(&exefs_mod->source, &scratch, &exefs);
+    if (error_is_ok(err)) {
+      log_notice("mods: ExeFS replaced by " MODS_EXEFS_IMAGE);
+    } else {
+      log_warn("[mods] " MODS_EXEFS_IMAGE " unusable (%s); using the title's ExeFS", err.message ? err.message : "?");
+      arena_reset(&scratch);
+    }
+  }
+  if (!exefs_mod || !error_is_ok(err)) err = exefs_open(nca_section_source(code_nca, (uint32_t)exefs_index), &scratch, &exefs);
   if (error_is_ok(err)) {
     const ExeFS_Entry* npdm_entry = exefs_find(&exefs, EXEFS_FILE_NPDM);
     const Mod_File* npdm_mod = mod_set_find(&emulator->mods, "exefs/" EXEFS_FILE_NPDM);

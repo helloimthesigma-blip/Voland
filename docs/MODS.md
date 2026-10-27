@@ -12,13 +12,15 @@ contains runs inside the emulated console, never as code in your browser.
 | Game files (LayeredFS) | `romfs/...` | Each file replaces the game's file at the same path, or is added if the game has none. Folders are merged. |
 | Executable patches | `exefs/<build id>.ips`, `exefs_patches/<name>/<build id>.ips` (IPS or IPS32), or any `*.pchtxt` | Applied to the matching executable (`main`, `subsdk*`, `sdk`, `rtld`) as it is loaded. The build id in the file name, or `@nsobid-` in a pchtxt, must match the executable, so a patch for another game version does nothing. |
 | Replacement executables | `exefs/main`, `exefs/subsdk0`..`subsdk9`, `exefs/sdk`, `exefs/rtld`, `exefs/main.npdm` | The file replaces the game's own, or adds a module the game lacks (for example `subsdk9` plus `main.npdm`, which is how code-injection frameworks load). |
+| Whole-image replacements | `romfs.bin`, `exefs.nsp` (Atmosphere) | `romfs.bin` is a complete RomFS image used instead of the game's; loose `romfs/` files from any mod are still layered over it. `exefs.nsp` is a complete ExeFS (PFS0) used instead of the game's; loose `exefs/` files still replace its entries. A file that is not a valid image is ignored with a log line. |
 | Game update | any `*.nca` (the update's decrypted program NCA) | The update's executables replace the base game's, and its RomFS is merged over the base game's, as the console does. Only an update for the loaded game is used: its program id must be the game's plus `0x800`. Patches and cheats then need the update's build ids. |
 | DLC | any `*.nca` (each add-on's decrypted data NCA) | The game sees the add-on as installed and reads its files. Add-ons for other games are skipped. |
 | Cheats | `cheats/<build id>.txt` | Atmosphere cheat format. `{Master}` codes always run, `[Named]` cheats can be switched on and off while playing. They run 12 times a second, as on Atmosphere. |
 
 Common folder layouts work as unpacked:
 
-- `atmosphere/contents/<title id>/romfs/...`, `.../exefs/...`, `.../cheats/...`.
+- `atmosphere/contents/<title id>/romfs/...`, `.../exefs/...`, `.../cheats/...`,
+  `.../romfs.bin`, `.../exefs.nsp`.
   Files under another game's title id are skipped.
 - `<title id>/romfs/...`, or plain `romfs/...`, `exefs/...`, `cheats/...`.
 - `atmosphere/exefs_patches/<name>/<build id>.ips`.
