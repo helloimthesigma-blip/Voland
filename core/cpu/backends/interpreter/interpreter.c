@@ -352,10 +352,11 @@ void interp_pc_log_check(const Interp_State *s) {
     const uint64_t x1v = pc_log_word(s, s->regs.x[1]);
     pc_log_arm(s, x1v);
     pc_log_dump(s->regs.pc);
-    log_warn("[pclog] pc 0x%llx tls 0x%llx x0 %llx x1 %llx [x1] %llx [[x1]+40] %llx x8 %llx [x8+40] %llx x19 %llx x20 %llx "
-             "x21 %llx x29 %llx x30 %llx",
+    log_warn("[pclog] pc 0x%llx tls 0x%llx x0 %llx x1 %llx x2 %llx x3 %llx [x1] %llx [[x1]+40] %llx x8 %llx [x8+40] %llx "
+             "x19 %llx x20 %llx x21 %llx x29 %llx x30 %llx",
              (unsigned long long)s->regs.pc, (unsigned long long)s->tpidrro_el0, (unsigned long long)s->regs.x[0],
-             (unsigned long long)s->regs.x[1], (unsigned long long)x1v,
+             (unsigned long long)s->regs.x[1], (unsigned long long)s->regs.x[2], (unsigned long long)s->regs.x[3],
+             (unsigned long long)x1v,
              (unsigned long long)pc_log_word(s, x1v + PC_LOG_FIELD), (unsigned long long)s->regs.x[8],
              (unsigned long long)pc_log_word(s, s->regs.x[8] + PC_LOG_FIELD), (unsigned long long)s->regs.x[19],
              (unsigned long long)s->regs.x[20], (unsigned long long)s->regs.x[21], (unsigned long long)s->regs.x[29],

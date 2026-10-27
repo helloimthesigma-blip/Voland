@@ -418,7 +418,7 @@ its guest thread on the core, as when the host OS takes the core away -
 `VOLAND_WATCH_GUEST_SKIP=HANDLE` (guest loads and stores there, with thread
 and tick); `VOLAND_REG_WATCH=LO:HI[:TLS]` with `VOLAND_NO_PREDECODE=1`
 (instructions that move a register into a range);
-`VOLAND_PC_LOG=PC[,PC...]` (registers with x30, and the words at `[x1]`,
+`VOLAND_PC_LOG=PC[,PC...]` (x0-x3, x8, x19-x21, x29, x30, and the words at `[x1]`,
 `[[x1]+0x40]` and `[x8+0x40]`, each time one of those PCs runs - a queue
 push and the item it hands over; every engine: the JIT leaves through the
 interpreter at those PCs) with `VOLAND_PC_LOG_WATCH=OFF` (each logged PC
