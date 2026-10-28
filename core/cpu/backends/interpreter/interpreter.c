@@ -9,6 +9,7 @@
 #include "common/log.h"
 #include "cpu/backends/interpreter/interp_internal.h"
 
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -316,7 +317,7 @@ static void pc_log_watch_hook(uint64_t pc, uint64_t lr, uint64_t address, uint32
            (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)address, size, (unsigned long long)v,
            (unsigned long long)(g_watch_state ? g_watch_state->tpidrro_el0 : 0u));
 }
-static int g_pc_log_watch = -1, g_pc_log_dump_parsed = -1;
+static int g_pc_log_watch = -1, g_pc_log_dump_parsed = -1, g_pc_log_deref = -1;
 bool interp_pc_log_watching(void) {
   int offset_set = g_pc_log_watch;
   if (offset_set < 0) g_pc_log_watch = offset_set = getenv("VOLAND_PC_LOG_WATCH") != NULL;
@@ -335,6 +336,7 @@ void interp_pc_log_reload(void) {
   g_pc_log = -1;
   g_pc_log_watch = -1;
   g_pc_log_dump_parsed = -1;
+  g_pc_log_deref = -1;
 }
 static void pc_log_dump(uint64_t pc) {
   static uint64_t dump_pc;
@@ -345,6 +347,32 @@ static void pc_log_dump(uint64_t pc) {
   }
   if (g_pc_log_dump && dump_pc && pc == dump_pc) g_pc_log_dump();
 }
+/* VOLAND_PC_LOG_DEREF=REG:OFF: each logged PC also prints the pointer at
+ * [xREG+OFF] and the 16 bytes it points to (a stream position and what
+ * is there). */
+#define PC_LOG_DEREF_BYTES 16u
+static uint32_t g_pc_log_deref_reg;
+static uint64_t g_pc_log_deref_offset;
+static void pc_log_deref(const Interp_State *s) {
+  if (g_pc_log_deref < 0) {
+    const char *spec = getenv("VOLAND_PC_LOG_DEREF");
+    char *end = NULL;
+    g_pc_log_deref_reg = spec ? (uint32_t)strtoul(spec, &end, 0) : 0u;
+    g_pc_log_deref_offset = end && *end == ':' ? strtoull(end + 1, NULL, 0) : 0u;
+    g_pc_log_deref = spec && g_pc_log_deref_reg <= 30u ? 1 : 0;
+  }
+  if (!g_pc_log_deref) return;
+  const uint64_t at = pc_log_word(s, s->regs.x[g_pc_log_deref_reg] + g_pc_log_deref_offset);
+  char hex[PC_LOG_DEREF_BYTES * 2u + 1u];
+  for (uint32_t i = 0; i < PC_LOG_DEREF_BYTES; i++) {
+    VMM_Fault fault;
+    const uint8_t *host = vmm_translate_inline(s->l1, at + i, VMM_PERM_R, &fault);
+    snprintf(&hex[i * 2u], 3, "%02x", host ? *host : 0u);
+  }
+  log_warn("[pclog] pc 0x%llx tls 0x%llx [x%u+%llx] %llx -> %s", (unsigned long long)s->regs.pc,
+           (unsigned long long)s->tpidrro_el0, g_pc_log_deref_reg, (unsigned long long)g_pc_log_deref_offset,
+           (unsigned long long)at, hex);
+}
 void interp_pc_log_check(const Interp_State *s) {
   if (!interp_pc_log_enabled()) return;
   for (uint32_t i = 0; i < g_pc_log_count; i++) {
@@ -352,6 +380,7 @@ void interp_pc_log_check(const Interp_State *s) {
     const uint64_t x1v = pc_log_word(s, s->regs.x[1]);
     pc_log_arm(s, x1v);
     pc_log_dump(s->regs.pc);
+    pc_log_deref(s);
     log_warn("[pclog] pc 0x%llx tls 0x%llx x0 %llx x1 %llx x2 %llx x3 %llx [x1] %llx [[x1]+40] %llx x8 %llx [x8+40] %llx "
              "x19 %llx x20 %llx x21 %llx x29 %llx x30 %llx",
              (unsigned long long)s->regs.pc, (unsigned long long)s->tpidrro_el0, (unsigned long long)s->regs.x[0],
