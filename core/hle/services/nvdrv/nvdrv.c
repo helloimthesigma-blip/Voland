@@ -370,11 +370,12 @@ static uint32_t as_remap(Nvdrv_State *s, uint8_t *d, uint32_t bytes) {
       }
     }
     if (!handle || !size) continue;
-    if (!nvmap_of(s, handle)) return NV_BAD_VALUE;
+    const Nvmap_Handle *h = nvmap_of(s, handle);
+    if (!h) return NV_BAD_VALUE;
     uint32_t i = 0;
     while (i < NVDRV_MAX_GPU_MAPPINGS && s->mappings[i].in_use) i++;
     if (i == NVDRV_MAX_GPU_MAPPINGS) return NV_INSUFFICIENT_MEMORY;
-    s->mappings[i] = (Gpu_Mapping){true, gpu_va, size, handle, buffer_offset};
+    s->mappings[i] = (Gpu_Mapping){true, gpu_va, size, handle, buffer_offset, h->allocated ? h->address : 0u};
     if (i + 1u > s->mapping_end) s->mapping_end = i + 1u;
     pt_map(s, i);
   }
@@ -445,7 +446,7 @@ static uint32_t as_gpu_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
     for (uint32_t i = 0; i < NVDRV_MAX_GPU_MAPPINGS; i++) {
       Gpu_Mapping *m = &s->mappings[i];
       if (m->in_use) continue;
-      *m = (Gpu_Mapping){true, gpu_va, size, handle, rd64(d + 16)};
+      *m = (Gpu_Mapping){true, gpu_va, size, handle, rd64(d + 16), h->allocated ? h->address : 0u};
       if (i + 1u > s->mapping_end) s->mapping_end = i + 1u;
       pt_map(s, i);
       log_debug("[as] MAP_BUFFER_EX flags 0x%x kind 0x%x handle %u page 0x%x buf_off 0x%llx size 0x%llx -> va 0x%llx",
@@ -576,8 +577,12 @@ bool nvdrv_gpu_translate(const Nvdrv_State *s, uint64_t gpu_va, uint64_t *guest_
     if (found == UINT32_MAX) return false;
   }
   const Gpu_Mapping *m = &s->mappings[found];
-  uint64_t base = 0, size = 0;
-  if (!nvdrv_nvmap_lookup(s, m->nvmap_handle, &base, &size)) return false;
+  /* A mapping pins the memory it was made over: NVN frees nvmap handles
+   * it still has mapped, and a later allocation that reuses the handle
+   * number must not redirect the old mapping (ACNH's command memory and
+   * textures read another buffer's bytes). */
+  uint64_t base = m->guest_base, size = 0;
+  if (!base && !nvdrv_nvmap_lookup(s, m->nvmap_handle, &base, &size)) return false;
   __atomic_store_n((uint32_t *)&s->last_mapping, found, __ATOMIC_RELAXED);
   *guest_va = base + m->buffer_offset + (gpu_va - m->gpu_va);
   *contiguous = m->size - (gpu_va - m->gpu_va);

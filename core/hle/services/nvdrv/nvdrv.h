@@ -125,6 +125,7 @@ typedef struct Gpu_Mapping {
   uint64_t size;
   uint32_t nvmap_handle;
   uint64_t buffer_offset;
+  uint64_t guest_base; /* the handle's memory when mapped: the mapping keeps it after FREE (0: look it up) */
 } Gpu_Mapping;
 
 typedef struct Nv_Event_Slot {

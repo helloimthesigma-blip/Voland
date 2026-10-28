@@ -202,6 +202,37 @@ int main(void) {
     CHECK(ioctl(as, IOWR(0x41u, 0x05u, 8), d) == 0);
   }
 
+  /* A mapping keeps the memory it was made over: NVN frees nvmap handles
+   * that are still mapped, and the next CREATE may reuse the number for a
+   * buffer elsewhere - the old mapping must not follow it. */
+  {
+    memset(d, 0, sizeof(d));
+    wr32(d, 0x1000);
+    CHECK(ioctl(nvmap, IOWR(0x01u, 0x01u, 8), d) == 0);
+    const uint32_t first = rd32(d + 4);
+    memset(d, 0, sizeof(d));
+    wr32(d, first); wr32(d + 4, 1); wr32(d + 8, 1); wr32(d + 12, 0x1000); wr64(d + 24, stack + 0x30000);
+    CHECK(ioctl(nvmap, IOWR(0x01u, 0x04u, 32), d) == 0);
+    const uint64_t pinned_va = 0x10200000ull;
+    memset(d, 0, sizeof(d));
+    wr32(d, 1); wr32(d + 8, first); wr64(d + 24, 0x1000); wr64(d + 32, pinned_va);
+    CHECK(ioctl(as, IOWR(0x41u, 0x06u, 40), d) == 0);
+    memset(d, 0, sizeof(d));
+    wr32(d, first);
+    CHECK(ioctl(nvmap, IOWR(0x01u, 0x05u, 24), d) == 0 && rd32(d + 20) == 0); /* freed */
+    memset(d, 0, sizeof(d));
+    wr32(d, 0x1000);
+    CHECK(ioctl(nvmap, IOWR(0x01u, 0x01u, 8), d) == 0 && rd32(d + 4) == first); /* the number comes back */
+    memset(d, 0, sizeof(d));
+    wr32(d, first); wr32(d + 4, 1); wr32(d + 8, 1); wr32(d + 12, 0x1000); wr64(d + 24, stack + 0x40000);
+    CHECK(ioctl(nvmap, IOWR(0x01u, 0x04u, 32), d) == 0);
+    uint64_t guest = 0, run = 0;
+    CHECK(nvdrv_gpu_translate(&g_emu.nvdrv, pinned_va + 0x80, &guest, &run) && guest == stack + 0x30080);
+    memset(d, 0, sizeof(d));
+    wr64(d, pinned_va);
+    CHECK(ioctl(as, IOWR(0x41u, 0x05u, 8), d) == 0);
+  }
+
   /* GPU channel: GPFIFO gives a fence; a submission with FENCE_GET completes it. */
   memset(d, 0, sizeof(d));
   wr32(d, 0x800);
