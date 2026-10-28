@@ -1030,6 +1030,10 @@ static void jit_request_stop(CPU_State *state) {
 }
 
 static CPU_State *jit_create(VMM_Context *vmm, void *userdata) {
+  /* VOLAND_JIT_THRESHOLD=N (diagnostics; ?env= in the browser): the hot
+   * threshold, as voland-cli's --jit-threshold. */
+  const char *threshold = getenv("VOLAND_JIT_THRESHOLD");
+  if (threshold) jit_set_hot_threshold((uint32_t)strtoul(threshold, NULL, 0));
   Jit_State *j = (Jit_State *)calloc(1, sizeof(Jit_State));
   if (!j) return NULL;
   j->interp.vmm = vmm;

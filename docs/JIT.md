@@ -407,6 +407,8 @@ same wall time): 4096 got 19% further than 256 with 59% fewer modules and
 no evictions at the live cap; 16384 got no further than 4096. In the
 browser its gloom scene went from ~2.2 to ~3.7 fps and the 150 s average
 from 8.0-8.3 to 8.6-9.1 fps; Silksong's title is unchanged (40-45 fps).
+`VOLAND_JIT_THRESHOLD=N` overrides it (in the browser through
+`?env=VOLAND_JIT_THRESHOLD=N`), for A/B runs without a rebuild.
 
 ## Sync vs async compile
 
