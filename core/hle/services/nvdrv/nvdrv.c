@@ -359,6 +359,9 @@ static uint32_t as_remap(Nvdrv_State *s, uint8_t *d, uint32_t bytes) {
     const uint64_t buffer_offset = (uint64_t)rd32(e + 8) << AS_REMAP_PAGE_SHIFT;
     const uint64_t gpu_va = (uint64_t)rd32(e + 12) << AS_REMAP_PAGE_SHIFT;
     const uint64_t size = (uint64_t)rd32(e + 16) << AS_REMAP_PAGE_SHIFT;
+    log_debug("[as] REMAP flags 0x%x kind 0x%x handle %u buf_off 0x%llx va 0x%llx size 0x%llx", (unsigned)(e[0] | e[1] << 8),
+              (unsigned)(e[2] | e[3] << 8), handle, (unsigned long long)buffer_offset, (unsigned long long)gpu_va,
+              (unsigned long long)size);
     for (uint32_t i = 0; i < s->mapping_end; i++) { /* whatever was at that VA goes */
       Gpu_Mapping *m = &s->mappings[i];
       if (m->in_use && m->gpu_va == gpu_va) {
