@@ -317,7 +317,7 @@ static void pc_log_watch_hook(uint64_t pc, uint64_t lr, uint64_t address, uint32
            (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)address, size, (unsigned long long)v,
            (unsigned long long)(g_watch_state ? g_watch_state->tpidrro_el0 : 0u));
 }
-static int g_pc_log_watch = -1, g_pc_log_dump_parsed = -1, g_pc_log_deref = -1;
+static int g_pc_log_watch = -1, g_pc_log_dump_parsed = -1, g_pc_log_deref = -1, g_pc_log_frames = -1;
 bool interp_pc_log_watching(void) {
   int offset_set = g_pc_log_watch;
   if (offset_set < 0) g_pc_log_watch = offset_set = getenv("VOLAND_PC_LOG_WATCH") != NULL;
@@ -337,6 +337,7 @@ void interp_pc_log_reload(void) {
   g_pc_log_watch = -1;
   g_pc_log_dump_parsed = -1;
   g_pc_log_deref = -1;
+  g_pc_log_frames = -1;
 }
 static void pc_log_dump(uint64_t pc) {
   static uint64_t dump_pc;
@@ -373,6 +374,34 @@ static void pc_log_deref(const Interp_State *s) {
            (unsigned long long)s->tpidrro_el0, g_pc_log_deref_reg, (unsigned long long)g_pc_log_deref_offset,
            (unsigned long long)at, hex);
 }
+/* VOLAND_PC_LOG_FRAMES=N: each logged PC also prints up to N return
+ * addresses from the frame-pointer chain ({x29: previous x29, lr}). */
+#define PC_LOG_MAX_FRAMES 24u
+#define PC_LOG_FRAME_LR 8u
+
+static void pc_log_frames(const Interp_State *s) {
+  if (g_pc_log_frames < 0) {
+    const char *spec = getenv("VOLAND_PC_LOG_FRAMES");
+    const unsigned long n = spec ? strtoul(spec, NULL, 0) : 0u;
+    g_pc_log_frames = (int)(n > PC_LOG_MAX_FRAMES ? PC_LOG_MAX_FRAMES : n);
+  }
+  if (g_pc_log_frames <= 0) return;
+  char line[PC_LOG_MAX_FRAMES * 12u + 1u];
+  size_t used = 0;
+  line[0] = 0;
+  uint64_t fp = s->regs.x[29];
+  for (int i = 0; i < g_pc_log_frames && fp; i++) {
+    const uint64_t lr = pc_log_word(s, fp + PC_LOG_FRAME_LR);
+    if (!lr) break;
+    used += (size_t)snprintf(line + used, sizeof(line) - used, " %llx", (unsigned long long)lr);
+    if (used >= sizeof(line)) break;
+    const uint64_t next = pc_log_word(s, fp);
+    if (next <= fp) break; /* the chain only goes up the stack */
+    fp = next;
+  }
+  log_warn("[pclog] pc 0x%llx tls 0x%llx frames%s", (unsigned long long)s->regs.pc,
+           (unsigned long long)s->tpidrro_el0, line);
+}
 void interp_pc_log_check(const Interp_State *s) {
   if (!interp_pc_log_enabled()) return;
   for (uint32_t i = 0; i < g_pc_log_count; i++) {
@@ -381,6 +410,7 @@ void interp_pc_log_check(const Interp_State *s) {
     pc_log_arm(s, x1v);
     pc_log_dump(s->regs.pc);
     pc_log_deref(s);
+    pc_log_frames(s);
     log_warn("[pclog] pc 0x%llx tls 0x%llx x0 %llx x1 %llx x2 %llx x3 %llx [x1] %llx [[x1]+40] %llx x8 %llx [x8+40] %llx "
              "x19 %llx x20 %llx x21 %llx x29 %llx x30 %llx",
              (unsigned long long)s->regs.pc, (unsigned long long)s->tpidrro_el0, (unsigned long long)s->regs.x[0],

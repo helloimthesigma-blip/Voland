@@ -431,7 +431,8 @@ compiled code is watched too) and `VOLAND_PC_LOG_DUMP=PC` (one of the
 logged PCs: voland-cli dumps every thread's state there - on core, held,
 waiting and on what, last core) and `VOLAND_PC_LOG_DEREF=REG:OFF` (also
 the pointer at `[xREG+OFF]` and the 16 bytes it points to - a stream
-position and the data there). In the browser these variables come from
+position and the data there) and `VOLAND_PC_LOG_FRAMES=N` (up to N return
+addresses from the x29 frame chain: a call stack per hit). In the browser these variables come from
 `?env=NAME=VALUE;NAME=VALUE` (set before the game loads), with `?aslr=0`
 so modules sit where voland-cli puts them and the PCs mean the same;
 `VOLAND_TRACE_CALLS` with `VOLAND_TRACE_MATCH_X1=OFF:VALUE` and
