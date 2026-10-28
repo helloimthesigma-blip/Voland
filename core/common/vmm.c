@@ -361,8 +361,6 @@ Error vmm_unmap(VMM_Context *ctx, uint64_t gva, uint64_t size) {
   const uint64_t page_count = size >> VMM_PAGE_BITS;
   bool executable = false;
   for (uint64_t i = 0; i < page_count && !executable; i++) executable = (pte_load(ctx, first_vpn + i) & VMM_PERM_X) != 0;
-  vmm_bump_map_generation();
-  if (executable) vmm_bump_generation();
   for (uint64_t i = 0; i < page_count; i++) {
     const uint64_t vpn = first_vpn + i;
     const uint64_t l1_index = vpn >> VMM_L2_INDEX_BITS;
@@ -375,6 +373,12 @@ Error vmm_unmap(VMM_Context *ctx, uint64_t gva, uint64_t size) {
       l2_table_release(ctx, table);
     }
   }
+  /* After the entries are gone, never before: a core that walks the table
+   * between a bump and the clear would cache the old translation under the
+   * new generation and keep it (with guest threads on several host cores,
+   * docs/PARALLEL.md "Memory model"). */
+  vmm_bump_map_generation();
+  if (executable) vmm_bump_generation();
   return OK;
 }
 
@@ -400,13 +404,14 @@ Error vmm_reprotect(VMM_Context *ctx, uint64_t gva, uint64_t size, uint32_t perm
       code = code || (pte & VMM_PERM_X) != 0;
     }
   }
-  if (loses) vmm_bump_map_generation();
-  if (code) vmm_bump_generation();
   for (uint64_t i = 0; i < page_count; i++) {
     const uint64_t vpn = first_vpn + i;
     const uint64_t pte = pte_load(ctx, vpn);
     pte_store(ctx, vpn, (pte & VMM_PTE_HOST_MASK) | ((uint64_t)perms & VMM_PTE_PERM_MASK));
   }
+  /* After the new entries, as in vmm_unmap. */
+  if (loses) vmm_bump_map_generation();
+  if (code) vmm_bump_generation();
   return OK;
 }
 

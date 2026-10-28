@@ -4815,6 +4815,7 @@ static uint32_t log2_size(uint32_t size) { return size == 8u ? 3u : size == 4u ?
 
 /* i32.atomic.load / i32.atomic.rmw.add (threads proposal, 0xFE prefix). */
 #define WASM_ATOMIC_I32_LOAD 0x10u
+#define WASM_ATOMIC_I64_LOAD 0x11u
 #define WASM_ATOMIC_I32_STORE 0x17u
 #define WASM_ATOMIC_I32_RMW_ADD 0x1Eu
 #define WASM_ATOMIC_I32_RMW_CMPXCHG 0x48u
@@ -5421,7 +5422,17 @@ static void emit_tlb_load(Ctx *c) {
     return;
   }
   i64c(c, c->link->map_generation_address);
-  mem(c, WASM_OP_I64_LOAD, ALIGN_8, 0);
+  if (cpu_multicore()) {
+    /* Acquire: the walks a refill makes below must not see page-table
+     * entries older than the generation (vmm_unmap bumps it after it
+     * clears them). */
+    op(c, WASM_ATOMIC_PREFIX);
+    wasm_uleb(c->b, WASM_ATOMIC_I64_LOAD);
+    wasm_uleb(c->b, ALIGN_8);
+    wasm_uleb(c->b, 0);
+  } else {
+    mem(c, WASM_OP_I64_LOAD, ALIGN_8, 0);
+  }
   lset(c, L_T0); /* the current translation generation */
   state_load64(c, OFF_TLB_GENERATION);
   lget(c, L_T0);

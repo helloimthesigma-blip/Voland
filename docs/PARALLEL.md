@@ -466,6 +466,14 @@ core nothing changes.
 - **Acquire/release.** LDAR and STLR get a full fence before and after
   the access (RCsc: an STLR then LDAR pair is not reordered). LDAXR gets
   an acquire fence; STLXR's CAS is already seq_cst.
+- **Translation caches.** `vmm_unmap` and a `vmm_reprotect` that takes a
+  permission away bump the translation generation *after* writing the
+  page-table entries, and multicore JIT code reads it with an atomic
+  (acquire) load at region entry. In the other order a core could walk
+  the table between the bump and the clear and keep the old translation
+  under the new generation - reading or writing a page that was freed
+  and handed to another allocation. A region already running keeps its entries
+  until it exits, as a core between two TLB shootdown points would.
 - **Plain loads and stores** stay plain. Aligned accesses of up to 8 bytes
   are single-copy atomic on both hosts (AArch64, and wasm's aligned
   loads/stores in practice).
