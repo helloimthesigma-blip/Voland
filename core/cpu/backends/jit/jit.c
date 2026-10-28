@@ -56,8 +56,9 @@
  * modules and no evictions at the live cap; 16384 no further than 4096.
  * Super Smash Bros. Ultimate's crash at a movie change, first blamed on
  * 4096, happened at 256 too: it was instant NVDEC completion
- * (docs/JIT.md). */
-#define JIT_DEFAULT_HOT_THRESHOLD 4096u
+ * (docs/JIT.md). 8192 then beat 4096: TOTK 4-6% further in Node and
+ * ~2.5% more browser fps, Silksong and SSBU unchanged; 16384 lost. */
+#define JIT_DEFAULT_HOT_THRESHOLD 8192u
 /* Installed regions per host thread. Each holds an engine module and its
  * machine code until it is removed; TOTK compiles ~70k distinct regions
  * per core in its first minutes and the browser tab died at ~200k live

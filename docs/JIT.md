@@ -394,7 +394,13 @@ The problem was slot conflicts, not capacity: four ways at the old size
 beat a direct-mapped cache four times larger. Virtual time and SVC counts
 were identical in all three runs.
 
-**Hot threshold.** 4096 interpreted executions before compiling. It was
+**Hot threshold.** 8192 interpreted executions before compiling (since
+2026-10-28; 4096 before). Against 4096: Tears of the Kingdom on three cores
+in Node got 4% and 5.7% further in the same wall time (two runs) with ~30%
+less compile and install time, and in the browser ran 10.33-10.47 fps vs
+10.08-10.17 (3 runs each); Silksong's browser title (35-39 fps) and SSBU in
+Node (same virtual time at 110k bursts) were unchanged; 16384 fell behind
+4096. 4096 was
 reverted to 256 for a day on 2026-10-27 when Super Smash Bros. Ultimate
 crashed at its title with 4096; the same crash (a null fence in its movie
 player's frame-status thread) then showed up at 256 on Node too, and its
