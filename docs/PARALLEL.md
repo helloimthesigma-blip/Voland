@@ -467,8 +467,8 @@ core nothing changes.
   the access (RCsc: an STLR then LDAR pair is not reordered). LDAXR gets
   an acquire fence; STLXR's CAS is already seq_cst.
 - **Translation caches.** `vmm_unmap` and a `vmm_reprotect` that takes a
-  permission away bump the translation generation *after* writing the
-  page-table entries, and multicore JIT code reads it with an atomic
+  permission away bump the translation generation before *and after*
+  writing the page-table entries, and multicore JIT code reads it with an atomic
   (acquire) load at region entry. In the other order a core could walk
   the table between the bump and the clear and keep the old translation
   under the new generation - reading or writing a page that was freed
