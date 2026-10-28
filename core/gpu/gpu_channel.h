@@ -123,6 +123,7 @@ typedef struct Gpu_Channel {
   uint64_t mme_faults;                       /* runaway or out-of-range macros */
   uint64_t methods;                          /* diagnostics */
   uint64_t ignored_methods;
+  uint64_t conditional_skips;                /* draws and clears SET_RENDER_ENABLE turned off */
   uint64_t dma_copies;
   uint64_t blits;                            /* 2D PIXELS_FROM_MEMORY */
   uint64_t faults;                           /* reads/writes to unmapped GPU VA */

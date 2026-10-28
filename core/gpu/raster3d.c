@@ -746,11 +746,18 @@ void raster3d_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, ui
   r->stats.clears++;
   if (r->trace_draws) { /* VOLAND_TRACE_DRAWS: clears in draw order */
     const uint32_t *rt = regs + REG_RT;
-    log_info("[gpu] clear %llu: bits 0x%x control 0x%x rt0 %llx %ux%u select 0x%x scissor 0x%x 0x%x value %08x %08x %08x %08x",
-             (unsigned long long)r->stats.clears, clear, regs[REG_CLEAR_CONTROL],
-             (unsigned long long)addr40(rt[0], rt[1]), rt[2], rt[3], regs[REG_CT_SELECT], regs[REG_SCISSOR + 1u],
+    const uint32_t mrt = (clear >> 6) & 0xfu, target = mrt < 8u ? (regs[REG_CT_SELECT] >> (4u + 3u * mrt)) & 7u : 0u;
+    const uint32_t *trt = rt + target * REG_RT_STRIDE; /* the target the clear writes */
+    log_info("[gpu] clear %llu: bits 0x%x control 0x%x rt0 %llx %ux%u target %u %llx %ux%u select 0x%x scissor 0x%x 0x%x "
+             "value %08x %08x %08x %08x",
+             (unsigned long long)r->stats.clears, clear, regs[REG_CLEAR_CONTROL], (unsigned long long)addr40(rt[0], rt[1]),
+             rt[2], rt[3], target, (unsigned long long)addr40(trt[0], trt[1]), trt[2], trt[3], regs[REG_CT_SELECT],
+             regs[REG_SCISSOR + 1u],
              regs[REG_SCISSOR + 2u], regs[REG_CLEAR_COLOR], regs[REG_CLEAR_COLOR + 1u], regs[REG_CLEAR_COLOR + 2u],
              regs[REG_CLEAR_COLOR + 3u]);
+    log_info("[gpu]   zeta sel %u %llx %ux%u fmt 0x%x zclear %08x scissor enable %u", regs[REG_ZT_SELECT] & 1u,
+             (unsigned long long)addr40(regs[REG_ZT_A], regs[REG_ZT_B]), regs[REG_ZT_SIZE_A], regs[REG_ZT_SIZE_B],
+             regs[REG_ZT_FORMAT], regs[REG_Z_CLEAR], regs[REG_SCISSOR] & 1u);
   }
   if (r->gpu) {
     gpu_clear(r, regs, mem, clear);
@@ -2006,6 +2013,18 @@ static bool depth_compare(uint32_t func, float incoming, float stored) {
   }
 }
 
+/* Whether a fragment at `z` passes `func` against the stored texel at `p`.
+ * The fragment is compared at the buffer's precision, as the hardware does:
+ * a depth pre-pass followed by an EQUAL colour pass only matches when both
+ * sides are quantised the same way. */
+static bool depth_passes(uint32_t func, uint32_t format, float z, const uint8_t *p) {
+  if (format == ZT_ZF32 || format == ZT_ZF32_X24S8) return depth_compare(func, clamp01(z), read_depth(format, p));
+  uint8_t q[sizeof(uint64_t)];
+  memcpy(q, p, zeta_bytes(format));
+  write_depth(format, q, z);
+  return depth_compare(func, read_depth(format, q), read_depth(format, p));
+}
+
 /* Blends output_pixel does inline on RGBA8 targets: the same float
  * operations as its generic path (products and sum as separate
  * expressions, so nothing contracts differently), without the per-channel
@@ -2219,7 +2238,7 @@ static void setup_lane(const Raster_State *rs, Sm_Thread *t, uint32_t l, int32_t
 static bool early_depth_reject(const Raster_State *rs, int32_t px, int32_t py, float depth) {
   if (!rs->depth || !rs->depth_test || rs->depth_reg != 0xffu || rs->stencil) return false;
   const uint8_t *zp = rs->depth->pixels + ((uint64_t)py * rs->depth->width + (uint64_t)px) * rs->depth->bytes_per_pixel;
-  return !depth_compare(rs->depth_func, depth, read_depth(rs->depth->format, zp));
+  return !depth_passes(rs->depth_func, rs->depth->format, depth, zp);
 }
 
 static void output_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, const uint32_t *out_regs);
@@ -2392,7 +2411,7 @@ static void output_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, 
     bool pass = depth_compare(rs->stencil_func[f], (float)(ref & mask), (float)(stored & mask));
     if (!pass) {
       op = rs->stencil_op_fail[f];
-    } else if (rs->depth_test && !depth_compare(rs->depth_func, depth, read_depth(rs->depth->format, zp))) {
+    } else if (rs->depth_test && !depth_passes(rs->depth_func, rs->depth->format, depth, zp)) {
       op = rs->stencil_op_zfail[f];
       pass = false;
     } else {
@@ -2411,7 +2430,7 @@ static void output_pixel(Raster_State *rs, int32_t px, int32_t py, float depth, 
     }
   } else if (rs->depth) {
     if (rs->depth_test && rs->depth_reg != 0xffu &&
-        !depth_compare(rs->depth_func, depth, read_depth(rs->depth->format, zp)))
+        !depth_passes(rs->depth_func, rs->depth->format, depth, zp))
       return;
     if (rs->depth_write) {
       write_depth(rs->depth->format, zp, depth);
@@ -5311,6 +5330,9 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
              rs.depth_func, rs.cull, rs.cull_face, regs[REG_FRONT_FACE], regs[REG_WINDOW_ORIGIN], (double)rs.vp_scale[1],
              (unsigned long long)(r->stats.triangles - triangles_before),
              (unsigned long long)(r->stats.pixels - pixels_before));
+    log_info("[gpu]   zeta sel %u %llx %ux%u fmt 0x%x", regs[REG_ZT_SELECT] & 1u,
+             (unsigned long long)addr40(regs[REG_ZT_A], regs[REG_ZT_B]), regs[REG_ZT_SIZE_A], regs[REG_ZT_SIZE_B],
+             regs[REG_ZT_FORMAT]);
     for (uint32_t k = 0; k < 2u * SM_CBUF_SLOTS; k++) { /* the constants each program reads */
       const uint32_t stage = k < SM_CBUF_SLOTS ? 1u : 0u, slot = k % SM_CBUF_SLOTS;
       const Sm_Program *prog = stage ? ctx->ps : ctx->vs;

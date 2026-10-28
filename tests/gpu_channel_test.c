@@ -213,6 +213,43 @@ static void test_3d_sync(void) {
   CHECK(g_channel.engine3d[0x35E] == 1 && g_channel.ignored_methods > ignored);
 }
 
+/* Conditional rendering (SET_RENDER_ENABLE_A/B/C): a clear and a draw run
+ * while the mode allows them and are dropped otherwise; RENDER_IF_NOT_EQUAL
+ * and RENDER_IF_EQUAL compare the payloads of the two semaphores (16 bytes
+ * apart) at the address, as NVN does around its pass-begin clears. */
+static void test_conditional_render(void) {
+  const uint64_t cond = MEM_BASE + 0x400;
+  const uint64_t a = 5, b = 5;
+  memcpy(g_mem + 0x400, &a, 8);
+  memcpy(g_mem + 0x410, &b, 8);
+  const uint32_t enable[3] = {(uint32_t)(cond >> 32), (uint32_t)cond, 4u /* RENDER_IF_NOT_EQUAL */};
+  const uint64_t skips = g_channel.conditional_skips;
+  one(2, 0x674, 0x3Cu);
+  submit();
+  CHECK(g_channel.conditional_skips == skips); /* rendering is on at power-on, before any SET_RENDER_ENABLE */
+  inc(2, 0x554, enable, 3);
+  one(2, 0x674, 0x3Cu); /* CLEAR_SURFACE */
+  one(2, 0x35E, 3);     /* DRAW_VERTEX_ARRAY */
+  submit();
+  CHECK(g_channel.conditional_skips == skips + 2); /* equal payloads drop the clear and the draw under NOT_EQUAL */
+  one(2, 0x556, 3u); /* RENDER_IF_EQUAL */
+  one(2, 0x674, 0x3Cu);
+  submit();
+  CHECK(g_channel.conditional_skips == skips + 2); /* equal payloads let RENDER_IF_EQUAL run */
+  const uint64_t c = 6;
+  memcpy(g_mem + 0x410, &c, 8);
+  one(2, 0x556, 4u);
+  one(2, 0x674, 0x3Cu);
+  submit();
+  CHECK(g_channel.conditional_skips == skips + 2); /* different payloads let RENDER_IF_NOT_EQUAL run */
+  one(2, 0x556, 0u); /* FALSE */
+  one(2, 0x35E, 3);
+  one(2, 0x556, 1u); /* TRUE */
+  one(2, 0x35E, 3);
+  submit();
+  CHECK(g_channel.conditional_skips == skips + 3); /* FALSE drops, TRUE runs */
+}
+
 /* MME instruction encoders (Fermi macro ISA field layout). */
 static uint32_t mme_alu(uint32_t assign, uint32_t dst, uint32_t a, uint32_t b, uint32_t alu, bool end) {
   return 0u | (assign << 4) | ((uint32_t)end << 7) | (dst << 8) | (a << 11) | (b << 14) | (alu << 17);
@@ -441,6 +478,7 @@ int main(void) {
   test_pitch_to_block_linear();
   test_linear_and_remap();
   test_3d_sync();
+  test_conditional_render();
   test_mme();
   test_inline_to_memory();
   test_2d_blit();

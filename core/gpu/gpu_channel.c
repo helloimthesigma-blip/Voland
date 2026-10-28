@@ -107,6 +107,16 @@
 #define M3D_DRAW_INDEX32_FIRST 0x5F9u             /* 32/16/8-bit FIRST, then SUBSEQUENT */
 #define M3D_DRAW_INDEX8_SUBSEQUENT 0x5FEu
 #define M3D_CLEAR_SURFACE 0x674u
+#define M3D_RENDER_ENABLE_A 0x554u                /* address of the condition's semaphores, high bits */
+#define M3D_RENDER_ENABLE_B 0x555u                /* low bits */
+#define M3D_RENDER_ENABLE_C 0x556u                /* mode */
+#define M3D_RENDER_ENABLE_MODE_MASK 7u
+#define M3D_RENDER_NEVER 0u
+#define M3D_RENDER_ALWAYS 1u
+#define M3D_RENDER_IF_NONZERO 2u                  /* the first semaphore's payload is nonzero */
+#define M3D_RENDER_IF_EQUAL 3u                    /* the two semaphores' payloads match */
+#define M3D_RENDER_IF_NOT_EQUAL 4u
+#define M3D_RENDER_SEMAPHORE_BYTES 16u            /* payload, then timestamp */
 #define M3D_BIND_GROUP_CB 0x904u                  /* + 8 * group */
 #define M3D_BIND_GROUP_STRIDE 8u
 #define M3D_BEGIN_TOPOLOGY(d) ((d) & 0xFFFFu)
@@ -168,6 +178,8 @@ void gpu_channel_init(Gpu_Channel *channel) {
   for (uint32_t j = 0; j < 6u; j++)
     channel->engine3d[M3D_PIPELINE_SHADER(j)] = (j << M3D_PIPELINE_TYPE_SHIFT) | (j == M3D_PIPELINE_VERTEX ? 1u : 0u);
   for (uint32_t i = 0; i < M3D_VIEWPORTS; i++) channel->engine3d[M3D_VIEWPORT_SWIZZLE(i)] = M3D_VIEWPORT_SWIZZLE_IDENTITY;
+  /* Rendering is enabled at power-on: most titles never write SET_RENDER_ENABLE_C. */
+  channel->engine3d[M3D_RENDER_ENABLE_C] = M3D_RENDER_ALWAYS;
 }
 
 static uint64_t addr40(uint32_t upper, uint32_t lower) { return ((uint64_t)(upper & 0xFFu) << 32) | lower; }
@@ -892,9 +904,35 @@ static void i2m_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t index, u
 
 static bool is_i2m_method(uint32_t method) { return method >= GPU_I2M_FIRST && method < GPU_I2M_FIRST + GPU_I2M_WORDS; }
 
+/* Conditional rendering (SET_RENDER_ENABLE): whether draws and clears run
+ * now. The condition compares the 64-bit payloads of one or two semaphore
+ * reports in guest memory, read when the work executes. */
+static bool render_enabled(Gpu_Channel *ch, const Gpu_Memory *mem) {
+  const uint32_t mode = ch->engine3d[M3D_RENDER_ENABLE_C] & M3D_RENDER_ENABLE_MODE_MASK;
+  if (mode == M3D_RENDER_ALWAYS) return true;
+  if (mode == M3D_RENDER_NEVER) return false;
+  const uint64_t va = addr40(ch->engine3d[M3D_RENDER_ENABLE_A], ch->engine3d[M3D_RENDER_ENABLE_B]);
+  uint64_t payload[2] = {0, 0};
+  if (!mem->read(mem->user, va, &payload[0], sizeof(payload[0])) ||
+      !mem->read(mem->user, va + M3D_RENDER_SEMAPHORE_BYTES, &payload[1], sizeof(payload[1]))) {
+    ch->faults++;
+    return true;
+  }
+  switch (mode) {
+  case M3D_RENDER_IF_NONZERO: return payload[0] != 0;
+  case M3D_RENDER_IF_EQUAL: return payload[0] == payload[1];
+  case M3D_RENDER_IF_NOT_EQUAL: return payload[0] != payload[1];
+  default: return true;
+  }
+}
+
 static void run_draw(Gpu_Channel *ch, const Gpu_Memory *mem, Raster3d_Draw_Kind kind, uint32_t topology,
                      uint32_t first, uint32_t count, uint32_t index_size) {
   ch->draws++;
+  if (!render_enabled(ch, mem)) {
+    ch->conditional_skips++;
+    return;
+  }
   if (!mem->renderer) return;
   Raster3d_Draw draw;
   memset(&draw, 0, sizeof(draw));
@@ -958,7 +996,8 @@ static bool draw_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t method,
              1u << (ch->engine3d[M3D_INDEX_BUFFER_E] & 3u));
     return true;
   case M3D_CLEAR_SURFACE:
-    if (mem->renderer) raster3d_clear(mem->renderer, ch->engine3d, mem, data);
+    if (!render_enabled(ch, mem)) ch->conditional_skips++;
+    else if (mem->renderer) raster3d_clear(mem->renderer, ch->engine3d, mem, data);
     return true;
   default:
     break;
