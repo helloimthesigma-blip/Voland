@@ -438,8 +438,17 @@ function applyPlacement(target: SwitchCoreExports): void {
 
 /** Free-running guest cores (set-free-running; ?free=N): from slice N on,
  * one run_for call per burst instead of a loop of slices. 0 = off; on from
- * the start by default (docs/PARALLEL.md). */
-let freeFromSlice = 1;
+ * the start by default (docs/PARALLEL.md). null = the title's default. */
+let requestedFreeFromSlice: number | null = null;
+/** Titles that run in slices by default instead of free-running:
+ * - Tears of the Kingdom (0100F2C0115B6000): 10.1 fps vs 8.7 free-running
+ *   at the same virtual-time rate, and its multicore loader crash 1 in 12
+ *   runs vs about 1 in 4 (browser, 3 cores, 2026-10-27). */
+const SLICED_TITLES: ReadonlySet<string> = new Set(["0100F2C0115B6000"]);
+function freeFromSlice(): number {
+  if (requestedFreeFromSlice !== null) return requestedFreeFromSlice;
+  return loadedTitleId !== null && SLICED_TITLES.has(loadedTitleId) ? 0 : 1;
+}
 /** Wall-clock pacing (set-pacing; ?pacing=0 turns it off): the game runs at
  * real speed with fewer frames instead of in slow motion. */
 let pacing = true;
@@ -500,7 +509,8 @@ function runBurst(): void {
   const deadline = burstStart + BURST_MS;
   let now = burstStart;
   while (now < deadline) {
-    if (!freeRunning && freeFromSlice > 0 && perf.slices >= freeFromSlice - 1) {
+    const fromSlice = freeFromSlice();
+    if (!freeRunning && fromSlice > 0 && perf.slices >= fromSlice - 1) {
       freeRunning = true;
       core._emulator_set_free_running_ffi(1);
       log("debug", `free-running guest cores from slice ${perf.slices + 1}`);
@@ -1150,6 +1160,7 @@ function loadGame(file: File): CPUToMainMessage {
   if (requestedHostCores === null) applyHostCores(core); /* the default may depend on the title */
   if (requestedCpuPercent === null) applyCpuSpeed(core);
   if (requestedFreePlacement === null) applyPlacement(core);
+  if (requestedFreeFromSlice === null && freeFromSlice() === 0) log("info", "this title runs in scheduler slices (free-running off by default; ?free=1 to try it)");
   return {
     type: "game-loaded",
     titleId: loadedTitleId,
@@ -1357,8 +1368,8 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   }
 
   if (msg.type === "set-free-running") {
-    freeFromSlice = msg.fromSlice;
-    log("info", freeFromSlice > 0 ? `free-running guest cores from slice ${freeFromSlice}` : "free-running guest cores off");
+    requestedFreeFromSlice = msg.fromSlice;
+    log("info", msg.fromSlice > 0 ? `free-running guest cores from slice ${msg.fromSlice}` : "free-running guest cores off");
     return;
   }
 

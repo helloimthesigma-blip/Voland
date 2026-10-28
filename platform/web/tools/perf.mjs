@@ -37,7 +37,8 @@
  *   slice, so a browser run is close to, not identical with, the CLI's.
  * - The page runs in scheduler slices (?free=0) unless --url-params sets
  *   free= itself, since free-running cores (the page's default) count a
- *   whole burst as one slice.
+ *   whole burst as one slice. free=title (not a number: the page ignores
+ *   it) measures the title's own default.
  * - --clock slices|ticks|presents picks the unit of --warmup-slices and
  *   --press points (default slices). With wall-clock pacing on (the web
  *   default), slices and virtual ticks follow the wall clock rather than
