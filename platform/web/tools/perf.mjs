@@ -102,6 +102,7 @@ let WEB_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const TICKS_PER_SECOND = 19_200_000;
 /* Screenshots wait for a composited frame; a title compiling a level's
  * shaders can hold one off for well over Playwright's default 30 s. */
+const STALL_DUMP_MS = 60_000; /* frames stopped this long while warming up: dump threads once */
 const SHOT_TIMEOUT_MS = 180_000;
 const HARDWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"];
 const SOFTWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"];
@@ -553,6 +554,7 @@ async function main() {
     let s = await sample();
     await servicePhases(s);
     let lastPrint = 0;
+    let stallWatch = { presents: s.presents, since: s.at, dumped: false };
     while (progress(s) < opts.warmupSlices) {
       const state = await page.getByTestId("run-state").getAttribute("data-state");
       if (state === "crashed" || state === "deadlock" || state === "exited") {
@@ -564,6 +566,15 @@ async function main() {
       if (s.at - lastPrint > 15_000) {
         lastPrint = s.at;
         console.log(`warmup: ${s.perf.slices} slices, ${(s.perf.ticks / TICKS_PER_SECOND).toFixed(1)} s virtual, ${s.presents} frames`);
+      }
+      /* Frames that stop while the guest runs: every thread's state, once,
+       * into the log (--log-match "\\[threads\\]" prints it). */
+      if (s.presents !== stallWatch.presents) {
+        stallWatch = { presents: s.presents, since: s.at, dumped: false };
+      } else if (!stallWatch.dumped && s.at - stallWatch.since > STALL_DUMP_MS) {
+        stallWatch = { ...stallWatch, dumped: true };
+        console.log(`stall: no new frame for ${STALL_DUMP_MS / 1000} s at ${s.presents} frames; dumping threads`);
+        await page.evaluate(() => window.__VOLAND_DEBUG__?.dumpThreads(true));
       }
       await servicePresses(progress(s));
       /* --shots-every N DIR: the screen every N warm-up slices (to see where a recipe goes). */

@@ -317,7 +317,7 @@ static void pc_log_watch_hook(uint64_t pc, uint64_t lr, uint64_t address, uint32
            (unsigned long long)pc, (unsigned long long)lr, (unsigned long long)address, size, (unsigned long long)v,
            (unsigned long long)(g_watch_state ? g_watch_state->tpidrro_el0 : 0u));
 }
-static int g_pc_log_watch = -1, g_pc_log_dump_parsed = -1, g_pc_log_deref = -1, g_pc_log_frames = -1;
+static int g_pc_log_watch = -1, g_pc_log_dump_parsed = -1, g_pc_log_deref = -1, g_pc_log_frames = -1, g_pc_log_unique = -1;
 bool interp_pc_log_watching(void) {
   int offset_set = g_pc_log_watch;
   if (offset_set < 0) g_pc_log_watch = offset_set = getenv("VOLAND_PC_LOG_WATCH") != NULL;
@@ -338,6 +338,7 @@ void interp_pc_log_reload(void) {
   g_pc_log_dump_parsed = -1;
   g_pc_log_deref = -1;
   g_pc_log_frames = -1;
+  g_pc_log_unique = -1;
 }
 static void pc_log_dump(uint64_t pc) {
   static uint64_t dump_pc;
@@ -402,10 +403,26 @@ static void pc_log_frames(const Interp_State *s) {
   log_warn("[pclog] pc 0x%llx tls 0x%llx frames%s", (unsigned long long)s->regs.pc,
            (unsigned long long)s->tpidrro_el0, line);
 }
+/* VOLAND_PC_LOG_UNIQUE=1: each (PC, thread, x0) combination is logged once
+ * (which threads reach a PC with which value, without the volume). */
+#define PC_LOG_UNIQUE_MAX 512u
+static bool pc_log_first_time(const Interp_State *s) {
+  static uint64_t seen[PC_LOG_UNIQUE_MAX][3];
+  static uint32_t count;
+  if (g_pc_log_unique < 0) g_pc_log_unique = getenv("VOLAND_PC_LOG_UNIQUE") ? 1 : 0;
+  if (!g_pc_log_unique) return true;
+  const uint64_t key[3] = {s->regs.pc, s->tpidrro_el0, s->regs.x[0]};
+  for (uint32_t i = 0; i < count; i++)
+    if (!memcmp(seen[i], key, sizeof(key))) return false;
+  if (count < PC_LOG_UNIQUE_MAX) memcpy(seen[count++], key, sizeof(key));
+  return true;
+}
+
 void interp_pc_log_check(const Interp_State *s) {
   if (!interp_pc_log_enabled()) return;
   for (uint32_t i = 0; i < g_pc_log_count; i++) {
     if (g_pc_log_pcs[i] != s->regs.pc) continue;
+    if (!pc_log_first_time(s)) return;
     const uint64_t x1v = pc_log_word(s, s->regs.x[1]);
     pc_log_arm(s, x1v);
     pc_log_dump(s->regs.pc);
