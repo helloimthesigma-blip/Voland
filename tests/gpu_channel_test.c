@@ -124,6 +124,27 @@ static void test_end_pb_segment(void) {
   CHECK(released == 0);
 }
 
+/* The older header forms: secondary opcode 0 (tertiary 0, count at 28:18,
+ * method word address at 12:2) increments, 2 does not. A host semaphore
+ * release written with them lands; read as new-format words, the data
+ * would be decoded as headers. */
+static uint32_t old_header(uint32_t op, uint32_t sub, uint32_t method, uint32_t count) {
+  return (op << 29) | (count << 18) | (sub << 13) | (method << 2);
+}
+
+static void test_old_headers(void) {
+  gpu_channel_init(&g_channel);
+  const uint32_t words[6] = {old_header(0, 0, 4, 3), 0, (uint32_t)(MEM_BASE + 0x380), 0x0123,
+                             old_header(2, 0, 7, 1), 2u | (1u << 24)};
+  memcpy(g_mem + (PB_VA - MEM_BASE), words, sizeof(words));
+  memset(g_mem + 0x380, 0, 4);
+  const uint64_t entry = PB_VA | ((uint64_t)6 << 42);
+  gpu_channel_submit(&g_channel, &k_mem, &entry, 1);
+  uint32_t released = 0;
+  memcpy(&released, g_mem + 0x380, 4);
+  CHECK(released == 0x0123);
+}
+
 static void test_pitch_to_block_linear(void) {
   for (uint32_t i = 0; i < W * H; i++) g_mem[(SRC - MEM_BASE) + i] = (uint8_t)(i * 3u + 1u);
   memset(g_mem + (DST - MEM_BASE), 0, 0x10000);
@@ -498,6 +519,7 @@ int main(void) {
   test_inline_to_memory();
   test_2d_blit();
   test_end_pb_segment();
+  test_old_headers();
   printf("[gpu_channel_test] passed\n");
   return 0;
 }

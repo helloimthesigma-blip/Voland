@@ -200,6 +200,25 @@ int main(void) {
     CHECK(nvdrv_gpu_translate(&g_emu.nvdrv, old_va + 0x10080, &guest, &run) && guest == buffer + 0x10080); /* re-entered */
     wr64(d, old_va);
     CHECK(ioctl(as, IOWR(0x41u, 0x05u, 8), d) == 0);
+    /* A newer partial mapping over an older whole-granule one leaves the
+     * granule shared: the newer is in effect where it reaches, the older
+     * elsewhere - whatever their slot order. */
+    const uint64_t mixed_va = 0x10180000ull;
+    const uint64_t overlap[2][3] = {{mixed_va, 0x10000, 0x8000}, {mixed_va + 0x8000, 0x4000, 0}};
+    for (uint32_t i = 0; i < 2u; i++) {
+      memset(d, 0, sizeof(d));
+      wr32(d, 1); wr32(d + 8, handle); wr64(d + 16, overlap[i][2]); wr64(d + 24, overlap[i][1]); wr64(d + 32, overlap[i][0]);
+      CHECK(ioctl(as, IOWR(0x41u, 0x06u, 40), d) == 0);
+    }
+    for (uint32_t pass = 0; pass < 2u; pass++) { /* twice: a remembered last hit must not pick the older one */
+      CHECK(nvdrv_gpu_translate(&g_emu.nvdrv, mixed_va + 0x40, &guest, &run) && guest == buffer + 0x8040);
+      CHECK(nvdrv_gpu_translate(&g_emu.nvdrv, mixed_va + 0x8040, &guest, &run) && guest == buffer + 0x40);
+    }
+    for (uint32_t i = 0; i < 2u; i++) {
+      memset(d, 0, sizeof(d));
+      wr64(d, overlap[1u - i][0]);
+      CHECK(ioctl(as, IOWR(0x41u, 0x05u, 8), d) == 0);
+    }
   }
 
   /* A mapping keeps the memory it was made over: NVN frees nvmap handles

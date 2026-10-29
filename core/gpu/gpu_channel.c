@@ -24,6 +24,14 @@
 #define OP_IMMEDIATE 4u
 #define OP_INCREMENT_ONCE 5u
 #define OP_END_PB_SEGMENT 7u /* control entry: the rest of the segment is not decoded */
+/* The older header forms, still accepted next to the new ones: secondary
+ * opcode 0 (with tertiary 0 and a nonzero count; 0x00000000 is the NOP) is
+ * an incrementing header, 2 a non-incrementing one, both with an 11-bit
+ * count at 28:18 and the method's word address at 12:2. */
+#define OP_OLD_NON_INCREMENTING 2u
+#define MH_OLD_COUNT(w) (((w) >> 18) & 0x7FFu)
+#define MH_OLD_METHOD(w) (((w) >> 2) & 0x7FFu)
+#define MH_TERT_OP(w) (((w) >> 16) & 3u)
 
 /* Host methods (word addresses). */
 #define HOST_METHODS 0x40u
@@ -1143,6 +1151,13 @@ static bool decode_word(Gpu_Channel *ch, const Gpu_Memory *mem, Decoder *d, uint
   }
   const uint32_t op = MH_OP(word);
   if (op == OP_END_PB_SEGMENT) return false;
+  if ((op == 0u && MH_TERT_OP(word) == 0u) || op == OP_OLD_NON_INCREMENTING) {
+    d->method = MH_OLD_METHOD(word);
+    d->subchannel = MH_SUBCHANNEL(word);
+    d->op = op == 0u ? OP_INCREMENTING : OP_NON_INCREMENTING;
+    d->remaining = MH_OLD_COUNT(word);
+    return true;
+  }
   d->method = MH_METHOD(word);
   d->subchannel = MH_SUBCHANNEL(word);
   if (op == OP_IMMEDIATE) {

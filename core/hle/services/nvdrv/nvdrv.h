@@ -130,6 +130,7 @@ typedef struct Gpu_Mapping {
   uint32_t nvmap_handle;
   uint64_t buffer_offset;
   uint64_t guest_base; /* the handle's memory when mapped: the mapping keeps it after FREE (0: look it up) */
+  uint64_t seq;        /* map order: where mappings overlap, the newest is the one in effect */
 } Gpu_Mapping;
 
 typedef struct Nv_Event_Slot {
@@ -147,7 +148,7 @@ typedef struct Nvdrv_State {
   Nvmap_Handle handles[NVMAP_MAX_HANDLES]; /* nvmap handle n is handles[n - 1] */
   Gpu_Mapping mappings[NVDRV_MAX_GPU_MAPPINGS];
   uint32_t mapping_end;    /* one past the highest slot ever used: scans stop here */
-  uint32_t last_mapping;   /* the slot the last translation hit (checked first) */
+  uint64_t mapping_seq;    /* the last Gpu_Mapping.seq handed out */
   /* Then the GPU page table: compute and vertex fetch alternate between
    * buffers, and a scan of every mapping costs thousands of compares. */
   uint16_t pt_l1[NVDRV_PT_L1_ENTRIES];                      /* L2 table + 1, 0 = none */
