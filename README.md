@@ -208,10 +208,28 @@ mythology and master of the forge. It is also Mikhail Bulgakov's name for the
 devil in *The Master and Margarita*. The Norse origin is the reason for the
 name; the literary echo is welcome.
 
+## Credits
+
+Voland was created by **Proxy** and **Null6598** at
+[voland-emu/Voland](https://github.com/voland-emu/Voland), and everything
+here is built on the foundation they laid:
+
+- **Proxy** ([proxy-alt.dev](https://proxy-alt.dev)) started the project:
+  the original proof of concept, the design document
+  ([DESIGN.md](docs/DESIGN.md)) with its web-first architecture (one linear
+  memory, the softmmu, bounded CPU backends, the WebGPU renderer and the
+  worker split), Phase 0's build and web platform, the linear-memory
+  layout and the CPU backend contract.
+- **Null6598** built the first working core pieces: the softmmu, decrypted
+  NCA parsing, the NSO loader and bootstrap, the TLS allocator and the
+  memory HLE.
+
+Thank you both.
+
 ## Acknowledgements
 
 - [voland-emu/Voland](https://github.com/voland-emu/Voland), the project
-  this repository grew from (design, web platform and early core)
+  this repository grew from
 - [Ryubing](https://github.com/Ryubing), yuzu and
   [dynarmic](https://github.com/merryhime/dynarmic): behavior references
 - [libnx](https://github.com/switchbrew/libnx) and
