@@ -20,6 +20,7 @@
 
 #define SIDE 4u
 #define BC6H_UF16_FORMAT 0x11u
+#define DXN2_FORMAT 0x28u /* BC5 */
 
 static uint8_t g_texels[SIDE * SIDE * 4u];
 
@@ -93,6 +94,37 @@ int main(void) {
       }
     }
     CHECK(differ == 0);
+  }
+  /* BC5 SNORM: signed endpoints. Red 127 / -127 (eight-value mode) with
+   * texels 0 and 1 on the endpoints; green 0 / 64 (six-value mode) with
+   * texels 0 and 1 on its fixed -127 and 127. Decoded as unsigned these
+   * would read about 0.5 and 0.5, not 1 and -1. */
+  {
+    static const uint8_t block[16] = {0x7f, 0x81, 0x08, 0, 0, 0, 0, 0, 0x00, 0x40, 0x3e, 0, 0, 0, 0, 0};
+    Tex_Header h;
+    memset(&h, 0, sizeof(h));
+    h.format = DXN2_FORMAT;
+    h.width = h.height = SIDE;
+    h.type = TEX_TYPE_2D;
+    h.layout = TEX_LAYOUT_PITCH;
+    h.pitch = sizeof(block);
+    h.levels = 1;
+    for (uint32_t c = 0; c < 4u; c++) h.data_type[c] = TEX_DATA_SNORM;
+    static uint8_t decoded[4096];
+    CHECK(tex_decoded_bytes(&h) <= sizeof(decoded));
+    Tex_Image bc5;
+    CHECK(tex_decode(&h, block, decoded, &bc5));
+    CHECK(!bc5.rgba8);
+    uint32_t t0[4], t1[4];
+    tex_texel(&bc5, 0, 0, 0, t0);
+    tex_texel(&bc5, 1, 0, 0, t1);
+    float r0, r1, g0, g1, a0;
+    memcpy(&r0, &t0[0], 4);
+    memcpy(&g0, &t0[1], 4);
+    memcpy(&a0, &t0[3], 4);
+    memcpy(&r1, &t1[0], 4);
+    memcpy(&g1, &t1[1], 4);
+    CHECK(r0 == 1.0f && r1 == -1.0f && g0 == -1.0f && g1 == 1.0f && a0 == 1.0f);
   }
   /* SUST encoding: what tex_encode_texel stores, tex_decode_texel reads
    * back (RGBA16F, RGBA8 UNORM, a masked write), and 3D block-linear

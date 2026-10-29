@@ -412,7 +412,32 @@ static void bc4_values(const uint8_t *block, uint8_t out[16]) {
   for (uint32_t i = 0; i < 16u; i++) out[i] = (uint8_t)pal[(bits >> (3u * i)) & 7u];
 }
 
-static void decode_bc_block(uint32_t format, const uint8_t *block, uint8_t out[][4]) {
+/* The signed form (BC4/BC5 SNORM): two's-complement endpoints, -128
+ * standing for -127, and the six-value mode's extremes -127 and 127. The
+ * values come out as the bytes of signed 8-bit texels. */
+#define BC4_SNORM_MIN (-127)
+#define BC4_SNORM_MAX 127
+static void bc4_values_signed(const uint8_t *block, uint8_t out[16]) {
+  int32_t a0 = (int8_t)block[0], a1 = (int8_t)block[1];
+  if (a0 < BC4_SNORM_MIN) a0 = BC4_SNORM_MIN;
+  if (a1 < BC4_SNORM_MIN) a1 = BC4_SNORM_MIN;
+  int32_t pal[8];
+  pal[0] = a0;
+  pal[1] = a1;
+  if (a0 > a1) {
+    for (int32_t i = 1; i < 7; i++) pal[i + 1] = ((7 - i) * a0 + i * a1) / 7;
+  } else {
+    for (int32_t i = 1; i < 5; i++) pal[i + 1] = ((5 - i) * a0 + i * a1) / 5;
+    pal[6] = BC4_SNORM_MIN;
+    pal[7] = BC4_SNORM_MAX;
+  }
+  uint64_t bits = 0;
+  for (uint32_t i = 0; i < 6u; i++) bits |= (uint64_t)block[2u + i] << (8u * i);
+  for (uint32_t i = 0; i < 16u; i++) out[i] = (uint8_t)(int8_t)pal[(bits >> (3u * i)) & 7u];
+}
+
+static void decode_bc_block(uint32_t format, bool snorm, const uint8_t *block, uint8_t out[][4]) {
+  void (*const red_values)(const uint8_t *, uint8_t[16]) = snorm ? bc4_values_signed : bc4_values;
   uint8_t v[16];
   switch (format) {
   case FMT_DXT1:
@@ -431,7 +456,7 @@ static void decode_bc_block(uint32_t format, const uint8_t *block, uint8_t out[]
     for (uint32_t i = 0; i < 16u; i++) out[i][3] = v[i];
     break;
   case FMT_DXN1:
-    bc4_values(block, v);
+    red_values(block, v);
     for (uint32_t i = 0; i < 16u; i++) {
       out[i][0] = v[i];
       out[i][1] = out[i][2] = 0;
@@ -439,9 +464,9 @@ static void decode_bc_block(uint32_t format, const uint8_t *block, uint8_t out[]
     }
     break;
   case FMT_DXN2:
-    bc4_values(block, v);
+    red_values(block, v);
     for (uint32_t i = 0; i < 16u; i++) out[i][0] = v[i];
-    bc4_values(block + 8, v);
+    red_values(block + 8, v);
     for (uint32_t i = 0; i < 16u; i++) {
       out[i][1] = v[i];
       out[i][2] = 0;
@@ -559,8 +584,9 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
     out->valid = true;
     return true;
   }
-  /* Expand blocks to A8B8G8R8. */
+  /* Expand blocks to A8B8G8R8 (signed red/green for BC4/BC5 SNORM). */
   const uint32_t out_row = h->width * 4u;
+  const bool bc_snorm = (h->format == FMT_DXN1 || h->format == FMT_DXN2) && h->data_type[0] == TEX_DATA_SNORM;
   const bool astc = f->bytes == ASTC_BLOCK_BYTES && h->format >= 0x40u;
   /* Error blocks per texture (diagnostics): how many, and where each of
    * the first rows starts going bad - a partial upload stops at one
@@ -596,7 +622,7 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
                      block[14], block[15]);
           }
         } else {
-          decode_bc_block(h->format, block, px);
+          decode_bc_block(h->format, bc_snorm, block, px);
         }
         for (uint32_t i = 0; i < (uint32_t)f->bw * f->bh; i++) {
           const uint32_t x = bx * f->bw + i % f->bw, y = by * f->bh + i / f->bw;
@@ -619,11 +645,12 @@ bool tex_decode(const Tex_Header *h, const uint8_t *raw, uint8_t *dst, Tex_Image
   }
   out->format = FMT_A8B8G8R8;
   out->header.data_type[0] = out->header.data_type[1] = out->header.data_type[2] = out->header.data_type[3] = TEX_DATA_UNORM;
+  if (bc_snorm) out->header.data_type[0] = out->header.data_type[1] = TEX_DATA_SNORM; /* blue 0, alpha 255: UNORM */
   out->bytes_per_texel = 4;
   out->row_bytes = out_row;
   out->layer_bytes = (uint64_t)out_row * h->height;
   out->texels = dst;
-  out->rgba8 = !h->srgb;
+  out->rgba8 = !h->srgb && !bc_snorm;
   out->valid = true;
   return true;
 }
