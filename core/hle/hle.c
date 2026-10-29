@@ -140,7 +140,10 @@ static void svc_trace(const HLE_Context *c, uint32_t swi, uint64_t arg0, uint64_
       at += (size_t)snprintf(chain + at, sizeof(chain) - at, " %llx", (unsigned long long)lr);
       fp = next_fp;
     }
-    log_info("[svc]   from %s", chain);
+    if (swi == SVC_TRACE_CREATE_THREAD) /* priority and ideal core (x4, x5: an SVC leaves them) */
+      log_info("[svc]   priority %llu core %lld from %s", (unsigned long long)r->x[4], (long long)(int32_t)r->x[5], chain);
+    else
+      log_info("[svc]   from %s", chain);
   }
 }
 
