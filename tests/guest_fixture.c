@@ -25,6 +25,10 @@ static void capture(void *userdata, const char *text, size_t length) {
 }
 
 void guest_boot(Guest_Run *run, const CPU_Backend *backend, const uint8_t *code, size_t size) {
+  guest_boot_cores(run, backend, code, size, 0);
+}
+
+void guest_boot_cores(Guest_Run *run, const CPU_Backend *backend, const uint8_t *code, size_t size, uint32_t cores) {
   memset(run, 0, sizeof(*run));
   Fixture_NSO_Params nso;
   memset(&nso, 0, sizeof(nso));
@@ -65,6 +69,7 @@ void guest_boot(Guest_Run *run, const CPU_Backend *backend, const uint8_t *code,
 
   CHECK_OK(emulator_create_with_backend(&run->emu, backend));
   emulator_set_debug_output(&run->emu, capture, run);
+  if (cores) CHECK(emulator_set_host_cores(&run->emu, cores) == cores);
   const Byte_Source source = byte_source_from_memory(nca_image.bytes, nca_image.size);
   CHECK_OK(emulator_load_program(&run->emu, &source, 0));
 

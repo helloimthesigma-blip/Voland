@@ -359,6 +359,24 @@ static void proxy_output(void *userdata, const char *text, size_t length) {
   }
 }
 
+/* Host cores set before the load (the web worker's order), then the same
+ * count again after it: the scheduler the load re-initialises must keep
+ * its core count - with 0 it enforced no affinity at all (threads pinned
+ * to one guest core ran on every host core at once in the browser). */
+static void test_cores_before_load(void) {
+  const Program *program = &k_programs[0];
+  guest_boot_cores(&g_run, TEST_BACKEND, program->code, program->size, 3);
+  CHECK(g_run.emu.scheduler.host_cores == 3u);
+  CHECK(emulator_set_host_cores(&g_run.emu, 3) == 3u);
+  CHECK(g_run.emu.scheduler.host_cores == 3u);
+  Outcome o;
+  o.status = guest_run(&g_run, 1000, MAX_SLICES);
+  o.slices = g_run.slices;
+  memcpy(o.output, g_run.output, sizeof(o.output));
+  guest_shutdown(&g_run);
+  check_completes(program, 3, 1000, &o);
+}
+
 static void test_host_calls(void) {
   g_driver = pthread_self();
   g_ran_on_driver = false;
@@ -439,6 +457,7 @@ int main(void) {
   test_poll_coalescing();
   test_free_running();
   test_pacing();
+  test_cores_before_load();
   test_host_calls();
   test_pinned_cores();
   test_gpu_lock();

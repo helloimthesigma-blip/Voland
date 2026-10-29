@@ -25,6 +25,8 @@ typedef struct Guest_Run {
 
 /* Boots `code` on `backend` with a 1MB main stack and priority 44. */
 void guest_boot(Guest_Run *run, const CPU_Backend *backend, const uint8_t *code, size_t size);
+/* The same with `cores` host cores set before the load (the web worker's order). */
+void guest_boot_cores(Guest_Run *run, const CPU_Backend *backend, const uint8_t *code, size_t size, uint32_t cores);
 
 /* Runs slices of `budget` cycles until the process stops (or max_slices). */
 Emulator_Status guest_run(Guest_Run *run, uint64_t budget, uint64_t max_slices);

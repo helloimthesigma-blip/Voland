@@ -313,6 +313,20 @@ a save state 7.92 M ticks/s, 24.7 fps sliced vs 9.49 M, 29.6 fps free
 worse. 60 s of Silksong at the default pacing: steady 40-45 fps, no gaps.
 Save states load across sessions in either mode.
 
+## Affinity in the browser (fixed 2026-10-29)
+
+Until 2026-10-29 the web build enforced no thread affinity at all. The
+worker sets the host cores before a game loads; the load re-initialises
+the scheduler (`scheduler_init` clears it) and only re-linked the
+parallel cores, leaving `host_cores` at 0; setting the same count again
+after the load returned early. With `host_cores` 0, `scheduler_runs_on`
+lets every thread run on every host core, so threads that share a guest
+core - which the Switch never runs at once - ran in parallel. The CLI
+sets cores after the load and was not affected, which is why browser-only
+multicore crashes (Animal Crossing's name entry, likely Tears of the
+Kingdom's loader) never reproduced natively. `scheduler_adopt_settings`
+now restores the count with the other settings on every re-init.
+
 ## Pinned cores (opt-in)
 
 `emulator_set_pin_ideal_cores` (web `?pincores=1`, CLI

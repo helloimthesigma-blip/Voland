@@ -640,6 +640,18 @@ void emulator_destroy(Emulator* emulator) {
   layout_destroy();
   memset(emulator, 0, sizeof(*emulator));
 }
+/* A freshly initialised scheduler takes the Emulator's settings: its
+ * parallel cores (and their count - with host_cores 0 the scheduler
+ * enforces no affinity at all, and setting the same core count again
+ * returns early), poll coalescing, pinning and placement. */
+static void scheduler_adopt_settings(Emulator* emulator) {
+  emulator->scheduler.parallel = emulator->parallel;
+  emulator->scheduler.host_cores = emulator->parallel ? parallel_core_count(emulator->parallel) : 0u;
+  emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
+  emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;
+  emulator->scheduler.free_placement = emulator->free_placement;
+}
+
 
 /* Runs the next program on `backend`: the main CPU_State is recreated
  * for it (a 32-bit title needs the A32 interpreter, a 64-bit one the
@@ -660,10 +672,7 @@ static Error use_backend(Emulator* emulator, const CPU_Backend* backend) {
   backend->set_svc_handler(state, hle_on_svc);
   backend->set_undefined_handler(state, hle_on_undefined);
   scheduler_init(&emulator->scheduler, backend, emulator->vmm);
-  emulator->scheduler.parallel = emulator->parallel;
-  emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
-  emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;
-  emulator->scheduler.free_placement = emulator->free_placement;
+  scheduler_adopt_settings(emulator);
   if (emulator->cpu_percent) scheduler_set_cpu_percent(&emulator->scheduler, emulator->cpu_percent);
   if (cores && backend->supports_multicore) (void)emulator_set_host_cores(emulator, cores);
   log_info("[emulator] CPU backend for this program: %s", backend->name);
@@ -692,10 +701,7 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
   /* The main thread joins the scheduler: it wraps the Emulator's own
    * CPU_State, and its bootstrap handle (0x8000) now names it. */
   scheduler_init(&emulator->scheduler, emulator->cpu_backend, emulator->vmm);
-  emulator->scheduler.parallel = emulator->parallel;
-  emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
-  emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;
-  emulator->scheduler.free_placement = emulator->free_placement;
+  scheduler_adopt_settings(emulator);
   if (emulator->cpu_percent) scheduler_set_cpu_percent(&emulator->scheduler, emulator->cpu_percent);
   Sched_Thread *main_thread = scheduler_new_thread(&emulator->scheduler);
   SWITCH_ASSERT_ALWAYS(main_thread != NULL, "empty scheduler has a slot");
@@ -973,10 +979,7 @@ void emulator_unload_program(Emulator* emulator) {
     if (t->state != THREAD_STATE_FREE && t->owns_cpu_state) thread_destroy(&env, &t->thread);
   }
   scheduler_init(&emulator->scheduler, emulator->cpu_backend, emulator->vmm);
-  emulator->scheduler.parallel = emulator->parallel;
-  emulator->scheduler.poll_coalescing = !emulator->no_poll_coalescing;
-  emulator->scheduler.pin_ideal = emulator->pin_ideal_cores;
-  emulator->scheduler.free_placement = emulator->free_placement;
+  scheduler_adopt_settings(emulator);
   /* Transfer memory still lent at exit: the heap gets its pages back
    * read-write, so teardown can release them. */
   for (uint32_t i = 0; i < TRANSFER_MEMORY_POOL_CAPACITY; i++) {
