@@ -327,6 +327,10 @@ multicore crashes (Animal Crossing's name entry, likely Tears of the
 Kingdom's loader) never reproduced natively. `scheduler_adopt_settings`
 now restores the count with the other settings on every re-init.
 
+Measured after the fix (browser, three cores): Tears of the Kingdom 0 of
+8 free-running runs crashed (150 s each; about 1 in 4 before) and 0 of 3
+in scheduler slices (9.9-11.7 fps); Animal Crossing 0 of 12 to name entry.
+
 ## Pinned cores (opt-in)
 
 `emulator_set_pin_ideal_cores` (web `?pincores=1`, CLI
