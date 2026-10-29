@@ -5,7 +5,7 @@
  */
 
 export const GPU_STREAM_MAGIC = 0x55504756;
-export const GPU_STREAM_VERSION = 9;
+export const GPU_STREAM_VERSION = 10;
 export const GPU_STREAM_HEADER_BYTES = 56;
 export const GPU_STREAM_RECORD_HEADER_BYTES = 8;
 export const OFF_MAGIC = 0;
@@ -165,7 +165,7 @@ export const TARGET_BYTES = 36;
 export const STENCIL_FACE_BYTES = 16;
 /* Version 3 adds the GPU vertex stage's four words (vs shader, inputs, cull, front face);
  * version 4 the index count and a flags word (version 5: DRAW_VERTEX_PULL). */
-export const DRAW_BYTES = 4 + 4 + TARGET_BYTES * MAX_TARGETS + 16 + 4 + STENCIL_FACE_BYTES * 2 + 12 + 16 + 16 + 16 + 16 + 8;
+export const DRAW_BYTES = 4 + 4 + TARGET_BYTES * MAX_TARGETS + 16 + 4 + STENCIL_FACE_BYTES * 2 + 12 + 16 + 16 + 16 + 16 + 8 + 16;
 /* Draw flags: no vertices; the indices are guest vertex ids and the vertex
  * stage decodes its inputs from the data binding (core/gpu/gpu_records.h). */
 export const DRAW_VERTEX_PULL = 1;
@@ -275,6 +275,10 @@ export interface Draw {
   readonly indexCount: number;
   /** DRAW_VERTEX_PULL. */
   readonly flags: number;
+  /** Version 10: polygon offset (all 0: none) - constant in depth units, slope factor, clamp. */
+  readonly depthBias: number;
+  readonly depthBiasSlope: number;
+  readonly depthBiasClamp: number;
 }
 
 export interface Copy {
@@ -372,6 +376,8 @@ export function parseDraw(v: DataView): Draw {
     bindingCount: u32(v, at + 52), vertexCount: u32(v, at + 56),
     vsShaderId: u32(v, at + 60), vertexInputCount: u32(v, at + 64), cullMode: u32(v, at + 68), frontFace: u32(v, at + 72),
     indexCount: u32(v, at + 76), flags: u32(v, at + 80),
+    depthBias: v.getInt32(at + 84, true), depthBiasSlope: v.getFloat32(at + 88, true),
+    depthBiasClamp: v.getFloat32(at + 92, true),
   };
 }
 

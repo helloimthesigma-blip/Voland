@@ -1001,6 +1001,8 @@ export class GpuExecutor {
           back: [d.stencilBack.compare, d.stencilBack.fail, d.stencilBack.depthFail, d.stencilBack.pass],
           readMask: d.stencilReadMask, writeMask: d.stencilWriteMask,
         } : null,
+        ...(d.depthBias || d.depthBiasSlope || d.depthBiasClamp
+          ? { bias: [d.depthBias, d.depthBiasSlope, d.depthBiasClamp] } : {}),
       } : null,
     };
   }
@@ -1097,6 +1099,11 @@ export class GpuExecutor {
       if (hasDepth(format)) {
         ds.depthWriteEnabled = depth.write;
         ds.depthCompare = depth.test ? COMPARES[depth.compare] ?? "always" : "always";
+        if (depth.bias) {
+          ds.depthBias = depth.bias[0] ?? 0;
+          ds.depthBiasSlopeScale = depth.bias[1] ?? 0;
+          ds.depthBiasClamp = depth.bias[2] ?? 0;
+        }
       }
       if (depth.stencil && hasStencil(format)) {
         const face = (f: readonly number[]): GPUStencilFaceState => ({

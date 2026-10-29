@@ -1,4 +1,4 @@
-# GPU command stream (version 9)
+# GPU command stream (version 10)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -158,6 +158,16 @@ and then the record's padding. The consumer stages the indices after the
 vertices in the same buffer and calls `drawIndexed`. Silksong's 250k-slice
 stream shrinks from 197 to 128 MB, and an SSBU fight's vertex data was
 about 27 MB per frame before this.
+
+### Polygon offset (version 10)
+
+`Gpu_Rec_Draw` ends with `depth_bias` (i32), `depth_bias_slope` and
+`depth_bias_clamp` (f32 bits): the guest's SET_DEPTH_BIAS,
+SET_SLOPE_SCALE_DEPTH_BIAS and SET_DEPTH_BIAS_CLAMP while
+SET_POLY_OFFSET_FILL is on, all 0 otherwise. The consumer passes them as
+the pipeline's `depthBias`, `depthBiasSlopeScale` and `depthBiasClamp`.
+Shadow passes rely on them: without the offset, Animal Crossing's lit
+surfaces compare against themselves in the shadow map and speckle.
 
 ### Vertex pulling (version 5)
 

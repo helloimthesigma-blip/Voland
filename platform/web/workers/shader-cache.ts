@@ -54,6 +54,8 @@ export interface DepthSpec {
   readonly write: boolean;
   readonly compare: number;
   readonly stencil: StencilSpec | null;
+  /** Polygon offset: constant (depth units), slope factor, clamp. Absent: none. */
+  readonly bias?: readonly number[];
 }
 
 /** A GPU vertex stage: its module, how many input vectors each vertex

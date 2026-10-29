@@ -60,6 +60,13 @@
 #define REG_DEPTH_WRITE 0x4bau
 #define REG_ALPHA_TEST 0x4bbu
 #define REG_DEPTH_FUNC 0x4c3u
+/* Polygon offset (SET_POLY_OFFSET_FILL, SET_SLOPE_SCALE_DEPTH_BIAS,
+ * SET_DEPTH_BIAS, SET_DEPTH_BIAS_CLAMP): shadow passes push their depth
+ * away so the lit pass's compare does not hit the surface itself. */
+#define REG_POLY_OFFSET_FILL 0x372u
+#define REG_SLOPE_SCALE_DEPTH_BIAS 0x55bu
+#define REG_DEPTH_BIAS 0x56fu
+#define REG_DEPTH_BIAS_CLAMP 0x61fu
 #define REG_ALPHA_REF 0x4c4u
 #define REG_ALPHA_FUNC 0x4c5u
 #define REG_BLEND_CONST 0x4c7u
@@ -298,6 +305,24 @@ static uint32_t zeta_bytes(uint32_t format) {
   case ZT_ZF32_X24S8: return 8;
   case ZT_ZF32: case ZT_Z24S8: case ZT_X8Z24: case ZT_S8Z24: case ZT_V8Z24: return 4;
   default: return 0;
+  }
+}
+
+/* The smallest depth step the format resolves near `z` (the polygon
+ * offset's unit): fixed for UNORM depth, one mantissa step of the largest
+ * depth for float depth. */
+#define DEPTH_UNORM16_BITS 16
+#define DEPTH_UNORM24_BITS 24
+#define FLOAT_MANTISSA_BITS 23
+static float depth_resolution(uint32_t format, float z) {
+  switch (format) {
+  case ZT_Z16: return ldexpf(1.0f, -DEPTH_UNORM16_BITS);
+  case ZT_ZF32: case ZT_ZF32_X24S8: {
+    int exponent = 0;
+    (void)frexpf(z, &exponent);
+    return ldexpf(1.0f, exponent - 1 - FLOAT_MANTISSA_BITS);
+  }
+  default: return ldexpf(1.0f, -DEPTH_UNORM24_BITS);
   }
 }
 
@@ -1861,6 +1886,8 @@ typedef struct Raster_State {
   Raster3d_Surface *depth;
   bool depth_test, depth_write;
   uint32_t depth_func;
+  bool depth_bias; /* filled triangles take the polygon offset */
+  float bias_units, bias_slope, bias_clamp;
   bool alpha_test;
   uint32_t alpha_func;
   float alpha_ref;
@@ -2114,6 +2141,10 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
      * test off and DEPTH_WRITE on, which must not wipe the pre-pass. */
     rs->depth_write = rs->depth_test && (regs[REG_DEPTH_WRITE] & 1u) != 0;
     rs->depth_func = regs[REG_DEPTH_FUNC];
+    rs->depth_bias = (regs[REG_POLY_OFFSET_FILL] & 1u) != 0;
+    rs->bias_units = f32(regs[REG_DEPTH_BIAS]);
+    rs->bias_slope = f32(regs[REG_SLOPE_SCALE_DEPTH_BIAS]);
+    rs->bias_clamp = f32(regs[REG_DEPTH_BIAS_CLAMP]);
     rs->stencil_byte = stencil_byte(zd.format);
     rs->stencil = (regs[REG_STENCIL_ENABLE] & 1u) != 0 && rs->stencil_byte != ZT_NO_STENCIL;
     if (rs->stencil) {
@@ -2580,6 +2611,14 @@ static void raster_triangle_now(Raster_State *rs, const Vertex *a, const Vertex 
     plane_setup(&planes[i], &sv[0], &sv[1], &sv[2], sv[0].varying[i], sv[1].varying[i], sv[2].varying[i], inv_area2);
   Plane zp, wp;
   plane_setup(&zp, &sv[0], &sv[1], &sv[2], sv[0].z, sv[1].z, sv[2].z, inv_area2);
+  if (rs->depth_bias && rs->depth) {
+    const float max_z = fmaxf(fabsf(sv[0].z), fmaxf(fabsf(sv[1].z), fabsf(sv[2].z)));
+    float offset = rs->bias_slope * fmaxf(fabsf(zp.a), fabsf(zp.b)) +
+                   rs->bias_units * depth_resolution(rs->depth->format, max_z);
+    if (rs->bias_clamp > 0.0f) offset = fminf(offset, rs->bias_clamp);
+    if (rs->bias_clamp < 0.0f) offset = fmaxf(offset, rs->bias_clamp);
+    zp.c += offset;
+  }
   plane_setup(&wp, &sv[0], &sv[1], &sv[2], sv[0].inv_w, sv[1].inv_w, sv[2].inv_w, inv_area2);
   Screen_Vertex prov;
   prov.src = provoking;
@@ -4698,6 +4737,11 @@ static void gpu_emit_draw(Raster_State *rs) {
    * passes the same nearest surfaces (the pre-pass already kept the
    * nearest depth) and tolerates the rounding. */
   if (d.depth_compare == GPU_CMP_EQUAL && !d.depth_write) d.depth_compare = GPU_CMP_LESS_EQUAL;
+  if (rs->depth_bias && rs->depth) {
+    d.depth_bias = (int32_t)lroundf(rs->bias_units);
+    d.depth_bias_slope = u32f(rs->bias_slope);
+    d.depth_bias_clamp = u32f(rs->bias_clamp);
+  }
   d.stencil = rs->stencil ? 1u : 0u;
   if (rs->stencil) {
     Gpu_Rec_Stencil_Face *faces[2] = {&d.stencil_front, &d.stencil_back};

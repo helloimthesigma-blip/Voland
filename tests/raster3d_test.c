@@ -607,6 +607,55 @@ static void test_depth_write_needs_test(Raster3d *r) {
   g_regs[0x54e] = 0;
 }
 
+/* Polygon offset (SET_POLY_OFFSET_FILL + SET_DEPTH_BIAS): a flat quad
+ * drawn again with a constant offset of 4 units lands 4 steps of the
+ * 24-bit depth further; with the fill offset off, the bias registers do
+ * nothing. Shadow passes rely on it (Animal Crossing's lit surfaces
+ * speckled without it). */
+static uint32_t depth24_at(uint32_t x, uint32_t y) {
+  const uint8_t *zt = g_gpu + (ZT - GPU_BASE);
+  const uint32_t at = (uint32_t)block_linear_offset(x * 4u, y, RT_SIZE * 4u, 0);
+  return (uint32_t)zt[at + 1u] | (uint32_t)zt[at + 2u] << 8 | (uint32_t)zt[at + 3u] << 16;
+}
+
+static void test_depth_bias(Raster3d *r) {
+  base_state(RT, false, PS_OFFSET);
+  g_regs[0x3f8] = (uint32_t)(ZT >> 32);
+  g_regs[0x3f9] = (uint32_t)ZT;
+  g_regs[0x3fa] = ZT_Z24S8;
+  g_regs[0x3fb] = 0;
+  g_regs[0x48a] = RT_SIZE;
+  g_regs[0x48b] = RT_SIZE;
+  g_regs[0x54e] = 1;
+  g_regs[0x4b3] = 1;
+  g_regs[0x4ba] = 1;
+  g_regs[0x4c3] = FUNC_ALWAYS;
+  vertex(0, -1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(1, 1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(2, -1.0f, 1.0f, 1, 0, 0, 1);
+  vertex(3, 1.0f, 1.0f, 1, 0, 0, 1);
+  raster3d_begin_submission(r);
+  draw_arrays(r, 5, 4);
+  raster3d_flush(r, &k_mem);
+  const uint32_t plain = depth24_at(20, 20);
+  memcpy(&g_regs[0x56f], &(float){4.0f}, 4); /* SET_DEPTH_BIAS */
+  raster3d_begin_submission(r);
+  draw_arrays(r, 5, 4);
+  raster3d_flush(r, &k_mem);
+  CHECK(depth24_at(20, 20) == plain, "bias registers alone change nothing (%06x vs %06x)", depth24_at(20, 20), plain);
+  g_regs[0x372] = 1; /* SET_POLY_OFFSET_FILL */
+  raster3d_begin_submission(r);
+  draw_arrays(r, 5, 4);
+  raster3d_flush(r, &k_mem);
+  const uint32_t biased = depth24_at(20, 20);
+  CHECK(biased >= plain + 3u && biased <= plain + 5u, "a 4-unit offset moves depth 4 steps (%06x -> %06x)", plain, biased);
+  g_regs[0x372] = 0;
+  g_regs[0x56f] = 0;
+  g_regs[0x4b3] = 0;
+  g_regs[0x4ba] = 0;
+  g_regs[0x54e] = 0;
+}
+
 /* Derivatives through the rasterizer's quads: u = x and v = y in pixels,
  * so dFdx(u) = dFdy(v) = 1 and dFdy(u) = 0 at every covered pixel -
  * including along the diagonal edge, whose quads need helper lanes. A
@@ -1256,6 +1305,7 @@ int main(void) {
   test_render_to_texture(&r);
   test_stencil(&r);
   test_depth_write_needs_test(&r);
+  test_depth_bias(&r);
   test_derivatives(&r);
   test_worker_count_invariance(&r);
   test_gpu_vertex_stage(&r);

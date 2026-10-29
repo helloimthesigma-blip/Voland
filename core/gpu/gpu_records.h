@@ -215,7 +215,15 @@ typedef struct Gpu_Rec_Draw {
    * decodes its inputs from vertex buffer bytes in the data binding
    * (gpu/wgsl.h WGSL_DRAW_VS_INPUTS). */
   uint32_t flags;
+  /* Version 10: polygon offset for filled triangles (all 0: none) - the
+   * constant in units of the depth format's resolution, the slope factor
+   * and the clamp (f32 bits), as WebGPU's depthBias* take them. */
+  int32_t depth_bias;
+  uint32_t depth_bias_slope;
+  uint32_t depth_bias_clamp;
+  uint32_t reserved; /* the record stays a multiple of 8 bytes: its tail data is aligned */
 } Gpu_Rec_Draw;
+_Static_assert(sizeof(Gpu_Rec_Draw) % 8u == 0u, "a draw's tail data starts aligned");
 
 #define GPU_DRAW_VERTEX_PULL 1u
 
