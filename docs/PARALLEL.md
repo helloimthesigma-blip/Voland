@@ -350,20 +350,17 @@ What it changes, measured 2026-10-22 (small samples):
   run that ended at the budget or in a non-blocking SVC) did not help
   Tears of the Kingdom: 3 of 4 runs faulted.
 
-It stays off by default, a tool for chasing the open multicore bug,
-except for titles in `PINNED_TITLES` (`cpu.worker.ts`; `?pincores=0`
-turns it off):
-
-- **Animal Crossing: New Horizons** (2026-10-29, browser, three cores,
-  scheduler slices, to 6000 presents): unpinned, 4 of 8 runs crashed at
-  name entry, all in glyph loading (sdk+0x305154/0x305220/0x300344 under
-  main+0x1908a8c, null face pointers); pinned, 1 of 5 crashed, at the
-  same ~14 fps. The text engine keeps one font instance per index
-  (main+0x1d9f220: a TLS value, else GetCurrentProcessorNumber), and
-  threads 21 and 43 both use instance 1: whatever keeps them apart on the
-  Switch is not yet reproduced (root cause open). A separate stall
-  (presents stop at ~1770-1870 frames with only main runnable) happens
-  about 1 run in 4, pinned or not.
+It stays off by default, a tool for chasing the open multicore bug
+(`PINNED_TITLES` in `cpu.worker.ts` gives a per-title default; empty).
+Animal Crossing was pinned for a day: unpinned, 4 of 8 browser runs
+crashed at name entry (glyph loading, null font faces), pinned 1 of 5.
+The real cause was the browser enforcing no affinity (above): threads 21
+and 43, both on guest core 1 and sharing font engine instance 1
+(main+0x1d9f220), ran at once. With affinity, unpinned runs no longer
+crash (0 of 8, slices or free-running). A separate stall remains about 1
+run in 4: main spins in NVN's sync wait (sdk+0x429220) on a semaphore one
+short of its target (`[x26]` 0x46e, waiting for 0x46f) while every other
+thread waits.
 
 ## Free placement (opt-in)
 

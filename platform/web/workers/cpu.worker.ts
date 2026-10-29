@@ -422,12 +422,10 @@ let pollCoalescing = true;
  * only on its ideal core's host core (docs/PARALLEL.md "Pinned cores").
  * null = the title's default. */
 let requestedPinIdealCores: boolean | null = null;
-/** Titles pinned by default:
- * - Animal Crossing: New Horizons (01006F8002326000): two text threads
- *   share a font engine instance and corrupt it at name entry: 4 of 8
- *   runs crashed unpinned, 1 of 5 pinned, same fps (browser, 3 cores,
- *   2026-10-29; docs/PARALLEL.md "Pinned cores"). */
-const PINNED_TITLES: ReadonlySet<string> = new Set(["01006F8002326000"]);
+/** Titles pinned by default (none: Animal Crossing's name-entry crash was
+ * the browser enforcing no affinity at all, docs/PARALLEL.md "Affinity in
+ * the browser"; with affinity it needs no pinning). */
+const PINNED_TITLES: ReadonlySet<string> = new Set();
 function applyPinning(target: SwitchCoreExports): void {
   const pinned = requestedPinIdealCores ?? (loadedTitleId !== null && PINNED_TITLES.has(loadedTitleId));
   target._emulator_set_pin_ideal_cores_ffi(pinned ? 1 : 0);
@@ -456,10 +454,8 @@ let requestedFreeFromSlice: number | null = null;
  * - Tears of the Kingdom (0100F2C0115B6000): 10.1 fps vs 8.7 free-running
  *   at the same virtual-time rate, and its multicore loader crash 1 in 12
  *   runs vs about 1 in 4 (browser, 3 cores, 2026-10-27).
- * - Animal Crossing: New Horizons (01006F8002326000): free-running, 2 of 4
- *   runs stopped presenting at ~1770 frames and 2 crashed; in slices it
- *   reaches name entry at the same ~14 fps (browser, 2026-10-29). */
-const SLICED_TITLES: ReadonlySet<string> = new Set(["0100F2C0115B6000", "01006F8002326000"]);
+ */
+const SLICED_TITLES: ReadonlySet<string> = new Set(["0100F2C0115B6000"]);
 function freeFromSlice(): number {
   if (requestedFreeFromSlice !== null) return requestedFreeFromSlice;
   return loadedTitleId !== null && SLICED_TITLES.has(loadedTitleId) ? 0 : 1;

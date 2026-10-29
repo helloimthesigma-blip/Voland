@@ -260,6 +260,18 @@ static void remap_line(const Gpu_Channel *ch, const uint8_t *in, uint8_t *out, u
   }
 }
 
+/* A semaphore release that could not be written: the guest waiting on it
+ * would spin forever, so it is worth a line (the first few). */
+#define SEMAPHORE_FAULTS_LOGGED 8u
+static void semaphore_fault(Gpu_Channel *ch, const char *kind, uint64_t va, uint32_t payload) {
+  static uint32_t logged;
+  ch->faults++;
+  if (logged < SEMAPHORE_FAULTS_LOGGED) {
+    logged++;
+    log_warn("[gpu] %s semaphore release of 0x%x to unmapped GPU VA 0x%llx", kind, payload, (unsigned long long)va);
+  }
+}
+
 static void dma_semaphore(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t launch) {
   const uint32_t type = (launch >> LAUNCH_SEMAPHORE_SHIFT) & LAUNCH_SEMAPHORE_MASK;
   if (type != LAUNCH_SEMAPHORE_ONE_WORD && type != LAUNCH_SEMAPHORE_FOUR_WORD) return;
@@ -267,7 +279,8 @@ static void dma_semaphore(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t launc
   uint8_t release[SEMAPHORE_FOUR_WORD_BYTES];
   memset(release, 0, sizeof(release)); /* payload, reserved, timestamp 0 */
   memcpy(release, &ch->dma[DMA_SEMAPHORE_PAYLOAD], 4);
-  if (!mem->write(mem->user, va, release, type == LAUNCH_SEMAPHORE_ONE_WORD ? 4u : sizeof(release))) ch->faults++;
+  if (!mem->write(mem->user, va, release, type == LAUNCH_SEMAPHORE_ONE_WORD ? 4u : sizeof(release)))
+    semaphore_fault(ch, "DMA", va, ch->dma[DMA_SEMAPHORE_PAYLOAD]);
 }
 
 #define DMA_FAULT_LOG_LIMIT 8u
@@ -611,7 +624,8 @@ static void host_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t subchan
       uint8_t release[SEMAPHORE_FOUR_WORD_BYTES];
       memset(release, 0, sizeof(release));
       memcpy(release, &ch->host[HOST_SEMAPHORE_PAYLOAD], 4);
-      if (!mem->write(mem->user, va, release, (data & SEMAPHORE_RELEASE_4BYTE) ? 4u : sizeof(release))) ch->faults++;
+      if (!mem->write(mem->user, va, release, (data & SEMAPHORE_RELEASE_4BYTE) ? 4u : sizeof(release)))
+        semaphore_fault(ch, "host", va, ch->host[HOST_SEMAPHORE_PAYLOAD]);
     }
     break; /* acquires are satisfied: work completes in order */
   case HOST_SYNCPOINT_OP:
@@ -652,7 +666,8 @@ static void report_semaphore(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t op
   }
   ch->report_time += M3D_TIMESTAMP_STEP;
   memcpy(release + 8, &ch->report_time, sizeof(ch->report_time));
-  if (!mem->write(mem->user, va, release, (operation & M3D_REPORT_ONE_WORD) ? 4u : sizeof(release))) ch->faults++;
+  if (!mem->write(mem->user, va, release, (operation & M3D_REPORT_ONE_WORD) ? 4u : sizeof(release)))
+    semaphore_fault(ch, "3D report", va, ch->engine3d[M3D_REPORT_SEMAPHORE_C]);
 }
 
 /* ------------------------------------------------------------------ */

@@ -1581,6 +1581,15 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
     }
     if (!backtrace) continue;
     const CPU_Register_File *rf = emulator->cpu_backend->get_register_file(th->thread.cpu_state);
+    uint32_t at_x26 = 0;
+    if (th->state == THREAD_STATE_RUNNABLE) (void)vmm_read32(emulator->vmm, rf->x[26], &at_x26);
+    if (th->state == THREAD_STATE_RUNNABLE) /* a spinning thread: what it compares, and against what */
+      log_warn("[threads]   x0 %llx x1 %llx x19 %llx x20 %llx x21 %llx x22 %llx x23 %llx x24 %llx x25 %llx x26 %llx "
+               "x27 %llx x28 %llx [x26] %x",
+               (unsigned long long)rf->x[0], (unsigned long long)rf->x[1], (unsigned long long)rf->x[19],
+               (unsigned long long)rf->x[20], (unsigned long long)rf->x[21], (unsigned long long)rf->x[22],
+               (unsigned long long)rf->x[23], (unsigned long long)rf->x[24], (unsigned long long)rf->x[25],
+               (unsigned long long)rf->x[26], (unsigned long long)rf->x[27], (unsigned long long)rf->x[28], at_x26);
     uint64_t fp = rf->x[29], lr = rf->x[30];
     for (uint32_t depth = 0; depth < DUMP_BACKTRACE_DEPTH; depth++) {
       uint64_t off = 0;
