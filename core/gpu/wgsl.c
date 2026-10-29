@@ -331,6 +331,9 @@ static const char *const k_prelude[] = {
     "fn F(x: u32) -> f32 { return bitcast<f32>(x); }\n"
     "fn U(x: f32) -> u32 { return bitcast<u32>(x); }\n"
     "fn sat(v: f32) -> f32 { if (!(v > 0.0)) { return 0.0; } return min(v, 1.0); }\n"
+    /* The FMZ multiply mode: a zero factor gives zero, even against inf/NaN. */
+    "fn fmul_fmz(a: f32, b: f32) -> f32 { if (a == 0.0 || b == 0.0) { return 0.0; } return a * b; }\n"
+    "fn fmul_ieee(a: f32, b: f32) -> f32 { return a * b; }\n"
     "fn isnan_(v: f32) -> bool { return (U(v) & 0x7fffffffu) > 0x7f800000u; }\n"
     "fn fmin_(a: f32, b: f32) -> f32 { if (isnan_(a)) { return b; } if (isnan_(b)) { return a; } return min(a, b); }\n"
     "fn fmax_(a: f32, b: f32) -> f32 { if (isnan_(a)) { return b; } if (isnan_(b)) { return a; } return max(a, b); }\n"
@@ -1334,18 +1337,23 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
     static const float scale[8] = {1.0f, 0.5f, 0.25f, 0.125f, 8.0f, 4.0f, 2.0f, 1.0f};
     const float k = scale[BITS(w, 41, 3)] * (BIT(w, 48) ? -1.0f : 1.0f);
     const Ex a = fl(reg(t, REG_A(w))), b = fl(op_b(t, in));
-    EMIT("%s = U(%s(%s * %s * %s)); ", reg_dst(t, REG_D(w)).s, BIT(w, 50) ? "sat" : "", a.s, b.s, imm_f(k).s);
+    const bool fmz = BITS(w, FMUL_MODE_BIT, 2) == MUL_MODE_FMZ;
+    EMIT("%s = U(%s(%s(%s, %s) * %s)); ", reg_dst(t, REG_D(w)).s, BIT(w, 50) ? "sat" : "", fmz ? "fmul_fmz" : "fmul_ieee", a.s,
+         b.s, imm_f(k).s);
     return;
   }
   case SM_OP_FMUL32I: {
     const Ex a = fl(reg(t, REG_A(w)));
-    EMIT("%s = U(%s(%s * F(0x%xu))); ", reg_dst(t, REG_D(w)).s, BIT(w, 55) ? "sat" : "", a.s, in->imm);
+    const bool fmz = BITS(w, FFMA_MODE_BIT, 2) == MUL_MODE_FMZ;
+    EMIT("%s = U(%s(%s(%s, F(0x%xu)))); ", reg_dst(t, REG_D(w)).s, BIT(w, 55) ? "sat" : "", fmz ? "fmul_fmz" : "fmul_ieee", a.s,
+         in->imm);
     return;
   }
   case SM_OP_FFMA: {
     const Ex a = fl(reg(t, REG_A(w))), b = fl(op_b(t, in)), c = fl(op_c(t, in));
-    EMIT("%s = U(%s(%s * %s * %s + %s * %s)); ", reg_dst(t, REG_D(w)).s, BIT(w, 50) ? "sat" : "", a.s, b.s,
-         BIT(w, 48) ? "-1.0" : "1.0", c.s, BIT(w, 49) ? "-1.0" : "1.0");
+    const bool fmz = BITS(w, FFMA_MODE_BIT, 2) == MUL_MODE_FMZ;
+    EMIT("%s = U(%s(%s(%s, %s) * %s + %s * %s)); ", reg_dst(t, REG_D(w)).s, BIT(w, 50) ? "sat" : "",
+         fmz ? "fmul_fmz" : "fmul_ieee", a.s, b.s, BIT(w, 48) ? "-1.0" : "1.0", c.s, BIT(w, 49) ? "-1.0" : "1.0");
     return;
   }
   case SM_OP_FFMA32I: {
@@ -1353,8 +1361,9 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
     float bf;
     memcpy(&bf, &in->imm, sizeof(bf));
     bf *= BIT(w, 56) ? -1.0f : 1.0f;
-    EMIT("%s = U(%s(%s * %s + %s * %s)); ", reg_dst(t, REG_D(w)).s, BIT(w, 55) ? "sat" : "", a.s, imm_f(bf).s, c.s,
-         BIT(w, 57) ? "-1.0" : "1.0");
+    const bool fmz = BITS(w, FFMA_MODE_BIT, 2) == MUL_MODE_FMZ;
+    EMIT("%s = U(%s(%s(%s, %s) + %s * %s)); ", reg_dst(t, REG_D(w)).s, BIT(w, 55) ? "sat" : "", fmz ? "fmul_fmz" : "fmul_ieee",
+         a.s, imm_f(bf).s, c.s, BIT(w, 57) ? "-1.0" : "1.0");
     return;
   }
   case SM_OP_FMNMX: {

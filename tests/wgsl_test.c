@@ -323,6 +323,23 @@ static void vector_float(void) {
   finish(&b, "float", true);
 }
 
+/* The FMZ multiply mode: inf * 0 is 0 (FFMA leaves c, FMUL gives 0) where
+ * IEEE gives NaN. */
+static void vector_fmz(void) {
+  Builder b;
+  begin(&b);
+  emit(&b, MOV32I(4, 0x7f800000u));         /* inf */
+  emit(&b, MOV32I(5, 0));
+  emit(&b, MOV32I(6, (uint32_t)f_bits(1.0f)));
+  emit(&b, FFMA_RR(0, 4, 5, 6) | ((uint64_t)MUL_MODE_FMZ << FFMA_MODE_BIT)); /* 1 */
+  emit(&b, (op_top(0x5c68) | GUARD | rb(5) | ra(4) | rd(1)) | ((uint64_t)MUL_MODE_FMZ << FMUL_MODE_BIT)); /* 0 */
+  emit(&b, MOV32I(2, 0));
+  emit(&b, MOV32I(3, 0));
+  emit(&b, EXIT());
+  finish(&b, "fmz", true);
+  CHECK(strstr(g_text, "fmul_fmz(") != NULL);
+}
+
 static void vector_integer(void) {
   Builder b;
   begin(&b);
@@ -731,6 +748,7 @@ int main(int argc, char **argv) {
   structural();
   lod_selection();
   vector_float();
+  vector_fmz();
   vector_integer();
   vector_iadd3();
   vector_i2i_abs_neg();

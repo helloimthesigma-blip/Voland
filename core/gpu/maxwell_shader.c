@@ -877,6 +877,12 @@ static Half_Fields half_fields(const Sm_Insn *in) {
   return f;
 }
 
+/* FMUL / FFMA / FMUL32I / FFMA32I multiply mode (2 bits; FMUL at 44, the
+ * others at 53): FMZ is the D3D9 rule - a product with a zero factor is
+ * zero, even against infinity or NaN. Shaders lean on it to mask terms
+ * that would otherwise be NaN (Animal Crossing's fur went black). */
+static float mul_mode(float a, float b, bool fmz) { return fmz && (a == 0.0f || b == 0.0f) ? 0.0f : a * b; }
+
 /* One lane of a product with the FMZ rule applied. */
 static float half_mul(float a, float b, uint32_t precision) {
   if (precision == HALF_PRECISION_FMZ && (a == 0.0f || b == 0.0f)) return 0.0f;
@@ -1493,12 +1499,13 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     uint32_t *d = dst_row(t, REG_D(w));
     const float k = scale[BITS(w, 41, 3)] * (BIT(w, 48) ? -1.0f : 1.0f);
     const uint32_t sat = BIT(w, 50);
+    const bool fmz = BITS(w, FMUL_MODE_BIT, 2) == MUL_MODE_FMZ;
     uint32_t res[SM_LANES];
     uint32_t bs;
     if (op_b_scalar(in, env, &bs)) {
       const float bv = f32(bs);
       FOR_ALL_LANES {
-        float r = f32(a[l]) * bv * k;
+        float r = mul_mode(f32(a[l]), bv, fmz) * k;
         if (sat) r = saturate(r);
         res[l] = u32f(r);
       }
@@ -1507,7 +1514,7 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     }
     const uint32_t *b = op_b(in, env, t, tb);
     FOR_ALL_LANES {
-      float r = f32(a[l]) * f32(b[l]) * k;
+      float r = mul_mode(f32(a[l]), f32(b[l]), fmz) * k;
       if (sat) r = saturate(r);
       res[l] = u32f(r);
     }
@@ -1519,9 +1526,10 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     uint32_t *d = dst_row(t, REG_D(w));
     const float b = f32(in->imm);
     const uint32_t sat = BIT(w, 55);
+    const bool fmz = BITS(w, FFMA_MODE_BIT, 2) == MUL_MODE_FMZ;
     uint32_t res[SM_LANES];
     FOR_ALL_LANES {
-      float r = f32(a[l]) * b;
+      float r = mul_mode(f32(a[l]), b, fmz);
       if (sat) r = saturate(r);
       res[l] = u32f(r);
     }
@@ -1533,12 +1541,13 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     uint32_t *d = dst_row(t, REG_D(w));
     const float nab = BIT(w, 48) ? -1.0f : 1.0f, nc = BIT(w, 49) ? -1.0f : 1.0f;
     const uint32_t sat = BIT(w, 50);
+    const bool fmz = BITS(w, FFMA_MODE_BIT, 2) == MUL_MODE_FMZ;
     uint32_t res[SM_LANES];
     uint32_t bs;
     if (op_b_scalar(in, env, &bs)) {
       const float bv = f32(bs);
       FOR_ALL_LANES {
-        float r = f32(a[l]) * bv * nab + f32(c[l]) * nc;
+        float r = mul_mode(f32(a[l]), bv, fmz) * nab + f32(c[l]) * nc;
         if (sat) r = saturate(r);
         res[l] = u32f(r);
       }
@@ -1547,7 +1556,7 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     }
     const uint32_t *b = op_b(in, env, t, tb);
     FOR_ALL_LANES {
-      float r = f32(a[l]) * f32(b[l]) * nab + f32(c[l]) * nc;
+      float r = mul_mode(f32(a[l]), f32(b[l]), fmz) * nab + f32(c[l]) * nc;
       if (sat) r = saturate(r);
       res[l] = u32f(r);
     }
@@ -1559,9 +1568,10 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     uint32_t *d = dst_row(t, REG_D(w));
     const float b = f32(in->imm) * (BIT(w, 56) ? -1.0f : 1.0f), nc = BIT(w, 57) ? -1.0f : 1.0f;
     const uint32_t sat = BIT(w, 55);
+    const bool fmz = BITS(w, FFMA_MODE_BIT, 2) == MUL_MODE_FMZ;
     uint32_t res[SM_LANES];
     FOR_ALL_LANES {
-      float r = f32(a[l]) * b + f32(d[l]) * nc;
+      float r = mul_mode(f32(a[l]), b, fmz) + f32(d[l]) * nc;
       if (sat) r = saturate(r);
       res[l] = u32f(r);
     }

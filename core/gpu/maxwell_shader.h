@@ -346,4 +346,11 @@ Sm_Group_Status sm_group_run(const Sm_Program *program, const Sm_Env *env, Sm_Th
 /* Short mnemonic for diagnostics. */
 const char *sm_op_name(Sm_Op op);
 
+/* FMUL / FFMA / FMUL32I / FFMA32I multiply mode field (2 bits; FMUL's at
+ * bit 44, the others' at 53): MUL_MODE_FMZ makes a product with a zero
+ * factor zero, even against infinity or NaN (D3D9's rule). */
+#define FMUL_MODE_BIT 44
+#define FFMA_MODE_BIT 53
+#define MUL_MODE_FMZ 2u
+
 #endif /* SWITCH_GPU_MAXWELL_SHADER_H */

@@ -758,6 +758,41 @@ static void test_half_precision(void) {
   }
 }
 
+/* The FMZ multiply mode (FMUL @44, FFMA / FMUL32I / FFMA32I @53): a zero
+ * factor gives zero even against infinity, so FFMA leaves just c. */
+static void test_fmz(void) {
+  const uint64_t base = GUARD | ra(0) | rd(3);
+  const uint32_t inf = 0x7f800000u, one = (uint32_t)f_bits(1.0f);
+  const Half_Vector vectors[] = {
+      {"FMUL reg FMZ (inf * 0 = 0)", op_top(0x5c68) | base | rb(1) | ((uint64_t)MUL_MODE_FMZ << FMUL_MODE_BIT), inf, 0, 0,
+       0, 0, 0, NO_PRED, NO_PRED},
+      {"FMUL reg FMZ (2 * 3 = 6)", op_top(0x5c68) | base | rb(1) | ((uint64_t)MUL_MODE_FMZ << FMUL_MODE_BIT),
+       (uint32_t)f_bits(2.0f), (uint32_t)f_bits(3.0f), 0, 0, 0, (uint32_t)f_bits(6.0f), NO_PRED, NO_PRED},
+      {"FFMA reg FMZ (inf * 0 + 1 = 1)", op_top(0x5980) | base | rb(1) | rc(2) | ((uint64_t)MUL_MODE_FMZ << FFMA_MODE_BIT),
+       inf, 0, one, 0, 0, one, NO_PRED, NO_PRED},
+      {"FMUL32I FMZ (inf * 0 = 0)", op_top(0x1e00) | base | ((uint64_t)MUL_MODE_FMZ << FFMA_MODE_BIT), inf, 0, 0, 0, 0, 0,
+       NO_PRED, NO_PRED},
+      {"FFMA32I FMZ (inf * 0 + Rd = Rd)", op_top(0x0c00) | base | ((uint64_t)MUL_MODE_FMZ << FFMA_MODE_BIT), inf, 0, 0,
+       one, 0, one, NO_PRED, NO_PRED},
+  };
+  for (uint32_t i = 0; i < sizeof(vectors) / sizeof(vectors[0]); i++) {
+    const Half_Vector *v = &vectors[i];
+    Builder b;
+    begin(&b, SM_STAGE_VERTEX);
+    emit(&b, MOV32I(0, v->a));
+    emit(&b, MOV32I(1, v->b));
+    emit(&b, MOV32I(2, v->c));
+    emit(&b, MOV32I(3, v->d));
+    emit(&b, v->insn);
+    emit(&b, EXIT());
+    load(&b);
+    CHECK(g_prog.unknown_ops == 0, "%s decodes", v->name);
+    sm_thread_reset(&g_thread, 1);
+    CHECK(run(), "%s runs", v->name);
+    CHECK(g_thread.r[3][0] == v->expect_d, "%s: R3 %08x, want %08x", v->name, g_thread.r[3][0], v->expect_d);
+  }
+}
+
 int main(void) {
   test_float_arith();
   test_integer_arith();
@@ -777,6 +812,7 @@ int main(void) {
   test_derivatives();
   test_conditional_exit();
   test_half_precision();
+  test_fmz();
   if (g_failures) {
     fprintf(stderr, "maxwell_shader_test: %d failure(s)\n", g_failures);
     return 1;
