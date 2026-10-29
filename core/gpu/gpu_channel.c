@@ -23,6 +23,7 @@
 #define OP_NON_INCREMENTING 3u
 #define OP_IMMEDIATE 4u
 #define OP_INCREMENT_ONCE 5u
+#define OP_END_PB_SEGMENT 7u /* control entry: the rest of the segment is not decoded */
 
 /* Host methods (word addresses). */
 #define HOST_METHODS 0x40u
@@ -1130,26 +1131,30 @@ typedef struct Decoder {
   uint32_t op;
 } Decoder;
 
-static void decode_word(Gpu_Channel *ch, const Gpu_Memory *mem, Decoder *d, uint32_t word) {
+/* Decodes one pushbuffer word; false once an END_PB_SEGMENT control entry
+ * ends the segment (nothing after it in that GPFIFO entry is decoded). */
+static bool decode_word(Gpu_Channel *ch, const Gpu_Memory *mem, Decoder *d, uint32_t word) {
   if (d->remaining) {
     gpu_channel_method(ch, mem, d->subchannel, d->method, word);
     d->remaining--;
     if (d->op == OP_INCREMENTING) d->method++;
     else if (d->op == OP_INCREMENT_ONCE) d->op = OP_NON_INCREMENTING, d->method++;
-    return;
+    return true;
   }
   const uint32_t op = MH_OP(word);
+  if (op == OP_END_PB_SEGMENT) return false;
   d->method = MH_METHOD(word);
   d->subchannel = MH_SUBCHANNEL(word);
   if (op == OP_IMMEDIATE) {
     gpu_channel_method(ch, mem, d->subchannel, d->method, MH_COUNT(word));
-    return;
+    return true;
   }
   if (op == OP_INCREMENTING || op == OP_NON_INCREMENTING || op == OP_INCREMENT_ONCE) {
     d->op = op;
     d->remaining = MH_COUNT(word);
   }
   /* Anything else (including 0: a NOP word) carries no data. */
+  return true;
 }
 
 uint32_t gpu_channel_entry_words(uint64_t entry) { return (uint32_t)((entry >> GP_LENGTH_SHIFT) & GP_LENGTH_MASK); }
@@ -1172,10 +1177,14 @@ void gpu_channel_submit_words(Gpu_Channel *ch, const Gpu_Memory *mem, const uint
   for (uint32_t i = 0; i < count; i++) {
     const uint64_t va = entries[i] & GP_VA_MASK;
     const uint32_t words = gpu_channel_entry_words(entries[i]);
+    /* Each GPFIFO entry starts a fresh method: NVN abandons a method that
+     * does not fit at the end of a command memory chunk (its header and
+     * part of its data stay behind) and writes it again, whole, at the
+     * start of the next one. */
     Decoder d;
     memset(&d, 0, sizeof(d));
     if (captured) {
-      for (uint32_t w = 0; w < words; w++) decode_word(ch, mem, &d, next[w]);
+      for (uint32_t w = 0; w < words && decode_word(ch, mem, &d, next[w]); w++) {}
       next += words;
       continue;
     }
@@ -1185,7 +1194,9 @@ void gpu_channel_submit_words(Gpu_Channel *ch, const Gpu_Memory *mem, const uint
         ch->faults++;
         break;
       }
-      for (uint32_t w = 0; w < n; w++) decode_word(ch, mem, &d, ch->fetch[w]);
+      bool live = true;
+      for (uint32_t w = 0; w < n && live; w++) live = decode_word(ch, mem, &d, ch->fetch[w]);
+      if (!live) break; /* END_PB_SEGMENT: the rest of this entry is not decoded */
       at += n;
     }
   }

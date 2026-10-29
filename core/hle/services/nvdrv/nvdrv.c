@@ -643,6 +643,11 @@ static Gpu_Channel *channel_of(Nvdrv_State *s, Nv_Fd *f) {
     for (uint32_t i = 0; i < NVDRV_MAX_CHANNELS; i++) {
       if (s->channel_used[i]) continue;
       s->channel_used[i] = true;
+      /* A closed fd's slot may still have submissions queued on the GPU
+       * thread: they run first, or the reset would wipe their registers
+       * mid-stream (Animal Crossing's last semaphore release of a queue went
+       * to GPU VA 0, and NVN spun on it forever). */
+      if (s->gpu_thread) gpu_thread_drain(s->gpu_thread);
       gpu_channel_init(&s->channels[i]);
       f->channel = i;
       break;

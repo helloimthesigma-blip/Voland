@@ -1558,6 +1558,14 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
   if (!emulator || !emulator->program_loaded) return;
   static const char *const k_state[] = {"free", "created", "runnable", "waiting", "dead"};
   log_warn("[threads] at tick %llu:", (unsigned long long)emulator->scheduler.ticks);
+  /* The GPU side of a stall: submissions still queued, and syncpoints whose
+   * promised value is ahead of the reached one. */
+  log_warn("[threads] gpu thread: %u calls queued, %u done, %s", gpu_thread_queued(&emulator->gpu_thread),
+           gpu_thread_progress(&emulator->gpu_thread), gpu_thread_busy(&emulator->gpu_thread) ? "busy" : "idle");
+  for (uint32_t id = 1; id < SYNCPOINT_COUNT; id++) {
+    const uint32_t lo = syncpoint_min(&emulator->nvdrv.syncpoints, id), hi = syncpoint_max(&emulator->nvdrv.syncpoints, id);
+    if (lo != hi) log_warn("[threads] syncpoint %u: reached %u of %u", id, lo, hi);
+  }
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     const Sched_Thread *th = &emulator->scheduler.threads[i];
     if (th->state == THREAD_STATE_FREE || th->state == THREAD_STATE_DEAD || !th->thread.cpu_state) continue;

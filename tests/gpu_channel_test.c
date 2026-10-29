@@ -109,6 +109,21 @@ static void test_headers_and_host(void) {
 #define W 128u /* bytes per line */
 #define H 24u
 
+/* END_PB_SEGMENT (secondary opcode 7): nothing after it in the segment is
+ * decoded - here a complete semaphore release that must not happen. */
+static void test_end_pb_segment(void) {
+  gpu_channel_init(&g_channel);
+  const uint32_t words[7] = {7u << 29, header(1, 0, 4, 3), 0, (uint32_t)(MEM_BASE + 0x300), 0x5150, header(1, 0, 7, 1),
+                             2u | (1u << 24)};
+  memcpy(g_mem + (PB_VA - MEM_BASE), words, sizeof(words));
+  memset(g_mem + 0x300, 0, 4);
+  const uint64_t entry = PB_VA | ((uint64_t)7 << 42);
+  gpu_channel_submit(&g_channel, &k_mem, &entry, 1);
+  uint32_t released = 0;
+  memcpy(&released, g_mem + 0x300, 4);
+  CHECK(released == 0);
+}
+
 static void test_pitch_to_block_linear(void) {
   for (uint32_t i = 0; i < W * H; i++) g_mem[(SRC - MEM_BASE) + i] = (uint8_t)(i * 3u + 1u);
   memset(g_mem + (DST - MEM_BASE), 0, 0x10000);
@@ -482,6 +497,7 @@ int main(void) {
   test_mme();
   test_inline_to_memory();
   test_2d_blit();
+  test_end_pb_segment();
   printf("[gpu_channel_test] passed\n");
   return 0;
 }
