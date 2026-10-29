@@ -359,11 +359,11 @@ async function boot(): Promise<BootResult | null> {
         if (cores !== null && /^[0-9]+$/.test(cores)) {
           cpuWorker.postMessage({ type: "set-host-cores", cores: Number(cores) } satisfies MainToCPUMessage);
         }
-        /* ?pincores=1: each guest thread only on its ideal core's host core
-         * (docs/PARALLEL.md "Pinned cores"): slower, but threads that share
-         * a core never run at once. */
-        if (new URLSearchParams(location.search).get("pincores") === "1") {
-          cpuWorker.postMessage({ type: "set-pin-ideal-cores", on: true } satisfies MainToCPUMessage);
+        /* ?pincores=1|0: each guest thread only on its ideal core's host core
+         * (docs/PARALLEL.md "Pinned cores"), or not; default by title. */
+        const pincores = new URLSearchParams(location.search).get("pincores");
+        if (pincores === "1" || pincores === "0") {
+          cpuWorker.postMessage({ type: "set-pin-ideal-cores", on: pincores === "1" } satisfies MainToCPUMessage);
         }
         /* ?placement=free|strict: guest threads on any host core, or only
          * where their affinity allows (docs/PARALLEL.md "Free placement");

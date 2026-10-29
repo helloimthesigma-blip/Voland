@@ -418,9 +418,21 @@ function applyCpuSpeed(target: SwitchCoreExports): void {
 
 /** Poll coalescing (set-poll-coalescing; ?polls=0 turns it off). */
 let pollCoalescing = true;
-/** Pinned cores (set-pin-ideal-cores; ?pincores=1): each guest thread
- * only on its ideal core's host core (docs/PARALLEL.md "Pinned cores"). */
-let pinIdealCores = false;
+/** Pinned cores (set-pin-ideal-cores; ?pincores=1|0): each guest thread
+ * only on its ideal core's host core (docs/PARALLEL.md "Pinned cores").
+ * null = the title's default. */
+let requestedPinIdealCores: boolean | null = null;
+/** Titles pinned by default:
+ * - Animal Crossing: New Horizons (01006F8002326000): two text threads
+ *   share a font engine instance and corrupt it at name entry: 4 of 8
+ *   runs crashed unpinned, 1 of 5 pinned, same fps (browser, 3 cores,
+ *   2026-10-29; docs/PARALLEL.md "Pinned cores"). */
+const PINNED_TITLES: ReadonlySet<string> = new Set(["01006F8002326000"]);
+function applyPinning(target: SwitchCoreExports): void {
+  const pinned = requestedPinIdealCores ?? (loadedTitleId !== null && PINNED_TITLES.has(loadedTitleId));
+  target._emulator_set_pin_ideal_cores_ffi(pinned ? 1 : 0);
+  if (pinned) log("info", "pinned cores: each guest thread only on its ideal core's host core");
+}
 /** Titles whose guest threads may run on any host core by default (free
  * placement, docs/PARALLEL.md "Free placement"). None: with affinity
  * enforced the per-core pick keeps a guest core's threads in priority
@@ -443,8 +455,11 @@ let requestedFreeFromSlice: number | null = null;
 /** Titles that run in slices by default instead of free-running:
  * - Tears of the Kingdom (0100F2C0115B6000): 10.1 fps vs 8.7 free-running
  *   at the same virtual-time rate, and its multicore loader crash 1 in 12
- *   runs vs about 1 in 4 (browser, 3 cores, 2026-10-27). */
-const SLICED_TITLES: ReadonlySet<string> = new Set(["0100F2C0115B6000"]);
+ *   runs vs about 1 in 4 (browser, 3 cores, 2026-10-27).
+ * - Animal Crossing: New Horizons (01006F8002326000): free-running, 2 of 4
+ *   runs stopped presenting at ~1770 frames and 2 crashed; in slices it
+ *   reaches name entry at the same ~14 fps (browser, 2026-10-29). */
+const SLICED_TITLES: ReadonlySet<string> = new Set(["0100F2C0115B6000", "01006F8002326000"]);
 function freeFromSlice(): number {
   if (requestedFreeFromSlice !== null) return requestedFreeFromSlice;
   return loadedTitleId !== null && SLICED_TITLES.has(loadedTitleId) ? 0 : 1;
@@ -1141,7 +1156,7 @@ function loadGame(file: File): CPUToMainMessage {
   applyCpuSpeed(loadingCore);
   if (renderWorkers > 0) log("info", `renderer workers: ${loadingCore._emulator_set_render_workers_ffi(renderWorkers)}`);
   loadingCore._emulator_set_poll_coalescing_ffi(pollCoalescing ? 1 : 0);
-  loadingCore._emulator_set_pin_ideal_cores_ffi(pinIdealCores ? 1 : 0);
+  applyPinning(loadingCore);
   applyPlacement(loadingCore);
   freeRunning = false;
   loadingCore._emulator_set_free_running_ffi(0);
@@ -1160,6 +1175,7 @@ function loadGame(file: File): CPUToMainMessage {
   if (requestedHostCores === null) applyHostCores(core); /* the default may depend on the title */
   if (requestedCpuPercent === null) applyCpuSpeed(core);
   if (requestedFreePlacement === null) applyPlacement(core);
+  if (requestedPinIdealCores === null) applyPinning(core);
   if (requestedFreeFromSlice === null && freeFromSlice() === 0) log("info", "this title runs in scheduler slices (free-running off by default; ?free=1 to try it)");
   return {
     type: "game-loaded",
@@ -1391,9 +1407,9 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   }
 
   if (msg.type === "set-pin-ideal-cores") {
-    pinIdealCores = msg.on;
-    core?._emulator_set_pin_ideal_cores_ffi(pinIdealCores ? 1 : 0);
-    log("debug", `pinned cores ${pinIdealCores ? "on" : "off"}`);
+    requestedPinIdealCores = msg.on;
+    if (core) applyPinning(core);
+    log("debug", `pinned cores ${msg.on ? "on" : "off"}`);
     return;
   }
 
