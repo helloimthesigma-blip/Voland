@@ -62,6 +62,10 @@
 #define NVDRV_MAX_CHANNELS 8u     /* GPU channels with command processing */
 #define NVDRV_NO_CHANNEL UINT32_MAX
 #define NVDRV_IOCTL_MAX_BYTES 0x4000u /* the 14-bit size field */
+/* KICKOFF_PB passes its GPFIFO entries in Ioctl2's second buffer, which
+ * the size field does not bound: Animal Crossing submits ~2800 at once. */
+#define NVDRV_GPFIFO_MAX_ENTRIES 0x8000u
+#define NVDRV_IOCTL_BUFFER_BYTES (NVDRV_IOCTL_MAX_BYTES + NVDRV_GPFIFO_MAX_ENTRIES * 8u)
 #define NVDRV_MAX_CMDBUF_WORDS 0x4000u /* a host1x command buffer read at once (nvdec.h) */
 
 /* NvError codes (libnx result.h LibnxNvidiaError mapping). */
@@ -152,8 +156,9 @@ typedef struct Nvdrv_State {
   uint64_t next_gpu_va;
   Syncpoints syncpoints;
   Nv_Event_Slot events[NVDRV_MAX_EVENTS];
-  uint8_t ioctl_buffer[NVDRV_IOCTL_MAX_BYTES];
-  uint32_t ioctl_in_bytes; /* the bytes of ioctl_buffer this ioctl's in-data fills */
+  uint8_t ioctl_buffer[NVDRV_IOCTL_BUFFER_BYTES]; /* the in-data, then Ioctl2's second buffer */
+  uint32_t ioctl_in_bytes;    /* the bytes of ioctl_buffer this ioctl's in-data fills */
+  uint32_t ioctl_extra_bytes; /* then the bytes of Ioctl2's second buffer */
   uint8_t extra_buffer[NVDRV_IOCTL_MAX_BYTES];
   bool extra_out;          /* the current ioctl has Ioctl3's second output buffer */
   uint64_t ioctl_count;

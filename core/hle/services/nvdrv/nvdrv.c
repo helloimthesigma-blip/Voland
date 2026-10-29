@@ -653,9 +653,11 @@ static Gpu_Channel *channel_of(Nvdrv_State *s, Nv_Fd *f) {
 }
 
 /* SUBMIT_GPFIFO / KICKOFF_PB: the entries follow the 24-byte header
- * (inline, or Ioctl2's extra buffer appended - run_ioctl). */
+ * (inline, or Ioctl2's extra buffer appended - run_ioctl). The GPU thread
+ * takes them GPFIFO_CHUNK_ENTRIES at a time. */
 #define GPFIFO_HEADER_BYTES 24u
-#define GPFIFO_MAX_ENTRIES ((NVDRV_IOCTL_MAX_BYTES - GPFIFO_HEADER_BYTES) / 8u)
+#define GPFIFO_INLINE_ENTRIES ((NVDRV_IOCTL_MAX_BYTES - GPFIFO_HEADER_BYTES) / 8u)
+#define GPFIFO_CHUNK_ENTRIES GPFIFO_INLINE_ENTRIES
 
 /* One submission for the GPU thread: its entries follow. */
 typedef struct Gpfifo_Call {
@@ -666,6 +668,7 @@ typedef struct Gpfifo_Call {
   bool promised;     /* increments were promised */
   uint32_t count;
   bool captured;     /* the entries' command words follow them (async) */
+  bool last;         /* the submission's last chunk: it keeps the promise */
 } Gpfifo_Call;
 
 static void gpfifo_run(void *user, const void *payload, uint32_t bytes) {
@@ -673,7 +676,7 @@ static void gpfifo_run(void *user, const void *payload, uint32_t bytes) {
   (void)bytes;
   Gpfifo_Call call;
   memcpy(&call, payload, sizeof(call));
-  uint64_t entries[GPFIFO_MAX_ENTRIES];
+  uint64_t entries[GPFIFO_CHUNK_ENTRIES];
   memcpy(entries, (const uint8_t *)payload + sizeof(call), (size_t)call.count * 8u);
   Nvdrv_State *s = call.s;
   const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate, gpu_extent};
@@ -686,7 +689,7 @@ static void gpfifo_run(void *user, const void *payload, uint32_t bytes) {
                                          : NULL);
   t_submit_promised = false;
   /* Whatever the commands did, the promise is kept. */
-  if (call.promised) syncpoint_complete(&s->syncpoints, call.syncpoint, call.fence);
+  if (call.promised && call.last) syncpoint_complete(&s->syncpoints, call.syncpoint, call.fence);
 }
 
 /* Async GPU: this submission's virtual time and the GPU thread's call
@@ -720,6 +723,57 @@ void nvdrv_bound_gpu_latency(Nvdrv_State *s, uint64_t now_ticks, uint64_t max_ti
   }
 }
 
+/* Queues one chunk of a submission (or runs it, synchronously). */
+static void queue_gpfifo(Nvdrv_State *s, Gpfifo_Call call, const uint64_t *chunk) {
+  static _Thread_local uint8_t payload[sizeof(Gpfifo_Call) + GPFIFO_CHUNK_ENTRIES * 8u];
+  memcpy(payload, &call, sizeof(call));
+  memcpy(payload + sizeof(call), chunk, (size_t)call.count * 8u);
+  uint32_t bytes = (uint32_t)sizeof(call) + call.count * 8u;
+  if (gpu_thread_async(s->gpu_thread)) {
+    /* The command words go with the call: the guest reuses command memory
+     * once it believes the GPU has fetched it, often before the GPU
+     * thread gets there (MK8DX lost whole frames and semaphore releases). */
+    static _Thread_local uint8_t *capture; /* GPU_THREAD_MAX_PAYLOAD, once per submitting thread */
+    if (!capture) capture = (uint8_t *)malloc(GPU_THREAD_MAX_PAYLOAD);
+    if (capture && bytes <= GPU_THREAD_MAX_PAYLOAD) {
+      const uint32_t room = (GPU_THREAD_MAX_PAYLOAD - bytes) / 4u;
+      memcpy(capture, payload, bytes);
+      const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate, gpu_extent};
+      const uint64_t *entries = (const uint64_t *)(const void *)(capture + sizeof(call));
+      uint32_t words = 0;
+      for (uint32_t i = 0; i < call.count; i++) words += gpu_channel_entry_words(entries[i]);
+      static int no_capture = -1;
+      if (no_capture < 0) no_capture = getenv("VOLAND_NO_CAPTURE") ? 1 : 0; /* measurement only: the old behaviour */
+      if (no_capture) {
+        gpu_thread_call(s->gpu_thread, gpfifo_run, NULL, payload, bytes);
+        note_submission(s, gpu_thread_queued(s->gpu_thread));
+        return;
+      }
+      if (words <= room && gpu_channel_capture(&memory, entries, call.count, (uint32_t *)(void *)(capture + bytes), room)) {
+        s->captured_submissions++;
+        s->captured_bytes += (uint64_t)words * 4u;
+        call.captured = true;
+        memcpy(capture, &call, sizeof(call));
+        gpu_thread_call(s->gpu_thread, gpfifo_run, NULL, capture, bytes + words * 4u);
+        note_submission(s, gpu_thread_queued(s->gpu_thread));
+        return;
+      }
+    }
+    /* Too large to carry: run it now, in order, once the thread is idle. */
+    s->uncaptured_submissions++;
+    gpu_thread_drain(s->gpu_thread);
+    gpfifo_run(NULL, payload, bytes);
+    return;
+  }
+  /* Synchronously the commands run outside the kernel lock
+   * (scheduler.h scheduler_gpu_*). */
+  Scheduler *sched = s->hle->scheduler;
+  Kernel_Suspend suspended;
+  scheduler_gpu_begin(sched, &suspended);
+  gpu_thread_call(s->gpu_thread, gpfifo_run, NULL, payload, bytes);
+  scheduler_gpu_end(sched, &suspended);
+}
+
 /* Queues the submission (or runs it, synchronously): its syncpoint
  * promise is made now, in submission order; returns the fence. */
 static uint32_t run_gpfifo(Nvdrv_State *s, Nv_Fd *f, uint8_t *d) {
@@ -734,65 +788,33 @@ static uint32_t run_gpfifo(Nvdrv_State *s, Nv_Fd *f, uint8_t *d) {
     syncpoint_complete(&s->syncpoints, id, fence);
     return fence;
   }
+  /* Ioctl2's buffer holds exactly the entries passed; inline ones are
+   * read up to the size field's limit. */
+  const uint32_t passed = s->ioctl_extra_bytes
+                              ? (s->ioctl_in_bytes + s->ioctl_extra_bytes - GPFIFO_HEADER_BYTES) / 8u
+                              : GPFIFO_INLINE_ENTRIES;
   uint32_t count = rd32(d + 8);
-  if (count > GPFIFO_MAX_ENTRIES) count = GPFIFO_MAX_ENTRIES;
-  static _Thread_local uint8_t payload[sizeof(Gpfifo_Call) + GPFIFO_MAX_ENTRIES * 8u];
-  Gpfifo_Call call = {s, channel, id, fence, increments != 0u, count, false};
-  memcpy(payload, &call, sizeof(call));
-  memcpy(payload + sizeof(call), d + GPFIFO_HEADER_BYTES, (size_t)count * 8u);
-  uint32_t bytes = (uint32_t)sizeof(call) + count * 8u;
-  if (gpu_thread_async(s->gpu_thread)) {
-    /* The command words go with the call: the guest reuses command memory
-     * once it believes the GPU has fetched it, often before the GPU
-     * thread gets there (MK8DX lost whole frames and semaphore releases). */
-    static _Thread_local uint8_t *capture; /* GPU_THREAD_MAX_PAYLOAD, once per submitting thread */
-    if (!capture) capture = (uint8_t *)malloc(GPU_THREAD_MAX_PAYLOAD);
-    if (capture && bytes <= GPU_THREAD_MAX_PAYLOAD) {
-      const uint32_t room = (GPU_THREAD_MAX_PAYLOAD - bytes) / 4u;
-      memcpy(capture, payload, bytes);
-      const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate, gpu_extent};
-      const uint64_t *entries = (const uint64_t *)(const void *)(capture + sizeof(call));
-      uint32_t words = 0;
-      for (uint32_t i = 0; i < count; i++) words += gpu_channel_entry_words(entries[i]);
-      static int no_capture = -1;
-      if (no_capture < 0) no_capture = getenv("VOLAND_NO_CAPTURE") ? 1 : 0; /* measurement only: the old behaviour */
-      if (no_capture) {
-        gpu_thread_call(s->gpu_thread, gpfifo_run, NULL, payload, bytes);
-        note_submission(s, gpu_thread_queued(s->gpu_thread));
-        return fence;
-      }
-      if (words <= room && gpu_channel_capture(&memory, entries, count, (uint32_t *)(void *)(capture + bytes), room)) {
-        s->captured_submissions++;
-        s->captured_bytes += (uint64_t)words * 4u;
-        call.captured = true;
-        memcpy(capture, &call, sizeof(call));
-        gpu_thread_call(s->gpu_thread, gpfifo_run, NULL, capture, bytes + words * 4u);
-        note_submission(s, gpu_thread_queued(s->gpu_thread));
-        return fence;
-      }
-    }
-    /* Too large to carry: run it now, in order, once the thread is idle. */
-    s->uncaptured_submissions++;
-    gpu_thread_drain(s->gpu_thread);
-    gpfifo_run(NULL, payload, bytes);
-    return fence;
-  }
-  /* Synchronously the commands run outside the kernel lock
-   * (scheduler.h scheduler_gpu_*). Other cores' ioctls may reuse the
-   * shared ioctl buffer meanwhile: the request's bytes are put back
-   * afterwards for the reply - from a buffer of this host thread's own,
-   * since another core's submission may run between the GPU lock's
-   * release and the kernel lock's return. */
-  static _Thread_local uint8_t saved_request[NVDRV_IOCTL_MAX_BYTES];
-  const uint32_t request_bytes = GPFIFO_HEADER_BYTES + count * 8u;
-  memcpy(saved_request, d, request_bytes);
+  if (count > passed) count = passed;
+  if (count > NVDRV_GPFIFO_MAX_ENTRIES) count = NVDRV_GPFIFO_MAX_ENTRIES;
+  /* Copied out first: synchronously, other cores' ioctls may reuse the
+   * shared ioctl buffer while the commands run. The request's header is
+   * put back afterwards for the reply - from a buffer of this host
+   * thread's own, since another core's submission may run between the
+   * GPU lock's release and the kernel lock's return. */
+  static _Thread_local uint64_t entries[NVDRV_GPFIFO_MAX_ENTRIES];
+  memcpy(entries, d + GPFIFO_HEADER_BYTES, (size_t)count * 8u);
+  uint8_t header[GPFIFO_HEADER_BYTES];
+  memcpy(header, d, sizeof(header));
   const bool extra_out = s->extra_out; /* Ioctl3's second output: zeros for a submission */
-  Scheduler *sched = s->hle->scheduler;
-  Kernel_Suspend suspended;
-  scheduler_gpu_begin(sched, &suspended);
-  gpu_thread_call(s->gpu_thread, gpfifo_run, NULL, payload, bytes);
-  scheduler_gpu_end(sched, &suspended);
-  memcpy(d, saved_request, request_bytes);
+  if (count > GPFIFO_CHUNK_ENTRIES) log_debug("[nvdrv] submission of %u GPFIFO entries, in chunks", count);
+  uint32_t done = 0;
+  do {
+    const uint32_t n = count - done < GPFIFO_CHUNK_ENTRIES ? count - done : GPFIFO_CHUNK_ENTRIES;
+    const Gpfifo_Call call = {s, channel, id, fence, increments != 0u, n, false, done + n == count};
+    queue_gpfifo(s, call, entries + done);
+    done += n;
+  } while (done < count);
+  memcpy(d, header, sizeof(header));
   s->extra_out = extra_out;
   if (extra_out) memset(s->extra_buffer, 0, sizeof(s->extra_buffer));
   return fence;
@@ -1015,10 +1037,13 @@ static uint32_t run_ioctl(HLE_Context *c, Nvdrv_State *s, const IPC_Request *req
   /* REMAP's struct is one entry; the buffer holds as many as are passed. */
   if (f->device == NV_DEVICE_AS_GPU && NV_IOC_NR(request) == AS_REMAP_NR) {
     const IPC_Buffer *in = in_buffer(req, 0);
-    if (in && in->size > size) size = in->size < sizeof(s->ioctl_buffer) ? (uint32_t)in->size : (uint32_t)sizeof(s->ioctl_buffer);
+    if (in && in->size > size) size = in->size < NVDRV_IOCTL_MAX_BYTES ? (uint32_t)in->size : NVDRV_IOCTL_MAX_BYTES;
   }
   s->ioctl_in_bytes = size;
-  memset(s->ioctl_buffer, 0, sizeof(s->ioctl_buffer));
+  s->ioctl_extra_bytes = 0;
+  /* The in-data's part only: a second buffer is read whole, and its
+   * readers stop at ioctl_extra_bytes. */
+  memset(s->ioctl_buffer, 0, NVDRV_IOCTL_MAX_BYTES);
   if (dir & NV_IOC_WRITE) {
     const IPC_Buffer *in = in_buffer(req, 0);
     if (!in || in->size < size || !error_is_ok(vmm_read_block(c->vmm, in->gva, s->ioctl_buffer, size))) {
@@ -1032,6 +1057,7 @@ static uint32_t run_ioctl(HLE_Context *c, Nvdrv_State *s, const IPC_Request *req
     if (size + extra > sizeof(s->ioctl_buffer)) return NV_BAD_PARAMETER;
     if (extra && !error_is_ok(vmm_read_block(c->vmm, in->gva, s->ioctl_buffer + size, extra))) return NV_BAD_PARAMETER;
     total += extra;
+    s->ioctl_extra_bytes = (uint32_t)extra;
   }
   (void)total;
   s->hle = c;

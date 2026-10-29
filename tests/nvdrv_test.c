@@ -254,6 +254,58 @@ int main(void) {
   wr32(d + 4, 5);
   CHECK(ioctl(ctrl, IOWR(0x00u, 0x1Du, 16), d) == NV_TIMEOUT);
 
+  /* KICKOFF_PB through Ioctl2: the entries come in the second buffer,
+   * more than the 14-bit size field could carry (Animal Crossing passes
+   * ~2800). Each runs a two-word pushbuffer: one host NOP. */
+  {
+    memset(d, 0, sizeof(d));
+    wr32(d, 0x1000);
+    CHECK(ioctl(nvmap, IOWR(0x01u, 0x01u, 8), d) == 0);
+    const uint32_t pb = rd32(d + 4);
+    memset(d, 0, sizeof(d));
+    wr32(d, pb); wr32(d + 4, 1); wr32(d + 8, 1); wr32(d + 12, 0x1000); wr64(d + 24, stack + 0x50000);
+    CHECK(ioctl(nvmap, IOWR(0x01u, 0x04u, 32), d) == 0);
+    const uint64_t pb_va = 0x10300000ull;
+    memset(d, 0, sizeof(d));
+    wr32(d, 1); wr32(d + 8, pb); wr64(d + 24, 0x1000); wr64(d + 32, pb_va);
+    CHECK(ioctl(as, IOWR(0x41u, 0x06u, 40), d) == 0);
+    const uint32_t big = open_device("/dev/nvhost-gpu"); /* its own channel and syncpoint */
+    CHECK(big != 0xFFFFFFFFu);
+    memset(d, 0, sizeof(d));
+    wr32(d, 0x800);
+    CHECK(ioctl(big, IOWR(0x48u, 0x1Au, 32), d) == 0);
+    const uint32_t big_syncpoint = rd32(d + 12);
+    CHECK(big_syncpoint != 0 && big_syncpoint != syncpoint);
+    const uint32_t nop[2] = {(1u << 29) | (1u << 16) | 2u, 0}; /* incrementing, 1 word, host method 2 (NOP) */
+    CHECK_OK(vmm_write_block(g_emu.vmm, stack + 0x50000, nop, sizeof(nop)));
+    enum { ENTRIES = 3000 };
+    const uint64_t entries_gva = stack + 0x60000;
+    for (uint32_t i = 0; i < ENTRIES; i++) {
+      const uint64_t entry = pb_va | ((uint64_t)2u << 42);
+      CHECK_OK(vmm_write_block(g_emu.vmm, entries_gva + i * 8u, &entry, 8));
+    }
+    memset(d, 0, sizeof(d));
+    wr32(d + 8, ENTRIES); wr32(d + 12, 1u << 1);
+    const uint32_t request = IOWR(0x48u, 0x1Bu, 24);
+    CHECK_OK(vmm_write_block(g_emu.vmm, g_in_gva, d, 24));
+    const uint32_t in[2] = {big, request};
+    Test_Ipc_Message m;
+    memset(&m, 0, sizeof(m));
+    m.sends[0] = (Test_Ipc_Buffer){g_in_gva, 24, 0};
+    m.sends[1] = (Test_Ipc_Buffer){entries_gva, ENTRIES * 8u, 0};
+    m.send_count = 2;
+    m.receives[0] = (Test_Ipc_Buffer){g_out_gva, 24, 0};
+    m.receive_count = 1;
+    uint64_t methods = 0;
+    for (uint32_t i = 0; i < NVDRV_MAX_CHANNELS; i++) methods += g_emu.nvdrv.channels[i].methods;
+    CHECK(rd32(call(11, in, sizeof(in), &m).data) == 0); /* Ioctl2 */
+    for (uint32_t i = 0; i < NVDRV_MAX_CHANNELS; i++) methods -= g_emu.nvdrv.channels[i].methods;
+    CHECK(0u - methods == ENTRIES);
+    CHECK_OK(vmm_read_block(g_emu.vmm, g_out_gva, d, 24));
+    CHECK(rd32(d + 16) == big_syncpoint && rd32(d + 20) == 1);
+    CHECK(syncpoint_reached(&g_emu.nvdrv.syncpoints, big_syncpoint, 1));
+  }
+
   /* VIC (and NVDEC: its first ioctl is SET_NVMAP_FD, type 0x48): one
    * 20-byte syncpoint-increment entry of 2 -> fence threshold 2. */
   memset(d, 0, sizeof(d));
