@@ -194,6 +194,7 @@ static uint32_t nvmap_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
 /* ------------------------------------------------------------------ */
 
 #define NV_EVENT_SYNCPOINT_SHIFT 16u /* EVENT_WAIT's returned value: {syncpoint id, event slot} */
+#define NV_EVENT_SLOT_MASK 0xFFFFu   /* its low half, and of the ids QueryEvent takes */
 
 /* Arms event slot `slot` on a syncpoint threshold. Its kernel event is
  * one object for every user of the slot (QueryEvent hands out handles to
@@ -201,16 +202,17 @@ static uint32_t nvmap_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
  * otherwise the new waiter wakes at once, and the previous waiter's late
  * clear can then swallow this wait's real completion (ACNH's movie
  * player hung that way). */
-static void arm_event(Nvdrv_State *s, uint32_t slot, uint32_t id, uint32_t threshold) {
-  Nv_Event_Slot *e = &s->events[slot];
+static void arm_event(Nv_Event_Slot *events, uint32_t slot, uint32_t id, uint32_t threshold) {
+  Nv_Event_Slot *e = &events[slot];
   if (e->event) e->event->signaled = false;
   e->waiting = true;
   e->syncpoint = id;
   e->threshold = threshold;
 }
 
-static uint32_t ctrl_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
+static uint32_t ctrl_ioctl(Nvdrv_State *s, const Nv_Fd *f, uint32_t nr, uint8_t *d) {
   Syncpoints *sp = &s->syncpoints;
+  Nv_Event_Slot *events = s->events[f->ctrl];
   switch (nr) {
   case 0x14: /* SYNCPT_READ {id; value out} */
     if (rd32(d) >= SYNCPOINT_COUNT) return NV_BAD_VALUE;
@@ -243,12 +245,12 @@ static uint32_t ctrl_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
      * event table with the low half. 0: no event (NVN polls). */
     uint32_t slot = NVDRV_MAX_EVENTS;
     for (uint32_t i = 0; i < NVDRV_MAX_EVENTS && slot == NVDRV_MAX_EVENTS; i++)
-      if (s->events[i].registered && !s->events[i].waiting) slot = i;
+      if (events[i].registered && !events[i].waiting) slot = i;
     if (slot == NVDRV_MAX_EVENTS) {
       wr32(d + 12, 0);
       return NV_TIMEOUT;
     }
-    arm_event(s, slot, id, threshold);
+    arm_event(events, slot, id, threshold);
     wr32(d + 12, (id << NV_EVENT_SYNCPOINT_SHIFT) | slot);
     return NV_TIMEOUT;
   }
@@ -258,14 +260,18 @@ static uint32_t ctrl_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
     log_debug("[nvdrv] EVENT_WAIT_ASYNC syncpoint %u threshold %u (min %u max %u) event %u timeout %d", id, threshold,
               syncpoint_min(sp, id), syncpoint_max(sp, id), event_id, (int32_t)rd32(d + 8));
     if (syncpoint_reached(sp, id, threshold)) return NV_SUCCESS;
-    arm_event(s, event_id, id, threshold);
+    arm_event(events, event_id, id, threshold);
     return NV_TIMEOUT; /* "try again"; the event is signalled on completion */
   }
-  case 0x1C: case 0x1F: case 0x20: /* SYNCPT_CLEAR_EVENT_WAIT, EVENT_REGISTER, EVENT_UNREGISTER {event_id} */
-    if (rd32(d) >= NVDRV_MAX_EVENTS) return NV_BAD_VALUE;
-    if (nr != 0x1F) s->events[rd32(d)].waiting = false;
-    if (nr != 0x1C) s->events[rd32(d)].registered = nr == 0x1F;
+  case 0x1C: case 0x1F: case 0x20: { /* SYNCPT_CLEAR_EVENT_WAIT, EVENT_REGISTER, EVENT_UNREGISTER {event_id} */
+    /* The SDK cancels a timed-out wait with the QueryEvent form of the id
+     * (slot | 0x10000000): the slot is the low half. */
+    const uint32_t slot = rd32(d) & NV_EVENT_SLOT_MASK;
+    if (slot >= NVDRV_MAX_EVENTS) return NV_BAD_VALUE;
+    if (nr != 0x1F) events[slot].waiting = false;
+    if (nr != 0x1C) events[slot].registered = nr == 0x1F;
     return NV_SUCCESS;
+  }
   case 0x1B: /* GET_CONFIG: no configuration keys exist here */
     return NV_NOT_SUPPORTED;
   default:
@@ -1030,7 +1036,7 @@ static uint32_t dispatch_device_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t request
   case NV_DEVICE_NVMAP:
     return type == NV_TYPE_NVMAP ? nvmap_ioctl(s, nr, data) : NV_NOT_IMPLEMENTED;
   case NV_DEVICE_CTRL:
-    return type == NV_TYPE_CTRL ? ctrl_ioctl(s, nr, data) : NV_NOT_IMPLEMENTED;
+    return type == NV_TYPE_CTRL ? ctrl_ioctl(s, f, nr, data) : NV_NOT_IMPLEMENTED;
   case NV_DEVICE_CTRL_GPU:
     return type == NV_TYPE_CTRL_GPU ? ctrl_gpu_ioctl(nr, data, size, s->extra_out ? s->extra_buffer : NULL) : NV_NOT_IMPLEMENTED;
   case NV_DEVICE_AS_GPU:
@@ -1125,9 +1131,16 @@ static HLE_ServiceResult cmd_open(HLE_Context *c, Service_Object *self, const IP
     if (strcmp(path, k_devices[d].path) != 0) continue;
     for (uint32_t i = 1; i < NVDRV_MAX_FDS; i++) { /* fd 0 is never handed out */
       if (s->fds[i].device != NV_DEVICE_NONE) continue;
+      uint32_t ctrl = 0;
+      if (k_devices[d].device == NV_DEVICE_CTRL) {
+        while (ctrl < NVDRV_MAX_CTRL_FDS && s->ctrl_used[ctrl]) ctrl++;
+        if (ctrl == NVDRV_MAX_CTRL_FDS) break;
+        s->ctrl_used[ctrl] = true;
+      }
       memset(&s->fds[i], 0, sizeof(s->fds[i]));
       s->fds[i].device = k_devices[d].device;
       s->fds[i].channel = NVDRV_NO_CHANNEL;
+      s->fds[i].ctrl = ctrl;
       fd = i;
       error = NV_SUCCESS;
       break;
@@ -1155,6 +1168,15 @@ static HLE_ServiceResult cmd_ioctl3(HLE_Context *c, Service_Object *self, const 
   return HLE_RESULT_SUCCESS;
 }
 
+/* Drops the driver's references to an nvhost-ctrl fd's events (the
+ * guest's handles keep theirs) and frees the row. */
+static void release_event_row(Nvdrv_State *s, uint32_t row) {
+  for (uint32_t i = 0; i < NVDRV_MAX_EVENTS; i++)
+    if (s->events[row][i].event) event_release(s->events[row][i].event);
+  memset(s->events[row], 0, sizeof(s->events[row]));
+  s->ctrl_used[row] = false;
+}
+
 static HLE_ServiceResult cmd_close(HLE_Context *c, Service_Object *self, const IPC_Request *req, IPC_Response *res) {
   (void)c;
   Nvdrv_State *s = state_of(self);
@@ -1164,6 +1186,7 @@ static HLE_ServiceResult cmd_close(HLE_Context *c, Service_Object *self, const I
   if (f) {
     if (f->syncpoint) syncpoint_free(&s->syncpoints, f->syncpoint);
     if (f->channel < NVDRV_MAX_CHANNELS) s->channel_used[f->channel] = false;
+    if (f->device == NV_DEVICE_CTRL) release_event_row(s, f->ctrl);
     memset(f, 0, sizeof(*f));
     f->channel = NVDRV_NO_CHANNEL;
   }
@@ -1185,11 +1208,12 @@ static HLE_ServiceResult cmd_query_event(HLE_Context *c, Service_Object *self, c
   (void)ipc_request_read_u32(req, 0, &fd);
   (void)ipc_request_read_u32(req, 4, &event_id);
   const uint32_t slot = event_id % NVDRV_MAX_EVENTS; /* channel events use high ids; fold them */
-  if (!fd_of(s, fd)) {
+  const Nv_Fd *f = fd_of(s, fd);
+  if (!f) {
     (void)ipc_response_push_u32(res, NV_BAD_VALUE);
     return HLE_RESULT_SUCCESS;
   }
-  Nv_Event_Slot *e = &s->events[slot];
+  Nv_Event_Slot *e = &s->events[f->device == NV_DEVICE_CTRL ? f->ctrl : NVDRV_EVENT_ROW_OTHER][slot];
   if (!e->event) {
     const uint32_t result = hle_create_event(c, &e->readable_handle, NULL, &e->event);
     if (result != HLE_RESULT_SUCCESS) return result;
@@ -1276,11 +1300,14 @@ void nvdrv_poll_completions(Nvdrv_State *state, HLE_Context *context) {
     state->engine_pending_head = (at + 1u) % NVDRV_ENGINE_PENDING;
     state->engine_pending_count--;
   }
-  for (uint32_t i = 0; i < NVDRV_MAX_EVENTS; i++) {
-    Nv_Event_Slot *e = &state->events[i];
-    if (!e->waiting || !syncpoint_reached(&state->syncpoints, e->syncpoint, e->threshold)) continue;
-    e->waiting = false;
-    if (e->event) hle_signal_event(context, e->event);
+  for (uint32_t row = 0; row < NVDRV_MAX_CTRL_FDS; row++) {
+    if (!state->ctrl_used[row]) continue;
+    for (uint32_t i = 0; i < NVDRV_MAX_EVENTS; i++) {
+      Nv_Event_Slot *e = &state->events[row][i];
+      if (!e->waiting || !syncpoint_reached(&state->syncpoints, e->syncpoint, e->threshold)) continue;
+      e->waiting = false;
+      if (e->event) hle_signal_event(context, e->event);
+    }
   }
 }
 

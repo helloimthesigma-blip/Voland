@@ -57,6 +57,12 @@
 #define NVMAP_MAX_HANDLES 8192u
 #define NVDRV_MAX_GPU_MAPPINGS 16384u
 #define NVDRV_MAX_EVENTS 64u
+/* Event slots belong to an nvhost-ctrl fd: the SDK opens it more than
+ * once (NVN and the multimedia library), each with its own table counting
+ * slots from 0. Row NVDRV_EVENT_ROW_OTHER holds other devices' events. */
+#define NVDRV_MAX_CTRL_FDS 8u
+#define NVDRV_EVENT_ROW_OTHER NVDRV_MAX_CTRL_FDS
+#define NVDRV_EVENT_ROWS (NVDRV_MAX_CTRL_FDS + 1u)
 #define NVDRV_GPU_LATENCY_RING 256u /* queued submissions tracked for nvdrv_bound_gpu_latency */
 #define NVDRV_ENGINE_PENDING 64u    /* NVDEC syncpoint completions waiting for their decode time */
 #define NVDRV_MAX_CHANNELS 8u     /* GPU channels with command processing */
@@ -110,6 +116,7 @@ typedef struct Nv_Fd {
   uint32_t nvmap_fd;
   uint32_t submissions; /* diagnostics */
   uint32_t channel;     /* nvhost-gpu: index into Nvdrv_State.channels, or NVDRV_NO_CHANNEL */
+  uint32_t ctrl;        /* nvhost-ctrl: its row of Nvdrv_State.events */
 } Nv_Fd;
 
 typedef struct Nvmap_Handle {
@@ -157,7 +164,8 @@ typedef struct Nvdrv_State {
   uint32_t pt_l2_used;
   uint64_t next_gpu_va;
   Syncpoints syncpoints;
-  Nv_Event_Slot events[NVDRV_MAX_EVENTS];
+  Nv_Event_Slot events[NVDRV_EVENT_ROWS][NVDRV_MAX_EVENTS];
+  bool ctrl_used[NVDRV_MAX_CTRL_FDS]; /* event rows held by an open nvhost-ctrl fd */
   uint8_t ioctl_buffer[NVDRV_IOCTL_BUFFER_BYTES]; /* the in-data, then Ioctl2's second buffer */
   uint32_t ioctl_in_bytes;    /* the bytes of ioctl_buffer this ioctl's in-data fills */
   uint32_t ioctl_extra_bytes; /* then the bytes of Ioctl2's second buffer */

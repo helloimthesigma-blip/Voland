@@ -479,6 +479,43 @@ int main(void) {
   nvdrv_poll_completions(&g_emu.nvdrv, &g_emu.hle);
   CHECK(event5->signaled);
 
+  /* Event slots belong to their nvhost-ctrl fd: a second fd's slot 5 is
+   * another event, and arming it leaves the first fd's wait alone. */
+  {
+    const uint32_t ctrl2 = open_device("/dev/nvhost-ctrl");
+    CHECK(ctrl2 != 0xFFFFFFFFu && ctrl2 != ctrl);
+    const uint32_t query2[2] = {ctrl2, 0x10000000u | slot5};
+    q = call(4, query2, sizeof(query2), NULL);
+    Kernel_Event *event2 = (Kernel_Event *)handle_table_get(&g_emu.process.handles, q.copy_handles[0],
+                                                            KERNEL_OBJECT_EVENT_READABLE);
+    CHECK(event2 != NULL && event2 != event5);
+    memset(d, 0, sizeof(d));
+    wr32(d, syncpoint); wr32(d + 4, 4); wr32(d + 8, 0xFFFFFFFFu); wr32(d + 12, slot5);
+    CHECK(ioctl(ctrl, IOWR(0x00u, 0x1Eu, 16), d) == NV_TIMEOUT);
+    CHECK(!event5->signaled);
+    memset(d, 0, sizeof(d));
+    wr32(d, other_syncpoint); wr32(d + 4, 2); wr32(d + 8, 0xFFFFFFFFu); wr32(d + 12, slot5);
+    CHECK(ioctl(ctrl2, IOWR(0x00u, 0x1Eu, 16), d) == NV_TIMEOUT);
+    CHECK(completion_ring_push(syncpoint, 4));
+    nvdrv_poll_completions(&g_emu.nvdrv, &g_emu.hle);
+    CHECK(event5->signaled && !event2->signaled);
+    CHECK(completion_ring_push(other_syncpoint, 2));
+    nvdrv_poll_completions(&g_emu.nvdrv, &g_emu.hle);
+    CHECK(event2->signaled);
+    /* SYNCPT_CLEAR_EVENT_WAIT with the QueryEvent form of the id cancels
+     * the wait: its completion signals nothing. */
+    memset(d, 0, sizeof(d));
+    wr32(d, other_syncpoint); wr32(d + 4, 3); wr32(d + 8, 0xFFFFFFFFu); wr32(d + 12, slot5);
+    CHECK(ioctl(ctrl2, IOWR(0x00u, 0x1Eu, 16), d) == NV_TIMEOUT && !event2->signaled);
+    memset(d, 0, sizeof(d));
+    wr32(d, 0x10000000u | slot5);
+    CHECK(ioctl(ctrl2, IOWR(0x00u, 0x1Cu, 4), d) == 0);
+    CHECK(completion_ring_push(other_syncpoint, 3));
+    nvdrv_poll_completions(&g_emu.nvdrv, &g_emu.hle);
+    CHECK(!event2->signaled);
+    CHECK(rd32(call(2, &ctrl2, 4, NULL).data) == 0);
+  }
+
   /* nvmap free: first leaves the FROM_ID reference, second frees. */
   memset(d, 0, sizeof(d));
   wr32(d, handle);

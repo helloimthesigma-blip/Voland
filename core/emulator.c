@@ -1567,10 +1567,11 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
     if (lo != hi) log_warn("[threads] syncpoint %u: reached %u of %u", id, lo, hi);
   }
   /* nvhost-ctrl event slots armed on a threshold (EVENT_WAIT(_ASYNC)). */
-  for (uint32_t i = 0; i < NVDRV_MAX_EVENTS; i++) {
-    const Nv_Event_Slot *e = &emulator->nvdrv.events[i];
+  for (uint32_t i = 0; i < NVDRV_MAX_CTRL_FDS * NVDRV_MAX_EVENTS; i++) {
+    const Nv_Event_Slot *e = &emulator->nvdrv.events[i / NVDRV_MAX_EVENTS][i % NVDRV_MAX_EVENTS];
     if (!e->waiting && !(e->event && e->event->signaled)) continue;
-    log_warn("[threads] nv event %u: %s%s syncpoint %u threshold %u (reached %u of %u), event %s", i,
+    log_warn("[threads] nv event %u.%u: %s%s syncpoint %u threshold %u (reached %u of %u), event %s",
+             i / NVDRV_MAX_EVENTS, i % NVDRV_MAX_EVENTS,
              e->registered ? "registered" : "unregistered", e->waiting ? " waiting" : "", e->syncpoint, e->threshold,
              syncpoint_min(&emulator->nvdrv.syncpoints, e->syncpoint),
              syncpoint_max(&emulator->nvdrv.syncpoints, e->syncpoint),
