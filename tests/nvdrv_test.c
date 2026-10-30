@@ -239,9 +239,21 @@ int main(void) {
     memset(d, 0, sizeof(d));
     wr32(d, first);
     CHECK(ioctl(nvmap, IOWR(0x01u, 0x05u, 24), d) == 0 && rd32(d + 20) == 0); /* freed */
+    /* A freed number is not handed out again at once (the SDK may still
+     * hold its record); it comes back only after every other number. */
     memset(d, 0, sizeof(d));
     wr32(d, 0x1000);
-    CHECK(ioctl(nvmap, IOWR(0x01u, 0x01u, 8), d) == 0 && rd32(d + 4) == first); /* the number comes back */
+    CHECK(ioctl(nvmap, IOWR(0x01u, 0x01u, 8), d) == 0 && rd32(d + 4) != first);
+    for (uint32_t n = 0; n < NVMAP_MAX_HANDLES && rd32(d + 4) != first; n++) {
+      const uint32_t other = rd32(d + 4);
+      memset(d, 0, sizeof(d));
+      wr32(d, other);
+      CHECK(ioctl(nvmap, IOWR(0x01u, 0x05u, 24), d) == 0);
+      memset(d, 0, sizeof(d));
+      wr32(d, 0x1000);
+      CHECK(ioctl(nvmap, IOWR(0x01u, 0x01u, 8), d) == 0);
+    }
+    CHECK(rd32(d + 4) == first); /* the number comes back, at last */
     memset(d, 0, sizeof(d));
     wr32(d, first); wr32(d + 4, 1); wr32(d + 8, 1); wr32(d + 12, 0x1000); wr64(d + 24, stack + 0x40000);
     CHECK(ioctl(nvmap, IOWR(0x01u, 0x04u, 32), d) == 0);

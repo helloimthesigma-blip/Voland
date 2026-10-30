@@ -146,6 +146,7 @@ typedef struct Nvdrv_State {
   Service_Interface interface; /* service_state points back here */
   Nv_Fd fds[NVDRV_MAX_FDS];
   Nvmap_Handle handles[NVMAP_MAX_HANDLES]; /* nvmap handle n is handles[n - 1] */
+  uint32_t next_handle_slot; /* CREATE searches from here: a freed number is not handed out again at once */
   Gpu_Mapping mappings[NVDRV_MAX_GPU_MAPPINGS];
   uint32_t mapping_end;    /* one past the highest slot ever used: scans stop here */
   uint64_t mapping_seq;    /* the last Gpu_Mapping.seq handed out */

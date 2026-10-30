@@ -110,12 +110,19 @@ static uint32_t nvmap_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
   case 0x01: { /* CREATE {u32 size; u32 handle out} */
     const uint32_t size = rd32(d);
     if (size == 0) return NV_BAD_VALUE;
-    for (uint32_t i = 0; i < NVMAP_MAX_HANDLES; i++) {
+    /* Round robin, not the lowest free number: the SDK keeps its own record
+     * of a handle number until it has finished with it, and a number freed
+     * by one thread and handed straight to another's CREATE made Animal
+     * Crossing's next ALLOC look up the old record (the old pool's memory):
+     * its commands went to a buffer the GPU read as another. */
+    for (uint32_t n = 0; n < NVMAP_MAX_HANDLES; n++) {
+      const uint32_t i = (s->next_handle_slot + n) % NVMAP_MAX_HANDLES;
       Nvmap_Handle *h = &s->handles[i];
       if (h->references) continue;
       memset(h, 0, sizeof(*h));
       h->references = 1;
       h->size = (uint32_t)align_up(size, NVMAP_MIN_ALIGN);
+      s->next_handle_slot = (i + 1u) % NVMAP_MAX_HANDLES;
       wr32(d + 4, i + 1u);
       return NV_SUCCESS;
     }
