@@ -443,6 +443,16 @@ int main(void) {
   CHECK(completion_ring_push(syncpoint, 2));
   nvdrv_poll_completions(&g_emu.nvdrv, &g_emu.hle);
   CHECK(event->signaled);
+  /* Re-arming the slot for a later threshold clears the old signal: the
+   * next waiter sleeps until its own completion. */
+  const uint32_t other_syncpoint = SYNCPOINT_COUNT - 1u;
+  memset(d, 0, sizeof(d));
+  wr32(d, other_syncpoint); wr32(d + 4, 1); wr32(d + 8, 0xFFFFFFFFu); wr32(d + 12, 3);
+  CHECK(ioctl(ctrl, IOWR(0x00u, 0x1Eu, 16), d) == NV_TIMEOUT);
+  CHECK(!event->signaled);
+  CHECK(completion_ring_push(other_syncpoint, 1));
+  nvdrv_poll_completions(&g_emu.nvdrv, &g_emu.hle);
+  CHECK(event->signaled);
 
   /* EVENT_WAIT (NVN's fence wait): reached -> the value; not reached ->
    * "try again" with {syncpoint << 16 | a registered event slot}, and that

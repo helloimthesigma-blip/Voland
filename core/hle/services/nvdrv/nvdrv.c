@@ -195,6 +195,20 @@ static uint32_t nvmap_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
 
 #define NV_EVENT_SYNCPOINT_SHIFT 16u /* EVENT_WAIT's returned value: {syncpoint id, event slot} */
 
+/* Arms event slot `slot` on a syncpoint threshold. Its kernel event is
+ * one object for every user of the slot (QueryEvent hands out handles to
+ * it), so a signal left over from the previous wait is cleared here:
+ * otherwise the new waiter wakes at once, and the previous waiter's late
+ * clear can then swallow this wait's real completion (ACNH's movie
+ * player hung that way). */
+static void arm_event(Nvdrv_State *s, uint32_t slot, uint32_t id, uint32_t threshold) {
+  Nv_Event_Slot *e = &s->events[slot];
+  if (e->event) e->event->signaled = false;
+  e->waiting = true;
+  e->syncpoint = id;
+  e->threshold = threshold;
+}
+
 static uint32_t ctrl_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
   Syncpoints *sp = &s->syncpoints;
   switch (nr) {
@@ -234,9 +248,7 @@ static uint32_t ctrl_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
       wr32(d + 12, 0);
       return NV_TIMEOUT;
     }
-    s->events[slot].waiting = true;
-    s->events[slot].syncpoint = id;
-    s->events[slot].threshold = threshold;
+    arm_event(s, slot, id, threshold);
     wr32(d + 12, (id << NV_EVENT_SYNCPOINT_SHIFT) | slot);
     return NV_TIMEOUT;
   }
@@ -246,9 +258,7 @@ static uint32_t ctrl_ioctl(Nvdrv_State *s, uint32_t nr, uint8_t *d) {
     log_debug("[nvdrv] EVENT_WAIT_ASYNC syncpoint %u threshold %u (min %u max %u) event %u timeout %d", id, threshold,
               syncpoint_min(sp, id), syncpoint_max(sp, id), event_id, (int32_t)rd32(d + 8));
     if (syncpoint_reached(sp, id, threshold)) return NV_SUCCESS;
-    s->events[event_id].waiting = true;
-    s->events[event_id].syncpoint = id;
-    s->events[event_id].threshold = threshold;
+    arm_event(s, event_id, id, threshold);
     return NV_TIMEOUT; /* "try again"; the event is signalled on completion */
   }
   case 0x1C: case 0x1F: case 0x20: /* SYNCPT_CLEAR_EVENT_WAIT, EVENT_REGISTER, EVENT_UNREGISTER {event_id} */
