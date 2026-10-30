@@ -486,7 +486,7 @@ static void frame_end_run(void *user, const void *payload, uint32_t bytes) {
   Frame_End_Call call;
   memcpy(&call, payload, sizeof(call));
   raster3d_end_frame(call.renderer);
-  call.renderer->skip_draws = call.skip_next;
+  raster3d_set_skip(call.renderer, call.skip_next);
 }
 
 static void frame_skip_on_queue(Vi_State *s, HLE_Context *c, Vi_Slot *slot) {

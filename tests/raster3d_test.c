@@ -322,15 +322,27 @@ static void test_triangle_and_blend(Raster3d *r, bool block_linear) {
         pixel(rt, block_linear, 4, 10)[0], pixel(rt, block_linear, 4, 10)[1], pixel(rt, block_linear, 4, 10)[2],
         pixel(rt, block_linear, 4, 10)[3]);
   CHECK(rgba_is(pixel(rt, block_linear, 20, 10), 255, 0, 0, 255), "scissored pixel untouched");
-  /* Frame skip: neither draws nor clears touch the target, nor count. */
-  r->skip_draws = true;
+  /* Frame skip: neither draws nor clears touch a target the last drawn
+   * frame drew, nor count. */
+  raster3d_set_skip(r, true);
   const uint64_t draws = r->stats.draws, clears = r->stats.clears;
   clear_to(r, 1, 1, 1, 1);
   draw_arrays(r, 4, 3);
   raster3d_flush(r, &k_mem);
   CHECK(r->stats.draws == draws && r->stats.clears == clears, "skipped draws are not counted");
   CHECK(rgba_is(pixel(rt, block_linear, 20, 10), 255, 0, 0, 255), "a skipped frame leaves the target alone");
-  r->skip_draws = false;
+  /* A target the last drawn frame did not draw (render-to-texture done now
+   * and then, like a colour-grading LUT) is drawn even in a skipped frame. */
+  const uint64_t once = GPU_BASE + 0x60000u;
+  g_regs[0x200] = (uint32_t)(once >> 32);
+  g_regs[0x201] = (uint32_t)once;
+  clear_to(r, 1, 1, 1, 1);
+  raster3d_flush(r, &k_mem);
+  CHECK(r->stats.clears == clears + 1u && rgba_is(pixel(once, block_linear, 20, 10), 255, 255, 255, 255),
+        "a skipped frame still clears a target the last drawn frame did not use");
+  g_regs[0x200] = (uint32_t)(rt >> 32);
+  g_regs[0x201] = (uint32_t)rt;
+  raster3d_set_skip(r, false);
 }
 
 /* Viewport swizzle NEGATIVE_Y (OpenGL titles' y flip): the lower-left

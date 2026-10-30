@@ -3,8 +3,8 @@
  *
  * Frame skip: the reference renderer draws on the CPU (§13), so drawing
  * fewer frames speeds a game up - logic, audio and input still run at full
- * rate; the picture is choppier, and a one-time render landing in a
- * skipped frame may be missing until the game draws it again. The choice
+ * rate; the picture is choppier. Renders into textures the last drawn
+ * frame did not draw (one-time ones) still run in skipped frames. The choice
  * is remembered per browser (a convenience; storage may be unavailable).
  */
 import { For, createSignal, onMount } from "solid-js";

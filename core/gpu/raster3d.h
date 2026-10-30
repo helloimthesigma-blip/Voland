@@ -229,6 +229,8 @@ typedef struct Raster3d_Stats {
   uint64_t texture_misses;  /* pool full / unreadable */
 } Raster3d_Stats;
 
+#define RASTER_FRAME_TARGETS 64u /* render targets one frame draws, tracked for frame skip */
+
 typedef struct Raster3d {
   bool ready;
   uint32_t submission;
@@ -266,7 +268,11 @@ typedef struct Raster3d {
                           const struct Sm_Env *env, uint64_t tic_pool, uint64_t tsc_pool,
                           const struct Gpu_Memory *mem, bool after);
   void *compute_capture_user;
-  bool skip_draws;           /* frame skip: draws and clears are not rasterised */
+  bool skip_draws;           /* frame skip: draws and clears are not rasterised (raster3d_set_skip) */
+  /* Frame skip drops only draws into targets the last drawn frame drew
+   * too (raster3d_set_skip): [0] this drawn frame's, [1] the last one's. */
+  uint64_t frame_targets[2][RASTER_FRAME_TARGETS];
+  uint32_t frame_target_count[2];
   /* Diagnostics: called with every newly decoded texture (may be NULL). */
   void (*on_texture_decoded)(void *user, const Tex_Image *image, uint64_t address);
   void *on_texture_user;
@@ -372,6 +378,13 @@ void raster3d_sync_range(Raster3d *r, const struct Gpu_Memory *mem, uint64_t add
  * CPU wrote. GPU-side writes (render targets, copy engines via
  * raster3d_sync_range) invalidate exactly what they touch at once. */
 void raster3d_end_frame(Raster3d *r);
+
+/* Frame skip: whether the next frame's draws and clears are skipped. A
+ * skipped frame still runs those into targets the last drawn frame did
+ * not draw - render-to-texture done once or now and then (a colour-grading
+ * LUT), which no later frame would redo; only targets every frame redraws
+ * are skipped. */
+void raster3d_set_skip(Raster3d *r, bool skip);
 
 /* Writes every dirty render target back to guest memory (GPU mode:
  * publishes the stream). */

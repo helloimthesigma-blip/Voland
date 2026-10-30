@@ -1664,7 +1664,7 @@ void emulator_set_frame_skip(Emulator* emulator, uint32_t n) {
   emulator->vi.frame_skip = emulator->frame_skip;
   if (!emulator->frame_skip) {
     gpu_thread_drain(&emulator->gpu_thread);
-    emulator->renderer.skip_draws = false;
+    raster3d_set_skip(&emulator->renderer, false);
     emulator->vi.skipping = false;
   }
 }

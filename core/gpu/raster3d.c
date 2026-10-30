@@ -229,6 +229,39 @@ void raster3d_begin_submission(Raster3d *r) {
   r->submission++; /* programs re-validate on first use in a submission; textures per frame (raster3d_end_frame) */
 }
 
+/* The address a draw or clear writes: its first colour target, else its
+ * depth target (0: none). */
+static uint64_t frame_target(const uint32_t *regs, uint32_t mrt) {
+  if ((regs[REG_CT_SELECT] & 0xfu) > mrt) {
+    const uint32_t *rt = regs + REG_RT + ((regs[REG_CT_SELECT] >> (4u + 3u * mrt)) & 7u) * REG_RT_STRIDE;
+    return addr40(rt[0], rt[1]);
+  }
+  return (regs[REG_ZT_SELECT] & 1u) ? addr40(regs[REG_ZT_A], regs[REG_ZT_B]) : 0;
+}
+
+/* Frame skip (raster3d_set_skip): whether to drop a draw or clear into
+ * `target`. A drawn frame notes its targets; a skipped one drops only
+ * those the last drawn frame drew. */
+static bool frame_skips(Raster3d *r, uint64_t target) {
+  if (!target) return r->skip_draws;
+  const uint32_t set = r->skip_draws ? 1u : 0u;
+  for (uint32_t i = 0; i < r->frame_target_count[set]; i++)
+    if (r->frame_targets[set][i] == target) return r->skip_draws;
+  if (!r->skip_draws && r->frame_target_count[0] < RASTER_FRAME_TARGETS)
+    r->frame_targets[0][r->frame_target_count[0]++] = target;
+  return false;
+}
+
+void raster3d_set_skip(Raster3d *r, bool skip) {
+  if (!r) return;
+  if (!r->skip_draws) { /* a drawn frame ended: its targets are the ones to skip */
+    memcpy(r->frame_targets[1], r->frame_targets[0], sizeof(r->frame_targets[0]));
+    r->frame_target_count[1] = r->frame_target_count[0];
+    r->frame_target_count[0] = 0;
+  }
+  r->skip_draws = skip;
+}
+
 void raster3d_end_frame(Raster3d *r) {
   if (r && r->ready && r->on_frame_end) r->on_frame_end(r->on_frame_end_user, r);
   if (r && r->ready) r->texture_epoch++;
@@ -767,7 +800,7 @@ static void rect_viewport_clip(Rect *rect, const uint32_t *regs) {
 static void gpu_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, uint32_t clear);
 
 void raster3d_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, uint32_t clear) {
-  if (!r || !r->ready || r->skip_draws) return;
+  if (!r || !r->ready || frame_skips(r, frame_target(regs, (clear >> 6) & 0xfu))) return;
   r->stats.clears++;
   if (r->trace_draws) { /* VOLAND_TRACE_DRAWS: clears in draw order */
     const uint32_t *rt = regs + REG_RT;
@@ -5257,7 +5290,7 @@ static Draw_Context g_draw_context; /* large (vertex windows); one draw at a tim
 
 void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *bindings, const Gpu_Memory *mem,
                    const Raster3d_Draw *draw) {
-  if (!r || !r->ready || !draw->count || r->skip_draws) return;
+  if (!r || !r->ready || !draw->count || frame_skips(r, frame_target(regs, 0))) return;
   if (!(regs[REG_RASTER_ENABLE] & 1u) && regs[REG_RASTER_ENABLE] != 0) return;
   r->stats.draws++;
   r->surface_view_count = 0; /* no worker holds last draw's views */
