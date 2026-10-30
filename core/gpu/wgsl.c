@@ -2078,9 +2078,14 @@ static const char *target_type(const Wgsl_Program_Desc *d, uint32_t i) {
  * varying - and 1/w - interpolates linearly in screen space: the values
  * are already divided by w where the program wants perspective (as
  * to_screen does), which with the pass-through vertex stage's w of 1 and
- * with a GPU vertex stage's real w gives the same results. */
+ * with a GPU vertex stage's real w gives the same results. The position
+ * is invariant: a depth pre-pass and the colour pass that tests EQUAL or
+ * LESS_EQUAL against it run different vertex programs computing the same
+ * position, and the host compiler may otherwise fuse or reorder their
+ * arithmetic differently - one ulp of depth fails the test (Animal
+ * Crossing's snow and building edges streaked black). */
 static void emit_vout(Out *o, const Wgsl_Program_Desc *d) {
-  out_add(o, "struct VOut {\n  @builtin(position) pos: vec4<f32>,\n  @location(0) @interpolate(linear) inv_w: f32,\n");
+  out_add(o, "struct VOut {\n  @invariant @builtin(position) pos: vec4<f32>,\n  @location(0) @interpolate(linear) inv_w: f32,\n");
   for (uint32_t i = 0; i < d->varying_count; i++) {
     if ((d->flat_mask >> i) & 1u) out_add(o, "  @location(%u) @interpolate(flat) v%u: vec4<u32>,\n", i + 1u, i);
     else out_add(o, "  @location(%u) @interpolate(linear) v%u: vec4<f32>,\n", i + 1u, i);

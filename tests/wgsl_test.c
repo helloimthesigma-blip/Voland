@@ -562,6 +562,9 @@ static void structural(void) {
   r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   CHECK(r.ok && strstr(g_text, "@vertex fn vs(vin: VIn) -> VOut") && strstr(g_text, "var aout: array<u32, 256>"));
   CHECK(strstr(g_text, "@fragment") == NULL && strstr(g_text, "dpdxFine") == NULL && strstr(g_text, "discard") == NULL);
+  /* Its position is invariant: a depth pre-pass and the colour pass testing
+   * against it compute the same depth in different programs. */
+  CHECK(strstr(g_text, "@invariant @builtin(position) pos: vec4<f32>") != NULL);
   /* Unsupported in a pixel program: reported, nothing emitted. */
   begin(&b);
   emit(&b, ALD(0, 0x80, 1));
