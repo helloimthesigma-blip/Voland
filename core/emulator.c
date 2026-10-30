@@ -1566,6 +1566,18 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
     const uint32_t lo = syncpoint_min(&emulator->nvdrv.syncpoints, id), hi = syncpoint_max(&emulator->nvdrv.syncpoints, id);
     if (lo != hi) log_warn("[threads] syncpoint %u: reached %u of %u", id, lo, hi);
   }
+  /* nvhost-ctrl event slots armed on a threshold (EVENT_WAIT(_ASYNC)). */
+  for (uint32_t i = 0; i < NVDRV_MAX_EVENTS; i++) {
+    const Nv_Event_Slot *e = &emulator->nvdrv.events[i];
+    if (!e->waiting && !(e->event && e->event->signaled)) continue;
+    log_warn("[threads] nv event %u: %s%s syncpoint %u threshold %u (reached %u of %u), event %s", i,
+             e->registered ? "registered" : "unregistered", e->waiting ? " waiting" : "", e->syncpoint, e->threshold,
+             syncpoint_min(&emulator->nvdrv.syncpoints, e->syncpoint),
+             syncpoint_max(&emulator->nvdrv.syncpoints, e->syncpoint),
+             !e->event ? "none" : e->event->signaled ? "signaled" : "clear");
+  }
+  if (emulator->nvdrv.engine_pending_count)
+    log_warn("[threads] nvdec completions pending: %u", emulator->nvdrv.engine_pending_count);
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     const Sched_Thread *th = &emulator->scheduler.threads[i];
     if (th->state == THREAD_STATE_FREE || th->state == THREAD_STATE_DEAD || !th->thread.cpu_state) continue;
