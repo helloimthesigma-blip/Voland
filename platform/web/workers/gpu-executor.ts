@@ -34,6 +34,7 @@ import {
   POOL_WRAP,
   POOL_WRITE_BYTES,
   REC_POOL_WRITE,
+  REC_TEXTURE_REINTERPRET,
   BIND_SAMPLER,
   BIND_TEXTURE,
   BUFFER_WRITE_BYTES,
@@ -129,6 +130,8 @@ export interface DebugTarget {
 const DEBUG_MIN_TEXELS = 256 * 256;
 /* A memory report (textures by kind, storage buffers) every this many presents. */
 const MEMORY_REPORT_PRESENTS = 300;
+/* WebGPU's bytesPerRow alignment for buffer <-> texture copies. */
+const COPY_ROW_ALIGN = 256;
 /** Approximate bytes per texel of a format (block-compressed: per texel of its blocks). */
 function texelBytes(format: GPUTextureFormat): number {
   if (format.startsWith("bc1") || format.startsWith("bc4")) return 0.5;
@@ -340,6 +343,7 @@ export class GpuExecutor {
   private readonly buffers = new Map<number, GPUBuffer>();
   private readonly touchedBuffers = new Set<GPUBuffer>();
   private pendingBufferDestroy: GPUBuffer[] = [];
+  private reinterpretBuffer: GPUBuffer | null = null; /* textureReinterpret's staging, grown as needed */
   private readonly computePipelines = new Map<string, { pipeline: GPUComputePipeline; layout: GPUBindGroupLayout }>();
   private readonly vertexStaging = new Uint8Array(VERTEX_BUFFER_BYTES);
   private readonly dataStaging = new Uint8Array(DATA_BUFFER_BYTES);
@@ -414,6 +418,7 @@ export class GpuExecutor {
       case REC_BUFFER_WRITE: this.bufferWrite(view, payload); break;
       case REC_COMPUTE: this.compute(view, payload); break;
       case REC_POOL_WRITE: this.poolWrite(view, payload); break;
+      case REC_TEXTURE_REINTERPRET: this.textureReinterpret(view.getUint32(0, true), view.getUint32(4, true)); break;
       default: this.warnOnce(`record ${type}`, `unknown GPU record type ${type}`); break;
     }
   }
@@ -766,6 +771,35 @@ export class GpuExecutor {
     this.pendingColor.delete(id);
     this.pendingDepth.delete(id);
     this.pendingDestroy.push(t.texture);
+  }
+
+  /** Version 11: `srcId`'s texels into `dstId` bit for bit - a render
+   * target re-described over the same bytes in another format, which
+   * starts from what the old view left there (through a buffer: texture
+   * copies keep the format). */
+  private textureReinterpret(srcId: number, dstId: number): void {
+    const src = this.textures.get(srcId), dst = this.textures.get(dstId);
+    if (!src || !dst || src.fallback || dst.fallback || src.width !== dst.width || src.height !== dst.height ||
+        isDepthFormat(src.format) || isDepthFormat(dst.format) || texelBytes(src.format) !== texelBytes(dst.format)) {
+      this.warnOnce(`reinterpret ${src?.format}->${dst?.format}`,
+        `GPU reinterpret ${src?.format ?? "?"} -> ${dst?.format ?? "?"} not supported`);
+      return;
+    }
+    this.materialize(srcId);
+    this.endPass();
+    const bytesPerRow = Math.ceil((src.width * texelBytes(src.format)) / COPY_ROW_ALIGN) * COPY_ROW_ALIGN;
+    const size = bytesPerRow * src.height;
+    if (!this.reinterpretBuffer || this.reinterpretBuffer.size < size) {
+      if (this.reinterpretBuffer) this.pendingBufferDestroy.push(this.reinterpretBuffer);
+      this.reinterpretBuffer = this.device.createBuffer({ size, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
+    }
+    const buffer = this.reinterpretBuffer;
+    const encoder = this.ensureEncoder();
+    encoder.copyTextureToBuffer({ texture: src.texture }, { buffer, bytesPerRow }, [src.width, src.height, 1]);
+    encoder.copyBufferToTexture({ buffer, bytesPerRow }, { texture: dst.texture }, [src.width, src.height, 1]);
+    this.touched.add(src.texture);
+    this.touched.add(dst.texture);
+    this.stats.copies++;
   }
 
   private textureWrite(v: DataView, payload: Uint8Array): void {

@@ -1,4 +1,4 @@
-# GPU command stream (version 10)
+# GPU command stream (version 11)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -76,6 +76,7 @@ means none.
 | 8 | PRESENT | id, rect, flags (1 flip x, 2 flip y) |
 | 13 | TEXTURE_WRITE_LEVEL | id, mip level, layer, y, width, height (texels, whole blocks), bytes per block row, data bytes; then the block rows (version 8) |
 | 14 | POOL_WRITE | byte offset, bytes, flags (`GPU_POOL_WRAP`), reserved; then the bytes, appended to the pool (version 9) |
+| 15 | TEXTURE_REINTERPRET | source id, destination id: the destination takes the source's texels bit for bit (version 11) |
 
 ### DRAW
 
@@ -158,6 +159,23 @@ and then the record's padding. The consumer stages the indices after the
 vertices in the same buffer and calls `drawIndexed`. Silksong's 250k-slice
 stream shrinks from 197 to 128 MB, and an SSBU fight's vertex data was
 about 27 MB per frame before this.
+
+### Re-described render targets (version 11)
+
+GPU drawing never writes guest memory, so the bytes under a GPU-only
+render target are whatever the CPU last left there. When the guest binds
+the same address as a target in another format, the producer used to
+load the new view from those bytes; on the Switch it would see what the
+previous view drew. Animal Crossing renders its water buffer (RG16F) into
+memory an RG11B10 target uses later in the frame: the stale bytes were an
+RGBA8 clear, which read as NaN, and the sea drew black.
+
+Now, when the new view covers the same bytes texel for texel (same width,
+height, bytes per texel and layout; colour formats whose GPU texels are
+the guest bytes; the old view not stale), the producer creates the new
+texture, sends TEXTURE_REINTERPRET from the old one, then destroys the
+old one. The consumer copies through a buffer (a texture copy keeps the
+format). Any other re-description loads from guest memory as before.
 
 ### Polygon offset (version 10)
 

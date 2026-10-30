@@ -3533,10 +3533,27 @@ static void surface_index_remove(Raster3d *r, uint32_t slot) {
   if (*link) *link = r->gpu_surface_next[slot];
 }
 
+/* Whether render target `s`, re-described as `d`, covers the same bytes
+ * texel for texel in a format whose GPU texels are its guest bytes: the
+ * new view then starts from the old one's texels. GPU drawing never writes
+ * guest memory, so loading the bytes there instead reads what the CPU last
+ * left (Animal Crossing's water buffer shares memory with an rg11b10
+ * target; the stale RGBA8 bytes there read as NaN and blacked out the sea). */
+static bool surface_same_bytes(const Raster3d_Gpu_Surface *s, const Surface_Desc *d) {
+  bool old_direct = false, new_direct = false;
+  if (s->depth || d->depth || s->stale) return false;
+  (void)gpu_color_format(s->format, &old_direct);
+  (void)gpu_color_format(d->format, &new_direct);
+  return old_direct && new_direct && s->width == d->width && s->height == d->height &&
+         s->bytes_per_pixel == d->bytes_per_pixel && s->block_linear == d->block_linear &&
+         (s->block_linear ? s->block_height_log2 == d->block_height_log2 : s->pitch == d->pitch);
+}
+
 /* The GPU surface for a render target, created on first use. `load`:
  * its current guest contents matter (not about to be fully overwritten). */
 static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d, const Gpu_Memory *mem, bool load) {
   r->tick++;
+  uint32_t carried = 0; /* a re-described view whose texels the new one takes */
   /* No textures_invalidate: GPU drawing never changes guest memory, so a
    * texture over a render target's bytes hashes the same before and after
    * (one that is the target samples it through gpu_surface_at). Forcing
@@ -3553,7 +3570,8 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
       s->stale = false;
       return s;
     }
-    gpu_destroy(r, s->id); /* re-described */
+    if (load && !carried && surface_same_bytes(s, d)) carried = s->id;
+    else gpu_destroy(r, s->id); /* re-described */
     surface_index_remove(r, slot);
     s->in_use = false;
   }
@@ -3597,7 +3615,13 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
   r->gpu_stats.surfaces++;
   log_debug("[gpu] GPU surface %u: %ux%u fmt 0x%02x%s @%llx", victim->id, d->width, d->height, d->format,
             d->depth ? " (zeta)" : "", (unsigned long long)d->address);
-  if (load) gpu_surface_upload(r, victim, mem);
+  if (carried) {
+    const uint32_t ids[2] = {carried, victim->id};
+    gpu_stream_write(r->gpu, GPU_REC_TEXTURE_REINTERPRET, ids, sizeof(ids));
+    gpu_destroy(r, carried);
+  } else if (load) {
+    gpu_surface_upload(r, victim, mem);
+  }
   return victim;
 }
 

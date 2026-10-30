@@ -5,7 +5,7 @@
  */
 
 export const GPU_STREAM_MAGIC = 0x55504756;
-export const GPU_STREAM_VERSION = 10;
+export const GPU_STREAM_VERSION = 11;
 export const GPU_STREAM_HEADER_BYTES = 56;
 export const GPU_STREAM_RECORD_HEADER_BYTES = 8;
 export const OFF_MAGIC = 0;
@@ -40,6 +40,9 @@ export const REC_POOL_WRITE = 14;
 export const POOL_WRITE_BYTES = 16;
 export const POOL_BYTES = 16 * 1024 * 1024;
 export const POOL_WRAP = 1; /* restarts at 0: submit what reads the old contents first */
+/* Version 11: a render target re-described over the same bytes takes the
+ * old one's texels bit for bit (u32 source id, u32 destination id). */
+export const REC_TEXTURE_REINTERPRET = 15;
 
 /* GPU_FMT_* by index. */
 export const FORMATS: readonly (GPUTextureFormat | null)[] = [

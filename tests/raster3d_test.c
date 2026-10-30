@@ -202,6 +202,7 @@ static uint32_t g_regs[GPU_3D_REGISTER_WORDS];
 static uint32_t g_vs_offset = VS_OFFSET; /* base_state's vertex program */
 static uint64_t g_vertices = VERTICES;   /* base_state's vertex stream */
 static Raster3d_Bindings g_bindings;
+static uint32_t g_rt_format = 0xD5;      /* base_state's RT0 format (A8B8G8R8) */
 
 static void base_state(uint64_t rt, bool block_linear, uint32_t ps_offset) {
   memset(g_regs, 0, sizeof(g_regs));
@@ -211,7 +212,7 @@ static void base_state(uint64_t rt, bool block_linear, uint32_t ps_offset) {
   g_regs[0x201] = (uint32_t)rt;
   g_regs[0x202] = block_linear ? RT_SIZE : RT_SIZE * 4u;
   g_regs[0x203] = RT_SIZE;
-  g_regs[0x204] = 0xD5;
+  g_regs[0x204] = g_rt_format;
   g_regs[0x205] = block_linear ? (1u << 4) : (1u << 12);
   g_regs[0x487] = 1;           /* CT_SELECT: one target, RT0 */
   g_regs[0x680] = 0x1111;      /* CT_WRITE(0) */
@@ -762,6 +763,9 @@ typedef struct Seen_Draw {
   /* Stream version 9: the pool holding draws' constant buffers and global memory. */
   uint32_t pool_writes, pool_wraps;
   uint32_t pool_writes_before_last; /* POOL_WRITEs between the previous draw and the last one */
+  /* Stream version 11: render targets re-described over the same bytes. */
+  uint32_t reinterprets, reinterpret_src, reinterpret_dst;
+  uint32_t texture_writes, last_texture_id, destroyed_id;
 } Seen_Draw;
 #define SEEN_DATA_BYTES (256u * 1024u)
 static uint8_t g_seen_data[SEEN_DATA_BYTES];
@@ -777,6 +781,14 @@ static void stream_drain(Seen_Draw *seen) {
       seen->last_texture_format = c.format;
       seen->last_texture_width = c.width;
       seen->last_texture_height = c.height;
+      seen->last_texture_id = c.id;
+    }
+    if (rec.type == GPU_REC_TEXTURE_WRITE) seen->texture_writes++;
+    if (rec.type == GPU_REC_TEXTURE_DESTROY) memcpy(&seen->destroyed_id, rec.payload, sizeof(uint32_t));
+    if (rec.type == GPU_REC_TEXTURE_REINTERPRET) {
+      seen->reinterprets++;
+      memcpy(&seen->reinterpret_src, rec.payload, sizeof(uint32_t));
+      memcpy(&seen->reinterpret_dst, rec.payload + sizeof(uint32_t), sizeof(uint32_t));
     }
     if (rec.type == GPU_REC_TEXTURE_WRITE_LEVEL && rec.payload_bytes >= sizeof(Gpu_Rec_Texture_Write_Level) + 16u) {
       if (!seen->level_writes++) {
@@ -890,6 +902,29 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
   stream_drain(&seen);
   raster3d_set_gpu(r, NULL);
   return seen;
+}
+
+/* GPU mode: a render target re-described over the same bytes in another
+ * format with the same texel size starts from the old view's texels
+ * (REINTERPRET, stream version 11), not from guest memory - GPU drawing
+ * never writes it back, so those bytes are stale. A different texel size
+ * loads from guest memory as before. */
+static void test_gpu_reinterpret(Raster3d *r) {
+  Seen_Draw seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.count == 1, "reinterpret: first draw"); /* an A8B8G8R8 target (earlier tests may have made it) */
+  g_rt_format = 0xDE; /* R16G16_FLOAT: 4 bytes, like A8B8G8R8 */
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.count == 1 && seen.last_texture_format == GPU_FMT_RG16_FLOAT, "reinterpret: RG16F view created");
+  CHECK(seen.reinterprets == 1 && seen.reinterpret_src != 0 && seen.reinterpret_dst == seen.last_texture_id,
+        "reinterpret: %u records, %u -> %u (new %u)", seen.reinterprets, seen.reinterpret_src, seen.reinterpret_dst,
+        seen.last_texture_id);
+  CHECK(seen.destroyed_id == seen.reinterpret_src && seen.texture_writes == 0, "reinterpret: old view destroyed (%u), no upload (%u)",
+        seen.destroyed_id, seen.texture_writes);
+  g_rt_format = 0xCA; /* R16G16B16A16_FLOAT: 8 bytes - another layout */
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.count == 1 && seen.reinterprets == 0 && seen.texture_writes == 1, "reinterpret: 8-byte view loads (%u, %u)",
+        seen.reinterprets, seen.texture_writes);
+  g_rt_format = 0xD5;
 }
 
 /* GPU mode with BCn sampled by the device: a DXT1 texture is created as
@@ -1310,6 +1345,7 @@ int main(void) {
   test_worker_count_invariance(&r);
   test_gpu_vertex_stage(&r);
   test_gpu_compressed_upload(&r);
+  test_gpu_reinterpret(&r);
   test_compute(&r);
   test_gpu_compute(&r);
   CHECK(r.stats.shader_faults == 0, "no shader faults");

@@ -38,6 +38,10 @@ enum {
   /* Version 9: constant buffers and global memory of draws live in one
    * pool buffer, each chunk written once while it stays the same. */
   GPU_REC_POOL_WRITE, /* Gpu_Rec_Pool_Write + bytes */
+  /* Version 11: a render target re-described over the same bytes (another
+   * format, same size and texel bytes) takes the old one's texels bit for
+   * bit, as the guest's memory would hold them. */
+  GPU_REC_TEXTURE_REINTERPRET, /* u32 source id, u32 destination id */
 };
 
 /* The pool (version 9): a read-only storage buffer of GPU_POOL_BYTES every
