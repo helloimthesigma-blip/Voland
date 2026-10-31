@@ -14,7 +14,7 @@
 #define RD_DIR_ENTRY_BYTES 0x18u   /* fixed part of a directory entry */
 #define RD_FILE_ENTRY_BYTES 0x20u  /* fixed part of a file entry */
 #define RD_MAX_FILES 16u
-#define RD_ARCHIVE_BYTES 0x1000u
+#define RD_ARCHIVE_BYTES 0x40000u   /* the MiiModel stand-in (~210 KiB) */
 
 static uint64_t align_up(uint64_t v, uint64_t a) { return (v + a - 1u) & ~(a - 1u); }
 
@@ -84,27 +84,140 @@ uint64_t system_data_build_romfs(const System_Data_File *files, uint32_t count, 
 
 /* ---- MiiModel ---------------------------------------------------------- */
 
-#define MII_RESOURCE_HEADER_BYTES 16u
-#define MII_RESOURCE_VERSION 1u
+/* The Mii resource layout (learned from the files' structure; no data of
+ * Nintendo's is reproduced): a header - signature, u32 version, u32 total
+ * size, then u32 per-part buffer sizes - and a fixed table of part entries
+ * the Mii library indexes directly. A stand-in must be full size or the
+ * library reads past its end (Mario Kart 8 faulted ~9 s in), and an entry
+ * a Mii uses must hold real data: an empty texture crashed in NVN. So
+ * every entry points at one tiny resource of our own, a zlib stream:
+ * - texture entry (28 bytes): offset, size, compressed size, 0x806, 0x200,
+ *   width | height << 16, format << 8 | mip levels. Ours: a black 8x8
+ *   texture in the format the smallest real parts use.
+ * - shape entry (0x58 bytes): offset, size, compressed size, 0x806, then
+ *   the offsets and the sizes of five vertex streams (position, normal,
+ *   texture coordinate and two unused) and of the 16-bit indices, then a
+ *   float bounding box. Ours: one zero-area triangle at the origin.
+ * Shapes also carry a block of part positions after the table, left zero.
+ * Miis draw as nothing. */
+#define MII_VERSION 1u
+#define MII_HEADER_SIZE_AT 8u
+#define MII_HEADER_SIZES_AT 12u
+#define MII_ENTRY_TAG 0x806u
+#define MII_TEXTURE_TABLE_AT 0x64u
+#define MII_TEXTURE_ENTRIES 327u
+#define MII_TEXTURE_ENTRY_BYTES 28u
+#define MII_TEXTURE_DATA_AT (MII_TEXTURE_TABLE_AT + MII_TEXTURE_ENTRIES * MII_TEXTURE_ENTRY_BYTES)
+#define MII_TEXTURE_ALIGN 0x200u
+#define MII_TEXTURE_SIDE 8u
+#define MII_TEXTURE_FORMAT 0x403u     /* format 4, 3 levels: the real 8x8 parts' */
+#define MII_TEXTURE_PIXEL_BYTES 0x800u /* their decoded size */
+#define MII_SHAPE_TABLE_AT 0xC4u
+#define MII_SHAPE_ENTRIES 856u
+#define MII_SHAPE_ENTRY_BYTES 0x58u
+#define MII_SHAPE_POSITION_BYTES 0x26D0u
+#define MII_SHAPE_DATA_AT (MII_SHAPE_TABLE_AT + MII_SHAPE_ENTRIES * MII_SHAPE_ENTRY_BYTES + MII_SHAPE_POSITION_BYTES)
+#define MII_SHAPE_STREAMS 6u          /* position, normal, texcoord, two unused, indices */
+#define MII_SHAPE_VERTICES 3u
+#define MII_SHAPE_STREAM_ALIGN 0x10u
+#define MII_BUFFER_BYTES 0x1000u      /* each per-part buffer size: room for ours */
+/* A stored (uncompressed) zlib stream: 2-byte header, one final stored
+ * block (1 + LEN + NLEN), the data, Adler-32. */
+#define ZLIB_HEADER_CMF 0x78u
+#define ZLIB_HEADER_FLG 0x01u
+#define ZLIB_STORED_FINAL 0x01u
+#define ZLIB_OVERHEAD 11u
+#define ADLER_MOD 65521u
 
-/* A resource header: four-character signature, then a u32 version. */
-static void mii_header(uint8_t out[MII_RESOURCE_HEADER_BYTES], const char signature[4]) {
-  memset(out, 0, MII_RESOURCE_HEADER_BYTES);
+static const uint32_t k_shape_stream_bytes[MII_SHAPE_STREAMS] = {
+    8u * MII_SHAPE_VERTICES, 4u * MII_SHAPE_VERTICES, 4u * MII_SHAPE_VERTICES, 0u, 0u, 2u * MII_SHAPE_VERTICES};
+
+static uint32_t zlib_stored(uint8_t *out, const uint8_t *data, uint32_t size) {
+  uint32_t a = 1u, b = 0u;
+  for (uint32_t i = 0; i < size; i++) {
+    a = (a + data[i]) % ADLER_MOD;
+    b = (b + a) % ADLER_MOD;
+  }
+  out[0] = ZLIB_HEADER_CMF;
+  out[1] = ZLIB_HEADER_FLG;
+  out[2] = ZLIB_STORED_FINAL;
+  out[3] = (uint8_t)size;
+  out[4] = (uint8_t)(size >> 8);
+  out[5] = (uint8_t)~size;
+  out[6] = (uint8_t)(~size >> 8);
+  memcpy(out + 7u, data, size);
+  const uint32_t adler = (b << 16) | a;
+  for (uint32_t i = 0; i < 4u; i++) out[7u + size + i] = (uint8_t)(adler >> (24u - 8u * i)); /* big-endian */
+  return size + ZLIB_OVERHEAD;
+}
+
+static void mii_header(uint8_t *out, uint32_t size, uint32_t table_at, const char signature[4]) {
+  memset(out, 0, size);
   memcpy(out, signature, 4u);
-  put32(out + 4u, MII_RESOURCE_VERSION);
+  put32(out + 4u, MII_VERSION);
+  put32(out + MII_HEADER_SIZE_AT, size);
+  for (uint32_t at = MII_HEADER_SIZES_AT; at < table_at; at += 4u) put32(out + at, MII_BUFFER_BYTES);
+}
+
+static uint32_t build_mii_texture(uint8_t *out) {
+  static const uint8_t pixels[MII_TEXTURE_PIXEL_BYTES];
+  const uint32_t packed = zlib_stored(out + MII_TEXTURE_DATA_AT, pixels, sizeof(pixels));
+  const uint32_t size = MII_TEXTURE_DATA_AT + packed;
+  mii_header(out, MII_TEXTURE_DATA_AT, MII_TEXTURE_TABLE_AT, "NFTR");
+  put32(out + MII_HEADER_SIZE_AT, size);
+  for (uint32_t i = 0; i < MII_TEXTURE_ENTRIES; i++) {
+    uint8_t *e = out + MII_TEXTURE_TABLE_AT + i * MII_TEXTURE_ENTRY_BYTES;
+    put32(e + 0x00, MII_TEXTURE_DATA_AT);
+    put32(e + 0x04, MII_TEXTURE_PIXEL_BYTES);
+    put32(e + 0x08, packed);
+    put32(e + 0x0C, MII_ENTRY_TAG);
+    put32(e + 0x10, MII_TEXTURE_ALIGN);
+    put32(e + 0x14, MII_TEXTURE_SIDE | (MII_TEXTURE_SIDE << 16));
+    put32(e + 0x18, MII_TEXTURE_FORMAT);
+  }
+  return size;
+}
+
+static uint32_t build_mii_shape(uint8_t *out) {
+  uint8_t mesh[MII_SHAPE_STREAMS * MII_SHAPE_STREAM_ALIGN * 2u];
+  memset(mesh, 0, sizeof(mesh));
+  uint32_t at[MII_SHAPE_STREAMS], mesh_bytes = 0;
+  for (uint32_t k = 0; k < MII_SHAPE_STREAMS; k++) {
+    at[k] = k_shape_stream_bytes[k] ? (uint32_t)align_up(mesh_bytes, MII_SHAPE_STREAM_ALIGN) : 0u;
+    if (k_shape_stream_bytes[k]) mesh_bytes = at[k] + k_shape_stream_bytes[k];
+  }
+  /* Indices 0, 1, 2 (the vertices all zero: a zero-area triangle). */
+  const uint32_t indices = at[MII_SHAPE_STREAMS - 1u];
+  for (uint32_t v = 0; v < MII_SHAPE_VERTICES; v++) mesh[indices + 2u * v] = (uint8_t)v;
+  const uint32_t packed = zlib_stored(out + MII_SHAPE_DATA_AT, mesh, mesh_bytes);
+  const uint32_t size = MII_SHAPE_DATA_AT + packed;
+  mii_header(out, MII_SHAPE_DATA_AT, MII_SHAPE_TABLE_AT, "NFSR");
+  put32(out + MII_HEADER_SIZE_AT, size);
+  for (uint32_t i = 0; i < MII_SHAPE_ENTRIES; i++) {
+    uint8_t *e = out + MII_SHAPE_TABLE_AT + i * MII_SHAPE_ENTRY_BYTES;
+    put32(e + 0x00, MII_SHAPE_DATA_AT);
+    put32(e + 0x04, mesh_bytes);
+    put32(e + 0x08, packed);
+    put32(e + 0x0C, MII_ENTRY_TAG);
+    for (uint32_t k = 0; k < MII_SHAPE_STREAMS; k++) {
+      put32(e + 0x10 + 4u * k, at[k]);
+      put32(e + 0x10 + 4u * (MII_SHAPE_STREAMS + k), k_shape_stream_bytes[k]);
+    }
+  }
+  return size;
 }
 
 static uint8_t g_mii_model[RD_ARCHIVE_BYTES];
 static uint64_t g_mii_model_size;
 
 static void build_mii_model(void) {
-  static uint8_t texture[MII_RESOURCE_HEADER_BYTES], shape[MII_RESOURCE_HEADER_BYTES];
-  mii_header(texture, "NFTR");
-  mii_header(shape, "NFSR");
+  static uint8_t texture[MII_TEXTURE_DATA_AT + MII_TEXTURE_PIXEL_BYTES + ZLIB_OVERHEAD];
+  static uint8_t shape[MII_SHAPE_DATA_AT + MII_SHAPE_STREAMS * MII_SHAPE_STREAM_ALIGN * 2u + ZLIB_OVERHEAD];
+  const uint32_t texture_bytes = build_mii_texture(texture), shape_bytes = build_mii_shape(shape);
   const System_Data_File files[] = {
-      {"NXTextureLowLinear.dat", texture, sizeof(texture)}, {"NXTextureLowSRGB.dat", texture, sizeof(texture)},
-      {"NXTextureMidLinear.dat", texture, sizeof(texture)}, {"NXTextureMidSRGB.dat", texture, sizeof(texture)},
-      {"NXShapeHigh.dat", shape, sizeof(shape)},            {"NXShapeMid.dat", shape, sizeof(shape)},
+      {"NXTextureLowLinear.dat", texture, texture_bytes}, {"NXTextureLowSRGB.dat", texture, texture_bytes},
+      {"NXTextureMidLinear.dat", texture, texture_bytes}, {"NXTextureMidSRGB.dat", texture, texture_bytes},
+      {"ShapeHigh.dat", shape, shape_bytes},              {"ShapeMid.dat", shape, shape_bytes},
   };
   g_mii_model_size = system_data_build_romfs(files, sizeof(files) / sizeof(files[0]), g_mii_model, sizeof(g_mii_model));
 }

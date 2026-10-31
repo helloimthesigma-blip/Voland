@@ -2503,7 +2503,7 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 - **§8, AArch32 titles: Mario Kart 8 Deluxe boots to its title screen.** This adds the A32 interpreter backend, the 32-bit SVC calling convention and Horizon's 32-bit address-space carve (§8, "AArch32 titles"). Also:
   - SVCs 0x2A, 0x2B and 0x5F (data-cache flushes) succeed as no-ops, because guest memory is coherent.
   - nvhost-as-gpu REMAP (nr 0x14) maps big pages of a handle at a GPU address, or unmaps them for handle 0. Its entry count comes from the buffer size.
-  - System data 0100000000000802 (MiiModel) is a stand-in made by Voland (`hle/fs/system_data.{h,c}`): a RomFS holding the archive's files, each with only a resource header. A title that draws Miis mounts it at start and aborts without it. No Nintendo content is shipped (§1.6).
+  - System data 0100000000000802 (MiiModel) is a stand-in made by Voland (`hle/fs/system_data.{h,c}`): a RomFS holding the archive's six files (`NXTexture{Low,Mid}{Linear,SRGB}.dat`, `Shape{High,Mid}.dat`). Each is a full-size resource with every part-table entry (327 textures, 856 shapes) pointing at one tiny resource of Voland's own: a black 8x8 texture and a zero-area triangle, as stored zlib streams. So Miis draw as nothing. A title that draws Miis mounts it at start and aborts without it. Only the layout (header, entry sizes, table lengths) was learned from a dump; no Nintendo content is shipped (§1.6).
   - svcBreak logs the link register and the stack's return addresses as module+offset.
   - `VOLAND_DUMP_MODULES` also writes each module's whole image, so the dynamic symbols can name them.
 - **Async GPU runs captured commands (§13, docs/ASYNC_GPU.md "Captured commands").** A queued submission carries a copy of its command words, taken at submit (up to 1 MB; larger ones run in place). The guest reuses command memory before a lagging GPU thread reads it: MK8DX lost frames and semaphore releases and hung at loading or race start, and its race view was black.
@@ -2525,7 +2525,7 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 - **User-supplied system data (§1.6).** `OpenDataStorageByDataId` first looks on the SD card for the user's own dump, named after the data id (`/<id>.nca` or `/<id>.romfs`, also under `/systemdata/`).
   - A pre-decrypted data NCA has its RomFS section served; a bare RomFS is served as is.
   - Only then does Voland's stand-in apply.
-  - MK8DX needs this: its Mii renderer cannot build its resources from the header-only MiiModel stand-in, and NVN later faults on the uninitialized texture objects (~4.4 s after boot, under the interpreter and the JIT alike).
+  - MK8DX used to need this: with the header-only stand-in its Mii library read past the files' ends and, once they were full size but empty, NVN faulted on a zero-size texture (~9 s after boot, in the title demo). With the full stand-in (2026-10-31) MK8DX plays its title demo without the user's MiiModel; the user's own file still gives real Miis.
   - **"System files" in the web shell.** The load panel lists the archives games may ask for (`SYSTEM_FILES` in `bindings/load.ts`) and whether each was added.
     - "Add system files…" (one or several files) and "Choose firmware folder…" (a whole decrypted firmware dump) ask the core what each file is from its first 64 KiB (`emulator_identify_system_data_ffi`).
       - A data NCA names its own id.

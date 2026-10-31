@@ -87,14 +87,25 @@ static void test_system_data(void) {
   RomFS fs;
   CHECK_OK(romfs_open(&src, &arena, &fs));
   static const char *names[] = {"NXTextureLowLinear.dat", "NXTextureLowSRGB.dat", "NXTextureMidLinear.dat",
-                                "NXTextureMidSRGB.dat", "NXShapeHigh.dat", "NXShapeMid.dat"};
+                                "NXTextureMidSRGB.dat", "ShapeHigh.dat", "ShapeMid.dat"};
   for (unsigned i = 0; i < sizeof(names) / sizeof(names[0]); i++) {
     RomFS_File_Entry e;
     CHECK_OK(romfs_find_file(&fs, names[i], &e));
-    uint8_t header[8];
-    CHECK(e.data_size == 16u);
-    CHECK_OK(romfs_read_file(&fs, &e, 0, header, sizeof(header)));
-    CHECK(!memcmp(header, i < 4u ? "NFTR" : "NFSR", 4u) && header[4] == 1u);
+    /* Full-size resources (the library indexes their part tables): the
+     * header's size field is the file's; the first part entry points past
+     * the table at a stored zlib stream holding as many bytes as it says. */
+    const uint32_t table_at = i < 4u ? 0x64u : 0xC4u, data_at = i < 4u ? 0x2428u : 0x14DD4u;
+    static uint8_t file[0x16000];
+    CHECK(e.data_size > data_at && e.data_size <= sizeof(file));
+    CHECK_OK(romfs_read_file(&fs, &e, 0, file, e.data_size));
+    CHECK(!memcmp(file, i < 4u ? "NFTR" : "NFSR", 4u) && file[4] == 1u);
+    uint32_t size, offset, unpacked, packed;
+    memcpy(&size, file + 8, 4);
+    memcpy(&offset, file + table_at, 4);
+    memcpy(&unpacked, file + table_at + 4, 4);
+    memcpy(&packed, file + table_at + 8, 4);
+    CHECK(size == e.data_size && offset == data_at && packed == unpacked + 11u && offset + packed == size);
+    CHECK(file[offset] == 0x78 && file[offset + 2] == 1u && (file[offset + 3] | file[offset + 4] << 8) == (int)unpacked);
   }
   RomFS_File_Entry missing;
   CHECK(romfs_find_file(&fs, "NXShapeLow.dat", &missing).code == RESULT_NOT_FOUND);
