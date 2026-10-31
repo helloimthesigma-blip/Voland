@@ -722,6 +722,18 @@ slicing explains the deterministic repro but not all of the parallel crash.
 Higher-priority wakes still wait for the end of a slice on parallel cores
 (Horizon preempts at once).
 
+**A thread leads one guest core** (2026-10-30). The per-core pick made a
+runnable thread a candidate leader on every core in its affinity mask at
+once. On Horizon it is queued on one core and only suggested on the
+others. Hollow Knight froze about 25 s in on three host cores. A
+priority-44 thread with a wide mask spun on `SleepThread`, waiting for a
+lock held by a priority-49 thread pinned to core 1. The spinner led cores
+0-2 between its yields, so the holder never led core 1, and two host cores
+sat idle. This was found once the browser enforced affinity (c6c0d2a).
+Now a thread that leads several cores keeps one: a core nobody else could
+lead, or else its ideal core. The other cores fall to their next best
+thread (`spread_leaders`; parallel_test "a thread leads one guest core").
+
 **Preemption disable in TLS** (2026-10-26, always on). TOTK's SDK
 spinlocks raise the u16 at TLS+0x100 while held, and Horizon never
 preempts a thread while it is nonzero: it sets TLS+0x102 and the thread

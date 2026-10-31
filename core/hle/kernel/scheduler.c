@@ -395,18 +395,51 @@ static bool better_leader(const Sched_Thread *t, const Sched_Thread *b, bool aff
   return t->last_run < b->last_run;
 }
 
+/* A thread is on one guest core at a time (Horizon schedules it on one;
+ * the rest of its affinity only suggests it there). One leading several
+ * keeps one - a core nobody else could lead, else its ideal - and the
+ * others fall to their next best. Without this a spinning priority-44
+ * thread with a wide mask led every core while yielding, and Hollow
+ * Knight's priority-49 lock holder, pinned to one of them, never ran
+ * although two host cores sat idle. */
+static void spread_leaders(const Scheduler *sched, int32_t leader[THREAD_CORE_COUNT],
+                           const int32_t second[THREAD_CORE_COUNT]) {
+  for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++) {
+    const int32_t i = leader[g];
+    if (i < 0) continue;
+    uint32_t led = 0, keep = THREAD_CORE_COUNT;
+    for (uint32_t h = g; h < THREAD_CORE_COUNT; h++) {
+      if (leader[h] != i) continue;
+      led |= 1u << h;
+      if (keep == THREAD_CORE_COUNT && second[h] < 0) keep = h;
+    }
+    if (!(led & (led - 1u))) continue; /* leads just this core */
+    const uint32_t ideal = sched->threads[i].thread.preferred_core;
+    if (keep == THREAD_CORE_COUNT) keep = ideal < THREAD_CORE_COUNT && ((led >> ideal) & 1u) ? ideal : g;
+    for (uint32_t h = g; h < THREAD_CORE_COUNT; h++)
+      if (h != keep && ((led >> h) & 1u)) leader[h] = second[h];
+  }
+}
+
 static int32_t pick_leaders(const Scheduler *sched, bool affine, uint32_t core, bool busy) {
-  int32_t leader[THREAD_CORE_COUNT];
-  for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++) leader[g] = -1;
+  int32_t leader[THREAD_CORE_COUNT], second[THREAD_CORE_COUNT];
+  for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++) leader[g] = second[g] = -1;
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     const Sched_Thread *t = &sched->threads[i];
     if (t->state != THREAD_STATE_RUNNABLE || t->paused || t->on_core) continue;
     if (busy && solo(t)) continue;
     const uint64_t mask = guest_cores_of(t);
-    for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++)
-      if (((mask >> g) & 1u) && (leader[g] < 0 || leads_core(t, &sched->threads[leader[g]], affine, core)))
+    for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++) {
+      if (!((mask >> g) & 1u)) continue;
+      if (leader[g] < 0 || leads_core(t, &sched->threads[leader[g]], affine, core)) {
+        second[g] = leader[g];
         leader[g] = (int32_t)i;
+      } else if (second[g] < 0 || leads_core(t, &sched->threads[second[g]], affine, core)) {
+        second[g] = (int32_t)i;
+      }
+    }
   }
+  spread_leaders(sched, leader, second);
   int32_t best = -1;
   for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++) {
     const int32_t i = leader[g];

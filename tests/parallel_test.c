@@ -333,6 +333,31 @@ static void test_pinned_cores(void) {
   printf("[parallel_test] pinned cores: placement, and every program on 2-3 cores (slices, free-running)\n");
 }
 
+/* A thread is on one guest core at a time: a spinning priority-44 thread
+ * whose mask spans cores 0-2 must not lead core 1 too, or the
+ * priority-49 thread pinned there never runs (Hollow Knight's lock holder
+ * starved while two host cores sat idle). */
+static void test_leader_one_core(void) {
+  static Scheduler sched;
+  memset(&sched, 0, sizeof(sched));
+  sched.host_cores = 3;
+  Sched_Thread *spinner = &sched.threads[0], *holder = &sched.threads[1];
+  spinner->state = holder->state = THREAD_STATE_RUNNABLE;
+  spinner->thread.priority = 44;
+  spinner->thread.preferred_core = 1;
+  spinner->core_mask = 0x7;
+  spinner->spinning = true;
+  holder->thread.priority = 49;
+  holder->thread.preferred_core = 1;
+  holder->core_mask = 0x2;
+  CHECK(scheduler_pick_for_core(&sched, 1) == 1);
+  CHECK(scheduler_pick_for_core(&sched, 0) == 0); /* the spinner still runs elsewhere */
+  /* Pinned to core 1 as well, the spinner leads it as before. */
+  spinner->core_mask = 0x2;
+  CHECK(scheduler_pick_for_core(&sched, 1) == 0);
+  printf("[parallel_test] a thread leads one guest core\n");
+}
+
 static pthread_t g_driver;
 static bool g_ran_on_driver;
 static void note_thread(void *ctx) {
@@ -460,6 +485,7 @@ int main(void) {
   test_cores_before_load();
   test_host_calls();
   test_pinned_cores();
+  test_leader_one_core();
   test_gpu_lock();
   printf("[parallel_test] passed\n");
   return 0;
