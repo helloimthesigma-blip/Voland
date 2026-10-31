@@ -2447,13 +2447,23 @@ static int romfs_command(int argc, char **argv) {
   }
   if (!error_is_ok(emulator_create(&emu))) return EXIT_LOAD_FAILED;
   if (mods_dir) load_mods(&emu, mods_dir);
-  if (!error_is_ok(emulator_load(&emu, &source, 0)) || !emu.romfs) {
+  /* A program's RomFS, or else a data NCA's (system data such as MiiModel). */
+  const Byte_Source *romfs = NULL;
+  static NCA_File data_nca;
+  int section = -1;
+  if (error_is_ok(emulator_load(&emu, &source, 0)) && emu.romfs) {
+    romfs = emu.romfs;
+  } else if (error_is_ok(nca_open(&source, &data_nca)) && (section = nca_find_section(&data_nca, NCA_FS_ROMFS)) >= 0 &&
+             error_is_ok(nca_probe_section(&data_nca, (uint32_t)section))) {
+    romfs = nca_section_source(&data_nca, (uint32_t)section);
+  }
+  if (!romfs) {
     fprintf(stderr, "voland-cli: %s: no RomFS\n", argv[0]);
     return EXIT_LOAD_FAILED;
   }
   Arena arena;
   RomFS fs;
-  if (!arena_create(&arena, ROMFS_ARENA_BYTES) || !error_is_ok(romfs_open(emu.romfs, &arena, &fs))) {
+  if (!arena_create(&arena, ROMFS_ARENA_BYTES) || !error_is_ok(romfs_open(romfs, &arena, &fs))) {
     fprintf(stderr, "voland-cli: RomFS unreadable\n");
     return EXIT_LOAD_FAILED;
   }
