@@ -595,6 +595,11 @@ export class GpuExecutor {
     this.pendingColor.delete(c.id);
     this.pendingDepth.delete(c.id);
     const width = Math.max(1, c.width), height = Math.max(1, c.height);
+    const maxSize = this.device.limits.maxTextureDimension2D;
+    if (width > maxSize || height > maxSize) { /* creating it would invalidate every command that binds it */
+      this.warnOnce(`size ${width}x${height}`, `GPU texture ${width}x${height} exceeds the device's ${maxSize}`);
+      return;
+    }
     /* Mip chains: float formats the box filter can render (the producer
      * asks for them on sampled float textures only). */
     const full = Math.floor(Math.log2(Math.max(width, height))) + 1;

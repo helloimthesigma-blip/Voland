@@ -108,7 +108,10 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
   const features = ["rg11b10ufloat-renderable", "depth32float-stencil8", "float32-filterable", "float32-blendable"].filter((f) => a.features.has(f));
   const device = await a.requestDevice({
     requiredFeatures: features,
-    requiredLimits: { maxColorAttachmentBytesPerSample: a.limits.maxColorAttachmentBytesPerSample }, // as gpu.worker.ts
+    requiredLimits: { // as gpu.worker.ts
+      maxColorAttachmentBytesPerSample: a.limits.maxColorAttachmentBytesPerSample,
+      maxTextureDimension2D: a.limits.maxTextureDimension2D,
+    },
   });
   if (globalThis.NO_SHADOW_COMPARE) { /* experiment: every depth compare passes */
     const create = device.createShaderModule.bind(device);

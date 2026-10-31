@@ -270,6 +270,9 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
   // RG11B10 targets (48 bytes). Take what the adapter offers.
   const requiredLimits: Record<string, number> = {
     maxColorAttachmentBytesPerSample: adapter.limits.maxColorAttachmentBytesPerSample,
+    /* The default 8192 is below what titles allocate (Nine Sols: a
+     * 4104x8196 texture); most adapters offer 16384. */
+    maxTextureDimension2D: adapter.limits.maxTextureDimension2D,
   };
   const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
   device.addEventListener("uncapturederror", (e: Event) => {
