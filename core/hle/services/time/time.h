@@ -50,9 +50,13 @@ typedef struct Time_State {
   Shared_Memory_Pool *pool;
   Kernel_Shared_Memory *shared_memory;
   int64_t rtc_at_boot;              /* Unix seconds at virtual time 0 */
+  int32_t utc_offset;               /* the device location's seconds east of UTC */
 } Time_State;
 
-void time_init(Time_State *state, Shared_Memory_Pool *pool, int64_t rtc_at_boot);
+/* utc_offset: the one device location is a fixed offset from UTC (the
+ * host's at boot; 0 headless) - games such as Animal Crossing show local
+ * time from the calendar conversions. */
+void time_init(Time_State *state, Shared_Memory_Pool *pool, int64_t rtc_at_boot, int32_t utc_offset);
 Error time_register(Time_State *state, SM_Registry *registry);
 
 /* Proleptic-Gregorian conversions (UTC), exposed for tests. */

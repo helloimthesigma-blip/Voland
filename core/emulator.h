@@ -183,6 +183,7 @@ typedef struct Emulator
   char next_argv[EMULATOR_ARGV_BYTES];
   uint32_t content_node;    /* ramfs node of a chain-loaded NRO */
   int64_t rtc;       /* Unix seconds the next process boots at (emulator_set_rtc) */
+  int32_t utc_offset; /* emulator_set_utc_offset; survives process reloads */
   uint32_t frame_skip; /* emulator_set_frame_skip; survives process reloads */
   Parallel *parallel;  /* emulator_set_host_cores; NULL = serial */
   bool no_poll_coalescing; /* emulator_set_poll_coalescing(false); survives reloads */
@@ -333,6 +334,10 @@ CPU_ExitReason emulator_run(Emulator *emulator, uint64_t cycle_budget);
  * boot; its clocks then advance with virtual time. Default
  * TIME_DEFAULT_RTC, so headless runs are deterministic. */
 void emulator_set_rtc(Emulator *emulator, int64_t unix_seconds);
+
+/* The device location's offset from UTC (seconds east) that the time
+ * zone service converts with; default 0 (UTC) for deterministic runs. */
+void emulator_set_utc_offset(Emulator *emulator, int32_t seconds_east);
 
 /* Frame skip (a speed setting, 0 = off): of every n + 1 frames the guest
  * presents, only one is rasterised and shown; game logic, audio and every

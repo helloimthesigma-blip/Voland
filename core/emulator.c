@@ -491,7 +491,7 @@ static void reset_process_services(Emulator* emulator) {
   am_init(&emulator->am, emulator->am_storage_pool);
   apm_init(&emulator->apm);
   set_init(&emulator->set);
-  time_init(&emulator->time, &emulator->shared_memory, emulator->rtc);
+  time_init(&emulator->time, &emulator->shared_memory, emulator->rtc, emulator->utc_offset);
   fs_reset_process(&emulator->fs, NULL, 0);
   emulator->addon_count = 0;
   fs_set_addons(&emulator->fs, NULL, NULL, 0);
@@ -1585,10 +1585,10 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
     const uint64_t pc = emulator->cpu_backend->get_pc(th->thread.cpu_state);
     uint64_t offset = 0;
     const char *module = module_of(emulator, pc, &offset);
-    log_warn("[threads] %llu (handle 0x%x, prio %u) %s%s%s pc %s+0x%llx (last core %u, run %llu)",
+    log_warn("[threads] %llu (handle 0x%x, prio %u) %s%s%s pc %s+0x%llx (last core %u, ideal %u, mask 0x%llx, run %llu)",
              (unsigned long long)th->thread_id, th->handle, th->thread.priority, k_state[th->state],
              th->on_core ? " on core" : "", th->held ? " held" : "", module, (unsigned long long)offset, th->last_core,
-             (unsigned long long)th->last_run);
+             th->thread.preferred_core, (unsigned long long)th->core_mask, (unsigned long long)th->last_run);
     if (th->state == THREAD_STATE_WAITING) {
       uint32_t word = 0;
       (void)vmm_read32(emulator->vmm, th->wait_address, &word);
@@ -1673,6 +1673,12 @@ void emulator_set_rtc(Emulator* emulator, int64_t unix_seconds) {
   if (!emulator) return;
   emulator->rtc = unix_seconds;
   if (!emulator->program_loaded) emulator->time.rtc_at_boot = unix_seconds;
+}
+
+void emulator_set_utc_offset(Emulator* emulator, int32_t seconds_east) {
+  if (!emulator) return;
+  emulator->utc_offset = seconds_east;
+  if (!emulator->program_loaded) emulator->time.utc_offset = seconds_east;
 }
 
 void emulator_set_debug_output(Emulator* emulator, HLE_Debug_Output_Fn fn, void* userdata) {

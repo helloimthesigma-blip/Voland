@@ -1,6 +1,6 @@
 /**
  * time service: clocks over virtual time, the clock shared memory, and a
- * UTC-only time zone service. See time.h.
+ * time zone service with one fixed-offset location. See time.h.
  */
 #include "hle/services/time/time.h"
 
@@ -18,6 +18,7 @@
 #define TIME_RULE_BYTES 0x4000u
 #define TIME_RULE_VERSION_BYTES 0x10u
 #define TIME_SNAPSHOT_BYTES 0xD0u
+#define TIME_INFO_UTC_OFFSET 0x14u     /* in CalendarAdditionalInfo */
 #define TIME_SHMEM_COPY_OFFSET 0x8u        /* the two copies after the u32 counter, 8-aligned */
 #define TIME_SHMEM_BOOL_COPY_OFFSET 0x4u   /* a bool's copies right after the counter */
 #define TIME_ADJUSTMENT_BYTES 0x38u
@@ -87,9 +88,11 @@ Time_Calendar time_to_calendar(int64_t posix_seconds) {
   return out;
 }
 
-/* CalendarTime (8 bytes) + CalendarAdditionalInfo (0x18) for UTC. */
-static void encode_calendar(uint8_t out[TIME_CALENDAR_BYTES + TIME_ADDITIONAL_INFO_BYTES], int64_t posix) {
-  const Time_Calendar cal = time_to_calendar(posix);
+/* CalendarTime (8 bytes) + CalendarAdditionalInfo (0x18: weekday,
+ * yearday, zone name[8], is_dst, seconds east of UTC) at utc_offset. */
+static void encode_calendar(uint8_t out[TIME_CALENDAR_BYTES + TIME_ADDITIONAL_INFO_BYTES], int64_t posix,
+                            int32_t utc_offset) {
+  const Time_Calendar cal = time_to_calendar(posix + utc_offset);
   memset(out, 0, TIME_CALENDAR_BYTES + TIME_ADDITIONAL_INFO_BYTES);
   const uint16_t year = (uint16_t)cal.year;
   memcpy(out, &year, sizeof(year));
@@ -102,7 +105,7 @@ static void encode_calendar(uint8_t out[TIME_CALENDAR_BYTES + TIME_ADDITIONAL_IN
   wr32(info, cal.weekday);
   wr32(info + 4, cal.yearday);
   memcpy(info + 8, "UTC", sizeof("UTC"));
-  /* DST 0, offset 0 */
+  wr32(info + TIME_INFO_UTC_OFFSET, (uint32_t)utc_offset); /* DST 0 */
 }
 
 /* ------------------------------------------------------------------ */
@@ -250,7 +253,7 @@ static void build_snapshot(uint8_t out[TIME_SNAPSHOT_BYTES], const Time_State *s
   wr64(out + 0x40, (uint64_t)now);
   wr64(out + 0x48, (uint64_t)now);
   uint8_t cal[TIME_CALENDAR_BYTES + TIME_ADDITIONAL_INFO_BYTES];
-  encode_calendar(cal, now);
+  encode_calendar(cal, now, s->utc_offset);
   memcpy(out + 0x50, cal, TIME_CALENDAR_BYTES);
   memcpy(out + 0x58, cal, TIME_CALENDAR_BYTES);
   memcpy(out + 0x60, cal + TIME_CALENDAR_BYTES, TIME_ADDITIONAL_INFO_BYTES);
@@ -335,7 +338,7 @@ static HLE_ServiceResult cmd_steady_rtc_value(HLE_Context *c, Service_Object *se
 }
 
 /* ------------------------------------------------------------------ */
-/* ITimeZoneService (UTC only).                                        */
+/* ITimeZoneService (one location).                                   */
 /* ------------------------------------------------------------------ */
 
 static HLE_ServiceResult cmd_get_location_name(HLE_Context *c, Service_Object *self, const IPC_Request *req,
@@ -398,14 +401,15 @@ static HLE_ServiceResult cmd_get_rule_version(HLE_Context *c, Service_Object *se
   return HLE_RESULT_SUCCESS;
 }
 
+/* One location exists, so a loaded rule (LoadTimeZoneRule) and "my rule"
+ * are both the device's offset. */
 static HLE_ServiceResult cmd_to_calendar_time(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                               IPC_Response *res) {
   (void)c;
-  (void)self;
   uint64_t posix = 0;
   if (!error_is_ok(ipc_request_read_u64(req, 0, &posix))) return IPC_RESULT_SF_INVALID_IN_HEADER;
   uint8_t out[TIME_CALENDAR_BYTES + TIME_ADDITIONAL_INFO_BYTES];
-  encode_calendar(out, (int64_t)posix);
+  encode_calendar(out, (int64_t)posix, state_of(self)->utc_offset);
   (void)ipc_response_push_bytes(res, out, sizeof(out));
   return HLE_RESULT_SUCCESS;
 }
@@ -413,7 +417,6 @@ static HLE_ServiceResult cmd_to_calendar_time(HLE_Context *c, Service_Object *se
 /* CalendarTime in the raw data -> one posix time in the output buffer. */
 static HLE_ServiceResult cmd_to_posix_time(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                            IPC_Response *res) {
-  (void)self;
   uint8_t cal[TIME_CALENDAR_BYTES];
   if (!error_is_ok(ipc_request_read_bytes(req, 0, cal, sizeof(cal)))) return IPC_RESULT_SF_INVALID_IN_HEADER;
   uint16_t year = 0;
@@ -421,7 +424,7 @@ static HLE_ServiceResult cmd_to_posix_time(HLE_Context *c, Service_Object *self,
   if (cal[2] < 1 || cal[2] > 12 || cal[3] < 1 || cal[3] > 31 || cal[4] > 23 || cal[5] > 59 || cal[6] > 60) {
     return TIME_RESULT_OUT_OF_RANGE;
   }
-  const int64_t posix = time_from_calendar(year, cal[2], cal[3], cal[4], cal[5], cal[6]);
+  const int64_t posix = time_from_calendar(year, cal[2], cal[3], cal[4], cal[5], cal[6]) - state_of(self)->utc_offset;
   const uint32_t count = service_write_out(c, req, 0, &posix, sizeof(posix)) ? 1u : 0u;
   (void)ipc_response_push_u32(res, count);
   return HLE_RESULT_SUCCESS;
@@ -482,10 +485,11 @@ static const Service_Command k_time_zone_commands[] = {
     {202, cmd_to_posix_time, "ToPosixTimeWithMyRule"},
 };
 
-void time_init(Time_State *state, Shared_Memory_Pool *pool, int64_t rtc_at_boot) {
+void time_init(Time_State *state, Shared_Memory_Pool *pool, int64_t rtc_at_boot, int32_t utc_offset) {
   memset(state, 0, sizeof(*state));
   state->pool = pool;
   state->rtc_at_boot = rtc_at_boot;
+  state->utc_offset = utc_offset;
   state->interface = SERVICE_INTERFACE("time:u", k_time_commands, 0x1000, state);
   state->system_clock = SERVICE_INTERFACE("ISystemClock", k_system_clock_commands, 0, state);
   state->steady_clock = SERVICE_INTERFACE("ISteadyClock", k_steady_clock_commands, 0, state);

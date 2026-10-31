@@ -132,6 +132,7 @@ const readModFile: ModFileReadHook = (id, offset, destination, size) => {
 };
 
 const NCA_PROGRAM_ID_OFFSET = 0x210;
+const SECONDS_PER_MINUTE = 60;
 
 /** A decrypted NCA's program id (header field 0x210) as 16 hex digits;
  * null for anything else (NRO homebrew has no mods). */
@@ -1143,6 +1144,7 @@ function loadGame(file: File): CPUToMainMessage {
   chunksSeen.clear();
   const loadingCore = core;
   loadingCore._emulator_set_rtc_ffi(BigInt(Math.floor(Date.now() / 1000)));
+  loadingCore._emulator_set_utc_offset_ffi(-new Date().getTimezoneOffset() * SECONDS_PER_MINUTE);
   loadingCore._emulator_set_frame_skip_ffi(frameSkip);
   loadingCore._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
   loadingCore._emulator_set_gpu_compression_ffi(gpuCompression);

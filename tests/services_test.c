@@ -516,6 +516,23 @@ static void test_time(void) {
   r = call(zone, 101, &stamp, sizeof(stamp), NULL);
   CHECK(test_le32(r.data) == (2026u | (1u << 16) | (1u << 24)) && r.data[4] == 13 && r.data[5] == 1 && r.data[6] == 1);
 
+  /* A device location west of UTC (UTC-5): the same instant is 08:01:01
+   * local, the additional info carries the offset, and ToPosixTime maps
+   * the local calendar back to the instant. */
+  const int32_t k_west = -5 * 3600;
+  g_emu.time.utc_offset = k_west;
+  r = call(zone, 101, &stamp, sizeof(stamp), NULL);
+  CHECK(r.data[3] == 1 && r.data[4] == 8 && r.data[5] == 1 && r.data[6] == 1);
+  CHECK((int32_t)test_le32(r.data + 8 + 0x14) == k_west);
+  const uint8_t local[8] = {0xEA, 0x07, 1, 1, 8, 1, 1, 0}; /* 2026-01-01 08:01:01 */
+  Test_Ipc_Message pc;
+  memset(&pc, 0, sizeof(pc));
+  pc.receive_list[0] = (Test_Ipc_Buffer){SCRATCH(0x9000), 8, 0};
+  pc.receive_list_count = 1;
+  r = call(zone, 202, local, sizeof(local), &pc);
+  CHECK(test_le32(r.data) == 1 && rd64(SCRATCH(0x9000)) == stamp);
+  g_emu.time.utc_offset = 0;
+
   /* The clock shared memory, mapped read-only: the context offset is the RTC. */
   r = call(time, 20, NULL, 0, NULL);
   CHECK(r.copy_count == 1);

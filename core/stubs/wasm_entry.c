@@ -71,6 +71,7 @@ EXPORT uint64_t emulator_render_stats_ffi(void);
 EXPORT void emulator_set_program_path_ffi(uint64_t path);
 EXPORT void emulator_setenv_ffi(uint64_t name, uint64_t value);
 EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
+EXPORT void emulator_set_utc_offset_ffi(int32_t seconds_east);
 EXPORT void emulator_set_frame_skip_ffi(uint32_t frames);
 EXPORT void emulator_set_gpu_mode_ffi(uint32_t on);
 EXPORT void emulator_set_gpu_compression_ffi(uint32_t mask);
@@ -531,6 +532,12 @@ EXPORT void emulator_setenv_ffi(uint64_t name, uint64_t value)
 EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds)
 {
   if (g_initialised) emulator_set_rtc(&g_emulator, unix_seconds);
+}
+
+/* The host's time zone for the time service's one location. */
+EXPORT void emulator_set_utc_offset_ffi(int32_t seconds_east)
+{
+  if (g_initialised) emulator_set_utc_offset(&g_emulator, seconds_east);
 }
 
 /* Frame skip (a user speed setting; emulator_set_frame_skip). */
