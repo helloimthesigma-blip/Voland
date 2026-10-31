@@ -370,13 +370,20 @@ thread waits.
 
 `emulator_set_free_placement` (web `?placement=free`, CLI
 `--free-placement`; `FREE_PLACEMENT_TITLES` in `cpu.worker.ts` for a
-per-title default, empty for now) lets any host core run any thread. Affinity
+per-title default: Hollow Knight) lets any host core run any thread. Affinity
 is still reported: GetCurrentProcessorNumber answers the guest core that
 the thread's mask and the host core it runs on give, as without it. But
 it is not enforced, so threads pinned to one guest core may run at once.
 That is not the Switch's rule. It is for titles that pile their threads
 onto one guest core, which a host core cannot carry at the Switch's
 speed.
+
+Hollow Knight is that case (2026-10-30). Most of its threads are pinned to
+core 1, including a priority-29 DSP thread. With affinity enforced
+(c6c0d2a), host core 1 falls behind on a loaded machine and the
+lower-priority threads there, one of them holding a lock main needs,
+starve: no frame after ~50 s, while cores 0 and 2 sit ~90% idle. Free
+placement reaches the title at 22-29 fps with no errors.
 
 Tears of the Kingdom, native interpreter, three cores, 300k slices
 (2026-10-24):

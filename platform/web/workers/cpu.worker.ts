@@ -433,11 +433,14 @@ function applyPinning(target: SwitchCoreExports): void {
   if (pinned) log("info", "pinned cores: each guest thread only on its ideal core's host core");
 }
 /** Titles whose guest threads may run on any host core by default (free
- * placement, docs/PARALLEL.md "Free placement"). None: with affinity
- * enforced the per-core pick keeps a guest core's threads in priority
- * order, which Tears of the Kingdom's loader needs; free placement would
- * let them run at once again (?placement=free to try it). */
-const FREE_PLACEMENT_TITLES: ReadonlySet<string> = new Set();
+ * placement, docs/PARALLEL.md "Free placement"). Most titles keep affinity:
+ * the per-core pick keeps a guest core's threads in priority order, which
+ * Tears of the Kingdom's loader needs (?placement=free|strict overrides).
+ * Hollow Knight pins most of its threads to core 1, a priority-29 DSP
+ * thread among them; on one host core that core falls behind and its
+ * lower priorities starve (stall ~50 s in), while free placement reaches
+ * the title at 22 fps. */
+const FREE_PLACEMENT_TITLES: ReadonlySet<string> = new Set(["0100633007D48000"]);
 /** ?placement=free|strict (set-free-placement); null = the title's default. */
 let requestedFreePlacement: boolean | null = null;
 
