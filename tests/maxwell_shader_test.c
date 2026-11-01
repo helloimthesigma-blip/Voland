@@ -60,6 +60,11 @@ static uint64_t ISETP_C(uint32_t pd, uint32_t a, uint32_t slot, uint32_t off, ui
 static uint64_t FSETP_R(uint32_t pd, uint32_t a, uint32_t b, uint32_t cond) {
   return op_top(0x5bb0) | GUARD | ((uint64_t)cond << 48) | (PT << 39) | rb(b) | ra(a) | ((uint64_t)pd << 3) | PT;
 }
+/* PSET Rd = bop2(bop1(Pa, Pb), Pc) ? (bf ? 1.0 : ~0) : 0; bop 0 = AND, 1 = OR. */
+static uint64_t PSET(uint32_t d, uint32_t pa, uint32_t pb, uint32_t pc, uint32_t bop1, uint32_t bop2, bool bf) {
+  return op_top(0x5088) | GUARD | ((uint64_t)bop2 << 45) | ((uint64_t)bf << 44) | ((uint64_t)pc << 39) |
+         ((uint64_t)pb << 29) | ((uint64_t)bop1 << 24) | ((uint64_t)pa << 12) | rd(d);
+}
 static uint64_t SEL_R(uint32_t d, uint32_t a, uint32_t b, uint32_t p) { return op_top(0x5ca0) | GUARD | ((uint64_t)p << 39) | rb(b) | ra(a) | rd(d); }
 static uint64_t BRA(int32_t off, uint32_t p, bool negate) {
   return op_top(0xe240) | ((uint64_t)p << 16) | ((uint64_t)negate << 19) | branch(off) | 0xfull;
@@ -287,6 +292,30 @@ static void test_attributes_and_select(void) {
   for (uint32_t c = 0; c < 4u; c++) CHECK(as_f(g_thread.attr_out[SM_ATTR_POSITION / 4u + c][0]) == in[c], "ALD/AST copy %u", c);
   CHECK(as_f(g_thread.attr_out[SM_ATTR_GENERIC / 4u + 4u][0]) == 3.0f, "SEL picked min %f",
         as_f(g_thread.attr_out[SM_ATTR_GENERIC / 4u + 4u][0]));
+}
+
+static void test_pset(void) {
+  Builder b;
+  begin(&b, SM_STAGE_VERTEX);
+  emit(&b, ALD(0, SM_ATTR_GENERIC, 2));
+  emit(&b, FSETP_R(1, 0, 1, 1));                           /* P1 = x < y (true) */
+  emit(&b, FSETP_R(2, 1, 0, 1));                           /* P2 = y < x (false) */
+  emit(&b, PSET(4, 1, (uint32_t)PT, (uint32_t)PT, 0, 0, false)); /* P1: ~0 */
+  emit(&b, PSET(5, 2, (uint32_t)PT, (uint32_t)PT, 0, 0, false)); /* P2: 0 */
+  emit(&b, PSET(6, 1, 2, (uint32_t)PT, 0, 0, true));       /* P1 && P2: 0 */
+  emit(&b, PSET(7, 1, 2, (uint32_t)PT, 1, 0, true));       /* P1 || P2: 1.0 */
+  emit(&b, AST(4, SM_ATTR_GENERIC + 16u, 4));
+  emit(&b, EXIT());
+  load(&b);
+  sm_thread_reset(&g_thread, 1);
+  const float in[2] = {1.0f, 2.0f};
+  for (uint32_t c = 0; c < 2u; c++) memcpy(&g_thread.attr_in[SM_ATTR_GENERIC / 4u + c][0], &in[c], 4);
+  CHECK(run(), "PSET program runs");
+  const uint32_t *out = &g_thread.attr_out[SM_ATTR_GENERIC / 4u + 4u][0];
+  CHECK(g_thread.attr_out[SM_ATTR_GENERIC / 4u + 4u][0] == 0xffffffffu, "PSET true %08x", out[0]);
+  CHECK(g_thread.attr_out[SM_ATTR_GENERIC / 4u + 5u][0] == 0u, "PSET false");
+  CHECK(g_thread.attr_out[SM_ATTR_GENERIC / 4u + 6u][0] == 0u, "PSET AND");
+  CHECK(as_f(g_thread.attr_out[SM_ATTR_GENERIC / 4u + 7u][0]) == 1.0f, "PSET OR .BF");
 }
 
 static void test_pixel_ops(void) {
@@ -799,6 +828,7 @@ int main(void) {
   test_branches();
   test_loop();
   test_attributes_and_select();
+  test_pset();
   test_pixel_ops();
   test_kill_and_header();
   test_extent();

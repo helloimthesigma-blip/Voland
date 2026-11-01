@@ -103,7 +103,7 @@ static const Op_Pattern k_patterns[] = {
     {0xfff8, 0x5ca0, SM_OP_SEL, R, 0}, {0xfff8, 0x4ca0, SM_OP_SEL, C, 0}, {0xfef8, 0x38a0, SM_OP_SEL, I, 0},
     {0xfff8, 0x5c98, SM_OP_MOV, R, 0}, {0xfff8, 0x4c98, SM_OP_MOV, C, 0}, {0xfef8, 0x3898, SM_OP_MOV, I, 0},
     {0xfff0, 0x0100, SM_OP_MOV32I, L, 0},
-    {0xfff8, 0x5090, SM_OP_PSETP, R, 0},
+    {0xfff8, 0x5090, SM_OP_PSETP, R, 0}, {0xfff8, 0x5088, SM_OP_PSET, R, 0},
     {0xfff8, 0x5ce8, SM_OP_P2R, R, 0}, {0xfff8, 0x4ce8, SM_OP_P2R, C, 0}, {0xfef8, 0x38e8, SM_OP_P2R, I, 0},
     {0xfff8, 0x5cf0, SM_OP_R2P, R, 0}, {0xfff8, 0x4cf0, SM_OP_R2P, C, 0}, {0xfef8, 0x38f0, SM_OP_R2P, I, 0},
     {0xfff8, 0x50a0, SM_OP_CSETP, R, 0},
@@ -124,6 +124,7 @@ static const Op_Pattern k_patterns[] = {
     {0xfff8, 0xfbe0, SM_OP_OUT, R, 0}, {0xfef8, 0xf6e0, SM_OP_OUT, I, 0}, {0xfff8, 0xebe0, SM_OP_OUT, C, 0},
     /* texture */
     {0xfff8, 0xdf48, SM_OP_TXQ, R, 0}, {0xfff8, 0xdf58, SM_OP_TMML, R, 0},
+    {0xfff8, 0xdf60, SM_OP_TMML, R, 0}, /* TMML.B: bindless; the query reads 0 either way */
     {0xffc0, 0xdf00, SM_OP_TLD4S, R, 0},
     {0xfe00, 0xd800, SM_OP_TEXS, R, 0}, {0xfe00, 0xda00, SM_OP_TLDS, R, 0},
     {0xfe00, 0xd000, SM_OP_TEXS, R, 0}, {0xfe00, 0xd200, SM_OP_TLDS, R, 0}, /* bit 59 clear: half results */
@@ -154,7 +155,7 @@ static const char *const k_names[SM_OP_COUNT] = {
     [SM_OP_IMUL] = "IMUL", [SM_OP_IMUL32I] = "IMUL32I", [SM_OP_IMAD] = "IMAD", [SM_OP_XMAD] = "XMAD",
     [SM_OP_LOP] = "LOP", [SM_OP_LOP32I] = "LOP32I", [SM_OP_LOP3] = "LOP3", [SM_OP_SHL] = "SHL", [SM_OP_SHR] = "SHR",
     [SM_OP_BFE] = "BFE", [SM_OP_BFI] = "BFI", [SM_OP_POPC] = "POPC", [SM_OP_FLO] = "FLO", [SM_OP_PRMT] = "PRMT",
-    [SM_OP_SEL] = "SEL", [SM_OP_MOV] = "MOV", [SM_OP_MOV32I] = "MOV32I", [SM_OP_PSETP] = "PSETP",
+    [SM_OP_SEL] = "SEL", [SM_OP_MOV] = "MOV", [SM_OP_MOV32I] = "MOV32I", [SM_OP_PSETP] = "PSETP", [SM_OP_PSET] = "PSET",
     [SM_OP_P2R] = "P2R", [SM_OP_R2P] = "R2P", [SM_OP_CSETP] = "CSETP", [SM_OP_S2R] = "S2R", [SM_OP_CS2R] = "CS2R",
     [SM_OP_VOTE] = "VOTE", [SM_OP_SHFL] = "SHFL", [SM_OP_BARRIER] = "BAR", [SM_OP_ALD] = "ALD", [SM_OP_AST] = "AST",
     [SM_OP_IPA] = "IPA", [SM_OP_LDC] = "LDC", [SM_OP_LD] = "LD", [SM_OP_ST] = "ST", [SM_OP_LDG] = "LDG",
@@ -2202,6 +2203,19 @@ static void execute(const Sm_Insn *in, const Sm_Env *env, Sm_Thread *t, Sm_Mask 
     }
     set_pred(t, BITS(w, 3, 3), m, p0);
     set_pred(t, BITS(w, 0, 3), m, p1);
+    return;
+  }
+  case SM_OP_PSET: { /* Rd = bop2(bop1(Pa, Pb), Pc) ? (.BF ? 1.0 : ~0) : 0 */
+    const Sm_Mask pa = pred_mask(t, BITS(w, 12, 3), BIT(w, 15));
+    const Sm_Mask pb = pred_mask(t, BITS(w, 29, 3), BIT(w, 32));
+    const Sm_Mask pc = pred_mask(t, BITS(w, 39, 3), BIT(w, 42));
+    const uint32_t bop1 = BITS(w, 24, 2), bop2 = BITS(w, 45, 2);
+    const uint32_t true_value = BIT(w, 44) ? u32f(1.0f) : 0xffffffffu;
+    uint32_t *d = dst_row(t, REG_D(w));
+    FOR_LANES(m) {
+      const bool ab = bool_op(bop1, LANE(pa, l) != 0, LANE(pb, l) != 0);
+      d[l] = bool_op(bop2, ab, LANE(pc, l) != 0) ? true_value : 0u;
+    }
     return;
   }
   case SM_OP_P2R: {

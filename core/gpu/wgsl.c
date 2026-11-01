@@ -1707,6 +1707,11 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
     EMIT("} ");
     return;
   }
+  case SM_OP_PSET:
+    EMIT("%s = select(0u, 0x%xu, bop(%uu, bop(%uu, %s, %s), %s)); ", reg_dst(t, REG_D(w)).s,
+         BIT(w, 44) ? F32_ONE : 0xffffffffu, BITS(w, 45, 2), BITS(w, 24, 2), pred(BITS(w, 12, 3), BIT(w, 15)).s,
+         pred(BITS(w, 29, 3), BIT(w, 32)).s, pred(BITS(w, 39, 3), BIT(w, 42)).s);
+    return;
   case SM_OP_P2R: {
     const uint32_t shift = BITS(w, 41, 2) * 8u;
     EMIT("{ var bits = 0u; ");

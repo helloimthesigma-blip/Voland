@@ -66,6 +66,10 @@ static uint64_t ISETP_C(uint32_t pd, uint32_t a, uint32_t slot, uint32_t off, ui
 static uint64_t FSETP_R(uint32_t pd, uint32_t a, uint32_t b, uint32_t cond) {
   return op_top(0x5bb0) | GUARD | ((uint64_t)cond << 48) | (PT << 39) | rb(b) | ra(a) | ((uint64_t)pd << 3) | PT;
 }
+static uint64_t PSET(uint32_t d, uint32_t pa, uint32_t pb, uint32_t pc, uint32_t bop1, uint32_t bop2, bool bf) {
+  return op_top(0x5088) | GUARD | ((uint64_t)bop2 << 45) | ((uint64_t)bf << 44) | ((uint64_t)pc << 39) |
+         ((uint64_t)pb << 29) | ((uint64_t)bop1 << 24) | ((uint64_t)pa << 12) | rd(d);
+}
 static uint64_t SEL_R(uint32_t d, uint32_t a, uint32_t b, uint32_t p) { return op_top(0x5ca0) | GUARD | ((uint64_t)p << 39) | rb(b) | ra(a) | rd(d); }
 static uint64_t BRA(int32_t off, uint32_t p, bool negate) {
   return op_top(0xe240) | ((uint64_t)p << 16) | ((uint64_t)negate << 19) | branch(off) | 0xfull;
@@ -452,6 +456,23 @@ static void vector_select_texture(void) {
   finish(&b, "texture", true);
 }
 
+/* PSET: predicates to registers (all-ones / 1.0 / 0). */
+static void vector_pset(void) {
+  Builder b;
+  begin(&b);
+  put_varying(0, 1.0f, 2.0f, 0.0f, 0.0f);
+  emit(&b, IPA(4, SM_ATTR_GENERIC, 0, (uint32_t)RZ));
+  emit(&b, IPA(5, SM_ATTR_GENERIC + 4u, 0, (uint32_t)RZ));
+  emit(&b, FSETP_R(1, 4, 5, 1));                                  /* p1 = 1 < 2 */
+  emit(&b, FSETP_R(2, 5, 4, 1));                                  /* p2 = 2 < 1 */
+  emit(&b, PSET(0, 1, (uint32_t)PT, (uint32_t)PT, 0, 0, false));  /* ~0 */
+  emit(&b, PSET(1, 1, 2, (uint32_t)PT, 0, 0, true));              /* 0 */
+  emit(&b, PSET(2, 1, 2, (uint32_t)PT, 1, 0, true));              /* 1.0 */
+  emit(&b, PSET(3, 2, (uint32_t)PT, (uint32_t)PT, 0, 0, false));  /* 0 */
+  emit(&b, EXIT());
+  finish(&b, "pset", false);
+}
+
 /* TEXS writing packed halves: (r, g) in r0 and (b, a) in r2. */
 static void vector_texture_half(void) {
   Builder b;
@@ -759,6 +780,7 @@ int main(int argc, char **argv) {
   vector_branches();
   vector_select_texture();
   vector_texture_half();
+  vector_pset();
   vector_texture_3d();
   vector_texture_hw();
   vector_texture_lod();
