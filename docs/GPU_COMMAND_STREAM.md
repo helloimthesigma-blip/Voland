@@ -186,6 +186,11 @@ SET_POLY_OFFSET_FILL is on, all 0 otherwise. The consumer passes them as
 the pipeline's `depthBias`, `depthBiasSlopeScale` and `depthBiasClamp`.
 Shadow passes rely on them: without the offset, Animal Crossing's lit
 surfaces compare against themselves in the shadow map and speckle.
+The WebGPU consumer rounds the slope factor to 4 significant bits
+(within 1/32) first: the offset is pipeline state, and TOTK derives its
+shadow passes' slope from the camera, so exact values built a new pipeline
+every few frames (1519 pipelines after ten minutes; 354 rounded). The
+stream itself carries the exact value.
 
 ### Vertex pulling (version 5)
 

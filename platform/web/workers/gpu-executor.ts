@@ -23,7 +23,7 @@
  * in the encoder) before the next draw samples a texture written since.
  */
 
-import { type CacheContents, type PipelineSpec, type ShaderCacheStore, specKey, wgslHash } from "./shader-cache";
+import { type CacheContents, type PipelineSpec, type ShaderCacheStore, roundBiasSlope, specKey, wgslHash } from "./shader-cache";
 import {
   BIND_DATA,
   BIND_FILTERED,
@@ -1041,7 +1041,7 @@ export class GpuExecutor {
           readMask: d.stencilReadMask, writeMask: d.stencilWriteMask,
         } : null,
         ...(d.depthBias || d.depthBiasSlope || d.depthBiasClamp
-          ? { bias: [d.depthBias, d.depthBiasSlope, d.depthBiasClamp] } : {}),
+          ? { bias: [d.depthBias, roundBiasSlope(d.depthBiasSlope), d.depthBiasClamp] } : {}),
       } : null,
     };
   }

@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { type PipelineSpec, SHADER_CACHE_VERSION, parseCache, serializeCache, specKey, wgslHash } from "../../workers/shader-cache.ts";
+import { type PipelineSpec, SHADER_CACHE_VERSION, parseCache, roundBiasSlope, serializeCache, specKey, wgslHash } from "../../workers/shader-cache.ts";
 
 const SPEC: PipelineSpec = {
   wgsl: wgslHash("@fragment fn fs() {}"),
@@ -36,4 +36,18 @@ test("damaged, other-version and orphaned entries are dropped", () => {
   /* A pipeline whose shader is not stored cannot be built: dropped. */
   const orphan = parseCache(JSON.stringify({ version: SHADER_CACHE_VERSION, shaders: {}, pipelines: [SPEC] }));
   assert.equal(orphan.pipelines.length, 0);
+});
+
+test("slope-scaled depth bias keeps 4 significant bits, so drifting values share pipelines", () => {
+  assert.equal(roundBiasSlope(0), 0);
+  assert.equal(roundBiasSlope(-0.5), -0.5);
+  assert.equal(roundBiasSlope(2), 2);
+  /* TOTK's camera-driven slopes: the result stays within 1/32. */
+  for (const v of [-0.211111113, -0.511111081, -0.40746069, -0.707460701, 1.37, 1e-5]) {
+    assert.ok(Math.abs(roundBiasSlope(v) - v) <= Math.abs(v) / 32);
+  }
+  /* A sweep of 1000 values in one octave lands on at most 2^4 + 1 keys. */
+  const keys = new Set<number>();
+  for (let i = 0; i < 1000; i++) keys.add(roundBiasSlope(-(0.5 + i / 2000)));
+  assert.ok(keys.size <= 17);
 });

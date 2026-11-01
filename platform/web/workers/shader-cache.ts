@@ -81,6 +81,21 @@ export interface PipelineSpec {
   readonly depth: DepthSpec | null;
 }
 
+/* Significant bits kept of a draw's slope-scaled depth bias. The bias is
+ * pipeline state, and a game that derives it from the camera (TOTK's
+ * shadow cascades) sets a new value every few frames: unrounded, each one
+ * built another pipeline (over 1500 after ten minutes, ~2.7 GB in the GPU
+ * process). 4 bits: within 1/32 of the value, a few dozen distinct ones.
+ * The constant part (depthBias) is an integer already. */
+const DEPTH_BIAS_SLOPE_BITS = 4;
+
+/** `v` rounded to DEPTH_BIAS_SLOPE_BITS significant bits. Pure. */
+export function roundBiasSlope(v: number): number {
+  if (v === 0 || !Number.isFinite(v)) return v;
+  const step = 2 ** (Math.floor(Math.log2(Math.abs(v))) - DEPTH_BIAS_SLOPE_BITS);
+  return Math.round(v / step) * step;
+}
+
 /** The in-memory and on-disk identity of a spec. Pure. */
 export function specKey(spec: PipelineSpec): string {
   return JSON.stringify(spec);
