@@ -19,7 +19,9 @@ static HLE_ServiceResult cmd_register_client(HLE_Context *c, Service_Object *sel
   (void)c;
   (void)self;
   (void)req;
-  (void)ipc_response_push_u64(res, BSD_CLIENT_PID);
+  /* The output is an errno, not a pid: nn::socket::Initialize aborts on
+   * anything but 0 (Super Mario Odyssey's network task did with 0x51). */
+  (void)ipc_response_push_u32(res, BSD_ERRNO_NONE);
   return HLE_RESULT_SUCCESS;
 }
 

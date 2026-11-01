@@ -239,6 +239,10 @@ foreach(unit block_linear_test ramfs_test gpu_channel_test maxwell_shader_test r
 endforeach()
 
 # hid + shared memory (§12, §18) over real IPC and SVCs.
+add_executable(network_test network_test.c)
+target_link_libraries(network_test PRIVATE switch_core ipc_fixtures loader_fixtures)
+add_test(NAME network_test COMMAND network_test)
+
 add_executable(hid_test hid_test.c)
 target_link_libraries(hid_test PRIVATE switch_core ipc_fixtures loader_fixtures)
 add_test(NAME hid_test COMMAND hid_test)

@@ -7,7 +7,7 @@
  * anywhere (CLAUDE.md rule 9) - real multiplayer transport is §20's
  * LDN-over-WebRTC, a separate path.
  *
- *   bsd: 0 RegisterClient (-> pid), 1 StartMonitoring, 2-31 socket calls
+ *   bsd: 0 RegisterClient (-> errno 0), 1 StartMonitoring, 2-31 socket calls
  *        -> {ret -1, errno ENETDOWN} (Close -> 0).
  *   nifm: 4/5 CreateGeneralService(Old) -> IGeneralService: 1 GetClientId,
  *        4 CreateRequest -> IRequest (state Free, result NotConnected),
@@ -27,7 +27,7 @@
 #define NIFM_MODULE 110u
 #define NIFM_RESULT_NOT_CONNECTED ((300u << 9) | NIFM_MODULE)
 #define BSD_ENETDOWN 50
-#define BSD_CLIENT_PID 0x51u
+#define BSD_ERRNO_NONE 0u
 
 typedef struct Network_State {
   Service_Interface bsd;
