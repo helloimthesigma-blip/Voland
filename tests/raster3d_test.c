@@ -198,6 +198,7 @@ static void build_programs(void) {
 
 /* ---- register state ----------------------------------------------- */
 
+#define REG_SURFACE_CLIP_H_TEST 0x3fdu /* SURFACE_CLIP horizontal, then vertical */
 static uint32_t g_regs[GPU_3D_REGISTER_WORDS];
 static uint32_t g_vs_offset = VS_OFFSET; /* base_state's vertex program */
 static uint64_t g_vertices = VERTICES;   /* base_state's vertex stream */
@@ -435,6 +436,30 @@ static void texture_state_bc1(void) {
   tic[5] = (g_bc1_size - 1u) | (1u << 31); /* height-1, normalized */
   memcpy(g_gpu + (TIC_POOL - GPU_BASE), tic, sizeof(tic));
   for (uint32_t b = 0; b < 4u; b++) memset(g_gpu + (TEXELS - GPU_BASE) + (b / 2u) * 32u + (b % 2u) * 8u, (int)(b + 1u), 8);
+}
+
+/* SET_VIEWPORT_SCALE_OFFSET disabled (Super Mario Odyssey's scene passes):
+ * clip-space positions map onto the surface clip rectangle, +y up, and
+ * the viewport registers are ignored. */
+static void test_viewport_disabled(Raster3d *r) {
+  base_state(RT, false, PS_OFFSET);
+  g_regs[0x64b] = 0;
+  const float unused_scale = 1.0f, unused_offset = 0.0f; /* would draw a speck at the origin */
+  for (uint32_t c = 0; c < 2u; c++) {
+    memcpy(&g_regs[0x280 + c], &unused_scale, 4);
+    memcpy(&g_regs[0x283 + c], &unused_offset, 4);
+  }
+  g_regs[REG_SURFACE_CLIP_H_TEST] = RT_SIZE << 16;
+  g_regs[REG_SURFACE_CLIP_H_TEST + 1u] = RT_SIZE << 16;
+  raster3d_begin_submission(r);
+  clear_to(r, 0.0f, 0.0f, 1.0f, 1.0f);
+  vertex(0, -1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(1, 1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(2, -1.0f, 1.0f, 1, 0, 0, 1);
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  CHECK(rgba_is(pixel(RT, false, 10, 53), 255, 0, 0, 255), "viewport disabled: the triangle fills the surface clip, +y up");
+  CHECK(rgba_is(pixel(RT, false, 53, 10), 0, 0, 255, 255), "viewport disabled: the opposite corner is the clear colour");
 }
 
 static void test_texture(Raster3d *r) {
@@ -1348,6 +1373,7 @@ int main(void) {
   test_triangle_and_blend(&r, false);
   test_triangle_and_blend(&r, true);
   test_viewport_swizzle(&r);
+  test_viewport_disabled(&r);
   test_texture(&r);
   test_render_to_texture(&r);
   test_stencil(&r);

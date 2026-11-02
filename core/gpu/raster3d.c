@@ -2224,7 +2224,25 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
     rs->vp_scale[c] = f32(regs[REG_VIEWPORT + c]);
     rs->vp_offset[c] = f32(regs[REG_VIEWPORT + 3u + c]);
   }
-  rs->viewport_transform = (regs[REG_VIEWPORT_SCALE_OFFSET] & 1u) != 0;
+  rs->viewport_transform = true;
+  if (!(regs[REG_VIEWPORT_SCALE_OFFSET] & 1u)) {
+    /* SET_VIEWPORT_SCALE_OFFSET disabled: the viewport is the surface clip
+     * rectangle, not the viewport registers, and depth is not rescaled.
+     * Positions are still clip space - Super Mario Odyssey's render
+     * target macro disables it for every scene pass. */
+    uint32_t h = regs[REG_SURFACE_CLIP_H], v = regs[REG_SURFACE_CLIP_V];
+    if (!(h >> 16) || !(v >> 16)) { /* no surface clip: the whole target */
+      h = (uint32_t)width << 16;
+      v = (uint32_t)height << 16;
+    }
+    const float half_w = (float)(h >> 16) * 0.5f, half_h = (float)(v >> 16) * 0.5f;
+    rs->vp_scale[0] = half_w;
+    rs->vp_scale[1] = -half_h; /* +y up, as NVN's own viewports (scale y < 0) */
+    rs->vp_scale[2] = 1.0f;
+    rs->vp_offset[0] = (float)(h & 0xffffu) + half_w;
+    rs->vp_offset[1] = (float)(v & 0xffffu) + half_h;
+    rs->vp_offset[2] = 0.0f;
+  }
   rs->viewport_swizzle = regs[REG_VIEWPORT_SWIZZLE];
   rs->lower_left = (regs[REG_WINDOW_ORIGIN] & WINDOW_ORIGIN_LOWER_LEFT) != 0;
   rs->z_zero_to_one = (regs[REG_Z_CLIP_RANGE] & 1u) != 0;
