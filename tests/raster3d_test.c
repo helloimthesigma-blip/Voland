@@ -394,6 +394,7 @@ static void test_viewport_swizzle(Raster3d *r) {
 
 /* A 2x2 A8B8G8R8 pitch texture (32-byte rows): red, green / blue, white;
  * TIC/TSC 0, bound through handle 0 in c[0] of the pixel stage. */
+static uint32_t g_tic_rt_bl_width; /* texture_state: sample RT_BL's target at this width (0: TEXELS) */
 static void texture_state(void) {
   uint32_t tic[8];
   memset(tic, 0, sizeof(tic));
@@ -403,6 +404,13 @@ static void texture_state(void) {
   tic[3] = 32u >> 5;                               /* pitch, in 32-byte units */
   tic[4] = (2u - 1u) | (1u << 23);                 /* width-1, 2D */
   tic[5] = (2u - 1u) | (1u << 31);                 /* height-1, normalized */
+  if (g_tic_rt_bl_width) { /* RT_BL's target, block linear, this wide */
+    tic[1] = (uint32_t)RT_BL & ~0x1ffu;
+    tic[2] = (uint32_t)(RT_BL >> 32) | (3u << 21); /* header version: block linear */
+    tic[3] = 1u << 3;                               /* block height 2 GOBs, as base_state's targets */
+    tic[4] = (g_tic_rt_bl_width - 1u) | (1u << 23);
+    tic[5] = (RT_SIZE - 1u) | (1u << 31);
+  }
   memcpy(g_gpu + (TIC_POOL - GPU_BASE), tic, sizeof(tic));
   const uint32_t rows[2][8] = {{0xff0000ffu, 0xff00ff00u}, {0xffff0000u, 0xffffffffu}};
   memcpy(g_gpu + (TEXELS - GPU_BASE), rows[0], 8);
@@ -803,6 +811,7 @@ typedef struct Seen_Draw {
   /* Stream version 11: render targets re-described over the same bytes. */
   uint32_t reinterprets, reinterpret_src, reinterpret_dst;
   uint32_t texture_writes, last_texture_id, destroyed_id;
+  uint32_t samplers; /* the last draw's hardware samplers (GPU_BIND_SAMPLER) */
 } Seen_Draw;
 #define SEEN_DATA_BYTES (256u * 1024u)
 static uint8_t g_seen_data[SEEN_DATA_BYTES];
@@ -877,11 +886,13 @@ static void stream_drain(Seen_Draw *seen) {
       seen->data_bytes = data.bytes < SEEN_DATA_BYTES ? data.bytes : SEEN_DATA_BYTES;
       memcpy(g_seen_data, rec.payload + sizeof(Gpu_Rec_Draw) + sizeof(data), seen->data_bytes);
       seen->resident_binding = 0;
+      seen->samplers = 0;
       const uint8_t *b = rec.payload + sizeof(Gpu_Rec_Draw) + sizeof(data) + data.bytes;
       for (uint32_t i = 1; i < seen->last.binding_count; i++, b += sizeof(Gpu_Rec_Binding)) {
         Gpu_Rec_Binding other;
         memcpy(&other, b, sizeof(other));
         if (other.kind == GPU_BIND_BUFFER) seen->resident_binding = other.texture_id;
+        if (other.kind == GPU_BIND_SAMPLER) seen->samplers++;
       }
       /* Bindings: the data binding's bytes follow it; vertices come last. */
       const uint32_t vertex_bytes = seen->last.vs_shader_id ? 16u * (1u + seen->last.vertex_input_count) : 0u;
@@ -914,13 +925,14 @@ static bool g_gpu_textured; /* gpu_draw_topology: the texturing pixel program */
 static bool g_bc1_texture;  /* ... sampling texture_state_bc1's texture */
 static uint32_t g_ps_override; /* gpu_draw_topology: this pixel program instead (0: none) */
 static bool g_draw_twice;      /* gpu_draw_topology: the same draw again */
+static bool g_gpu_rt_bl;       /* gpu_draw_topology: into RT_BL (block linear) instead of RT */
 static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_t topology, uint32_t count) {
   static Gpu_Stream stream;
   Seen_Draw seen;
   memset(&seen, 0, sizeof(seen));
   gpu_stream_init(&stream, g_stream_header, (uint8_t *)g_stream_ring, GPU_RING_BYTES, stream_wait, &seen);
   raster3d_set_gpu(r, &stream);
-  base_state(RT, false, g_ps_override ? g_ps_override : g_gpu_textured ? PS_TEX_OFFSET : PS_OFFSET);
+  base_state(g_gpu_rt_bl ? RT_BL : RT, g_gpu_rt_bl, g_ps_override ? g_ps_override : g_gpu_textured ? PS_TEX_OFFSET : PS_OFFSET);
   if (g_gpu_textured) texture_state();
   if (g_bc1_texture) texture_state_bc1();
   g_regs[REG_CULL_ENABLE_TEST] = 1;
@@ -962,6 +974,30 @@ static void test_gpu_reinterpret(Raster3d *r) {
   CHECK(seen.count == 1 && seen.reinterprets == 0 && seen.texture_writes == 1, "reinterpret: 8-byte view loads (%u, %u)",
         seen.reinterprets, seen.texture_writes);
   g_rt_format = 0xD5;
+}
+
+/* GPU mode: a block-linear target sampled narrower than its GOB-padded
+ * GPU texture (Super Mario Odyssey's 2x1 sun colour in a 16-wide target)
+ * is sampled at its own size by the shader's filtering - a hardware
+ * sampler would filter and clamp across the padding. */
+static void test_gpu_padded_target(Raster3d *r) {
+  g_gpu_rt_bl = true;
+  Seen_Draw seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.count == 1, "padded target: drawn");
+  g_gpu_rt_bl = false;
+  g_gpu_textured = true;
+  g_tic_rt_bl_width = RT_SIZE - 4u; /* one GOB (16 texels) short of whole: padded to RT_SIZE */
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  uint32_t size_word;
+  memcpy(&size_word, g_seen_data + 4u * (WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEXP_SIZE), sizeof(size_word));
+  CHECK(seen.count == 1 && size_word == ((RT_SIZE - 4u) | (RT_SIZE << 16)), "padded target: sampled at %ux%u (size word %08x)",
+        RT_SIZE - 4u, RT_SIZE, size_word);
+  CHECK(seen.samplers == 0u, "padded target: no hardware sampler (%u)", seen.samplers);
+  g_tic_rt_bl_width = RT_SIZE; /* the whole target: the hardware sampler */
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.count == 1 && seen.samplers == 1u, "whole target: a hardware sampler (%u)", seen.samplers);
+  g_tic_rt_bl_width = 0;
+  g_gpu_textured = false;
 }
 
 /* GPU mode with BCn sampled by the device: a DXT1 texture is created as
@@ -1383,6 +1419,7 @@ int main(void) {
   test_worker_count_invariance(&r);
   test_gpu_vertex_stage(&r);
   test_gpu_compressed_upload(&r);
+  test_gpu_padded_target(&r);
   test_gpu_reinterpret(&r);
   test_compute(&r);
   test_gpu_compute(&r);

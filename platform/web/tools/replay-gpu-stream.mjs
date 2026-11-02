@@ -299,7 +299,7 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
       }
       if (globalThis.DRAW_TRACE && type === 6 && presents + 1 === globalThis.DRAW_TRACE) {
         /* Diagnostics: each RGBA8 target's channel sums after every draw of one present
-         * (TRACE_TARGET=id: that one target, float formats too, with the draw's targets). */
+         * (TRACE_TARGET=id: that one target, float formats too, with the draw's targets, summed per channel). */
         ex.flush();
         const sums = [];
         const only = globalThis.TRACE_TARGET;
@@ -315,18 +315,21 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
             device.queue.submit([enc.finish()]);
             await buffer.mapAsync(GPUMapMode.READ);
             const dv2 = new DataView(buffer.getMappedRange());
-            let sum = 0;
-            if (isDepth) for (let y = 0; y < t.height; y += 4) for (let x = 0; x < t.width; x += 4) sum += 1 - dv2.getFloat32(y * bytesPerRow + x * 4, true);
+            const sum = [0, 0, 0]; /* per channel (depth: the first) */
             for (let y = 0; y < t.height; y += 4)
               for (let x = 0; x < t.width; x += 4) {
                 const at = y * bytesPerRow + x * texel;
-                if (t.format === "rgba16float") sum += half(dv2.getUint16(at, true)) + half(dv2.getUint16(at + 2, true)) + half(dv2.getUint16(at + 4, true));
-                else if (t.format === "rg11b10ufloat") { const w = dv2.getUint32(at, true); sum += small(w & 2047, 6) + small((w >> 11) & 2047, 6) + small(w >>> 22, 5); }
-                else if (!isDepth) sum += dv2.getUint8(at) + dv2.getUint8(at + 1) + dv2.getUint8(at + 2);
+                let c;
+                if (isDepth) c = [1 - dv2.getFloat32(at, true), 0, 0];
+                else if (t.format === "rgba16float") c = [0, 2, 4].map((k) => half(dv2.getUint16(at + k, true)));
+                else if (t.format === "r16float") c = [half(dv2.getUint16(at, true)), 0, 0];
+                else if (t.format === "rg11b10ufloat") { const w = dv2.getUint32(at, true); c = [small(w & 2047, 6), small((w >> 11) & 2047, 6), small(w >>> 22, 5)]; }
+                else c = [0, 1, 2].map((k) => dv2.getUint8(at + k));
+                for (let k = 0; k < 3; k++) sum[k] += c[k];
               }
             buffer.destroy();
             const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-            console.log(`draw ${records} shader ${dv.getUint32(0, true)} target ${only} ${t.format} sum ${sum.toFixed(2)}`);
+            console.log(`draw ${records} shader ${dv.getUint32(0, true)} target ${only} ${t.format} sum ${sum.map((v) => v.toFixed(1)).join(" ")}`);
           }
         }
         for (const [id, t] of only ? [] : ex.textures) {

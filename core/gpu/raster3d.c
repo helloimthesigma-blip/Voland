@@ -4557,7 +4557,7 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
   if (tsc_pool && mem->read(mem->user, tsc_pool + (uint64_t)tsc_index * TEX_SAMPLER_BYTES, tsc, sizeof(tsc)))
     tex_sampler_parse(tsc, &s);
   uint32_t id = 0, sample_type = WGSL_SAMPLE_FLOAT, gpu_format = 0;
-  bool padded = false; /* a block-compressed image inside a whole-block GPU texture */
+  bool padded = false; /* the image fills only part of its GPU texture (TEXP_SIZE) */
   Raster3d_Gpu_Surface *surf = gpu_surface_at(r, h.address, h.width);
   if (surf && surf->stale) {
     /* Sampled after a CPU / copy-engine write (SSBU copies each movie
@@ -4574,6 +4574,10 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
     bool is_signed = false;
     id = surf->id;
     gpu_format = surf->gpu_format;
+    /* Sampled smaller than it was drawn (Super Mario Odyssey's 2x1 sun
+     * colour in a 16-wide target): a hardware sampler would normalize
+     * the coordinates by the whole target and read past the image. */
+    padded = surf->width != h.width || surf->height != h.height;
     if (gpu_format_is_int(surf->gpu_format, &is_signed)) sample_type = is_signed ? WGSL_SAMPLE_SINT : WGSL_SAMPLE_UINT;
   } else {
     gpu_note_partial_surface(r, &h);
