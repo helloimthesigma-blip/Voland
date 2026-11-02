@@ -204,6 +204,8 @@ static uint32_t g_vs_offset = VS_OFFSET; /* base_state's vertex program */
 static uint64_t g_vertices = VERTICES;   /* base_state's vertex stream */
 static Raster3d_Bindings g_bindings;
 static uint32_t g_rt_format = 0xD5;      /* base_state's RT0 format (A8B8G8R8) */
+static uint32_t g_rt_width = RT_SIZE;    /* base_state's RT0 size */
+static uint32_t g_rt_height = RT_SIZE;
 
 static void base_state(uint64_t rt, bool block_linear, uint32_t ps_offset) {
   memset(g_regs, 0, sizeof(g_regs));
@@ -211,8 +213,8 @@ static void base_state(uint64_t rt, bool block_linear, uint32_t ps_offset) {
   /* RT0 64x64 A8B8G8R8 */
   g_regs[0x200] = (uint32_t)(rt >> 32);
   g_regs[0x201] = (uint32_t)rt;
-  g_regs[0x202] = block_linear ? RT_SIZE : RT_SIZE * 4u;
-  g_regs[0x203] = RT_SIZE;
+  g_regs[0x202] = block_linear ? g_rt_width : g_rt_width * 4u;
+  g_regs[0x203] = g_rt_height;
   g_regs[0x204] = g_rt_format;
   g_regs[0x205] = block_linear ? (1u << 4) : (1u << 12);
   g_regs[0x487] = 1;           /* CT_SELECT: one target, RT0 */
@@ -395,6 +397,8 @@ static void test_viewport_swizzle(Raster3d *r) {
 /* A 2x2 A8B8G8R8 pitch texture (32-byte rows): red, green / blue, white;
  * TIC/TSC 0, bound through handle 0 in c[0] of the pixel stage. */
 static uint32_t g_tic_rt_bl_width; /* texture_state: sample RT_BL's target at this width (0: TEXELS) */
+static uint32_t g_tic_rt_bl_height = RT_SIZE;
+static uint32_t g_tic_rt_bl_depth; /* ... as a 3D texture this deep (0: 2D) */
 static void texture_state(void) {
   uint32_t tic[8];
   memset(tic, 0, sizeof(tic));
@@ -407,9 +411,10 @@ static void texture_state(void) {
   if (g_tic_rt_bl_width) { /* RT_BL's target, block linear, this wide */
     tic[1] = (uint32_t)RT_BL & ~0x1ffu;
     tic[2] = (uint32_t)(RT_BL >> 32) | (3u << 21); /* header version: block linear */
-    tic[3] = 1u << 3;                               /* block height 2 GOBs, as base_state's targets */
-    tic[4] = (g_tic_rt_bl_width - 1u) | (1u << 23);
-    tic[5] = (RT_SIZE - 1u) | (1u << 31);
+    tic[3] = (1u << 3) | (1u << 6);                 /* block height 2 GOBs, as base_state's targets; depth 2 */
+    tic[4] = (g_tic_rt_bl_width - 1u) | ((g_tic_rt_bl_depth ? 2u : 1u) << 23); /* 3D / 2D */
+    tic[5] = (g_tic_rt_bl_height - 1u) | (1u << 31);
+    if (g_tic_rt_bl_depth) tic[5] |= (g_tic_rt_bl_depth - 1u) << 16;
   }
   memcpy(g_gpu + (TIC_POOL - GPU_BASE), tic, sizeof(tic));
   const uint32_t rows[2][8] = {{0xff0000ffu, 0xff00ff00u}, {0xffff0000u, 0xffffffffu}};
@@ -926,13 +931,14 @@ static bool g_bc1_texture;  /* ... sampling texture_state_bc1's texture */
 static uint32_t g_ps_override; /* gpu_draw_topology: this pixel program instead (0: none) */
 static bool g_draw_twice;      /* gpu_draw_topology: the same draw again */
 static bool g_gpu_rt_bl;       /* gpu_draw_topology: into RT_BL (block linear) instead of RT */
+static uint64_t g_gpu_rt_offset; /* ... this far past RT_BL */
 static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_t topology, uint32_t count) {
   static Gpu_Stream stream;
   Seen_Draw seen;
   memset(&seen, 0, sizeof(seen));
   gpu_stream_init(&stream, g_stream_header, (uint8_t *)g_stream_ring, GPU_RING_BYTES, stream_wait, &seen);
   raster3d_set_gpu(r, &stream);
-  base_state(g_gpu_rt_bl ? RT_BL : RT, g_gpu_rt_bl, g_ps_override ? g_ps_override : g_gpu_textured ? PS_TEX_OFFSET : PS_OFFSET);
+  base_state(g_gpu_rt_bl ? RT_BL + g_gpu_rt_offset : RT, g_gpu_rt_bl, g_ps_override ? g_ps_override : g_gpu_textured ? PS_TEX_OFFSET : PS_OFFSET);
   if (g_gpu_textured) texture_state();
   if (g_bc1_texture) texture_state_bc1();
   g_regs[REG_CULL_ENABLE_TEST] = 1;
@@ -997,6 +1003,35 @@ static void test_gpu_padded_target(Raster3d *r) {
   seen = gpu_draw_once(r, FRONT_CW_REG);
   CHECK(seen.count == 1 && seen.samplers == 1u, "whole target: a hardware sampler (%u)", seen.samplers);
   g_tic_rt_bl_width = 0;
+  /* An 8x8x2 volume whose slices are 16x8 targets one block (two GOBs,
+   * 1 KB) apart: gathered into one 16-wide GPU texture, sampled at 8x8
+   * by the shader too (SMO's colour-grading LUT). */
+  g_gpu_textured = false;
+  g_rt_width = 16u;
+  g_rt_height = 8u;
+  g_gpu_rt_bl = true;
+  for (uint32_t k = 0; k < 2u; k++) {
+    g_gpu_rt_offset = k * 1024u;
+    seen = gpu_draw_once(r, FRONT_CW_REG);
+    CHECK(seen.count == 1, "volume slice %u drawn", k);
+  }
+  g_gpu_rt_bl = false;
+  g_gpu_rt_offset = 0;
+  g_rt_width = g_rt_height = RT_SIZE;
+  g_gpu_textured = true;
+  g_tic_rt_bl_width = 8u;
+  g_tic_rt_bl_height = 8u;
+  g_tic_rt_bl_depth = 2u;
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  memcpy(&size_word, g_seen_data + 4u * (WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEXP_SIZE), sizeof(size_word));
+  uint32_t flags;
+  memcpy(&flags, g_seen_data + 4u * (WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEXP_FLAGS), sizeof(flags));
+  CHECK(seen.count == 1 && (flags & WGSL_TEXP_3D) && size_word == (8u | (8u << 16)),
+        "gathered volume: 3D (flags %x), sampled at 8x8 (size word %08x)", flags, size_word);
+  CHECK(seen.samplers == 0u, "gathered volume: no hardware sampler (%u)", seen.samplers);
+  g_tic_rt_bl_width = 0;
+  g_tic_rt_bl_height = RT_SIZE;
+  g_tic_rt_bl_depth = 0;
   g_gpu_textured = false;
 }
 

@@ -4574,10 +4574,6 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
     bool is_signed = false;
     id = surf->id;
     gpu_format = surf->gpu_format;
-    /* Sampled smaller than it was drawn (Super Mario Odyssey's 2x1 sun
-     * colour in a 16-wide target): a hardware sampler would normalize
-     * the coordinates by the whole target and read past the image. */
-    padded = surf->width != h.width || surf->height != h.height;
     if (gpu_format_is_int(surf->gpu_format, &is_signed)) sample_type = is_signed ? WGSL_SAMPLE_SINT : WGSL_SAMPLE_UINT;
   } else {
     gpu_note_partial_surface(r, &h);
@@ -4589,8 +4585,12 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
     if (h.data_type[0] == TEX_DATA_UINT) sample_type = WGSL_SAMPLE_UINT;
     if (h.data_type[0] == TEX_DATA_SINT) sample_type = WGSL_SAMPLE_SINT;
   }
+  /* A target sampled smaller than it was drawn, or slices gathered from
+   * such targets (Super Mario Odyssey's 2x1 sun colour and 8x8x8 grading
+   * LUT, in 16-wide GPU textures): the image fills part of the texture. */
+  if (surf && (surf->width != h.width || surf->height != h.height)) padded = true;
   /* A hardware sampler where it gives the reference's result (not on a
-   * padded texture: it would wrap and clamp at the padding's edge). */
+   * padded texture: it would filter, wrap and clamp across the padding). */
   const bool cube_map = h.type == TEX_TYPE_CUBE || h.type == TEX_TYPE_CUBE_ARRAY;
   if (sample_type == WGSL_SAMPLE_FLOAT && !cube_map && !padded && gpu_format_filterable(gpu_format) &&
       s.wrap[0] <= 2u && s.wrap[1] <= 2u) {
@@ -4620,9 +4620,7 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
   p[WGSL_TEXP_COMPARE] = s.compare_func;
   /* Sampled inside a GOB-padded target or a whole-block compressed
    * texture: the texture's own size. */
-  p[WGSL_TEXP_SIZE] = padded || (surf && (surf->width != h.width || surf->height != h.height))
-                          ? (h.width & 0xffffu) | ((h.height & 0xffffu) << 16)
-                          : 0u;
+  p[WGSL_TEXP_SIZE] = padded ? (h.width & 0xffffu) | ((h.height & 0xffffu) << 16) : 0u;
   /* Level selection (textures with a mip chain only; the shader
    * clamps to the levels the GPU texture has). */
   if (s.mip_filter > TEX_MIP_NONE && s.min_filter == 2u) p[WGSL_TEXP_FLAGS] |= WGSL_TEXP_MIN_LINEAR;
