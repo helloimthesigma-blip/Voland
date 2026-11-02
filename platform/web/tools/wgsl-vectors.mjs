@@ -13,10 +13,17 @@ import { join } from "node:path";
 
 /* core/gpu/wgsl.h */
 const DRAW_TEXTURE_PARAMS = 4;
-const TEX_PARAM_WORDS = 12;
+const TEX_PARAM_WORDS = 13;
 const MAX_TEXTURES = 16;
 const CBUF_TABLE = DRAW_TEXTURE_PARAMS + TEX_PARAM_WORDS * MAX_TEXTURES;
-const CONSTANT_WORDS = CBUF_TABLE + 2 * 18;
+const CBUF_SLOTS = 18;
+const VS_CBUF_TABLE = CBUF_TABLE + 2 * CBUF_SLOTS;
+const VIEWPORT = VS_CBUF_TABLE + 2 * CBUF_SLOTS;
+const VS_INPUTS = VIEWPORT + 10;
+const VS_INSTANCE = VS_INPUTS + 4 * 16;
+const GLOBALS = VS_INSTANCE + 2;
+const PS_GLOBALS = GLOBALS + 4 * 4;
+const CONSTANT_WORDS = PS_GLOBALS + 4 * 4;
 const TEXP_SCALE = 1;
 const TEXP_LINEAR = 2;
 const TEXP_MIN_LINEAR = 16;

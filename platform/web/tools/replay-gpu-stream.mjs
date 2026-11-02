@@ -15,8 +15,8 @@
  * larger than one ArrayBuffer (gameplay runs are gigabytes) replay too.
  *
  * --dump-targets P1,P2,... DIR: after those presents, every RGBA8 and
- * float (rgba16float, rg11b10ufloat, r16float; clamped to [0, 1]) render
- * target as DIR/p<P>-tex<id>-<w>x<h>.pam (RGBA), to compare with
+ * float (rgba16float, rg11b10ufloat, r16float, rgba32float, r32float; clamped to [0, 1]) render
+ * target as DIR/p<P>-tex<id>-<w>x<h>-<format>.pam (RGBA), to compare with
  * VOLAND_DUMP_SURFACES output from a software run (voland-cli).
  *
  * Diagnostics (environment): DRAW_TRACE=P sums the RGBA8 targets after
@@ -159,7 +159,7 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
     return (1 + m / (1 << mbits)) * 2 ** (e - 15);
   };
   const byte = (v) => (Number.isFinite(v) ? Math.max(0, Math.min(255, Math.round(v * 255))) : v > 0 ? 255 : 0);
-  const TEXEL_BYTES = { "rgba8unorm": 4, "rgba8unorm-srgb": 4, "bgra8unorm": 4, "rgb10a2unorm": 4, "rgba16float": 8, "rg11b10ufloat": 4, "r16float": 2 };
+  const TEXEL_BYTES = { "rgba8unorm": 4, "rgba8unorm-srgb": 4, "bgra8unorm": 4, "rgb10a2unorm": 4, "rgba16float": 8, "rg11b10ufloat": 4, "r16float": 2, "rgba32float": 16, "r32float": 4 };
   /* Every RGBA8 and float render target, as it is now. */
   const dumpAll = (index) => {
     for (const [id, t] of ex.textures) {
@@ -182,7 +182,7 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
               const v = byte(Math.min(1, (1 - d) * 20));
               out[o] = out[o + 1] = out[o + 2] = v; out[o + 3] = 255;
             }
-        } else if (texel === 4 && t.format !== "rg11b10ufloat") {
+        } else if (texel === 4 && t.format !== "rg11b10ufloat" && t.format !== "r32float") {
           for (let y = 0; y < t.height; y++) out.set(src.subarray(y * bytesPerRow, y * bytesPerRow + t.width * 4), y * t.width * 4);
         } else {
           const dv = new DataView(src.buffer, src.byteOffset, src.byteLength);
@@ -192,12 +192,14 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
               let c;
               if (t.format === "rgba16float") c = [0, 2, 4, 6].map((k) => half(dv.getUint16(at + k, true)));
               else if (t.format === "r16float") { const v = half(dv.getUint16(at, true)); c = [v, v, v, 1]; }
+              else if (t.format === "rgba32float") c = [0, 4, 8, 12].map((k) => dv.getFloat32(at + k, true));
+              else if (t.format === "r32float") { const v = dv.getFloat32(at, true); c = [v, v, v, 1]; }
               else { const w = dv.getUint32(at, true); c = [small(w & 2047, 6), small((w >> 11) & 2047, 6), small(w >>> 22, 5), 1]; }
               for (let k = 0; k < 4; k++) out[o + k] = byte(c[k]);
             }
         }
         buffer.destroy();
-        return window.saveTarget(`p${index}-tex${id}-${t.width}x${t.height}.pam`, t.width, t.height, toBase64(out));
+        return window.saveTarget(`p${index}-tex${id}-${t.width}x${t.height}-${t.format}.pam`, t.width, t.height, toBase64(out));
       }));
     }
   };
