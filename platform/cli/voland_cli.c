@@ -1209,8 +1209,10 @@ static uint64_t g_gpu_records;
 
 /* VOLAND_STREAM_DRAWS_FROM=N: leave the draws before present N out of the
  * file (everything else is kept), so a late scene's stream stays small.
- * The replay's early frames are then empty; resources and presents stay. */
-static uint64_t g_gpu_presents, g_gpu_draws_from;
+ * The replay's early frames are then empty; resources and presents stay.
+ * VOLAND_STREAM_DRAWS_TO=M: the run stops at present M (a late scene's
+ * draws can be gigabytes a second). */
+static uint64_t g_gpu_presents, g_gpu_draws_from, g_gpu_draws_to;
 
 static void gpu_stream_drain(void) {
   Gpu_Stream_Record rec;
@@ -1644,6 +1646,8 @@ static int run(int argc, char **argv) {
   if (gpu_stream_path) {
     const char *draws_from = getenv("VOLAND_STREAM_DRAWS_FROM");
     if (draws_from) g_gpu_draws_from = strtoull(draws_from, NULL, 0);
+    const char *draws_to = getenv("VOLAND_STREAM_DRAWS_TO");
+    if (draws_to) g_gpu_draws_to = strtoull(draws_to, NULL, 0);
     g_gpu_file = fopen(gpu_stream_path, "wb");
     if (!g_gpu_file) {
       fprintf(stderr, "voland-cli: cannot write %s\n", gpu_stream_path);
@@ -1692,7 +1696,8 @@ static int run(int argc, char **argv) {
     trace_length = (end && *end == ':') ? strtoull(end + 1, NULL, 0) : 1u;
   }
   uint64_t measure_start_ns = 0, measure_ticks = 0, measure_presents = 0;
-  while (slices < max_slices && (status == EMULATOR_RUNNING || status == EMULATOR_IDLE)) {
+  while (slices < max_slices && (status == EMULATOR_RUNNING || status == EMULATOR_IDLE) &&
+         !(g_gpu_draws_to && g_gpu_presents >= g_gpu_draws_to)) {
     if (jit_fallbacks_from && slices == jit_fallbacks_from) jit_set_fallback_profile(true);
 #ifndef _WIN32
     if (snapshot_dir && snapshot_at && slices == snapshot_at) {
