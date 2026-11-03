@@ -1,4 +1,4 @@
-# GPU command stream (version 11)
+# GPU command stream (version 12)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -72,7 +72,7 @@ means none.
 | 10 | BUFFER_DESTROY | id |
 | 11 | BUFFER_WRITE | id, byte offset, bytes, then the bytes |
 | 12 | COMPUTE | `Gpu_Rec_Compute` (shader id, grid x/y/z, binding count), then its bindings |
-| 7 | COPY | source id, destination id, source rect, destination rect, filter, destination layer (version 7) |
+| 7 | COPY | source id, destination id, source rect, destination rect, filter, destination layer (version 7), destination mip level (version 12) |
 | 8 | PRESENT | id, rect, flags (1 flip x, 2 flip y) |
 | 13 | TEXTURE_WRITE_LEVEL | id, mip level, layer, y, width, height (texels, whole blocks), bytes per block row, data bytes; then the block rows (version 8) |
 | 14 | POOL_WRITE | byte offset, bytes, flags (`GPU_POOL_WRAP`), reserved; then the bytes, appended to the pool (version 9) |
@@ -273,9 +273,23 @@ binds at `WGSL_POOL_BINDING`, where its programs read it as `P`:
 COPY carries the destination's array layer. A guest that renders a 3D
 texture binds each slice as its own render target; before a draw samples
 the volume, raster3d copies those slice targets into the layers of one GPU
-texture (`gpu_gather_slices`), and the shader blends between layers as for
+texture (`gpu_gather`), and the shader blends between layers as for
 any 3D texture. Mario Kart 8 Deluxe draws its colour-grading LUT this way.
 Version 6 copies have no layer word, and parse as layer 0.
+
+### Cube maps from targets (version 12)
+
+COPY carries the destination's mip level too. Super Mario Odyssey renders
+its environment probes one face and one mip level at a time, each its own
+render target, and samples them as cube maps with an explicit level
+(roughness picks it). Before a draw samples such a cube, raster3d copies
+the 6 faces x levels targets into the layers and levels of one GPU
+texture (`gpu_gather`); bound alone, the first face's level 0 read as
+garbage for most directions and levels (bright speckles over the ground).
+Gathers, cube or 3D, copy again only when a source target was drawn into
+or re-created since. Version 11 copies have no level word and parse as
+level 0. A copy into a level above 0 must be a plain texture copy (same
+format and size); other copies draw into level 0.
 
 ### Compute and storage buffers (version 6)
 

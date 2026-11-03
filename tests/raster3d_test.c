@@ -399,6 +399,7 @@ static void test_viewport_swizzle(Raster3d *r) {
 static uint32_t g_tic_rt_bl_width; /* texture_state: sample RT_BL's target at this width (0: TEXELS) */
 static uint32_t g_tic_rt_bl_height = RT_SIZE;
 static uint32_t g_tic_rt_bl_depth; /* ... as a 3D texture this deep (0: 2D) */
+static uint32_t g_tic_rt_bl_cube_levels; /* ... as a cube map with this many levels (0: not a cube) */
 static void texture_state(void) {
   uint32_t tic[8];
   memset(tic, 0, sizeof(tic));
@@ -415,6 +416,10 @@ static void texture_state(void) {
     tic[4] = (g_tic_rt_bl_width - 1u) | ((g_tic_rt_bl_depth ? 2u : 1u) << 23); /* 3D / 2D */
     tic[5] = (g_tic_rt_bl_height - 1u) | (1u << 31);
     if (g_tic_rt_bl_depth) tic[5] |= (g_tic_rt_bl_depth - 1u) << 16;
+    if (g_tic_rt_bl_cube_levels) {
+      tic[4] = (tic[4] & ~(15u << 23)) | (3u << 23); /* cube */
+      tic[3] |= (g_tic_rt_bl_cube_levels - 1u) << 28; /* levels - 1 */
+    }
   }
   memcpy(g_gpu + (TIC_POOL - GPU_BASE), tic, sizeof(tic));
   const uint32_t rows[2][8] = {{0xff0000ffu, 0xff00ff00u}, {0xffff0000u, 0xffffffffu}};
@@ -817,6 +822,9 @@ typedef struct Seen_Draw {
   uint32_t reinterprets, reinterpret_src, reinterpret_dst;
   uint32_t texture_writes, last_texture_id, destroyed_id;
   uint32_t samplers; /* the last draw's hardware samplers (GPU_BIND_SAMPLER) */
+  /* Stream version 12: copies into layers and levels (gathered cube maps). */
+  uint32_t copies, copy_layers, copy_levels; /* bit per destination layer / level */
+  uint32_t last_texture_levels;
 } Seen_Draw;
 #define SEEN_DATA_BYTES (256u * 1024u)
 static uint8_t g_seen_data[SEEN_DATA_BYTES];
@@ -833,6 +841,14 @@ static void stream_drain(Seen_Draw *seen) {
       seen->last_texture_width = c.width;
       seen->last_texture_height = c.height;
       seen->last_texture_id = c.id;
+      seen->last_texture_levels = c.levels;
+    }
+    if (rec.type == GPU_REC_COPY && rec.payload_bytes >= sizeof(Gpu_Rec_Copy)) {
+      Gpu_Rec_Copy c;
+      memcpy(&c, rec.payload, sizeof(c));
+      seen->copies++;
+      seen->copy_layers |= 1u << (c.dst_layer & 31u);
+      seen->copy_levels |= 1u << (c.dst_level & 31u);
     }
     if (rec.type == GPU_REC_TEXTURE_WRITE) seen->texture_writes++;
     if (rec.type == GPU_REC_TEXTURE_DESTROY) memcpy(&seen->destroyed_id, rec.payload, sizeof(uint32_t));
@@ -1032,6 +1048,58 @@ static void test_gpu_padded_target(Raster3d *r) {
   g_tic_rt_bl_width = 0;
   g_tic_rt_bl_height = RT_SIZE;
   g_tic_rt_bl_depth = 0;
+  g_gpu_textured = false;
+}
+
+/* A 16x16 RGBA8 cube map with 2 levels whose faces and levels are render
+ * targets (SMO's environment probes): level 0 of face k at k * 2 KB (the
+ * layer stride: 1 KB + 512 bytes, block aligned), level 1 (8x8, a 16-wide
+ * padded target) 1 KB after it. Sampled as a cube, the 12 targets are
+ * copied into the layers and levels of one GPU texture - once, until a
+ * source is drawn again. */
+#define CUBE_LAYER_STRIDE 2048u
+#define CUBE_LEVEL1_OFFSET 1024u
+static void test_gpu_gathered_cube(Raster3d *r) {
+  g_gpu_rt_bl = true;
+  for (uint32_t k = 0; k < 6u; k++)
+    for (uint32_t v = 0; v < 2u; v++) {
+      g_rt_width = 16u;
+      g_rt_height = v ? 8u : 16u;
+      g_gpu_rt_offset = k * CUBE_LAYER_STRIDE + (v ? CUBE_LEVEL1_OFFSET : 0u);
+      const Seen_Draw face = gpu_draw_once(r, FRONT_CW_REG);
+      CHECK(face.count == 1, "cube face %u level %u drawn", k, v);
+    }
+  g_gpu_rt_bl = false;
+  g_gpu_rt_offset = 0;
+  g_rt_width = g_rt_height = RT_SIZE;
+  g_gpu_textured = true;
+  g_tic_rt_bl_width = g_tic_rt_bl_height = 16u;
+  g_tic_rt_bl_cube_levels = 2u;
+  Seen_Draw seen = gpu_draw_once(r, FRONT_CW_REG);
+  uint32_t flags;
+  memcpy(&flags, g_seen_data + 4u * (WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEXP_FLAGS), sizeof(flags));
+  CHECK(seen.count == 1 && (flags & WGSL_TEXP_CUBE), "gathered cube: drawn as a cube (flags %x)", flags);
+  CHECK(seen.copies == 12u && seen.copy_layers == 0x3fu && seen.copy_levels == 3u,
+        "gathered cube: 12 copies (%u) into layers %x, levels %x", seen.copies, seen.copy_layers, seen.copy_levels);
+  CHECK(seen.last_texture_levels == 2u, "gathered cube: a 2-level texture (%u)", seen.last_texture_levels);
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.count == 1 && seen.copies == 0u, "gathered cube unchanged: no copies (%u)", seen.copies);
+  /* Face 3's level 1 drawn again: copied again. */
+  g_gpu_textured = false;
+  g_gpu_rt_bl = true;
+  g_rt_width = 16u;
+  g_rt_height = 8u;
+  g_gpu_rt_offset = 3u * CUBE_LAYER_STRIDE + CUBE_LEVEL1_OFFSET;
+  (void)gpu_draw_once(r, FRONT_CW_REG);
+  g_gpu_rt_bl = false;
+  g_gpu_rt_offset = 0;
+  g_rt_width = g_rt_height = RT_SIZE;
+  g_gpu_textured = true;
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.copies == 12u, "gathered cube after a face was drawn: copied again (%u)", seen.copies);
+  g_tic_rt_bl_width = 0;
+  g_tic_rt_bl_height = RT_SIZE;
+  g_tic_rt_bl_cube_levels = 0;
   g_gpu_textured = false;
 }
 
@@ -1455,6 +1523,7 @@ int main(void) {
   test_gpu_vertex_stage(&r);
   test_gpu_compressed_upload(&r);
   test_gpu_padded_target(&r);
+  test_gpu_gathered_cube(&r);
   test_gpu_reinterpret(&r);
   test_compute(&r);
   test_gpu_compute(&r);

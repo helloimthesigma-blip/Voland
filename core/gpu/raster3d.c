@@ -3506,6 +3506,7 @@ static bool gpu_texture_native(Raster3d *r, Raster3d_Texture *t, const Tex_Heade
 static void gpu_surface_upload(Raster3d *r, Raster3d_Gpu_Surface *s, const Gpu_Memory *mem) {
   bool direct = false;
   if (s->depth) return;
+  s->written = ++r->tick;
   (void)gpu_color_format(s->format, &direct);
   if (!direct) return;
   const uint32_t row = s->width * s->bytes_per_pixel;
@@ -3529,6 +3530,7 @@ static void gpu_surface_upload(Raster3d *r, Raster3d_Gpu_Surface *s, const Gpu_M
 static void gpu_surface_upload_range(Raster3d *r, Raster3d_Gpu_Surface *s, const Gpu_Memory *mem, uint64_t lo, uint64_t hi) {
   bool direct = false;
   if (s->depth) return;
+  s->written = ++r->tick;
   (void)gpu_color_format(s->format, &direct);
   if (!direct || hi <= lo) return;
   const uint32_t row = s->width * s->bytes_per_pixel;
@@ -3615,7 +3617,7 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
     at = r->gpu_surface_next[slot];
     if (!s->in_use || s->address != d->address) continue;
     if (s->width == d->width && s->height == d->height && s->format == d->format && s->depth == d->depth) {
-      s->last_used = r->tick;
+      s->last_used = s->written = r->tick;
       if (s->stale && load) gpu_surface_upload_range(r, s, mem, s->stale_lo, s->stale_hi);
       s->stale = false;
       return s;
@@ -3658,7 +3660,7 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
   victim->block_height_log2 = d->block_height_log2;
   victim->pitch = d->pitch;
   victim->guest_bytes = surface_guest_bytes(d);
-  victim->last_used = r->tick;
+  victim->last_used = victim->written = r->tick;
   bool direct = false;
   victim->gpu_format = d->depth ? gpu_zeta_format(d->format) : gpu_color_format(d->format, &direct);
   gpu_create(r, victim->id, victim->gpu_format, d->width, d->height, 1, GPU_USAGE_SAMPLED | GPU_USAGE_RENDER, 1);
@@ -3721,43 +3723,88 @@ static uint32_t gpu_new_id(Raster3d *r);
 /* A block-linear 3D texture whose slices are GPU render targets: a guest
  * that renders a volume (MK8DX's colour-grading LUT) binds each slice as
  * its own target, slice k at base + k GOB columns of one block (512 bytes
- * << block height) when the volume fits one block deep. Those surfaces
- * are copied into the layers of one GPU texture, which the draw samples
- * (3D textures are layered; WGSL_TEXP_3D blends slices). 0: not such a
- * texture (the slice-0 surface alone would serve every slice). */
+ * << block height) when the volume fits one block deep. A cube map whose
+ * faces and mip levels are targets: Super Mario Odyssey renders its
+ * environment probes one face and one level at a time, and samples them
+ * at a level its roughness picks. Those surfaces are copied into the
+ * layers (and levels) of one GPU texture, which the draw samples (3D
+ * textures are layered, WGSL_TEXP_3D blends slices; cube faces are layers
+ * too). The copies run again only when a source was written or re-created
+ * since. 0: not such a texture (the first surface alone serves it). */
 #define GOB_BYTES 512u
-static uint32_t gpu_gather_slices(Raster3d *r, const Tex_Header *h, const Raster3d_Gpu_Surface *first) {
-  if (h->type != TEX_TYPE_3D || h->depth < 2u || h->layout != TEX_LAYOUT_BLOCK_LINEAR) return 0;
-  if (h->depth > (1u << h->block_depth_log2)) return 0; /* deeper than one block: not gathered */
-  const uint64_t slice_bytes = (uint64_t)GOB_BYTES << h->block_height_log2;
+#define CUBE_FACES 6u
+#define GATHER_MAX_LEVELS 16u
+static uint32_t gpu_gather(Raster3d *r, const Tex_Header *h, const Raster3d_Gpu_Surface *first) {
+  if (h->layout != TEX_LAYOUT_BLOCK_LINEAR) return 0;
+  uint32_t layers = 0, levels = 1;
+  uint64_t layer_stride = 0;
+  if (h->type == TEX_TYPE_3D && h->depth >= 2u && h->depth <= (1u << h->block_depth_log2)) {
+    layers = h->depth;
+    layer_stride = (uint64_t)GOB_BYTES << h->block_height_log2;
+  } else if (h->type == TEX_TYPE_CUBE && tex_layer_count(h) == CUBE_FACES) {
+    layers = CUBE_FACES;
+    layer_stride = tex_layer_stride(h);
+    if (!layer_stride || !gpu_surface_at(r, h->address + layer_stride, h->width)) return 0; /* not drawn face by face */
+    Tex_Level_Layout l;
+    while (levels < h->levels && levels < GATHER_MAX_LEVELS && tex_level_layout(h, levels, &l) &&
+           gpu_surface_at(r, h->address + l.offset, l.width))
+      levels++;
+  } else {
+    return 0;
+  }
+  /* The sources: whether any was written since the last copies, and
+   * which surfaces they are now. */
+  uint32_t written = 0;
+  uint64_t sources = 0;
+  for (uint32_t k = 0; k < layers; k++)
+    for (uint32_t v = 0; v < levels; v++) {
+      Tex_Level_Layout l;
+      if (v && !tex_level_layout(h, v, &l)) continue;
+      const Raster3d_Gpu_Surface *s = gpu_surface_at(r, h->address + k * layer_stride + (v ? l.offset : 0u), v ? l.width : h->width);
+      if (!s) continue;
+      if (!written || (int32_t)(s->written - written) > 0) written = s->written; /* ticks wrap */
+      sources = sources * 1099511628211ull + s->id; /* FNV prime: an order-dependent mix */
+    }
   uint32_t slot = RASTER_GPU_GATHERS;
   for (uint32_t i = 0; i < RASTER_GPU_GATHERS && slot == RASTER_GPU_GATHERS; i++)
     if (r->gpu_gathers[i].id && r->gpu_gathers[i].address == h->address) slot = i;
   if (slot == RASTER_GPU_GATHERS) slot = r->gpu_gather_next++ % RASTER_GPU_GATHERS;
   __typeof__(r->gpu_gathers[0]) *g = &r->gpu_gathers[slot];
   if (!g->id || g->address != h->address || g->width != first->width || g->height != first->height ||
-      g->layers != h->depth || g->gpu_format != first->gpu_format) {
+      g->layers != layers || g->levels != levels || g->gpu_format != first->gpu_format) {
     if (g->id) gpu_destroy(r, g->id);
     g->id = gpu_new_id(r);
     g->address = h->address;
     g->width = first->width;
     g->height = first->height;
-    g->layers = h->depth;
+    g->layers = layers;
+    g->levels = levels;
     g->gpu_format = first->gpu_format;
-    gpu_create(r, g->id, g->gpu_format, g->width, g->height, g->layers, GPU_USAGE_SAMPLED | GPU_USAGE_RENDER, 1u);
+    g->gathered = 0;
+    gpu_create(r, g->id, g->gpu_format, g->width, g->height, g->layers, GPU_USAGE_SAMPLED | GPU_USAGE_RENDER, levels);
+  } else if ((int32_t)(g->gathered - written) >= 0 && g->sources == sources) {
+    return g->id;
   }
-  for (uint32_t k = 0; k < h->depth; k++) {
-    const Raster3d_Gpu_Surface *s = gpu_surface_at(r, h->address + k * slice_bytes, h->width);
-    if (!s || s->width != g->width || s->height != g->height || s->gpu_format != g->gpu_format) continue;
-    Gpu_Rec_Copy c;
-    memset(&c, 0, sizeof(c));
-    c.src_id = s->id;
-    c.dst_id = g->id;
-    c.src_rect[2] = c.dst_rect[2] = (int32_t)g->width;
-    c.src_rect[3] = c.dst_rect[3] = (int32_t)g->height;
-    c.dst_layer = k;
-    gpu_stream_write(r->gpu, GPU_REC_COPY, &c, sizeof(c));
-  }
+  for (uint32_t k = 0; k < layers; k++)
+    for (uint32_t v = 0; v < levels; v++) {
+      Tex_Level_Layout l;
+      if (v && !tex_level_layout(h, v, &l)) continue;
+      const Raster3d_Gpu_Surface *s = gpu_surface_at(r, h->address + k * layer_stride + (v ? l.offset : 0u), v ? l.width : h->width);
+      const uint32_t w = g->width >> v ? g->width >> v : 1u, hh = g->height >> v ? g->height >> v : 1u;
+      if (!s || s->gpu_format != g->gpu_format || (v ? s->width < w || s->height < hh : s->width != w || s->height != hh))
+        continue;
+      Gpu_Rec_Copy c;
+      memset(&c, 0, sizeof(c));
+      c.src_id = s->id;
+      c.dst_id = g->id;
+      c.src_rect[2] = c.dst_rect[2] = (int32_t)w;
+      c.src_rect[3] = c.dst_rect[3] = (int32_t)hh;
+      c.dst_layer = k;
+      c.dst_level = v;
+      gpu_stream_write(r->gpu, GPU_REC_COPY, &c, sizeof(c));
+    }
+  g->gathered = r->tick;
+  g->sources = sources;
   return g->id;
 }
 
@@ -4566,7 +4613,7 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
     gpu_surface_upload_range(r, surf, mem, surf->stale_lo, surf->stale_hi);
     surf->stale = false;
   }
-  const uint32_t gathered = surf ? gpu_gather_slices(r, &h, surf) : 0u;
+  const uint32_t gathered = surf ? gpu_gather(r, &h, surf) : 0u;
   if (gathered) {
     id = gathered;
     gpu_format = surf->gpu_format;

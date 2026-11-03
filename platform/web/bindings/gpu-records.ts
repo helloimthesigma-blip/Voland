@@ -5,7 +5,7 @@
  */
 
 export const GPU_STREAM_MAGIC = 0x55504756;
-export const GPU_STREAM_VERSION = 11;
+export const GPU_STREAM_VERSION = 12;
 export const GPU_STREAM_HEADER_BYTES = 56;
 export const GPU_STREAM_RECORD_HEADER_BYTES = 8;
 export const OFF_MAGIC = 0;
@@ -292,6 +292,8 @@ export interface Copy {
   readonly filter: number;
   /** Version 7: the destination's array layer (a 3D texture's slice). */
   readonly dstLayer: number;
+  /** Version 12: the destination's mip level (a cube map's). */
+  readonly dstLevel: number;
 }
 
 export interface Present {
@@ -387,7 +389,7 @@ export function parseDraw(v: DataView): Draw {
 export function parseCopy(v: DataView): Copy {
   return {
     srcId: u32(v, 0), dstId: u32(v, 4), srcRect: i32s(v, 8, 4), dstRect: i32s(v, 24, 4), filter: u32(v, 40),
-    dstLayer: v.byteLength >= 48 ? u32(v, 44) : 0,
+    dstLayer: v.byteLength >= 48 ? u32(v, 44) : 0, dstLevel: v.byteLength >= 52 ? u32(v, 48) : 0,
   };
 }
 

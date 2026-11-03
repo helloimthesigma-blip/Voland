@@ -87,7 +87,7 @@ struct Gpu_Stream;
 #define RASTER_GPU_TEXTURE_BUDGET_BYTES ((uint64_t)2048 * 1024 * 1024)
 #define RASTER_GPU_SURFACE_BUCKETS 4096u /* the address index over them (a power of two) */
 #define RASTER_GPU_SHADERS 1024u
-#define RASTER_GPU_GATHERS 8u /* 3D textures assembled from slice render targets */
+#define RASTER_GPU_GATHERS 32u/* 3D textures and cube maps assembled from render targets */
 /* Pool chunk keys: each stage's constant-buffer slots, then each stage's
  * global buffers (at least WGSL_MAX_GLOBALS; raster3d.c checks). */
 #define RASTER_GPU_POOL_GLOBALS 8u
@@ -173,6 +173,7 @@ typedef struct Raster3d_Gpu_Surface {
   uint32_t pitch;
   uint64_t guest_bytes;
   uint32_t last_used;
+  uint32_t written;     /* tick when last bound as a target or uploaded (gpu_gather copies again after) */
 } Raster3d_Gpu_Surface;
 
 typedef struct Raster3d_Gpu_Shader {
@@ -292,12 +293,15 @@ typedef struct Raster3d {
    * (0 ends a chain). Texture bindings look up every draw. */
   uint16_t gpu_surface_head[RASTER_GPU_SURFACE_BUCKETS];
   uint16_t gpu_surface_next[RASTER_GPU_SURFACES];
-  /* A 3D texture whose slices the guest drew as separate render targets
-   * (raster3d.c gpu_gather_slices): the slices copied into one layered
-   * GPU texture before a draw samples it. */
+  /* A 3D texture whose slices, or a cube map whose faces and levels, the
+   * guest drew as separate render targets (raster3d.c gpu_gather): copied
+   * into one layered GPU texture before a draw samples it, again when a
+   * source was written (`gathered`: the tick then; `sources`: their ids). */
   struct {
     uint64_t address;
-    uint32_t id, width, height, layers, gpu_format;
+    uint32_t id, width, height, layers, levels, gpu_format;
+    uint32_t gathered;
+    uint64_t sources;
   } gpu_gathers[RASTER_GPU_GATHERS];
   uint32_t gpu_gather_next;
   Raster3d_Gpu_Shader *gpu_shaders;  /* RASTER_GPU_SHADERS, open addressing */

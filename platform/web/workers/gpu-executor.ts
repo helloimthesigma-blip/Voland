@@ -601,10 +601,10 @@ export class GpuExecutor {
       return;
     }
     /* Mip chains: float formats the box filter can render (the producer
-     * asks for them on sampled float textures only). */
+     * asks for them on sampled float textures, and on cube maps gathered
+     * from targets - their levels arrive by copies, version 12). */
     const full = Math.floor(Math.log2(Math.max(width, height))) + 1;
-    const levels = (c.usage & USAGE_RENDER) === 0 && shaderType(format) === "f32" && !isDepthFormat(format)
-      ? Math.min(c.levels, full) : 1;
+    const levels = shaderType(format) === "f32" && !isDepthFormat(format) ? Math.min(c.levels, full) : 1;
     if (isCompressedFormat(format) && !this.device.features.has(format.startsWith("bc") ? "texture-compression-bc"
       : "texture-compression-astc")) {
       this.warnOnce(`format ${format}`, `GPU texture format ${format} needs a device feature this one lacks`);
@@ -853,6 +853,10 @@ export class GpuExecutor {
       code = code.replace(/@fragment fn fs\((.*)\) -> FOut \{[\s\S]*$/, (_m, args: string) =>
         `@fragment fn fs(${args}) -> FOut { var fo: FOut; fo.c0 = vec4<f32>(1.0, 0.0, 1.0, 1.0); return fo; }`);
     }
+    if ((globalThis as { DISCARD_SHADERS?: number[] }).DISCARD_SHADERS?.includes(id) && !code.includes("@builtin(frag_depth)")) {
+      code = code.replace(/@fragment fn fs\((.*)\) -> FOut \{[\s\S]*$/, (_m, args: string) =>
+        `@fragment fn fs(${args}) -> FOut { var fo: FOut; discard; return fo; }`);
+    }
     const hash = wgslHash(code);
     let module = this.modulesByHash.get(hash);
     if (!module) {
@@ -1034,7 +1038,8 @@ export class GpuExecutor {
         blend: t.blend ? [t.colorOp, t.colorSrc, t.colorDst, t.alphaOp, t.alphaSrc, t.alphaDst] : null,
       })),
       depth: depth ? {
-        format: depth.format, test: d.depthTest, write: d.depthWrite, compare: d.depthCompare,
+        format: depth.format, compare: d.depthCompare, write: d.depthWrite,
+        test: (globalThis as { DEPTH_OFF_SHADERS?: number[] }).DEPTH_OFF_SHADERS?.includes(d.shaderId) ? false : d.depthTest,
         stencil: d.stencil ? {
           front: [d.stencilFront.compare, d.stencilFront.fail, d.stencilFront.depthFail, d.stencilFront.pass],
           back: [d.stencilBack.compare, d.stencilBack.fail, d.stencilBack.depthFail, d.stencilBack.pass],
@@ -1469,14 +1474,20 @@ export class GpuExecutor {
     this.touched.add(dst.texture);
     const [sx, sy, sw, sh] = [c.srcRect[0] ?? 0, c.srcRect[1] ?? 0, c.srcRect[2] ?? 0, c.srcRect[3] ?? 0];
     const [dx, dy, dw, dh] = [c.dstRect[0] ?? 0, c.dstRect[1] ?? 0, c.dstRect[2] ?? 0, c.dstRect[3] ?? 0];
+    /* The destination level's size (version 12: a cube map's levels). */
+    const lw = Math.max(1, dst.width >> c.dstLevel), lh = Math.max(1, dst.height >> c.dstLevel);
     if (c.srcId !== c.dstId && src.format === dst.format && sw === dw && sh === dh && sw > 0 && sh > 0 && sx >= 0 &&
-        sy >= 0 && dx >= 0 && dy >= 0 && sx + sw <= src.width && sy + sh <= src.height && dx + dw <= dst.width &&
-        dy + dh <= dst.height) {
+        sy >= 0 && dx >= 0 && dy >= 0 && sx + sw <= src.width && sy + sh <= src.height && dx + dw <= lw &&
+        dy + dh <= lh && c.dstLevel < dst.texture.mipLevelCount) {
       this.materialize(c.dstId);
       this.endPass();
       this.ensureEncoder().copyTextureToTexture({ texture: src.texture, origin: { x: sx, y: sy } },
-        { texture: dst.texture, origin: { x: dx, y: dy, z: c.dstLayer } }, [sw, sh, 1]);
+        { texture: dst.texture, mipLevel: c.dstLevel, origin: { x: dx, y: dy, z: c.dstLayer } }, [sw, sh, 1]);
       this.stats.copies++;
+      return;
+    }
+    if (c.dstLevel > 0) {
+      this.warnOnce(`copy level ${src.format}->${dst.format}`, `GPU copy into a mip level must be a plain texture copy`);
       return;
     }
     if (c.srcId === c.dstId) src = this.shadowOf(c.srcId, src);

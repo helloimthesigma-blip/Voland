@@ -278,6 +278,7 @@ typedef struct Gpu_Rec_Copy {
   int32_t src_rect[4], dst_rect[4]; /* x, y, width, height */
   uint32_t filter;                  /* 0 nearest, 1 linear (when scaling) */
   uint32_t dst_layer;               /* version 7: the destination's array layer (a 3D texture's slice) */
+  uint32_t dst_level;               /* version 12: the destination's mip level (a cube map's) */
 } Gpu_Rec_Copy;
 
 #define GPU_PRESENT_FLIP_X 1u
