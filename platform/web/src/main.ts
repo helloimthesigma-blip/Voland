@@ -24,7 +24,7 @@ import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
 import { PUBLISH_INDEX } from "@bindings/framebuffer";
 import { GPU_STREAM_HEADER_BYTES, OFF_PRESENTS } from "@bindings/gpu-records";
-import { appendGuestOutput, resetGuestConsole, setGuestFps, setGuestRunState } from "./guest-console";
+import { appendGuestOutput, resetGuestConsole, setGpuTrouble, setGuestFps, setGuestRunState } from "./guest-console";
 import { clearTextInput, showTextInput } from "./text-input-store";
 import { startAudioOutput } from "./audio/audio-output";
 import { startInputLoop } from "./input/input-loop";
@@ -330,6 +330,14 @@ async function boot(): Promise<BootResult | null> {
         debugTargetsResolve = null;
         return;
       }
+      if (msg.type === "gpu-trouble") {
+        /* Running on would only draw black frames: stop the guest where it is
+         * so the player can save-state or close other tabs first. */
+        appendLogLine("error", `gpu: ${msg.reason}: ${msg.detail}`);
+        setPaused(true);
+        setGpuTrouble(msg.reason);
+        return;
+      }
       if (msg.type === "ready") {
         adapterLabel = msg.adapterName ?? "Software/Unknown";
         appendLogLine("info", `gpu adapter: ${adapterLabel}`);
@@ -535,6 +543,7 @@ async function boot(): Promise<BootResult | null> {
   }
 
   function setPaused(paused: boolean): void {
+    if (!paused) setGpuTrouble("");
     cpuWorker.postMessage((paused ? { type: "pause" } : { type: "resume" }) satisfies MainToCPUMessage);
   }
 

@@ -259,6 +259,13 @@ function LoadPanel(props: LoadPanelProps) {
                   shows it is working; sound is slowed down to match.
                 </p>
               </Show>
+              <Show when={guest().gpuTrouble !== ""}>
+                <p class="voland-load-detail" role="alert" data-testid="gpu-trouble">
+                  {guest().gpuTrouble === "out-of-memory"
+                    ? "Paused: the graphics card ran out of memory. Close other tabs or apps, then press Resume; a save state first is safest."
+                    : "Paused: the browser reset the graphics device, so the picture cannot continue. Make a save state, then reload the page."}
+                </p>
+              </Show>
               <Show when={guest().runState === "crashed" || guest().runState === "deadlock"}>
                 <p class="voland-load-detail">{guest().detail}</p>
               </Show>

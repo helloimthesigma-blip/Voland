@@ -39,6 +39,9 @@ function log(level: "debug" | "info" | "warn" | "error", message: string): void 
   self.postMessage(msg);
 }
 
+/* After a gpu-trouble report, the same burst of failures stays quiet this long. */
+const TROUBLE_REPORT_INTERVAL_MS = 5000;
+
 const BLIT_SHADER = /* wgsl */ `
 @group(0) @binding(0) var frame: texture_2d<f32>;
 @group(0) @binding(1) var frame_sampler: sampler;
@@ -275,9 +278,23 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
     maxTextureDimension2D: adapter.limits.maxTextureDimension2D,
   };
   const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
+  /* One report per burst: an exhausted device fails every allocation. */
+  let lastTroubleMs = -Infinity;
+  const reportTrouble = (reason: "out-of-memory" | "device-lost", detail: string): void => {
+    if (performance.now() - lastTroubleMs < TROUBLE_REPORT_INTERVAL_MS) return;
+    lastTroubleMs = performance.now();
+    const msg: GPUToMainMessage = { type: "gpu-trouble", reason, detail };
+    self.postMessage(msg);
+  };
   device.addEventListener("uncapturederror", (e: Event) => {
-    log("error", `WebGPU: ${(e as GPUUncapturedErrorEvent).error.message.split("\n")[0] ?? ""}`);
+    const error = (e as GPUUncapturedErrorEvent).error;
+    log("error", `WebGPU: ${error.message.split("\n")[0] ?? ""}`);
+    if (error instanceof GPUOutOfMemoryError) reportTrouble("out-of-memory", error.message.split("\n")[0] ?? "");
   });
+  device.lost.then((info) => {
+    log("error", `WebGPU device lost (${info.reason}): ${info.message}`);
+    if (info.reason !== "destroyed") reportTrouble("device-lost", info.message);
+  }).catch(() => undefined);
   const context = canvas.getContext("webgpu") as GPUCanvasContext | null;
   if (!context) {
     const err: GPUToMainMessage = { type: "error", message: "getContext('webgpu') returned null" };

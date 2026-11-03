@@ -11,11 +11,13 @@ export interface GuestConsoleState {
   readonly detail: string;
   /** Guest frames presented in the last second (vi -> framebuffer slots). */
   readonly fps: number;
+  /** Why the GPU stopped (out of memory, device lost); empty when it is fine. */
+  readonly gpuTrouble: string;
 }
 
 const MAX_LINES = 1000;
 
-let state: GuestConsoleState = { lines: [], runState: "idle", detail: "", fps: 0 };
+let state: GuestConsoleState = { lines: [], runState: "idle", detail: "", fps: 0, gpuTrouble: "" };
 const subscribers = new Set<(next: GuestConsoleState) => void>();
 
 function publish(next: GuestConsoleState): void {
@@ -28,7 +30,7 @@ export function getGuestConsole(): GuestConsoleState {
 }
 
 export function resetGuestConsole(): void {
-  publish({ lines: [], runState: "idle", detail: "", fps: 0 });
+  publish({ lines: [], runState: "idle", detail: "", fps: 0, gpuTrouble: "" });
 }
 
 export function appendGuestOutput(text: string): void {
@@ -38,6 +40,10 @@ export function appendGuestOutput(text: string): void {
 
 export function setGuestRunState(runState: RunState, detail: string): void {
   publish({ ...state, runState, detail });
+}
+
+export function setGpuTrouble(gpuTrouble: string): void {
+  publish({ ...state, gpuTrouble });
 }
 
 export function setGuestFps(fps: number): void {

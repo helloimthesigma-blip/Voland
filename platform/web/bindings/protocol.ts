@@ -209,4 +209,7 @@ export type GPUToMainMessage =
       readonly textureCompression: number }
   | { readonly type: "log"; readonly level: LogLevel; readonly message: string }
   | { readonly type: "error"; readonly message: string }
+  /* The device ran out of memory or was lost: main pauses the guest and
+   * says so instead of letting frames go black. */
+  | { readonly type: "gpu-trouble"; readonly reason: "out-of-memory" | "device-lost"; readonly detail: string }
   | { readonly type: "debug-targets"; readonly targets: readonly DebugTargetImage[] };
