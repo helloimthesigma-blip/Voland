@@ -391,6 +391,45 @@ async function main() {
      * default) count a burst as one: slices unless --url-params says free=. */
     const params = /(^|&)free=/.test(opts.urlParams) ? opts.urlParams : [opts.urlParams, "free=0"].filter(Boolean).join("&");
     const pageUrl = `${baseUrl}?${params}`;
+    /* Page responsiveness while the game runs (the owner's "lag"): long
+     * main-thread tasks, gaps between animation frames, and how late a
+     * 50 ms timer fires. Reset when the measured window opens. */
+    await page.addInitScript(() => {
+      const RESP_TICK_MS = 50;
+      const fresh = () => ({ longTasks: 0, longTaskMs: 0, longTaskMaxMs: 0, frames: 0, frameGapMaxMs: 0, slowFrames: 0, timerLateMaxMs: 0, timerLateSumMs: 0, timerTicks: 0 });
+      let r = fresh();
+      try {
+        new PerformanceObserver((list) => {
+          for (const e of list.getEntries()) {
+            r.longTasks++;
+            r.longTaskMs += e.duration;
+            r.longTaskMaxMs = Math.max(r.longTaskMaxMs, e.duration);
+          }
+        }).observe({ type: "longtask", buffered: false });
+      } catch { /* no longtask support */ }
+      let lastFrame = 0;
+      const frame = (t) => {
+        if (lastFrame) {
+          const gap = t - lastFrame;
+          r.frames++;
+          r.frameGapMaxMs = Math.max(r.frameGapMaxMs, gap);
+          if (gap > 50) r.slowFrames++;
+        }
+        lastFrame = t;
+        requestAnimationFrame(frame);
+      };
+      requestAnimationFrame(frame);
+      let due = performance.now() + RESP_TICK_MS;
+      setInterval(() => {
+        const now = performance.now();
+        const late = Math.max(0, now - due);
+        r.timerTicks++;
+        r.timerLateSumMs += late;
+        r.timerLateMaxMs = Math.max(r.timerLateMaxMs, late);
+        due = now + RESP_TICK_MS;
+      }, RESP_TICK_MS);
+      window.__VOLAND_RESP__ = { reset: () => { r = fresh(); }, read: () => ({ ...r }) };
+    });
     await page.goto(pageUrl);
     await page.getByTestId("load-panel").waitFor({ timeout: 30_000 });
     if (opts.restoreSaves) {
@@ -657,6 +696,13 @@ async function main() {
       s = await sample();
     }
     const warm = s;
+    {
+      /* Responsiveness through boot and loading, then the window's own. */
+      const boot = await page.evaluate(() => window.__VOLAND_RESP__?.read() ?? null);
+      if (boot) console.log(`warmup page: ${boot.longTasks} long tasks (${boot.longTaskMs.toFixed(0)} ms, max ${boot.longTaskMaxMs.toFixed(0)} ms); ` +
+                            `${boot.slowFrames} rAF gaps > 50 ms (max ${boot.frameGapMaxMs.toFixed(0)} ms); timer late max ${boot.timerLateMaxMs.toFixed(0)} ms`);
+      await page.evaluate(() => window.__VOLAND_RESP__?.reset());
+    }
     if (opts.phases.length) {
       phaseState.cdp.close();
       results.phases = phaseState.rows.map(({ kinds, top, ...row }) => row);
@@ -740,6 +786,13 @@ async function main() {
                 `${d("jitEvicted")} evicted (${d("jitTrimmed")} trimmed), ${d("jitGenerations")} generations, ${d("jitStale")} stale`);
     const cpuS = end.cpuS - warm.cpuS;
     console.log(`  CPU s           ${cpuS.toFixed(1)} (${(cpuS / Math.max(1e-9, d("ticks") / TICKS_PER_SECOND)).toFixed(2)} CPU s per virtual s)`);
+    const resp = await page.evaluate(() => window.__VOLAND_RESP__?.read() ?? null);
+    if (resp) {
+      console.log(`  page            ${resp.longTasks} long tasks (${resp.longTaskMs.toFixed(0)} ms, max ${resp.longTaskMaxMs.toFixed(0)} ms); ` +
+                  `${(resp.frames / wallS).toFixed(1)} rAF/s, ${resp.slowFrames} gaps > 50 ms (max ${resp.frameGapMaxMs.toFixed(0)} ms); ` +
+                  `timer late avg ${(resp.timerLateSumMs / Math.max(1, resp.timerTicks)).toFixed(1)} ms, max ${resp.timerLateMaxMs.toFixed(0)} ms`);
+      results.responsiveness = resp;
+    }
     results.window = {
       fromSlice: warm.perf.slices, wallS, cpuS, slicesPerS: d("slices") / wallS, ticksPerS: d("ticks") / wallS,
       virtualS: d("ticks") / TICKS_PER_SECOND, fps: fpsAvg, wasmModules: d("wasmModules"),
