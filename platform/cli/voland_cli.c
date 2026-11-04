@@ -1211,8 +1211,16 @@ static uint64_t g_gpu_records;
  * file (everything else is kept), so a late scene's stream stays small.
  * The replay's early frames are then empty; resources and presents stay.
  * VOLAND_STREAM_DRAWS_TO=M: the run stops at present M (a late scene's
- * draws can be gigabytes a second). */
+ * draws can be gigabytes a second).
+ * VOLAND_STREAM_MAX_MB=N (default STREAM_DEFAULT_MAX_MB): the run stops
+ * once the file reaches N MB, or when a write fails. Texture uploads are
+ * kept whatever DRAWS_FROM says: an SMO run reached 82 GB and filled the
+ * disk. */
+#define STREAM_DEFAULT_MAX_MB 20480u
+#define BYTES_PER_MB (1024u * 1024u)
 static uint64_t g_gpu_presents, g_gpu_draws_from, g_gpu_draws_to;
+static uint64_t g_gpu_bytes, g_gpu_max_bytes = (uint64_t)STREAM_DEFAULT_MAX_MB * BYTES_PER_MB;
+static bool g_gpu_full;
 
 static void gpu_stream_drain(void) {
   Gpu_Stream_Record rec;
@@ -1222,9 +1230,21 @@ static void gpu_stream_drain(void) {
       gpu_stream_consume(g_gpu_header, &rec);
       continue;
     }
+    if (g_gpu_full) {
+      gpu_stream_consume(g_gpu_header, &rec);
+      continue;
+    }
     const uint32_t head[2] = {rec.type, rec.payload_bytes};
-    fwrite(head, sizeof(head), 1, g_gpu_file);
-    fwrite(rec.payload, 1, rec.payload_bytes, g_gpu_file);
+    if (fwrite(head, sizeof(head), 1, g_gpu_file) != 1 || fwrite(rec.payload, 1, rec.payload_bytes, g_gpu_file) != rec.payload_bytes) {
+      fprintf(stderr, "voland-cli: GPU stream write failed (disk full?): stopping\n");
+      g_gpu_full = true;
+    }
+    g_gpu_bytes += sizeof(head) + rec.payload_bytes;
+    if (!g_gpu_full && g_gpu_bytes >= g_gpu_max_bytes) {
+      fprintf(stderr, "voland-cli: GPU stream reached %llu MB (VOLAND_STREAM_MAX_MB): stopping\n",
+              (unsigned long long)(g_gpu_bytes / BYTES_PER_MB));
+      g_gpu_full = true;
+    }
     gpu_stream_consume(g_gpu_header, &rec);
     g_gpu_records++;
   }
@@ -1648,6 +1668,8 @@ static int run(int argc, char **argv) {
     if (draws_from) g_gpu_draws_from = strtoull(draws_from, NULL, 0);
     const char *draws_to = getenv("VOLAND_STREAM_DRAWS_TO");
     if (draws_to) g_gpu_draws_to = strtoull(draws_to, NULL, 0);
+    const char *max_mb = getenv("VOLAND_STREAM_MAX_MB");
+    if (max_mb) g_gpu_max_bytes = strtoull(max_mb, NULL, 0) * BYTES_PER_MB;
     g_gpu_file = fopen(gpu_stream_path, "wb");
     if (!g_gpu_file) {
       fprintf(stderr, "voland-cli: cannot write %s\n", gpu_stream_path);
@@ -1697,7 +1719,7 @@ static int run(int argc, char **argv) {
   }
   uint64_t measure_start_ns = 0, measure_ticks = 0, measure_presents = 0;
   while (slices < max_slices && (status == EMULATOR_RUNNING || status == EMULATOR_IDLE) &&
-         !(g_gpu_draws_to && g_gpu_presents >= g_gpu_draws_to)) {
+         !(g_gpu_draws_to && g_gpu_presents >= g_gpu_draws_to) && !g_gpu_full) {
     if (jit_fallbacks_from && slices == jit_fallbacks_from) jit_set_fallback_profile(true);
 #ifndef _WIN32
     if (snapshot_dir && snapshot_at && slices == snapshot_at) {
