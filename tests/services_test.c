@@ -1285,7 +1285,9 @@ static void test_mii_edit_append(void) {
   CHECK(name[0] == 'P' && name[5] == 'r');
 }
 
-static void test_audren(void) {
+/* unmixed: the voice names a mix the renderer does not have (a splitter's);
+ * it is not heard but still plays, and reports its buffer consumed. */
+static void test_audren(bool unmixed) {
   const uint32_t manager = service("audren:u");
   /* AudioRendererParameter {48000, 240, mix buffers 2, submixes 0, voices 2,
    * sinks 1, effects 0, ..., revision @0x30} + pad + work size + aruid. */
@@ -1338,7 +1340,7 @@ static void test_audren(void) {
   putf(voice + 0x1C, 1.0f);
   putf(voice + 0x20, 1.0f);
   put32(voice + 0x3C, 1);   /* one wave buffer at head 0 */
-  put32(voice + 0x58, 0);   /* final mix */
+  put32(voice + 0x58, unmixed ? 9u : 0u); /* final mix, or none */
   put64(voice + 0x60, SCRATCH(0x20000));
   put64(voice + 0x68, FRAMES * 2u);
   put32(voice + 0x70, 0);
@@ -1387,7 +1389,8 @@ static void test_audren(void) {
   CHECK(event->signaled && g_emu.audren->renderers[0].frames_rendered == 2);
   static float ring[FRAMES * 2];
   CHECK(audio_ring_drain(ring, FRAMES) == FRAMES);
-  CHECK(ring[2 * 100] == 5000.0f / 32768.0f && ring[2 * 100 + 1] == 2500.0f / 32768.0f);
+  if (unmixed) CHECK(ring[2 * 100] == 0.0f && ring[2 * 100 + 1] == 0.0f);
+  else CHECK(ring[2 * 100] == 5000.0f / 32768.0f && ring[2 * 100 + 1] == 2500.0f / 32768.0f);
 
   /* The next update reports the buffer consumed and 480 samples played. */
   voice[0x08] = 0;
@@ -1574,7 +1577,8 @@ int main(void) {
   test_time();
   test_set_apm_am();
   test_audout();
-  test_audren();
+  test_audren(false);
+  test_audren(true);
   test_audren_sessions();
   test_sd_manifest();
   test_system_queries();

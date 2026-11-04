@@ -311,9 +311,11 @@ static const Audren_Mix *find_mix(const Audren_Renderer *s, uint32_t mix_id) {
   return NULL;
 }
 
+/* A voice whose destination mix we do not have (a splitter's, or one
+ * not sent yet) still plays, unheard: the DSP consumes its buffers either
+ * way, and clients pace streams and scripted scenes on that. */
 static void render_voice(Audren_Renderer *s, HLE_Context *c, Audren_Voice *v) {
   const Audren_Mix *dest = find_mix(s, v->dest_mix_id == UNUSED_MIX_ID ? FINAL_MIX_ID : v->dest_mix_id);
-  if (!dest) return;
   const float ratio = (float)v->sample_rate * (v->pitch > 0.0f ? v->pitch : 1.0f) / (float)AUDREN_SAMPLE_RATE;
   if (!v->primed) {
     pull_frame(v, c, v->cur);
@@ -323,7 +325,7 @@ static void render_voice(Audren_Renderer *s, HLE_Context *c, Audren_Voice *v) {
   }
   const uint32_t channels = v->format == PCM_ADPCM ? 1u : (v->channel_count ? v->channel_count : 1u);
   for (uint32_t i = 0; i < s->sample_count && i < AUDREN_FRAME_SAMPLES; i++) {
-    for (uint32_t ch = 0; ch < channels && ch < AUDREN_VOICE_CHANNELS; ch++) {
+    for (uint32_t ch = 0; dest && ch < channels && ch < AUDREN_VOICE_CHANNELS; ch++) {
       const float sample = (v->cur[ch] + (v->next[ch] - v->cur[ch]) * v->frac) * v->volume;
       const uint32_t resource = v->channel_ids[ch];
       if (resource >= AUDREN_MAX_CHANNELS) continue;
@@ -772,6 +774,8 @@ static HLE_ServiceResult cmd_open(HLE_Context *c, Service_Object *self, const IP
   s->effect_count = effects;
   s->rendering_time_limit = 100;
   s->frames_rendered = 0;
+  /* A reopened session's event starts clear, not left signalled by the last one. */
+  if (s->system_event) s->system_event->signaled = false;
   memset(s->voices, 0, sizeof(s->voices));
   memset(s->mixes, 0, sizeof(s->mixes));
   memset(s->sinks, 0, sizeof(s->sinks));
