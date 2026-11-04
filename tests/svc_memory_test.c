@@ -110,7 +110,7 @@ static void set_svc_args3(CPU_Register_File *regs, uint64_t x0, uint64_t x1, uin
 }
 
 int main(void) {
-  Emulator emu;
+  static Emulator emu; /* static: larger than a default 8 MB stack */
   bootstrap_minimal(&emu);
   const Process *process = &emu.process;
   CPU_Register_File *regs = emu.cpu_backend->get_register_file(emu.cpu_state);

@@ -200,7 +200,7 @@ int main(void) {
   build_module_images();
   build_npdm(3); /* 39-bit */
 
-  Emulator emu;
+  static Emulator emu; /* static: larger than a default 8 MB stack */
   CHECK_OK(emulator_create(&emu));
   Arena scratch;
   CHECK(arena_create(&scratch, SCRATCH_BYTES));

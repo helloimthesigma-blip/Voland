@@ -114,7 +114,7 @@ int main(int argc, char **argv) {
   FILE *in = fopen(argv[1], "rb");
   CHECK(in != NULL);
   const Byte_Source source = {.user = in, .size = written_size, .read = file_read};
-  Emulator emu;
+  static Emulator emu; /* static: larger than a default 8 MB stack */
   CHECK_OK(emulator_create(&emu));
   CHECK_OK(emulator_load_program(&emu, &source, 0x5EED));
   CHECK(emu.program_loaded);
