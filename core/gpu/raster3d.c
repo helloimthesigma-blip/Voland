@@ -2226,12 +2226,23 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
   }
   rs->viewport_transform = true;
   if (!(regs[REG_VIEWPORT_SCALE_OFFSET] & 1u)) {
-    /* SET_VIEWPORT_SCALE_OFFSET disabled: x and y map onto the surface clip
-     * rectangle, not the viewport registers; depth keeps the registers'
-     * range (SMO's upscale quad sits at z -1: unmapped, WebGPU clips it).
+    /* SET_VIEWPORT_SCALE_OFFSET disabled: x and y map onto the viewport
+     * clip rectangle (else the surface clip), not the viewport registers;
+     * depth keeps the registers' range (SMO's upscale quad sits at z -1:
+     * unmapped, WebGPU clips it).
      * Positions are still clip space - Super Mario Odyssey's render
      * target macro disables it for every scene pass. */
     uint32_t h = regs[REG_SURFACE_CLIP_H], v = regs[REG_SURFACE_CLIP_V];
+    {
+      /* The viewport's own clip rectangle, when set and inside the target,
+       * bounds it instead: SMO composites its 1280x720 HUD into a 1600x900
+       * target whose surface clip is the whole target. */
+      const uint32_t vh = regs[REG_VIEWPORT_CLIP], vv = regs[REG_VIEWPORT_CLIP + 1u];
+      if (vh >> 16 && vv >> 16 && (vh & 0xffffu) + (vh >> 16) <= (uint32_t)width && (vv & 0xffffu) + (vv >> 16) <= (uint32_t)height) {
+        h = vh;
+        v = vv;
+      }
+    }
     if (!(h >> 16) || !(v >> 16)) { /* no surface clip: the whole target */
       h = (uint32_t)width << 16;
       v = (uint32_t)height << 16;

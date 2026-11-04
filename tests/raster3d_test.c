@@ -199,6 +199,7 @@ static void build_programs(void) {
 /* ---- register state ----------------------------------------------- */
 
 #define REG_SURFACE_CLIP_H_TEST 0x3fdu /* SURFACE_CLIP horizontal, then vertical */
+#define REG_VIEWPORT_CLIP_TEST 0x300u  /* VIEWPORT_CLIP horizontal, then vertical */
 static uint32_t g_regs[GPU_3D_REGISTER_WORDS];
 static uint32_t g_vs_offset = VS_OFFSET; /* base_state's vertex program */
 static uint64_t g_vertices = VERTICES;   /* base_state's vertex stream */
@@ -478,6 +479,18 @@ static void test_viewport_disabled(Raster3d *r) {
   raster3d_flush(r, &k_mem);
   CHECK(rgba_is(pixel(RT, false, 10, 53), 255, 0, 0, 255), "viewport disabled: the triangle fills the surface clip, +y up");
   CHECK(rgba_is(pixel(RT, false, 53, 10), 0, 0, 255, 255), "viewport disabled: the opposite corner is the clear colour");
+  /* A viewport clip inside the target bounds it instead (SMO's 1280x720
+   * HUD composited into a 1600x900 target): the left half here. */
+  g_regs[REG_VIEWPORT_CLIP_TEST] = (RT_SIZE / 2u) << 16;
+  g_regs[REG_VIEWPORT_CLIP_TEST + 1u] = RT_SIZE << 16;
+  raster3d_begin_submission(r);
+  clear_to(r, 0.0f, 0.0f, 1.0f, 1.0f);
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  CHECK(rgba_is(pixel(RT, false, 10, 53), 255, 0, 0, 255), "viewport clip: the triangle's corner is still drawn");
+  CHECK(rgba_is(pixel(RT, false, 24, 28), 0, 0, 255, 255), "viewport clip: the triangle is half as wide");
+  g_regs[REG_VIEWPORT_CLIP_TEST] = 0;
+  g_regs[REG_VIEWPORT_CLIP_TEST + 1u] = 0;
 }
 
 static void test_texture(Raster3d *r) {
