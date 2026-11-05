@@ -33,7 +33,12 @@ uint32_t cheat_vm_parse(Cheat_VM *vm, const char *text, size_t length) {
         if (n >= CHEAT_NAME_BYTES) n = CHEAT_NAME_BYTES - 1;
         memcpy(current->name, text + i + 1, n);
         current->master = c == '{';
-        current->enabled = true;
+        /* Named cheats start off, switched on by the player: cheat files
+         * (whole databases) carry variants for every save slot that write
+         * into the game's data from boot - all on, Super Mario Odyssey's
+         * coin cheats crashed it before its save data existed. Master
+         * codes always run. */
+        current->enabled = current->master;
         added++;
       }
       i = end + 1;

@@ -15,7 +15,7 @@ contains runs inside the emulated console, never as code in your browser.
 | Whole-image replacements | `romfs.bin`, `exefs.nsp` (Atmosphere) | `romfs.bin` is a complete RomFS image used instead of the game's; loose `romfs/` files from any mod are still layered over it. `exefs.nsp` is a complete ExeFS (PFS0) used instead of the game's; loose `exefs/` files still replace its entries. A file that is not a valid image is ignored with a log line. |
 | Game update | any `*.nca` (the update's decrypted program NCA) | The update's executables replace the base game's, and its RomFS is merged over the base game's, as the console does. Only an update for the loaded game is used: its program id must be the game's plus `0x800`. Patches and cheats then need the update's build ids. |
 | DLC | any `*.nca` (each add-on's decrypted data NCA) | The game sees the add-on as installed and reads its files. Add-ons for other games are skipped. |
-| Cheats | `cheats/<build id>.txt` | Atmosphere cheat format. `{Master}` codes always run, `[Named]` cheats can be switched on and off while playing. They run 12 times a second, as on Atmosphere. |
+| Cheats | `cheats/<build id>.txt` | Atmosphere cheat format. `{Master}` codes always run; `[Named]` cheats start off and are switched on and off while playing (cheat databases carry variants for every save slot, and running them all from boot corrupts the game's data). They run 12 times a second, as on Atmosphere. |
 
 Common folder layouts work as unpacked:
 

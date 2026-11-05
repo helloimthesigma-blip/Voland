@@ -27,6 +27,7 @@ static uint32_t read32(uint64_t gva) {
 static void run_text(const char *text, uint32_t keys) {
   cheat_vm_reset(&g_vm);
   CHECK(cheat_vm_parse(&g_vm, text, strlen(text)) >= 1);
+  for (uint32_t i = 0; i < g_vm.count; i++) g_vm.entries[i].enabled = true; /* as the player switches them on */
   const Cheat_Env env = {g_vmm, MAIN_GVA, HEAP_GVA, 0, 0, keys};
   cheat_vm_run(&g_vm, &env);
 }
@@ -39,6 +40,8 @@ static void test_parse(void) {
   cheat_vm_reset(&g_vm);
   CHECK(cheat_vm_parse(&g_vm, text, strlen(text)) == 3);
   CHECK(g_vm.entries[0].master && !g_vm.entries[1].master);
+  /* Master codes run; named cheats wait for the player. */
+  CHECK(g_vm.entries[0].enabled && !g_vm.entries[1].enabled && !g_vm.entries[2].enabled);
   CHECK(strcmp(g_vm.entries[1].name, "Infinite HP") == 0);
   CHECK(g_vm.entries[0].count == 3 && g_vm.entries[0].ops[0] == 0x040A0000u);
   CHECK(g_vm.entries[2].count == 1);
