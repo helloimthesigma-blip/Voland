@@ -28,6 +28,7 @@
 #define SM_SPH_BYTES 0x50u
 #define SM_SPH_WORDS 20u
 #define SM_MAX_WORDS 4096u      /* instruction words (incl. scheduling words) per program */
+#define SM_MAX_TEXTURE_PCS 256u /* texture instructions listed per program (Sm_Program.texture_pcs) */
 #define SM_REGISTERS 256u       /* R0-R254, RZ = 255 */
 #define SM_RZ 255u
 #define SM_PREDICATES 8u        /* P0-P6, PT = 7 */
@@ -182,8 +183,16 @@ typedef struct Sm_Program {
   /* Has TEX.B: a texture handle comes from a register, not from the
    * texture constant buffer at an index the instruction names. */
   bool uses_bindless_textures;
+  /* Its texture instructions' words in order: per-draw setup visits these
+   * rather than every instruction. texture_pc_count counts them all; above
+   * SM_MAX_TEXTURE_PCS only the first are listed (sm_texture_pcs_complete). */
+  uint32_t texture_pc_count;
+  uint16_t texture_pcs[SM_MAX_TEXTURE_PCS];
   Sm_Insn insns[SM_MAX_WORDS];
 } Sm_Program;
+
+static inline bool sm_texture_pcs_complete(const Sm_Program *p) { return p->texture_pc_count <= SM_MAX_TEXTURE_PCS; }
+static inline bool sm_is_texture_op(uint16_t op) { return op >= SM_OP_TEX && op <= SM_OP_TXD; }
 
 /* Texture requests the interpreter hands to its environment. */
 typedef enum Sm_Tex_Kind {

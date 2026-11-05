@@ -4568,9 +4568,12 @@ static bool gpu_prepare(Raster_State *rs, const Screen_Vertex *at, const Vertex 
 static bool gpu_static_probe_append(const Sm_Program *program, const Sm_Env *env, bool vertex, Gpu_Probe *probe) {
   if (program->uses_bindless_textures) return false;
   const uint32_t slot = env->texture_cbuf_slot;
-  for (uint32_t pc = 0; pc < program->word_count && probe->count < GPU_MAX_PROBE_TEXTURES; pc++) {
+  const bool listed = sm_texture_pcs_complete(program);
+  const uint32_t n = listed ? program->texture_pc_count : program->word_count;
+  for (uint32_t k = 0; k < n && probe->count < GPU_MAX_PROBE_TEXTURES; k++) {
+    const uint32_t pc = listed ? program->texture_pcs[k] : k;
     const Sm_Insn *in = &program->insns[pc];
-    if (in->op < SM_OP_TEX || in->op > SM_OP_TXD) continue;
+    if (!sm_is_texture_op(in->op)) continue;
     const uint32_t offset = (uint32_t)((in->raw >> 36) & 0x1fffu) * 4u;
     uint32_t handle = 0;
     if (slot < SM_CBUF_SLOTS && env->cbuf[slot] && offset + 4u <= env->cbuf_size[slot])
@@ -4591,6 +4594,7 @@ static bool gpu_static_probe(const Draw_Context *ctx, Gpu_Probe *probe) {
 /* Whether the GPU vertex stage's program samples textures (its handles
  * join the draw's bindings; gpu_choose_vertex_stage keeps TEX.B on the CPU). */
 static bool vs_samples_textures(const Sm_Program *vs) {
+  if (sm_texture_pcs_complete(vs)) return vs->texture_pc_count > 0;
   for (uint32_t pc = 0; pc < vs->word_count; pc++)
     if (vs->insns[pc].op >= SM_OP_TEX && vs->insns[pc].op <= SM_OP_TXD) return true;
   return false;

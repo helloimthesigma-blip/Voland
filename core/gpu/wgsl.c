@@ -2778,10 +2778,17 @@ void wgsl_default_desc(const Sm_Program *program, Wgsl_Program_Desc *desc) {
     if (flat) desc->flat_mask |= 1u << desc->varying_count;
     desc->varying_location[v] = (uint8_t)desc->varying_count++;
   }
-  for (uint32_t pc = 0; pc < program->word_count && pc < SM_MAX_WORDS; pc++) {
-    if (!is_texture_op(program->insns[pc].op) || desc->texture_count >= WGSL_MAX_TEXTURES) continue;
-    desc->binding_of[pc] = (uint8_t)desc->texture_count;
-    desc->sample_type[desc->texture_count++] = WGSL_SAMPLE_FLOAT;
+  if (sm_texture_pcs_complete(program)) {
+    for (uint32_t k = 0; k < program->texture_pc_count && desc->texture_count < WGSL_MAX_TEXTURES; k++) {
+      desc->binding_of[program->texture_pcs[k]] = (uint8_t)desc->texture_count;
+      desc->sample_type[desc->texture_count++] = WGSL_SAMPLE_FLOAT;
+    }
+  } else {
+    for (uint32_t pc = 0; pc < program->word_count && pc < SM_MAX_WORDS; pc++) {
+      if (!is_texture_op(program->insns[pc].op) || desc->texture_count >= WGSL_MAX_TEXTURES) continue;
+      desc->binding_of[pc] = (uint8_t)desc->texture_count;
+      desc->sample_type[desc->texture_count++] = WGSL_SAMPLE_FLOAT;
+    }
   }
   for (uint32_t t = 0; t < WGSL_MAX_TARGETS; t++)
     if ((h->omap_target >> (4u * t)) & 0xfu) desc->target_count = t + 1u;
@@ -2806,16 +2813,25 @@ void wgsl_default_desc(const Sm_Program *program, Wgsl_Program_Desc *desc) {
   }
 }
 
+/* FNV-1a over 8-byte words (the binding table is up to 4096 bytes, hashed
+ * per draw), then the tail bytewise; wgsl_desc_hash finishes with an
+ * avalanche so the low bits (the shader table slot) see every input bit. */
+#define DESC_HASH_PRIME 0x100000001b3ull
+static uint64_t desc_mix(uint64_t h, const void *data, size_t n) {
+  const uint8_t *b = (const uint8_t *)data;
+  size_t i = 0;
+  for (; i + 8u <= n; i += 8u) {
+    uint64_t w;
+    memcpy(&w, b + i, sizeof(w));
+    h = (h ^ w) * DESC_HASH_PRIME;
+  }
+  for (; i < n; i++) h = (h ^ b[i]) * DESC_HASH_PRIME;
+  return h;
+}
+
 uint64_t wgsl_desc_hash(const Wgsl_Program_Desc *desc, const Sm_Program *program) {
   uint64_t h = 0xcbf29ce484222325ull;
-#define MIX(ptr, n)                                         \
-  do {                                                      \
-    const uint8_t *b_ = (const uint8_t *)(ptr);             \
-    for (size_t i_ = 0; i_ < (size_t)(n); i_++) {           \
-      h ^= b_[i_];                                          \
-      h *= 0x100000001b3ull;                                \
-    }                                                       \
-  } while (0)
+#define MIX(ptr, n) (h = desc_mix(h, (ptr), (size_t)(n)))
   MIX(&program->hash, sizeof(program->hash));
   MIX(&program->byte_size, sizeof(program->byte_size));
   MIX(desc->binding_of, program->word_count < SM_MAX_WORDS ? program->word_count : SM_MAX_WORDS);
@@ -2843,5 +2859,10 @@ uint64_t wgsl_desc_hash(const Wgsl_Program_Desc *desc, const Sm_Program *program
     MIX(&desc->shared_bytes, sizeof(desc->shared_bytes));
   }
 #undef MIX
+  h ^= h >> 33; /* avalanche (murmur3's finalizer) */
+  h *= 0xff51afd7ed558ccdull;
+  h ^= h >> 33;
+  h *= 0xc4ceb9fe1a85ec53ull;
+  h ^= h >> 33;
   return h;
 }
