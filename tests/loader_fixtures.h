@@ -71,7 +71,7 @@ typedef struct Fixture_RomFS_Entry {
   size_t size;
 } Fixture_RomFS_Entry;
 
-#define FIXTURE_ROMFS_MAX_ENTRIES 64u
+#define FIXTURE_ROMFS_MAX_ENTRIES 4352u /* mods_test: 16 dirs x 256 short-named files */
 #define FIXTURE_ROMFS_HEADER_SIZE 0x50u
 #define FIXTURE_ROMFS_OFFSET_DIR_HASH_OFFSET 0x08u
 #define FIXTURE_ROMFS_OFFSET_DIR_HASH_SIZE 0x10u

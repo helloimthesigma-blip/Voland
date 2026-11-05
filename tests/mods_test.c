@@ -10,6 +10,7 @@
 #include "hle/loader/romfs.h"
 #include "loader_fixtures.h"
 
+#include <stdio.h>
 #include <string.h>
 
 static const char k_link[] = "LINK-BFRES";
@@ -131,6 +132,58 @@ static void test_layeredfs(void) {
   fixture_buffer_free(&image);
 }
 
+/* layeredfs_arena_bytes is enough for the build however short the base's
+ * names are: many one-letter files make the most entries per table byte
+ * (Tears of the Kingdom's and Animal Crossing's RomFS mods were refused
+ * under a table-bytes x 4 estimate). */
+#define SHORT_DIRS 16u
+#define SHORT_FILES_PER_DIR 256u
+#define SHORT_ENTRIES (SHORT_DIRS * (1u + SHORT_FILES_PER_DIR))
+#define SHORT_PATH_BYTES 16u
+static void test_layeredfs_arena_bytes(void) {
+  static Fixture_RomFS_Entry entries[SHORT_ENTRIES];
+  static char paths[SHORT_ENTRIES][SHORT_PATH_BYTES];
+  uint32_t n = 0;
+  for (uint32_t d = 0; d < SHORT_DIRS; d++) {
+    snprintf(paths[n], SHORT_PATH_BYTES, "/%c", 'a' + d);
+    entries[n] = (Fixture_RomFS_Entry){paths[n], true, NULL, 0};
+    n++;
+    for (uint32_t f = 0; f < SHORT_FILES_PER_DIR; f++) {
+      snprintf(paths[n], SHORT_PATH_BYTES, "/%c/%x", 'a' + d, f);
+      entries[n] = (Fixture_RomFS_Entry){paths[n], false, k_link, sizeof(k_link) - 1};
+      n++;
+    }
+  }
+  Fixture_Buffer image;
+  fixture_build_romfs(entries, n, 0, &image);
+  const Byte_Source base = byte_source_from_memory(image.bytes, image.size);
+
+  Mod_Set set;
+  memset(&set, 0, sizeof(set));
+  mod_set_bind(&set, mod_read, NULL);
+  add(&set, "romfs/a/0", 0);
+  add(&set, "romfs/new/dir/file.txt", 1);
+
+  Arena arena;
+  CHECK(arena_create(&arena, (size_t)layeredfs_arena_bytes(&base, &set)));
+  Layered_RomFS layered;
+  CHECK_OK(layeredfs_build(&base, &set, &arena, &layered));
+  CHECK(layered.replaced == 1 && layered.added == 1);
+
+  Arena read_arena;
+  CHECK(arena_create(&read_arena, 1024 * 1024));
+  RomFS fs;
+  CHECK_OK(romfs_open(&layered.source, &read_arena, &fs));
+  check_file(&fs, "/a/0", k_mod_data[0]);
+  check_file(&fs, "/p/ff", k_link);
+  check_file(&fs, "/new/dir/file.txt", k_mod_data[1]);
+
+  arena_destroy(&read_arena);
+  arena_destroy(&arena);
+  mod_set_clear(&set);
+  fixture_buffer_free(&image);
+}
+
 static const uint8_t k_id[32] = {0xDE, 0xAD, 0xBE, 0xEF, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
 
 static void test_build_ids(void) {
@@ -245,6 +298,7 @@ int main(void) {
   test_normalize();
   test_set_rules();
   test_layeredfs();
+  test_layeredfs_arena_bytes();
   test_build_ids();
   test_ips();
   test_pchtxt();

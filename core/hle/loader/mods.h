@@ -139,6 +139,10 @@ typedef struct Layered_RomFS {
  *   RESULT_OUT_OF_MEMORY    arena exhausted */
 Error layeredfs_build(const Byte_Source *base, const Mod_Set *mods, Arena *arena, Layered_RomFS *out);
 
+/* An arena size layeredfs_build cannot exhaust for `base` (may be NULL)
+ * and `mods`: its caps (from the base header's table sizes) and tables. */
+uint64_t layeredfs_arena_bytes(const Byte_Source *base, const Mod_Set *mods);
+
 /* ------------------------------------------------------------------ */
 /* ExeFS patches.                                                      */
 /* ------------------------------------------------------------------ */

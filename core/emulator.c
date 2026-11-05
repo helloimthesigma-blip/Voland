@@ -68,17 +68,7 @@ static void layer_romfs_mods(Emulator* emulator) {
   release_mods_arena(emulator);
   const uint32_t mod_files = mod_set_count_prefix(&emulator->mods, "romfs/");
   if (mod_files == 0) return;
-  uint64_t base_tables = 0;
-  if (emulator->romfs) {
-    uint8_t header[ROMFS_HEADER_SIZE];
-    if (error_is_ok(byte_source_read(emulator->romfs, 0, header, sizeof(header)))) {
-      for (int field = 1; field <= 4; field++) base_tables += byte_source_le64(header + 0x08 + 0x10 * (uint64_t)(field - 1) + 8);
-    }
-  }
-  if (base_tables > ROMFS_MAX_TABLE_BYTES) base_tables = ROMFS_MAX_TABLE_BYTES;
-  /* Base tables once as read, ~2.5x for the merged tables and per-entry
-   * working records, plus the mod files' share. */
-  const uint64_t bytes = base_tables * 4 + (uint64_t)mod_files * 256 + ((uint64_t)1 << 20);
+  const uint64_t bytes = layeredfs_arena_bytes(emulator->romfs, &emulator->mods);
   if (!arena_create(&emulator->mods_arena, (size_t)bytes)) {
     log_warn("[mods] LayeredFS: no memory for %llu bytes of tables; RomFS mods ignored", (unsigned long long)bytes);
     return;

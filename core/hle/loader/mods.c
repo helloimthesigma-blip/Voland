@@ -440,6 +440,53 @@ static Error layered_read(void *user, uint64_t offset, void *out, uint64_t size)
   return OK;
 }
 
+/* The tree's caps: every base entry, plus each mod file and one dir per
+ * path component of it; and the (parent, name) slots, a power of two at
+ * least twice the entries. layeredfs_build and layeredfs_arena_bytes both
+ * size from these. */
+static void layered_caps(const Mod_Set *mods, uint64_t dir_table_size, uint64_t file_table_size, uint32_t *dir_cap,
+                         uint32_t *file_cap, uint32_t *slots) {
+  uint32_t extra_dirs = 0;
+  for (uint32_t i = 0; i < mods->count; i++) {
+    const Mod_File *f = &mods->files[i];
+    if (!has_prefix(f, "romfs/", 6)) continue;
+    for (uint32_t c = 6; c < f->path_length; c++) extra_dirs += f->path[c] == '/' ? 1u : 0u;
+  }
+  *dir_cap = 1u + extra_dirs + (uint32_t)(dir_table_size / ROMFS_DIR_ENTRY_FIXED_SIZE);
+  *file_cap = mod_set_count_prefix(mods, "romfs/") + (uint32_t)(file_table_size / ROMFS_FILE_ENTRY_FIXED_SIZE);
+  *slots = 16;
+  while (*slots < 2u * (*dir_cap + *file_cap)) *slots <<= 1;
+}
+
+/* Alignment padding the arena may add per allocation. */
+#define LAYERED_ALLOC_SLACK ((uint64_t)64)
+#define LAYERED_ALLOCATIONS 8u
+
+uint64_t layeredfs_arena_bytes(const Byte_Source *base, const Mod_Set *mods) {
+  uint64_t table_sizes[4] = {0, 0, 0, 0}; /* dir hash, dir table, file hash, file table */
+  if (base) {
+    uint8_t header[ROMFS_HEADER_SIZE];
+    if (error_is_ok(byte_source_read(base, 0, header, sizeof(header)))) {
+      for (uint32_t k = 0; k < 4u; k++) {
+        table_sizes[k] = byte_source_le64(header + 0x10 + 0x10 * (uint64_t)k);
+        if (table_sizes[k] > ROMFS_MAX_TABLE_BYTES) table_sizes[k] = ROMFS_MAX_TABLE_BYTES;
+      }
+    }
+  }
+  uint32_t dir_cap, file_cap, slots;
+  layered_caps(mods, table_sizes[1], table_sizes[3], &dir_cap, &file_cap, &slots);
+  uint64_t mod_names = 0;
+  for (uint32_t i = 0; i < mods->count; i++) mod_names += mods->files[i].path_length;
+  const uint64_t base_tables = table_sizes[0] + table_sizes[1] + table_sizes[2] + table_sizes[3];
+  /* The merged tables: buckets for every entry, the base's entries and
+   * one more entry (fixed part + name) per mod file and new dir. */
+  const uint64_t merged = 4u * ((uint64_t)bucket_count(dir_cap) + bucket_count(file_cap)) + base_tables +
+                          (uint64_t)(file_cap + dir_cap) * ROMFS_FILE_ENTRY_FIXED_SIZE + mod_names;
+  return base_tables + (uint64_t)dir_cap * sizeof(L_Dir) + (uint64_t)file_cap * sizeof(L_File) +
+         sizeof(uint32_t) * ((uint64_t)slots + 2u * dir_cap) + merged + LAYERED_DATA_START +
+         (3u + (uint64_t)mods->count) * sizeof(Layered_Segment) + LAYERED_ALLOCATIONS * LAYERED_ALLOC_SLACK;
+}
+
 Error layeredfs_build(const Byte_Source *base, const Mod_Set *mods, Arena *arena, Layered_RomFS *out) {
   memset(out, 0, sizeof(*out));
   const uint32_t mod_files = mod_set_count_prefix(mods, "romfs/");
@@ -452,20 +499,11 @@ Error layeredfs_build(const Byte_Source *base, const Mod_Set *mods, Arena *arena
     if (!error_is_ok(err)) return err;
     have_base = true;
   }
-  /* Caps: every base entry, plus each mod file and one dir per path
-   * component of it. */
-  uint32_t extra_dirs = 0;
-  for (uint32_t i = 0; i < mods->count; i++) {
-    const Mod_File *f = &mods->files[i];
-    if (!has_prefix(f, "romfs/", 6)) continue;
-    for (uint32_t c = 6; c < f->path_length; c++) extra_dirs += f->path[c] == '/' ? 1u : 0u;
-  }
   L_Tree t;
   memset(&t, 0, sizeof(t));
-  t.dir_cap = 1u + extra_dirs + (have_base ? fs.dir_table_size / ROMFS_DIR_ENTRY_FIXED_SIZE : 0u);
-  t.file_cap = mod_files + (have_base ? fs.file_table_size / ROMFS_FILE_ENTRY_FIXED_SIZE : 0u);
-  uint32_t slots = 16;
-  while (slots < 2u * (t.dir_cap + t.file_cap)) slots <<= 1;
+  uint32_t slots;
+  layered_caps(mods, have_base ? fs.dir_table_size : 0, have_base ? fs.file_table_size : 0, &t.dir_cap, &t.file_cap,
+               &slots);
   t.slot_mask = slots - 1u;
   t.dirs = ARENA_ALLOC_ARRAY(arena, L_Dir, t.dir_cap);
   t.files = ARENA_ALLOC_ARRAY(arena, L_File, t.file_cap);
