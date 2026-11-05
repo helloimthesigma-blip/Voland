@@ -236,9 +236,11 @@ Error process_bootstrap(const Process_Bootstrap_Params *params, Process *out) {
     if (!error_is_ok(err)) goto fail;
     cursor += module->image_size;
     out->module_count++;
-    log_info("process: %-8s at 0x%010llx (%llu KB)", module->name,
+    char build_id[NSO_MODULE_ID_HEX_BYTES]; /* what exefs patches and cheats match (§19) */
+    if (!error_is_ok(nso_module_id_hex(&nsos[m], build_id))) build_id[0] = '\0';
+    log_info("process: %-8s at 0x%010llx (%llu KB), build id %s", module->name,
              (unsigned long long)module->base_gva,
-             (unsigned long long)(module->image_size / 1024));
+             (unsigned long long)(module->image_size / 1024), build_id);
   }
   out->code_bytes_mapped = code_size;
   /* rtld is index 0 when present (load order is fixed). Enter at its
