@@ -243,6 +243,12 @@ Error process_bootstrap(const Process_Bootstrap_Params *params, Process *out) {
              (unsigned long long)(module->image_size / 1024), build_id);
   }
   out->code_bytes_mapped = code_size;
+  if (params->mods) {
+    uint8_t module_ids[PROCESS_MAX_MODULES][NSO_MODULE_ID_SIZE];
+    for (uint32_t m = 0; m < out->module_count; m++) memcpy(module_ids[m], out->modules[m].module_id, NSO_MODULE_ID_SIZE);
+    (void)mods_report_unmatched_patches(params->mods, (const uint8_t (*)[32])module_ids, out->module_count,
+                                        params->scratch);
+  }
   /* rtld is index 0 when present (load order is fixed). Enter at its
    * .text, not the image base: nso_open allows a page-aligned non-zero
    * .text offset, and the image base is RW there. */

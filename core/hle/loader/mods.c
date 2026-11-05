@@ -812,6 +812,52 @@ static const char *base_name(const Mod_File *f, uint32_t *length) {
   return name;
 }
 
+/* Does pchtxt `text` name any of the ids in an @nsobid- line? */
+static bool pchtxt_targets(const char *text, uint64_t n, const uint8_t (*module_ids)[32], uint32_t count) {
+  for (uint64_t i = 0; i < n;) {
+    uint64_t end = i;
+    while (end < n && text[end] != '\n') end++;
+    const char *line = text + i;
+    uint64_t len = end - i;
+    i = end + 1;
+    while (len > 0 && (line[0] == ' ' || line[0] == '\t')) { line++; len--; }
+    if (len <= 8 || memcmp(line, "@nsobid-", 8) != 0) continue;
+    for (uint32_t m = 0; m < count; m++) {
+      if (mods_build_id_matches(line + 8, (uint32_t)(len - 8), module_ids[m])) return true;
+    }
+  }
+  return false;
+}
+
+uint32_t mods_report_unmatched_patches(const Mod_Set *set, const uint8_t (*module_ids)[32], uint32_t count,
+                                       Arena *scratch) {
+  if (!set || !set->live) return 0;
+  uint32_t unmatched = 0;
+  const size_t mark = scratch->used_bytes;
+  for (uint32_t i = 0; i < set->count; i++) {
+    const Mod_File *f = &set->files[i];
+    const bool ips = has_suffix(f, ".ips");
+    if (!ips && !has_suffix(f, ".pchtxt")) continue;
+    bool targets = false;
+    if (ips) {
+      uint32_t name_length = 0;
+      const char *name = base_name(f, &name_length);
+      for (uint32_t m = 0; m < count && !targets; m++) targets = mods_build_id_matches(name, name_length, module_ids[m]);
+    } else {
+      uint8_t *bytes = NULL;
+      uint64_t n = 0;
+      if (!error_is_ok(mod_file_read_all(f, scratch, &bytes, &n))) continue; /* mods_patch_module warned */
+      targets = pchtxt_targets((const char *)bytes, n, module_ids, count);
+      scratch->used_bytes = mark;
+    }
+    if (!targets) {
+      log_notice("mods: patch %s is for another version of the game (no executable has its build id)", f->path);
+      unmatched++;
+    }
+  }
+  return unmatched;
+}
+
 uint32_t mods_patch_module(const Mod_Set *set, const char *module_name, const uint8_t module_id[32], uint8_t *image,
                            uint64_t size, Arena *scratch) {
   if (!set || !set->live) return 0;

@@ -266,6 +266,36 @@ static void test_patch_module(void) {
   mod_set_clear(&set);
 }
 
+/* Patches no loaded executable matches are reported (another game version). */
+static void test_unmatched_patches(void) {
+  const uint8_t ips[] = {'P', 'A', 'T', 'C', 'H', 'E', 'O', 'F'};
+  static const uint8_t other_id[32] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08};
+  uint8_t loaded[2][32];
+  memcpy(loaded[0], other_id, sizeof(other_id));
+  memcpy(loaded[1], k_id, sizeof(k_id));
+  Arena scratch;
+  CHECK(arena_create(&scratch, 64 * 1024));
+
+  Mod_Set set;
+  memset(&set, 0, sizeof(set));
+  mod_set_bind(&set, patch_read, (void *)ips);
+  CHECK_OK(mod_set_add(&set, "exefs/DEADBEEF01020304.ips", sizeof(ips), 0));   /* the second executable's */
+  CHECK_OK(mod_set_add(&set, "exefs/FFFFFFFFFFFFFFFF.ips", sizeof(ips), 1));   /* nobody's */
+  CHECK(mods_report_unmatched_patches(&set, (const uint8_t (*)[32])loaded, 2, &scratch) == 1);
+  CHECK(mods_report_unmatched_patches(&set, (const uint8_t (*)[32])loaded, 1, &scratch) == 2);
+  mod_set_clear(&set);
+
+  const char text[] = "@nsobid-DEADBEEF0102030405060700\n00000004 11\n";
+  memset(&set, 0, sizeof(set));
+  mod_set_bind(&set, patch_read, (void *)text);
+  CHECK_OK(mod_set_add(&set, "exefs/v1.pchtxt", strlen(text), 0));
+  CHECK(mods_report_unmatched_patches(&set, (const uint8_t (*)[32])loaded, 2, &scratch) == 0);
+  CHECK(mods_report_unmatched_patches(&set, (const uint8_t (*)[32])loaded, 1, &scratch) == 1);
+  CHECK(scratch.used_bytes == 0);
+  mod_set_clear(&set);
+  arena_destroy(&scratch);
+}
+
 static void expect_norm(const char *path, const char *expected) {
   char out[MODS_MAX_PATH_BYTES];
   const bool ok = mods_normalize_path("MyMod", path, 0x0100A12300000000ull, out, sizeof(out));
@@ -306,6 +336,7 @@ int main(void) {
   test_ips();
   test_pchtxt();
   test_patch_module();
+  test_unmatched_patches();
   printf("[mods_test] all tests passed\n");
   return 0;
 }

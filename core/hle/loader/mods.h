@@ -155,6 +155,13 @@ uint64_t layeredfs_arena_bytes(const Byte_Source *base, const Mod_Set *mods);
 uint32_t mods_patch_module(const Mod_Set *set, const char *module_name, const uint8_t module_id[32],
                            uint8_t *image, uint64_t size, Arena *scratch);
 
+/* Logs each IPS / IPS32 / pchtxt patch in the set that targets none of the
+ * `count` loaded executables (`module_ids`): a patch for another version
+ * of the game, which would otherwise do nothing silently. Returns how many
+ * there were. `scratch` is rewound before returning. */
+uint32_t mods_report_unmatched_patches(const Mod_Set *set, const uint8_t (*module_ids)[32], uint32_t count,
+                                       Arena *scratch);
+
 /* True when a patch file's hex build id (from its file name, up to the
  * first non-hex character) is a prefix of `module_id`. Exposed for
  * tests and for the cheat loader, which uses the same convention. */

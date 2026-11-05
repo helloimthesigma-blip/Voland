@@ -74,6 +74,10 @@ win). If `DIR` itself contains `romfs/`, `exefs/`, `cheats/` or
 - Updates and DLC must be pre-decrypted NCAs (docs/DUMP.md), like the
   game itself.
 - A LayeredFS mod cannot delete a game file, only replace or add one.
+- An executable patch or cheat file only applies to the exact game version
+  it was made for. A patch that matches no loaded executable is named in
+  the log ("is for another version of the game"), and each executable's
+  build id is logged at load ("process: main ... build id ...").
 
 ## Mod repositories
 
