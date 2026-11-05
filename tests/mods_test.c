@@ -191,6 +191,9 @@ static void test_build_ids(void) {
   CHECK(mods_build_id_matches("deadbeef0102030405060700000000000000000000.ips", 46, k_id));
   CHECK(!mods_build_id_matches("DEADBEEF01020305", 16, k_id));
   CHECK(!mods_build_id_matches("DEADBEEF", 8, k_id)); /* too short to be an id */
+  /* Trailing zeros trimmed to an odd digit count: the last digit is a high nibble. */
+  CHECK(mods_build_id_matches("DEADBEEF010203040506070", 23, k_id));
+  CHECK(!mods_build_id_matches("DEADBEEF010203040506071", 23, k_id));
 }
 
 static void test_ips(void) {

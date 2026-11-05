@@ -669,10 +669,12 @@ static int hex_value(char c) {
 bool mods_build_id_matches(const char *hex, uint32_t hex_length, const uint8_t module_id[32]) {
   uint32_t digits = 0;
   while (digits < hex_length && digits < 64 && hex_value(hex[digits]) >= 0) digits++;
-  /* Fewer than 8 bytes is not an id; an odd digit count is malformed. */
-  if (digits < 16 || (digits & 1u)) return false;
-  for (uint32_t i = 0; i < digits / 2; i++) {
-    const uint8_t b = (uint8_t)(hex_value(hex[2 * i]) << 4 | hex_value(hex[2 * i + 1]));
+  /* Fewer than 8 bytes is not an id. Ids are written with trailing zeros
+   * trimmed, sometimes to an odd digit count: the missing digit is 0. */
+  if (digits < 16) return false;
+  for (uint32_t i = 0; i < (digits + 1u) / 2; i++) {
+    const int low = 2 * i + 1 < digits ? hex_value(hex[2 * i + 1]) : 0;
+    const uint8_t b = (uint8_t)(hex_value(hex[2 * i]) << 4 | low);
     if (b != module_id[i]) return false;
   }
   return true;
