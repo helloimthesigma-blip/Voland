@@ -540,11 +540,15 @@ static void flush_cycles(Ctx *c) {
  * the budget under a run already past it (never a wrapped huge room). */
 static void compute_room(Ctx *c) {
   state_load64(c, OFF_BUDGET);
+  lset(c, L_T0);
   state_load64(c, OFF_CYCLES);
+  lset(c, L_T1);
+  lget(c, L_T0);
+  lget(c, L_T1);
   op(c, WASM_OP_I64_SUB);
   i64c(c, 0);
-  state_load64(c, OFF_BUDGET);
-  state_load64(c, OFF_CYCLES);
+  lget(c, L_T0);
+  lget(c, L_T1);
   op(c, WASM_OP_I64_GT_U);
   op(c, WASM_OP_SELECT);
   lset(c, L_ROOM);
@@ -611,27 +615,36 @@ static int32_t find_block(const Ctx *c, uint64_t pc) {
  * slightly larger function whose only calls are to such leaves (managed
  * code's helpers: a getter or two and a GC poll), called tens of millions
  * of times while Celeste loads - every call to it was two region
- * transitions. Larger callees stay regions of their own - compiled once,
- * not into each caller (measured: inlining every callee doubled module
- * bytes). */
+ * transitions. The scan follows unconditional branches, so a function
+ * that tail-jumps through shims (IL2CPP's write barrier: two moves, B, a
+ * store, B, the card-marking body) counts as the instructions it runs.
+ * Larger callees stay regions of their own - compiled once, not into each
+ * caller (measured: inlining every callee doubled module bytes). */
 #define JIT_SMALL_CALLEE_INSNS 16u
 #define JIT_SMALL_CALLER_INSNS 48u /* the larger form, with calls to leaves */
 #define BRANCH_REGISTER_MASK 0xFF9FFC1Fu /* BR/RET with any Rn */
 #define BR_ENCODING 0xD61F0000u
 #define RET_ENCODING 0xD65F0000u
 static bool small_function(const Ctx *c, uint64_t target, bool calls_allowed) {
-  const uint64_t page = target & ~(uint64_t)VMM_PAGE_OFFSET_MASK;
-  const uint32_t *code = c->source->page_code(c->source->context, page);
-  if (!code || (target & 3u)) return false;
-  const uint32_t first = (uint32_t)((target - page) / INSN_BYTES);
   const uint32_t limit = calls_allowed ? JIT_SMALL_CALLER_INSNS : JIT_SMALL_CALLEE_INSNS;
-  for (uint32_t i = first; i < first + limit && i < VMM_PAGE_SIZE / INSN_BYTES; i++) {
-    const uint32_t insn = code[i];
+  uint64_t pc = target, page = 0;
+  const uint32_t *code = NULL;
+  for (uint32_t n = 0; n < limit; n++, pc += INSN_BYTES) {
+    if ((pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK) != page || !code) {
+      page = pc & ~(uint64_t)VMM_PAGE_OFFSET_MASK;
+      code = (pc & 3u) ? NULL : c->source->page_code(c->source->context, page);
+      if (!code) return false;
+    }
+    const uint32_t insn = code[(pc - page) / INSN_BYTES];
     const uint32_t masked = insn & BRANCH_REGISTER_MASK;
     if (masked == BR_ENCODING || masked == RET_ENCODING) return true;
-    if (bits(insn, 30, 26) == 0x05 && bit(insn, 31)) { /* BL */
-      const uint64_t callee = page + (uint64_t)i * INSN_BYTES + (uint64_t)sign_extend((uint64_t)bits(insn, 25, 0) << 2, 28);
-      if (!calls_allowed || !small_function(c, callee, false)) return false;
+    if (bits(insn, 30, 26) == 0x05) {
+      const uint64_t to = pc + (uint64_t)sign_extend((uint64_t)bits(insn, 25, 0) << 2, 28);
+      if (!bit(insn, 31)) { /* B: on at its target */
+        pc = to - INSN_BYTES;
+        continue;
+      }
+      if (!calls_allowed || !small_function(c, to, false)) return false; /* BL */
     }
     if ((insn & 0xFFFFFC1Fu) == 0xD63F0000u) return false; /* BLR */
   }

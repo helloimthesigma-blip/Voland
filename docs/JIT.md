@@ -309,7 +309,15 @@ What joins a region:
   returns or branches away (RET or BR) without calling anything. So does
   a function that returns within 48 instructions and calls only such
   leaves: managed code's helpers (an array's length, a GC poll), which
-  Celeste calls 170 M times while it loads. The
+  Celeste calls 170 M times while it loads. The size counts the
+  instructions a call runs, following unconditional branches, so a
+  function that tail-jumps through shims qualifies: IL2CPP's GC write
+  barrier (two moves, B, a store, B, the card-marking body) was Nine Sols'
+  busiest region, 25 M entries in 420k slices. Following them took region
+  entries down 4.9% (Nine Sols), 4.6% (Silksong) and 17.6% (Hollow Knight)
+  in 150k Node slices, for 1-6% more module bytes; also allowing calls to
+  any function in the 48-instruction form saved another 6% of Nine Sols'
+  entries but cost 20% more module bytes and no time. The
   return site joins too, and a RET goes back to an in-region return site
   through a guarded internal transition. Larger callees stay regions of
   their own, compiled once instead of into every caller.

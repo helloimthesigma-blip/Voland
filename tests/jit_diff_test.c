@@ -494,9 +494,9 @@ static void run_case(uint32_t iteration) {
       i += 2u;
       continue;
     }
-    if (pick(10) == 0) { /* BL into the second page: a leaf function or the PLT stub (code2 below) */
-      static const uint32_t targets[3] = {0, 4, 8};
-      const uint64_t target = CODE2_GVA + 4u * targets[pick(3)];
+    if (pick(10) == 0) { /* BL into the second page: a leaf function, the PLT stub or the shim (code2 below) */
+      static const uint32_t targets[4] = {0, 4, 8, 12};
+      const uint64_t target = CODE2_GVA + 4u * targets[pick(4)];
       code[i] = (0x25u << 26) | (uint32_t)(((target - (CODE_GVA + 4u * i)) >> 2) & 0x3FFFFFFu);
       continue;
     }
@@ -516,7 +516,9 @@ static void run_case(uint32_t iteration) {
   CHECK_OK(vmm_write_physical(g_vmm, CODE_PA, code, sizeof(code)));
   /* Page 2: f0 = add x1, x1, #1; ret.  f4 = add x2, x2, x1; ret.
    * stub (word 8) = adrp x16, DATA; ldr x17, [x16, #8]; br x17 - the GOT
-   * slot (data + 8) holds f0, f4 or something else (the prediction fails). */
+   * slot (data + 8) holds f0, f4 or something else (the prediction fails).
+   * shim (word 12) = mov x3, x1; b w20 ... w20 = add x2, x2, x3; b f4: a
+   * function that runs through unconditional branches (small_function). */
   static uint32_t code2[VMM_PAGE_SIZE / 4];
   for (uint32_t i = 0; i < VMM_PAGE_SIZE / 4; i++) code2[i] = SVC_ZERO;
   code2[0] = 0x91000421u;
@@ -527,6 +529,10 @@ static void run_case(uint32_t iteration) {
   code2[8] = 0x90000010u | (uint32_t)((adrp_page_delta & 3u) << 29) | (uint32_t)((adrp_page_delta >> 2) << 5);
   code2[9] = 0xF9400611u; /* ldr x17, [x16, #8] */
   code2[10] = 0xD61F0220u; /* br x17 */
+  code2[12] = 0xAA0103E3u; /* mov x3, x1 */
+  code2[13] = 0x14000007u; /* b +7 words: w20 */
+  code2[20] = 0x8B030042u; /* add x2, x2, x3 */
+  code2[21] = 0x14000000u | ((uint32_t)-17 & 0x3FFFFFFu); /* b -17 words: f4 */
   CHECK_OK(vmm_write_physical(g_vmm, CODE2_PA, code2, sizeof(code2)));
   g_jit_cpu->clear_cache(g_jit);
 
