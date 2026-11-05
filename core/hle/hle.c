@@ -98,6 +98,10 @@ static const char *svc_name(uint32_t swi)
     return "OutputDebugString";
   case 0x29:
     return "GetInfo";
+  case 0x74:
+    return "MapProcessMemory";
+  case 0x75:
+    return "UnmapProcessMemory";
   default:
     return "<unknown>";
   }
@@ -255,6 +259,8 @@ static void dispatch_svc(HLE_Context *context, CPU_State *cpu_state, uint32_t sw
   case 0x12: hle_svc_clear_event(context, cpu_state); break;
   case 0x17: hle_svc_reset_signal(context, cpu_state); break;
   case 0x45: hle_svc_create_event(context, cpu_state); break;
+  case 0x74: hle_svc_map_process_memory(context, cpu_state); break;
+  case 0x75: hle_svc_unmap_process_memory(context, cpu_state); break;
   case 0x35: hle_svc_signal_to_address(context, cpu_state); break;
   case 0x36: hle_svc_synchronize_preemption_state(context, cpu_state); break;
   /* FlushEntireDataCache, FlushDataCache, FlushProcessDataCache: guest

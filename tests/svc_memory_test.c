@@ -1,6 +1,6 @@
 /**
  * core/hle/kernel/svc_memory unit test: SetHeapSize, MapMemory,
- * UnmapMemory, QueryMemory driven the way thread_test.c drives thread
+ * UnmapMemory, QueryMemory, MapProcessMemory, UnmapProcessMemory driven the way thread_test.c drives thread
  * SVCs - registers set by hand, hle_on_svc invoked directly, state
  * asserted through the CPU backend and vmm (§5), never through IPC (does
  * not exist yet).
@@ -469,6 +469,53 @@ int main(void) {
     hle_on_svc(emu.cpu_state, 0x06, &emu.hle);
     CHECK_OK(vmm_read_block(emu.vmm, out, &info, sizeof(info)));
     CHECK(info.type == HLE_MEMTYPE_CODE_STATIC);
+  }
+
+  /* MapProcessMemory / UnmapProcessMemory: code-injection mods get their
+   * process's handle from GetInfo 65001 (Atmosphere), alias its code
+   * read-write, patch it, and unmap the alias (new code: the generation). */
+  {
+    const uint64_t code = process->address_space.code.base;
+    set_svc_args3(regs, 0, 65001u, 0);
+    regs->x[3] = 0;
+    hle_on_svc(emu.cpu_state, 0x29, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    const uint64_t handle = regs->x[1];
+
+    set_svc_args3(regs, dst, 0x1234u, code); /* not a process handle */
+    regs->x[3] = PAGE;
+    hle_on_svc(emu.cpu_state, 0x74, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_INVALID_HANDLE);
+    set_svc_args3(regs, code, handle, code); /* destination in use */
+    regs->x[3] = PAGE;
+    hle_on_svc(emu.cpu_state, 0x74, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_INVALID_MEMORY_STATE);
+
+    set_svc_args3(regs, dst, handle, code);
+    regs->x[3] = PAGE;
+    hle_on_svc(emu.cpu_state, 0x74, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    CHECK_OK(vmm_write8(emu.vmm, dst + 8, 0x5A)); /* through the alias */
+    CHECK_OK(vmm_read8(emu.vmm, code + 8, &byte));
+    CHECK(byte == 0x5A);
+
+    const uint64_t generation = vmm_generation();
+    set_svc_args3(regs, dst, 0xFFFF8001u, code); /* the pseudo-handle works too */
+    regs->x[3] = PAGE;
+    hle_on_svc(emu.cpu_state, 0x75, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
+    CHECK(vmm_generation() > generation);
+    VMM_Region_Info gone;
+    CHECK_OK(vmm_query(emu.vmm, dst, &gone));
+    CHECK(!gone.is_mapped);
+    set_svc_args3(regs, dst, handle, code); /* no alias left */
+    regs->x[3] = PAGE;
+    hle_on_svc(emu.cpu_state, 0x75, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_INVALID_MEMORY_STATE);
+
+    set_svc_args3(regs, handle, 0, 0);
+    hle_on_svc(emu.cpu_state, 0x16, &emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS);
   }
 
   /* Bootstrapped directly (bypassing emulator_load_program), so

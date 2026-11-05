@@ -451,6 +451,100 @@ void hle_svc_unmap_memory(HLE_Context *context, CPU_State *cpu_state) {
   regs->x[0] = HLE_RESULT_SUCCESS;
 }
 
+/* svcMapProcessMemory / svcUnmapProcessMemory take a process handle; the
+ * only process is the caller (its pseudo-handle or a GetInfo 65001 handle). */
+static bool is_own_process(HLE_Context *context, uint32_t handle) {
+  return handle == HANDLE_PSEUDO_CURRENT_PROCESS ||
+         handle_table_get(&context->process->handles, handle, KERNEL_OBJECT_PROCESS) == context->process;
+}
+
+/* Every page of [gva, gva + size) mapped (any permission). */
+static bool range_is_mapped(VMM_Context *vmm, uint64_t gva, uint64_t size) {
+  for (uint64_t at = gva; at < gva + size;) {
+    VMM_Region_Info info;
+    if (!error_is_ok(vmm_query(vmm, at, &info)) || !info.is_mapped || !(info.perms & VMM_PERM_R)) return false;
+    at = info.base_gva + info.size;
+  }
+  return true;
+}
+
+/* 0x74 MapProcessMemory(x0 dst, w1 process, x2 src, x3 size): the
+ * process's pages at src, read-write at the free range dst. Code-injection
+ * mods (exlaunch) write their hooks into the game's code through it. */
+void hle_svc_map_process_memory(HLE_Context *context, CPU_State *cpu_state) {
+  CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
+  VMM_Context *vmm = context->vmm;
+  const uint64_t dst = regs->x[0], src = regs->x[2], size = regs->x[3];
+  const uint32_t handle = (uint32_t)regs->x[1];
+  if (size == 0 || ((dst | src | size) & VMM_PAGE_OFFSET_MASK) != 0) {
+    regs->x[0] = HLE_RESULT_INVALID_SIZE;
+    return;
+  }
+  if (!is_own_process(context, handle)) {
+    regs->x[0] = HLE_RESULT_INVALID_HANDLE;
+    return;
+  }
+  const Address_Space *as = &context->process->address_space;
+  if (!address_region_contains(&as->aslr, dst, size) || !address_region_contains(&as->aslr, src, size)) {
+    regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
+    return;
+  }
+  VMM_Region_Info dst_info;
+  if (!error_is_ok(vmm_query(vmm, dst, &dst_info)) || dst_info.is_mapped || !vmm_run_covers(&dst_info, dst, size) ||
+      !range_is_mapped(vmm, src, size)) {
+    log_warn("[svc] MapProcessMemory(%llx, %llx, %llx): destination in use or source unmapped",
+             (unsigned long long)dst, (unsigned long long)src, (unsigned long long)size);
+    regs->x[0] = HLE_RESULT_INVALID_MEMORY_STATE;
+    return;
+  }
+  if (!alias_pages(vmm, dst, src, size, VMM_PERM_RW)) {
+    for (uint64_t off = 0; off < size; off += VMM_PAGE_SIZE) {
+      VMM_Region_Info info;
+      if (error_is_ok(vmm_query(vmm, dst + off, &info)) && info.is_mapped) (void)vmm_unmap(vmm, dst + off, VMM_PAGE_SIZE);
+    }
+    regs->x[0] = HLE_RESULT_OUT_OF_MEMORY;
+    return;
+  }
+  /* Writes through the alias change code no decoded block knows about;
+   * the unmap moves the generation again. A mod that keeps an alias and
+   * writes code later (after the code ran) is not seen by blocks already
+   * compiled - none known does: they patch at load, before the game runs. */
+  vmm_bump_generation();
+  regs->x[0] = HLE_RESULT_SUCCESS;
+}
+
+/* 0x75 UnmapProcessMemory(x0 dst, w1 process, x2 src, x3 size): removes
+ * such an alias. Code written through it is new code: the code generation
+ * moves, so compiled and predecoded blocks of the patched pages revalidate. */
+void hle_svc_unmap_process_memory(HLE_Context *context, CPU_State *cpu_state) {
+  CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
+  VMM_Context *vmm = context->vmm;
+  const uint64_t dst = regs->x[0], src = regs->x[2], size = regs->x[3];
+  const uint32_t handle = (uint32_t)regs->x[1];
+  if (size == 0 || ((dst | src | size) & VMM_PAGE_OFFSET_MASK) != 0) {
+    regs->x[0] = HLE_RESULT_INVALID_SIZE;
+    return;
+  }
+  if (!is_own_process(context, handle)) {
+    regs->x[0] = HLE_RESULT_INVALID_HANDLE;
+    return;
+  }
+  if (!range_is_mapped(vmm, dst, size) || !range_is_mapped(vmm, src, size)) {
+    regs->x[0] = HLE_RESULT_INVALID_MEMORY_STATE;
+    return;
+  }
+  for (uint64_t off = 0; off < size; off += VMM_PAGE_SIZE) {
+    if (page_pa_of(vmm, dst + off) != page_pa_of(vmm, src + off)) {
+      regs->x[0] = HLE_RESULT_INVALID_MEMORY_STATE; /* not an alias of src */
+      return;
+    }
+  }
+  const Error err = vmm_unmap(vmm, dst, size);
+  SWITCH_ASSERT_ALWAYS(error_is_ok(err), "hle_svc_unmap_process_memory: unmap of a checked alias failed");
+  vmm_bump_generation();
+  regs->x[0] = HLE_RESULT_SUCCESS;
+}
+
 void hle_svc_query_memory(HLE_Context *context, CPU_State *cpu_state) {
   CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
   Process *process = context->process;

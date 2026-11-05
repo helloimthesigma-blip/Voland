@@ -147,6 +147,12 @@ void hle_svc_map_physical_memory(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_unmap_physical_memory(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_map_memory(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_unmap_memory(HLE_Context *context, CPU_State *cpu_state);
+/* 0x74 MapProcessMemory / 0x75 UnmapProcessMemory (X0 dst, W1 process -
+ * the caller's own, X2 src, X3 size): an RW alias of the process's pages
+ * at a free range, and its removal (which moves the code generation:
+ * code-injection mods patch code through the alias). */
+void hle_svc_map_process_memory(HLE_Context *context, CPU_State *cpu_state);
+void hle_svc_unmap_process_memory(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_query_memory(HLE_Context *context, CPU_State *cpu_state);
 
 /* Shared memory (shared_memory.h), libnx svc.s ABI:

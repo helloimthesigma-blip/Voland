@@ -58,6 +58,7 @@ typedef enum Kernel_Object_Type {
   KERNEL_OBJECT_EVENT_WRITABLE, /* Kernel_Event: signal / clear */
   KERNEL_OBJECT_SHARED_MEMORY,  /* Kernel_Shared_Memory (shared_memory.h) */
   KERNEL_OBJECT_TRANSFER_MEMORY, /* Kernel_Transfer_Memory (transfer_memory.h) */
+  KERNEL_OBJECT_PROCESS,  /* Process (process.h): the one running (GetInfo 65001) */
   /* Ports: added with their SVCs. */
 } Kernel_Object_Type;
 

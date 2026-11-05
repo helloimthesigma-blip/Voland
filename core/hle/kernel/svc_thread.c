@@ -13,6 +13,8 @@
 
 #include <string.h>
 
+/* GetInfo types beyond Horizon's: Atmosphere (Mesosphere) extensions. */
+#define INFO_TYPE_MESOSPHERE_CURRENT_PROCESS 65001u
 #define CORE_USE_PROCESS_DEFAULT ((int32_t)-2)
 #define HLE_APPLICATION_MEMORY_BYTES ((uint64_t)0xCD500000) /* the application pool, ~3.2GB */
 #define HLE_ALL_CORES_MASK 0xFull
@@ -738,6 +740,18 @@ void hle_svc_get_info(HLE_Context *c, CPU_State *s) {
   case 25: case 0xF0000002u: value = c->scheduler->ticks; break;
   case 26: value = 1; break;
   case 27: case 28: value = 0; break; /* IoRegionHint, AliasRegionExtraSize (18.0.0+) */
+  case INFO_TYPE_MESOSPHERE_CURRENT_PROCESS: {
+    /* Atmosphere's extension: a real handle to the calling process, which
+     * code-injection frameworks (exlaunch) pass to svcMapProcessMemory to
+     * patch their game's code. */
+    uint32_t handle = 0;
+    if (!error_is_ok(handle_table_add(&c->process->handles, KERNEL_OBJECT_PROCESS, c->process, &handle))) {
+      r->x[0] = HLE_RESULT_OUT_OF_HANDLES;
+      return;
+    }
+    value = handle;
+    break;
+  }
   default:
     log_warn("[hle] GetInfo: unimplemented info type %u (subtype %llu)", type, (unsigned long long)subtype);
     r->x[0] = HLE_RESULT_INVALID_ENUM_VALUE;
