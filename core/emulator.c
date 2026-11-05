@@ -991,7 +991,24 @@ void emulator_unload_program(Emulator* emulator) {
   if (!error_is_ok(backend_err)) log_warn("[emulator] %s; keeping %s", backend_err.message, emulator->cpu_backend->name);
 }
 
-#define EMULATOR_GPU_MAX_LATENCY_TICKS (SCHEDULER_TIMER_HZ / 60u) /* one 60 Hz frame of virtual time */
+#define EMULATOR_GPU_FRAME_TICKS (SCHEDULER_TIMER_HZ / 60u) /* one 60 Hz frame of virtual time */
+/* How far the async GPU may trail the guest, in virtual time. One frame
+ * serialized Super Mario Odyssey's gameplay: its GPU thread needs ~40 ms
+ * a frame, so guest and GPU work alternated (15 fps, both threads part
+ * idle). Measured (browser, 2 x 20 s): 1 frame 14.9-15.3 fps, 2 17.4-20.3,
+ * 3 19.2-21.3, 4 20.6-21.2. Games whose GPU keeps up never reach the
+ * bound. Tuning: VOLAND_GPU_LATENCY_FRAMES=N (60 Hz frames). */
+#define EMULATOR_GPU_LATENCY_FRAMES 3u
+
+static uint64_t gpu_max_latency_ticks(void) {
+  static uint64_t ticks;
+  if (!ticks) {
+    const char *frames = getenv("VOLAND_GPU_LATENCY_FRAMES");
+    const uint64_t n = frames ? strtoull(frames, NULL, 0) : 0;
+    ticks = (n ? n : EMULATOR_GPU_LATENCY_FRAMES) * EMULATOR_GPU_FRAME_TICKS;
+  }
+  return ticks;
+}
 
 /* The devices the run loop drives between guest runs (§13, §14, §18), then
  * the next time one of them signals something. Slice mode runs it before
@@ -1001,7 +1018,7 @@ static void update_devices(Emulator* emulator) {
   /* GPU completions (§13) arrive at scheduler-tick cadence; the async
    * GPU stays within a frame of the guest's virtual time. */
   nvdrv_poll_completions(&emulator->nvdrv, &emulator->hle);
-  nvdrv_bound_gpu_latency(&emulator->nvdrv, emulator->scheduler.ticks, EMULATOR_GPU_MAX_LATENCY_TICKS);
+  nvdrv_bound_gpu_latency(&emulator->nvdrv, emulator->scheduler.ticks, gpu_max_latency_ticks());
   /* Controllers (§18): the input region into hid's shared memory. */
   const Memory_Layout* layout = layout_get();
   hid_update(&emulator->hid, &emulator->hle, layout ? (const void*)(uintptr_t)layout->input_region_base : NULL,
