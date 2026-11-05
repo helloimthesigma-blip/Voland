@@ -400,6 +400,8 @@ async function boot(): Promise<BootResult | null> {
         window.__VOLAND_DEBUG__ = {
           dumpThreads: (backtrace: boolean) =>
             cpuWorker.postMessage({ type: "dump-threads", backtrace } satisfies MainToCPUMessage),
+          setCpuSpeed: (percent: number) =>
+            cpuWorker.postMessage({ type: "set-cpu-speed", percent } satisfies MainToCPUMessage),
         };
         /* ?gpucompute=0: compute dispatches stay on the CPU. */
         if (new URLSearchParams(location.search).get("gpucompute") === "0") {

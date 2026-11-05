@@ -70,7 +70,9 @@
  *   menus to the scene to profile: "press KEY MS" (hold KEY for MS wall
  *   milliseconds), "shot FILE.png", "slices N" (wait for N more guest slices), "threads" (guest threads to the log), "stats", "click TESTID" (e.g.
  *   state-save, state-load), "status TESTID" (prints its text), "select TESTID VALUE" (a
- *   setting, e.g. frame-skip 2), "sleep MS", "go"
+ *   setting, e.g. frame-skip 2), "cpuspeed PERCENT" (the virtual CPU
+ *   clock, as ?cpuspeed=), "measure S" (fps and virtual-time rate over S
+ *   wall seconds), "sleep MS", "go"
  *   (measure now). Each
  *   command prints "drive: N done ...".
  * - --restore-saves BACKUP.tar imports a saves backup (the Saves panel's
@@ -674,6 +676,16 @@ async function main() {
         } else if (cmd === "threads") {
           await page.evaluate(() => window.__VOLAND_DEBUG__?.dumpThreads(true));
           await sleep(500);
+        } else if (cmd === "measure") {
+          const before = await sample();
+          const startedAt = Date.now();
+          await sleep(Number(arg) * 1000);
+          const after = await sample();
+          const wall = (Date.now() - startedAt) / 1000;
+          const virtual = (after.perf.ticks - before.perf.ticks) / TICKS_PER_SECOND;
+          note = `fps ${((after.presents - before.presents) / wall).toFixed(2)} virtual ${(100 * virtual / wall).toFixed(1)}% of real time`;
+        } else if (cmd === "cpuspeed") {
+          await page.evaluate((percent) => window.__VOLAND_DEBUG__?.setCpuSpeed(percent), Number(arg));
         } else if (cmd === "slices") {
           /* Guest progress rather than wall time: the same point in the game
            * whatever the host's speed. */

@@ -36,6 +36,8 @@ export interface VolandStats {
 export interface VolandDebug {
   /** Every guest thread's state, wait and (backtrace) frame chain to the log. */
   readonly dumpThreads: (backtrace: boolean) => void;
+  /** The virtual CPU clock, % of the Switch's (as ?cpuspeed=N, but mid-run). */
+  readonly setCpuSpeed: (percent: number) => void;
 }
 
 declare global {
