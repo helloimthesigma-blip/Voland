@@ -3694,10 +3694,18 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
  * target was drawn. Logged (a few lines) - each such shape is a missing
  * surface view. */
 #define PARTIAL_SURFACE_LOG_LIMIT 32u
+#define PARTIAL_SURFACE_CHECKED_SLOTS 1024u
+#define PARTIAL_SURFACE_ADDRESS_SHIFT 8u /* textures start at 256-byte (and coarser) boundaries */
 static void gpu_note_partial_surface(Raster3d *r, const Tex_Header *h) {
   static uint64_t seen[PARTIAL_SURFACE_LOG_LIMIT]; /* one line per shape pair */
   static uint32_t logged;
   if (logged >= PARTIAL_SURFACE_LOG_LIMIT) return;
+  /* Each texture address once (diagnostics): the surface scan per bind was
+   * a tenth of Super Mario Odyssey's GPU thread. */
+  static uint64_t checked[PARTIAL_SURFACE_CHECKED_SLOTS];
+  uint64_t *slot = &checked[(h->address >> PARTIAL_SURFACE_ADDRESS_SHIFT) % PARTIAL_SURFACE_CHECKED_SLOTS];
+  if (*slot == h->address) return;
+  *slot = h->address;
   for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
     const Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
     if (!s->in_use || h->address < s->address || h->address >= s->address + s->guest_bytes) continue;
@@ -4464,13 +4472,6 @@ static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs, uint32_t topolog
 }
 
 /* Mip levels of the GPU texture `id` (a render target has one). */
-static uint32_t gpu_texture_levels_of(const Raster3d *r, const Raster3d_Gpu_Surface *surface, uint32_t id) {
-  if (surface || !id) return 1u;
-  for (uint32_t i = 0; i < RASTER_TEXTURES; i++)
-    if (r->textures[i].valid && r->textures[i].gpu_id == id) return r->textures[i].gpu_levels;
-  return 1u;
-}
-
 /* Layers of the GPU texture `id` (diagnostics; a surface: 1). */
 static uint32_t gpu_texture_layers_of(const Raster3d *r, const Raster3d_Gpu_Surface *surface, uint32_t id) {
   if (surface || !id) return 1u;
@@ -4614,7 +4615,7 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
   s.mag_filter = 1;
   if (tsc_pool && mem->read(mem->user, tsc_pool + (uint64_t)tsc_index * TEX_SAMPLER_BYTES, tsc, sizeof(tsc)))
     tex_sampler_parse(tsc, &s);
-  uint32_t id = 0, sample_type = WGSL_SAMPLE_FLOAT, gpu_format = 0;
+  uint32_t id = 0, sample_type = WGSL_SAMPLE_FLOAT, gpu_format = 0, levels = 1;
   bool padded = false; /* the image fills only part of its GPU texture (TEXP_SIZE) */
   Raster3d_Gpu_Surface *surf = gpu_surface_at(r, h.address, h.width);
   if (surf && surf->stale) {
@@ -4638,6 +4639,7 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
     Raster3d_Texture *tex = texture_load(r, tic, mem, false);
     if (!tex) return false;
     id = gpu_texture(r, tex);
+    levels = tex->gpu_levels ? tex->gpu_levels : 1u;
     padded = tex->native && tex->gpu_padded;
     gpu_format = tex->gpu_format;
     if (h.data_type[0] == TEX_DATA_UINT) sample_type = WGSL_SAMPLE_UINT;
@@ -4655,7 +4657,7 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
     desc->hw_sample_mask |= 1u << b;
     /* Minification follows magnification on one level (the
      * reference's single filter); mip chains use the TSC's own. */
-    const bool mips = gpu_texture_levels_of(r, surf, id) > 1u;
+    const bool mips = levels > 1u;
     const bool min_linear = mips ? s.min_filter == 2u : s.mag_filter == 2u;
     sampler_state[b] = (s.mag_filter == 2u ? GPU_SAMPLER_LINEAR : 0u) | (min_linear ? GPU_SAMPLER_MIN_LINEAR : 0u) |
                           (s.mip_filter == TEX_MIP_LINEAR ? GPU_SAMPLER_MIP_LINEAR : 0u) |
