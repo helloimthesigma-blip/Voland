@@ -109,6 +109,23 @@ int main(int argc, char **argv) {
   bench(vmm, "two pages, two bases", two_bases, sizeof(two_bases) / 4, n);
   bench(vmm, "two pages, one base", one_base, sizeof(one_base) / 4, n);
 
+  /* 2c. Scalar single-precision arithmetic (Super Mario Odyssey's curve
+   *     length: fmul, fadd, fsqrt per sample), 9 FP instructions a loop. */
+  const uint32_t fp[] = {
+      0x1E2E1000u, /* fmov s0, #1.0 */
+      0x1E201001u, /* fmov s1, #2.0 */
+      0x1E220802u, /* fmul s2, s0, s2 */
+      0x1E212842u, /* fadd s2, s2, s1 */
+      0x1E220843u, /* fmul s3, s2, s2 */
+      0x1E232863u, /* fadd s3, s3, s3 */
+      0x1E21C064u, /* fsqrt s4, s3 */
+      0x1E242884u, /* fadd s4, s4, s4 */
+      0x1E240885u, /* fmul s5, s4, s4 */
+      0xF1000400u, /* subs x0, x0, #1 */
+      0x54FFFEC1u, /* b.ne -10 */
+      0xD4000001u};
+  bench(vmm, "scalar FP loop", fp, sizeof(fp) / 4, n / 4u);
+
   /* 3. Call loop: bl f; subs; b.ne; svc ... f: add x1, x1, #1; ret
    *    (f on the same page, but a call is a region exit + entry). */
   uint32_t call[64];
