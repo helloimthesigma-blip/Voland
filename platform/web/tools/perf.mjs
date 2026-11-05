@@ -72,7 +72,8 @@
  *   state-save, state-load), "status TESTID" (prints its text), "select TESTID VALUE" (a
  *   setting, e.g. frame-skip 2), "cpuspeed PERCENT" (the virtual CPU
  *   clock, as ?cpuspeed=), "measure S" (fps and virtual-time rate over S
- *   wall seconds), "sleep MS", "go"
+ *   wall seconds), "cheat NAME" (switch on the running cheat whose name
+ *   contains NAME, the rest of the line), "sleep MS", "go"
  *   (measure now). Each
  *   command prints "drive: N done ...".
  * - --restore-saves BACKUP.tar imports a saves backup (the Saves panel's
@@ -684,6 +685,11 @@ async function main() {
           const wall = (Date.now() - startedAt) / 1000;
           const virtual = (after.perf.ticks - before.perf.ticks) / TICKS_PER_SECOND;
           note = `fps ${((after.presents - before.presents) / wall).toFixed(2)} virtual ${(100 * virtual / wall).toFixed(1)}% of real time`;
+        } else if (cmd === "cheat") {
+          const name = lines[done].slice(cmd.length).trim();
+          const box = page.locator(".voland-cheats label", { hasText: name }).first().locator("input");
+          await box.check();
+          note = (await box.isChecked()) ? "on" : "off";
         } else if (cmd === "cpuspeed") {
           await page.evaluate((percent) => window.__VOLAND_DEBUG__?.setCpuSpeed(percent), Number(arg));
         } else if (cmd === "slices") {

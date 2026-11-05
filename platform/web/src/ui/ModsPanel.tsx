@@ -51,9 +51,16 @@ function folderPick(files: readonly File[]): { readonly name: string; readonly f
 }
 
 function ModsPanel() {
-  const names = (): Readonly<Record<string, string>> => titleNames();
-  const titles = (): readonly string[] => Object.keys(names()).sort((a, b) => (names()[a] ?? a).localeCompare(names()[b] ?? b));
+  /* Stored names, read again when a game loads (localStorage is not
+   * reactive: a first load left the panel saying "load a game once"). */
+  const [names, setNames] = createSignal<Readonly<Record<string, string>>>(titleNames());
   const [running, setRunning] = createSignal<RunningMods | null>(runningMods());
+  const titles = (): readonly string[] => {
+    const ids = new Set(Object.keys(names()));
+    const now = running()?.titleId;
+    if (now) ids.add(now); /* the running game, even before its name is stored */
+    return [...ids].sort((a, b) => (names()[a] ?? a).localeCompare(names()[b] ?? b));
+  };
   const [title, setTitle] = createSignal<string>(running()?.titleId ?? titles()[0] ?? "");
   const [mods, setMods] = createSignal<readonly ModInfo[]>([]);
   const [busy, setBusy] = createSignal<string | null>(null);
@@ -67,8 +74,14 @@ function ModsPanel() {
   onMount(() => {
     void refresh();
     const off = subscribeRunningMods((state) => {
+      const loaded = state !== null && state.titleId !== running()?.titleId;
+      if (loaded) setNames(titleNames());
       setRunning(state);
-      if (state && !title()) setTitle(state.titleId);
+      /* A game just loaded: show its mods and cheats. */
+      if (state && (loaded || !title())) {
+        setTitle(state.titleId);
+        void refresh();
+      }
     });
     onCleanup(off);
   });
