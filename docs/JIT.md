@@ -423,6 +423,9 @@ browser its gloom scene went from ~2.2 to ~3.7 fps and the 150 s average
 from 8.0-8.3 to 8.6-9.1 fps; Silksong's title is unchanged (40-45 fps).
 `VOLAND_JIT_THRESHOLD=N` overrides it (in the browser through
 `?env=VOLAND_JIT_THRESHOLD=N`), for A/B runs without a rebuild.
+`VOLAND_JIT_FALLBACKS=N` is the browser's `--jit-fallbacks`: every N
+interpreted block starts it logs the most interpreted block PCs and
+instruction encodings, then resets them.
 
 ## Sync vs async compile
 

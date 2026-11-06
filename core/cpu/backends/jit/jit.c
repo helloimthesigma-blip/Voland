@@ -526,6 +526,7 @@ static Jit_Thread *thread_jit(void) {
 #define FALLBACK_OPCODE_MASK 0xFFE0FC00u /* drops Rd, Rn, Rm */
 #define FALLBACK_FP_MASK 0xFFFFFC00u     /* SIMD&FP: 20:16 hold opcode bits (FRINT*, FCVT* modes) */
 static bool g_fallback_profile;
+static uint64_t g_fallback_report_every; /* VOLAND_JIT_FALLBACKS: interpreted block starts per report */
 static uint32_t g_fallback_key[FALLBACK_SLOTS];
 static uint64_t g_fallback_count[FALLBACK_SLOTS];
 
@@ -585,6 +586,7 @@ static void profile_fallback_key(uint32_t key) {
 #define COLD_SLOTS 8192u
 static uint64_t g_cold_pc[COLD_SLOTS], g_cold_count[COLD_SLOTS], g_cold_budget[COLD_SLOTS];
 
+#define FALLBACK_REPORT_TOP 24u
 static void profile_cold(uint64_t pc, bool over_budget) {
   const uint64_t key = pc | 1u; /* never 0 */
   for (uint32_t i = 0, slot = (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 51); i < COLD_SLOTS;
@@ -593,8 +595,12 @@ static void profile_cold(uint64_t pc, bool over_budget) {
       g_cold_pc[slot] = key;
       g_cold_count[slot]++;
       if (over_budget) g_cold_budget[slot]++;
-      return;
+      break;
     }
+  }
+  static uint64_t starts;
+  if (g_fallback_report_every && __atomic_add_fetch(&starts, 1u, __ATOMIC_RELAXED) % g_fallback_report_every == 0) {
+    jit_print_fallback_profile(FALLBACK_REPORT_TOP);
   }
 }
 
@@ -1035,6 +1041,14 @@ static CPU_State *jit_create(VMM_Context *vmm, void *userdata) {
    * threshold, as voland-cli's --jit-threshold. */
   const char *threshold = getenv("VOLAND_JIT_THRESHOLD");
   if (threshold) jit_set_hot_threshold((uint32_t)strtoul(threshold, NULL, 0));
+  /* VOLAND_JIT_FALLBACKS=N (diagnostics; the browser's stand-in for
+   * voland-cli's --jit-fallbacks): profile the interpreter's work and print
+   * (then reset) the profile every N interpreted block starts. */
+  const char *fallbacks = getenv("VOLAND_JIT_FALLBACKS");
+  if (fallbacks && strtoull(fallbacks, NULL, 0)) {
+    g_fallback_report_every = strtoull(fallbacks, NULL, 0);
+    jit_set_fallback_profile(true);
+  }
   Jit_State *j = (Jit_State *)calloc(1, sizeof(Jit_State));
   if (!j) return NULL;
   j->interp.vmm = vmm;
