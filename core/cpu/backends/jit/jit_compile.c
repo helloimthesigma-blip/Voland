@@ -2558,6 +2558,20 @@ static void emit_fp_env_ok_as(Ctx *c, bool fz_safe) {
   op(c, WASM_OP_I32_AND);
 }
 
+/* i32: FPCR == 0 and FPSR.UFC and FPSR.IXC both set - nothing an IEEE
+ * result could raise beyond those (no overflow, invalid or division by
+ * zero: callers check the result is finite) changes the flags. */
+static void emit_fp_underflow_recorded(Ctx *c) {
+  emit_fpcr_default(c);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
+  i32c(c, FPSR_UFC | FPSR_IXC);
+  op(c, WASM_OP_I32_AND);
+  i32c(c, FPSR_UFC | FPSR_IXC);
+  op(c, WASM_OP_I32_EQ);
+  op(c, WASM_OP_I32_AND);
+}
+
 /* L_EXACT: whether the native result needed rounding. */
 #define FP_UNKNOWN 0u /* not established: the fast path needs FPSR.IXC already set */
 #define FP_EXACT 1u   /* no rounding: the flags stay as they are */
@@ -3779,6 +3793,22 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
     and_lanes_not_subnormal(c, L_VA, dbl);
     and_lanes_not_subnormal(c, L_VB, dbl);
     emit_all_lanes(c, q);
+    emit_fp_env_ok_as(c, true);
+    op(c, WASM_OP_I32_AND);
+    /* Or any finite result once underflow and inexact are both already
+     * recorded, with FPCR 0: wasm's IEEE arithmetic is then exactly the
+     * architecture's, subnormals included, and no flag can change
+     * (Silksong squares tiny lanes: every one underflowed to softfloat). */
+    emit_lane_finite(c, L_VR, dbl);
+    emit_all_lanes(c, q);
+    emit_fp_underflow_recorded(c);
+    op(c, WASM_OP_I32_AND);
+    op(c, WASM_OP_I32_OR);
+    fp_fast_arm(c);
+    store_v(c, d, L_VR, q);
+    Sync none = {0};
+    fp_else_exact(c, &none);
+    return;
   }
   emit_fp_env_ok_as(c, vop != VFP_MLA && vop != VFP_MLS);
   op(c, WASM_OP_I32_AND);

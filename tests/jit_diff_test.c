@@ -617,7 +617,7 @@ static void run_case(uint32_t iteration) {
   const uint32_t nzcv = (uint32_t)pick(16) << 28;
   /* FP environment: mostly the default, sometimes FZ/DN/rounding modes; FPSR flags clear or sticky-set. */
   g_fpcr = pick(4) ? 0u : (pick(2) << 24) | (pick(2) << 25) | (pick(4) << 22);
-  g_fpsr = pick(2) ? 0u : 0x10u;
+  g_fpsr = pick(2) ? 0u : pick(2) ? 0x10u : 0x18u; /* clear, IXC, or IXC and UFC (any finite IEEE result is then exact) */
   for (uint32_t i = 0; i < DATA_BYTES; i++) g_data_init[i] = (uint8_t)rnd();
   { /* the stub's GOT slot: mostly a real function */
     const uint32_t choice = pick(4);
