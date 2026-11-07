@@ -39,7 +39,11 @@ struct Gpu_Stream;
 #define RASTER_BIND_GROUPS 5u
 #define RASTER_SURFACES 12u
 #define RASTER_MAX_SURFACE_BYTES ((size_t)2048 * 1280 * 4)
-#define RASTER_PROGRAMS 160u
+/* Decoded shader programs (~100 KB each; a slot costs memory only once
+ * used). Super Mario Odyssey's levels use ~600: at 160 the cache thrashed,
+ * decoding a program in about one draw in five. */
+#define RASTER_PROGRAMS 1024u
+#define RASTER_PROGRAM_INDEX 8192u /* program_find's buckets: slot + 1 by address; 0 empty; may be stale */
 /* Cached texture descriptors. GPU mode keeps only the GPU copy of an
  * uploaded texture, so this count - not the pool - bounds the working
  * set: MK8DX's races sample well over 256 a frame (at 256 every texture
@@ -239,6 +243,7 @@ typedef struct Raster3d {
   Raster3d_Surface surfaces[RASTER_SURFACES];
   uint8_t *staging;         /* RASTER_MAX_SURFACE_BYTES, guest-layout copy */
   Raster3d_Program *programs; /* RASTER_PROGRAMS */
+  uint16_t program_index[RASTER_PROGRAM_INDEX];
   uint8_t *program_bytes;   /* RASTER_PROGRAM_READ_BYTES */
   Raster3d_Texture textures[RASTER_TEXTURES];
   uint16_t texture_buckets[RASTER_TEXTURE_BUCKETS]; /* slot + 1 by descriptor hash; 0 empty; may be stale */

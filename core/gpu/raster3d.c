@@ -190,6 +190,7 @@ void raster3d_init(Raster3d *r, uint8_t *storage, size_t bytes) {
   for (uint32_t i = 0; i < RASTER_SURFACES; i++) r->surfaces[i].pixels = s + SURFACE_OFFSET(i);
   r->programs = (Raster3d_Program *)(void *)(s + PROGRAMS_OFFSET);
   for (uint32_t i = 0; i < RASTER_PROGRAMS; i++) r->programs[i].valid = false;
+  memset(r->program_index, 0, sizeof(r->program_index));
   r->program_bytes = s + PROGRAM_BYTES_OFFSET;
   r->texture_pool = s + TEXTURE_POOL_OFFSET;
   r->texture_raw = s + TEXTURE_RAW_OFFSET;
@@ -937,16 +938,37 @@ static void warn_unknown_ops(const char *kind, const Sm_Program *p) {
   log_warn("[gpu] %s @%llx: %u undecoded instruction(s):%s", kind, (unsigned long long)p->address, p->unknown_ops, list);
 }
 
-static const Sm_Program *program_get(Raster3d *r, uint64_t address, const Gpu_Memory *mem) {
-  Raster3d_Program *slot = NULL;
-  r->tick++;
+static uint32_t program_bucket(uint64_t address, bool compute) {
+  const uint64_t key = address * 2u + (compute ? 1u : 0u);
+  return (uint32_t)((key * 0x9E3779B97F4A7C15ull) >> 32) & (RASTER_PROGRAM_INDEX - 1u);
+}
+
+static bool program_matches(const Raster3d_Program *p, uint64_t address, bool compute) {
+  return p->valid && p->program.address == address && (!compute || p->program.header.stage == SM_STAGE_COMPUTE);
+}
+
+/* The cached program at `address` (compute: a compute one), or NULL. The
+ * index answers nearly every lookup; slots are 100 KB apart, so a scan
+ * touches a cache line per slot. */
+static Raster3d_Program *program_find(Raster3d *r, uint64_t address, bool compute) {
+  uint16_t *bucket = &r->program_index[program_bucket(address, compute)];
+  if (*bucket && program_matches(&r->programs[*bucket - 1u], address, compute)) return &r->programs[*bucket - 1u];
   for (uint32_t i = 0; i < RASTER_PROGRAMS; i++) {
-    Raster3d_Program *p = &r->programs[i];
-    if (p->valid && p->program.address == address) {
-      slot = p;
-      break;
+    if (program_matches(&r->programs[i], address, compute)) {
+      *bucket = (uint16_t)(i + 1u);
+      return &r->programs[i];
     }
   }
+  return NULL;
+}
+
+static void program_index_note(Raster3d *r, const Raster3d_Program *slot, bool compute) {
+  r->program_index[program_bucket(slot->program.address, compute)] = (uint16_t)(slot - r->programs + 1);
+}
+
+static const Sm_Program *program_get(Raster3d *r, uint64_t address, const Gpu_Memory *mem) {
+  r->tick++;
+  Raster3d_Program *slot = program_find(r, address, false);
   if (slot && slot->validated == r->submission) {
     slot->last_used = r->tick;
     return &slot->program;
@@ -979,6 +1001,7 @@ static const Sm_Program *program_get(Raster3d *r, uint64_t address, const Gpu_Me
     }
   }
   sm_program_decode(r->program_bytes, extent, address, &slot->program);
+  program_index_note(r, slot, false);
   slot->globals_state = RASTER_GLOBALS_UNKNOWN;
   if (r->on_program_decoded) r->on_program_decoded(r->on_program_user, &slot->program);
   slot->valid = true;
@@ -5552,15 +5575,8 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
  * decoder is given a zeroed one in front). Cached apart from graphics
  * programs by its stage. */
 static const Sm_Program *compute_program_get(Raster3d *r, uint64_t address, const Gpu_Memory *mem) {
-  Raster3d_Program *slot = NULL;
   r->tick++;
-  for (uint32_t i = 0; i < RASTER_PROGRAMS; i++) {
-    Raster3d_Program *p = &r->programs[i];
-    if (p->valid && p->program.address == address && p->program.header.stage == SM_STAGE_COMPUTE) {
-      slot = p;
-      break;
-    }
-  }
+  Raster3d_Program *slot = program_find(r, address, true);
   if (slot && slot->validated == r->submission) {
     slot->last_used = r->tick;
     return &slot->program;
@@ -5594,6 +5610,7 @@ static const Sm_Program *compute_program_get(Raster3d *r, uint64_t address, cons
   }
   sm_program_decode(bytes, extent, address, &slot->program);
   slot->program.header.stage = SM_STAGE_COMPUTE;
+  program_index_note(r, slot, true);
   if (r->on_program_decoded) r->on_program_decoded(r->on_program_user, &slot->program);
   slot->valid = true;
   slot->validated = r->submission;
