@@ -481,6 +481,10 @@ static void set_state(const CPU_Backend *cpu, CPU_State *s, const uint64_t *x, u
         if (((x[(i + k) % 31] >> 42) & 7u) == 2) f *= 1e-40f;               /* subnormal */
         if (((x[(i + k) % 31] >> 42) & 7u) == 3) f *= 4194304.0f;           /* large: 2^31..2^32 conversions */
         memcpy(&lanes[k], &f, sizeof(lanes[k]));
+        if (((x[(i + k) % 31] >> 42) & 7u) == 4) { /* NaN (quiet or signalling, any payload) or infinity */
+          const uint32_t payload = (uint32_t)(x[(i + k + 1) % 31] >> 9) & 0x7FFFFFu;
+          lanes[k] = (lanes[k] & 0x80000000u) | 0x7F800000u | (((x[(i + k) % 31] >> 45) & 3u) ? (payload | 1u) : 0u);
+        }
       }
       v.lo = lanes[0] | ((uint64_t)lanes[1] << 32);
       v.hi = lanes[2] | ((uint64_t)lanes[3] << 32);
@@ -533,6 +537,18 @@ static void run_case(uint32_t iteration) {
     }
     if (pick(8) == 0) { /* a run of cached-scalar traffic */
       for (const uint32_t end = i + 4u + pick(12); i < length && i < end; i++) code[i] = gen_fp_cache_mix();
+      i--;
+      continue;
+    }
+    if (i + 13u < length && pick(48) == 0) { /* vector FP with IOC, UFC and IXC recorded: NaN lanes, overflow */
+      static const uint32_t nans[13] = {
+          0xD280032Bu, 0xD51B442Bu, /* FPSR = IOC | UFC | IXC */
+          0x52800029u, 0x72AFF409u, 0x4E040D34u, /* v20 = 4 x 0x7FA00001 (signalling) */
+          0x5280004Au, 0x72AFF00Au, 0x4E040D55u, /* v21 = 4 x 0x7F800002 (signalling) */
+          0x4E35D696u, 0x6E35DE97u,              /* fadd v22, fmul v23 = v20 op v21: n's NaN, quieted */
+          0x52AFE00Cu, 0x4E040D98u, 0x6E38DF19u, /* v24 = 4 x 1.7e38; fmul v25 = v24 * v24 overflows (OFC) */
+      };
+      for (uint32_t k = 0; k < 13u; k++) code[i++] = nans[k];
       i--;
       continue;
     }
@@ -617,7 +633,8 @@ static void run_case(uint32_t iteration) {
   const uint32_t nzcv = (uint32_t)pick(16) << 28;
   /* FP environment: mostly the default, sometimes FZ/DN/rounding modes; FPSR flags clear or sticky-set. */
   g_fpcr = pick(4) ? 0u : (pick(2) << 24) | (pick(2) << 25) | (pick(4) << 22);
-  g_fpsr = pick(2) ? 0u : pick(2) ? 0x10u : 0x18u; /* clear, IXC, or IXC and UFC (any finite IEEE result is then exact) */
+  /* clear, IXC, IXC and UFC (any finite IEEE result is then exact), or with IOC as well (NaNs too) */
+  g_fpsr = pick(2) ? 0u : pick(2) ? 0x10u : pick(2) ? 0x18u : 0x19u;
   for (uint32_t i = 0; i < DATA_BYTES; i++) g_data_init[i] = (uint8_t)rnd();
   { /* the stub's GOT slot: mostly a real function */
     const uint32_t choice = pick(4);

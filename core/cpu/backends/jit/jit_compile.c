@@ -3710,6 +3710,8 @@ typedef enum Vector_Fp_Op { VFP_ADD, VFP_SUB, VFP_MUL, VFP_DIV, VFP_MLA, VFP_MLS
 
 /* rd = op(rn, rm or the broadcast element) over 2 or 4 lanes. L_VB must
  * hold the second operand already. */
+static void emit_vector_nan_lanes(Ctx *c, bool dbl);
+static void emit_nan_lanes_ok(Ctx *c, bool dbl, bool q);
 static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t n, uint32_t d) {
   static const uint32_t ops32[4] = {WASM_SIMD_F32X4_ADD, WASM_SIMD_F32X4_SUB, WASM_SIMD_F32X4_MUL, WASM_SIMD_F32X4_DIV};
   static const uint32_t ops64[4] = {WASM_SIMD_F64X2_ADD, WASM_SIMD_F64X2_SUB, WASM_SIMD_F64X2_MUL, WASM_SIMD_F64X2_DIV};
@@ -3806,8 +3808,15 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
     op(c, WASM_OP_I32_OR);
     fp_fast_arm(c);
     store_v(c, d, L_VR, q);
+    else_(c);
+    /* NaN lanes (Silksong's unused lanes hold some): native, then fixed up. */
+    emit_nan_lanes_ok(c, dbl, q);
+    open_if(c, WASM_BLOCK_VOID);
+    emit_vector_nan_lanes(c, dbl);
+    store_v(c, d, L_VR, q);
     Sync none = {0};
     fp_else_exact(c, &none);
+    end_(c);
     return;
   }
   emit_fp_env_ok_as(c, vop != VFP_MLA && vop != VFP_MLS);
@@ -3816,6 +3825,96 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
   store_v(c, d, L_VR, q);
   Sync none = {0};
   fp_else_exact(c, &none);
+}
+
+/* ---- NaN lanes once the flags they raise are recorded --------------
+ * ARM with FPCR 0 (DN = 0): a lane whose result is a NaN gets n quieted if
+ * n is signalling, else m quieted if m is, else n or m if quiet, else
+ * the default NaN (an invalid operation such as inf - inf). Only IOC
+ * marks any of that, so with IOC (and UFC, IXC) already set the native
+ * result with its NaN lanes replaced is the architecture's. */
+#define F32_QUIET_BIT 0x00400000u
+#define F64_QUIET_BIT 0x0008000000000000ull
+#define F32_DEFAULT_NAN 0x7FC00000u
+#define F64_DEFAULT_NAN 0x7FF8000000000000ull
+#define WASM_SIMD_I32X4_EQ_OP 0x37u
+#define WASM_SIMD_I64X2_EQ_OP 0xD6u
+static void v128_splat_bits(Ctx *c, uint64_t bits, bool dbl) {
+  const uint64_t lane = dbl ? bits : (bits | (bits << 32));
+  v128_const(c, lane, lane);
+}
+/* Lane mask: local is a NaN. */
+static void emit_lane_nan(Ctx *c, uint32_t local, bool dbl) {
+  lget(c, local);
+  lget(c, local);
+  simd(c, dbl ? WASM_SIMD_F64X2_EQ : WASM_SIMD_F32X4_EQ);
+  simd(c, WASM_SIMD_V128_NOT);
+}
+/* Lane mask: local is a signalling NaN (a NaN with the quiet bit clear). */
+static void emit_lane_snan(Ctx *c, uint32_t local, bool dbl) {
+  emit_lane_nan(c, local, dbl);
+  lget(c, local);
+  v128_splat_bits(c, dbl ? F64_QUIET_BIT : F32_QUIET_BIT, dbl);
+  simd(c, WASM_SIMD_V128_AND);
+  v128_const(c, 0, 0);
+  simd(c, dbl ? WASM_SIMD_I64X2_EQ_OP : WASM_SIMD_I32X4_EQ_OP);
+  simd(c, WASM_SIMD_V128_AND);
+}
+static void emit_lane_quieted(Ctx *c, uint32_t local, bool dbl) {
+  lget(c, local);
+  v128_splat_bits(c, dbl ? F64_QUIET_BIT : F32_QUIET_BIT, dbl);
+  simd(c, WASM_SIMD_V128_OR);
+}
+/* L_VR with its NaN lanes as the architecture computes them from L_VA, L_VB. */
+static void emit_vector_nan_lanes(Ctx *c, bool dbl) {
+  v128_splat_bits(c, dbl ? F64_DEFAULT_NAN : F32_DEFAULT_NAN, dbl);
+  lset(c, L_VD); /* lowest priority first; V128_BITSELECT(a, b, mask) = mask ? a : b */
+  lget(c, L_VB);
+  lget(c, L_VD);
+  emit_lane_nan(c, L_VB, dbl);
+  simd(c, WASM_SIMD_V128_BITSELECT);
+  lset(c, L_VD);
+  lget(c, L_VA);
+  lget(c, L_VD);
+  emit_lane_nan(c, L_VA, dbl);
+  simd(c, WASM_SIMD_V128_BITSELECT);
+  lset(c, L_VD);
+  emit_lane_quieted(c, L_VB, dbl);
+  lget(c, L_VD);
+  emit_lane_snan(c, L_VB, dbl);
+  simd(c, WASM_SIMD_V128_BITSELECT);
+  lset(c, L_VD);
+  emit_lane_quieted(c, L_VA, dbl);
+  lget(c, L_VD);
+  emit_lane_snan(c, L_VA, dbl);
+  simd(c, WASM_SIMD_V128_BITSELECT);
+  lset(c, L_VD);
+  lget(c, L_VD);
+  lget(c, L_VR);
+  emit_lane_nan(c, L_VR, dbl);
+  simd(c, WASM_SIMD_V128_BITSELECT);
+  lset(c, L_VR);
+}
+/* i32: FPCR 0, FPSR.IOC, UFC and IXC set, and no lane of L_VR infinite
+ * (an overflow or a division by zero would raise OFC or DZC). */
+static void emit_nan_lanes_ok(Ctx *c, bool dbl, bool q) {
+  lget(c, L_VR);
+  simd(c, dbl ? WASM_SIMD_F64X2_ABS : WASM_SIMD_F32X4_ABS);
+  if (dbl) f64c(c, FP_INFINITY_D);
+  else f32c(c, FP_INFINITY_S);
+  simd(c, dbl ? WASM_SIMD_F64X2_SPLAT : WASM_SIMD_F32X4_SPLAT);
+  simd(c, dbl ? WASM_SIMD_F64X2_EQ : WASM_SIMD_F32X4_EQ);
+  simd(c, WASM_SIMD_V128_NOT);
+  emit_all_lanes(c, q);
+  emit_fpcr_default(c);
+  op(c, WASM_OP_I32_AND);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
+  i32c(c, FPSR_IOC | FPSR_UFC | FPSR_IXC);
+  op(c, WASM_OP_I32_AND);
+  i32c(c, FPSR_IOC | FPSR_UFC | FPSR_IXC);
+  op(c, WASM_OP_I32_EQ);
+  op(c, WASM_OP_I32_AND);
 }
 
 static void pairwise_lanes(uint8_t lanes[SIMD_LANE_BYTES], uint32_t esize, uint32_t count, bool odd);
