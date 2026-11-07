@@ -536,6 +536,17 @@ static void run_case(uint32_t iteration) {
       i--;
       continue;
     }
+    if (i + 7u < length && pick(48) == 0) { /* a single FMADD whose f64 sum rounds onto an f32 midpoint */
+      static const uint32_t twice[7] = {
+          0x52810009u, 0x72A7F009u, /* w9 = 1 + 2^-12 */
+          0x1E270130u, 0x1E270131u, /* s16 = s17 = w9: their product is an f32 midpoint, exactly */
+          0x52A4300Au, 0x1E270152u, /* s18 = 2^-60: above the midpoint, but lost in f64 */
+          0x1F114A13u,              /* fmadd s19, s16, s17, s18: rounds up, not to even */
+      };
+      for (uint32_t k = 0; k < 7u; k++) code[i++] = twice[k];
+      i--;
+      continue;
+    }
     if (i + 4u < length && pick(32) == 0) { /* FPCR = FZ, then fused multiply-adds on singles that may be subnormal */
       code[i++] = 0xD2A02009u; /* movz x9, #0x100, lsl #16: FPCR.FZ */
       code[i++] = 0xD51B4409u; /* msr fpcr, x9 */

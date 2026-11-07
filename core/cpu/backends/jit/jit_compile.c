@@ -3018,6 +3018,7 @@ static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t 
   op(c, WASM_OP_F64_PROMOTE_F32);
   ltee(c, L_FD2);
   if (o1) op(c, WASM_OP_F64_NEG);
+  lset(c, L_FD6); /* the addend */
   load_fp(c, n, false);
   op(c, WASM_OP_F64_PROMOTE_F32);
   ltee(c, L_FD3);
@@ -3026,6 +3027,8 @@ static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t 
   op(c, WASM_OP_F64_PROMOTE_F32);
   ltee(c, L_FD4);
   op(c, WASM_OP_F64_MUL);
+  ltee(c, L_FD7); /* the product, exact */
+  lget(c, L_FD6);
   op(c, WASM_OP_F64_ADD);
   ltee(c, L_FD);
   op(c, WASM_OP_F32_DEMOTE_F64);
@@ -3034,13 +3037,6 @@ static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t 
   emit_tiny_single_in_double(c, L_FD);
   op(c, WASM_OP_I32_EQZ);
   op(c, WASM_OP_I32_AND);
-  lget(c, L_FD); /* not on a midpoint */
-  op(c, WASM_OP_I64_REINTERPRET_F64);
-  i64c(c, (1ull << F32_EXTRA_BITS) - 1u);
-  op(c, WASM_OP_I64_AND);
-  i64c(c, F32_MIDPOINT);
-  op(c, WASM_OP_I64_NE);
-  op(c, WASM_OP_I32_AND);
   if (c->fz) { /* FZ would flush a subnormal input (the result is already not tiny) */
     for (uint32_t local = L_FD2; local <= L_FD4; local++) {
       emit_tiny_single_in_double(c, local);
@@ -3048,6 +3044,19 @@ static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t 
       op(c, WASM_OP_I32_AND);
     }
   }
+  /* Not on an f32 midpoint - or on one exactly: an exact f64 sum rounds
+   * to the f32 the fused operation gives (half to even), only a rounded
+   * one could round twice. Sums of floats of similar size sit on
+   * midpoints often (Silksong's FMADDs all took softfloat without this). */
+  lget(c, L_FD);
+  op(c, WASM_OP_I64_REINTERPRET_F64);
+  i64c(c, (1ull << F32_EXTRA_BITS) - 1u);
+  op(c, WASM_OP_I64_AND);
+  i64c(c, F32_MIDPOINT);
+  op(c, WASM_OP_I64_NE);
+  emit_sum_exact64(c, L_FD6, L_FD7, false, L_FD);
+  op(c, WASM_OP_I32_OR);
+  op(c, WASM_OP_I32_AND);
   emit_fp_env_ok_as(c, true);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
