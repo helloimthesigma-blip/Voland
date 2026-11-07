@@ -4535,6 +4535,117 @@ static void int_op(Ctx *c, uint32_t iop, uint32_t size) { simd(c, k_int_simd[iop
 /* A lane-sized zero vector. */
 static void v128_zero(Ctx *c) { v128_const(c, 0, 0); }
 
+/* SSHL/USHL on 32-bit lanes: each lane of V[n] shifted by the signed low
+ * byte of V[m]'s lane - left if positive, right (arithmetic or logical)
+ * if negative. In i64 with the count clamped to 63 every case falls out:
+ * a left shift past the lane leaves zero in its low 32 bits, a logical
+ * right shift of the zero-extended lane gives zero, an arithmetic one
+ * of the sign-extended lane fills with the sign. wasm SIMD shifts take
+ * one count for all lanes, so this goes lane by lane. */
+#define SHIFT_COUNT_CLAMP 63u
+static void emit_vector_shift_by_register(Ctx *c, bool u, bool q, uint32_t n, uint32_t m, uint32_t d) {
+  load_v(c, n);
+  ltee(c, L_VA);
+  lset(c, L_VR);
+  load_v(c, m);
+  lset(c, L_VB);
+  for (uint32_t lane = 0; lane < (q ? 4u : 2u); lane++) {
+    lget(c, L_VB);
+    simd(c, WASM_SIMD_I32X4_EXTRACT_LANE);
+    wasm_u8(c->b, (uint8_t)lane);
+    op(c, WASM_OP_I32_EXTEND8_S);
+    op(c, WASM_OP_I64_EXTEND_I32_S);
+    lset(c, L_T1); /* the signed count */
+    lget(c, L_VA);
+    simd(c, WASM_SIMD_I32X4_EXTRACT_LANE);
+    wasm_u8(c->b, (uint8_t)lane);
+    op(c, u ? WASM_OP_I64_EXTEND_I32_U : WASM_OP_I64_EXTEND_I32_S);
+    lset(c, L_T0);
+    lget(c, L_VR);
+    /* left: a << min(count, 63) */
+    lget(c, L_T0);
+    i64c(c, SHIFT_COUNT_CLAMP);
+    lget(c, L_T1);
+    lget(c, L_T1);
+    i64c(c, SHIFT_COUNT_CLAMP);
+    op(c, WASM_OP_I64_GT_S);
+    op(c, WASM_OP_SELECT);
+    op(c, WASM_OP_I64_SHL);
+    /* right: a >> min(-count, 63) */
+    lget(c, L_T0);
+    i64c(c, SHIFT_COUNT_CLAMP);
+    i64c(c, 0);
+    lget(c, L_T1);
+    op(c, WASM_OP_I64_SUB);
+    lget(c, L_T1);
+    i64c(c, -(int64_t)SHIFT_COUNT_CLAMP);
+    op(c, WASM_OP_I64_LT_S);
+    op(c, WASM_OP_SELECT);
+    op(c, u ? WASM_OP_I64_SHR_U : WASM_OP_I64_SHR_S);
+    lget(c, L_T1);
+    i64c(c, 0);
+    op(c, WASM_OP_I64_GE_S);
+    op(c, WASM_OP_SELECT);
+    op(c, WASM_OP_I32_WRAP_I64);
+    simd(c, WASM_SIMD_I32X4_REPLACE_LANE);
+    wasm_u8(c->b, (uint8_t)lane);
+    lset(c, L_VR);
+  }
+  store_v(c, d, L_VR, q);
+}
+
+/* SADDL/UADDL/SSUBL/USUBL (and the "2" forms on the upper halves): both
+ * sources widened, then added or subtracted at twice the lane size. */
+static void emit_vector_add_sub_long(Ctx *c, bool u, bool upper, bool sub, uint32_t size, uint32_t n, uint32_t m,
+                                     uint32_t d) {
+  static const uint32_t extend[3] = {WASM_SIMD_I16X8_EXTEND_LOW_I8X16_S, WASM_SIMD_I32X4_EXTEND_LOW_I16X8_S,
+                                     WASM_SIMD_I64X2_EXTEND_LOW_I32X4_S};
+  /* low_s, high_s, low_u, high_u */
+  const uint32_t widen = extend[size] + (u ? 2u : 0u) + (upper ? 1u : 0u);
+  load_v(c, n);
+  simd(c, widen);
+  load_v(c, m);
+  simd(c, widen);
+  int_op(c, sub ? IOP_SUB : IOP_ADD, size + 1u);
+  lset(c, L_VR);
+  store_v(c, d, L_VR, true);
+}
+
+/* SQXTN/SQXTN2 from 16- or 32-bit lanes: wasm's signed saturating narrow;
+ * FPSR.QC is set when widening the result back does not give the source. */
+static void emit_vector_sqxtn(Ctx *c, uint32_t size, bool upper, uint32_t n, uint32_t d) {
+  static const uint32_t narrow[2] = {WASM_SIMD_I8X16_NARROW_I16X8_S, WASM_SIMD_I16X8_NARROW_I32X4_S};
+  static const uint32_t widen[2] = {WASM_SIMD_I16X8_EXTEND_LOW_I8X16_S, WASM_SIMD_I32X4_EXTEND_LOW_I16X8_S};
+  static const uint32_t all_true[2] = {WASM_SIMD_I16X8_ALL_TRUE, WASM_SIMD_I32X4_ALL_TRUE};
+  load_v(c, n);
+  ltee(c, L_VA);
+  lget(c, L_VA);
+  simd(c, narrow[size]); /* the narrowed lanes in the low 64 bits (and again above) */
+  ltee(c, L_VB);
+  simd(c, widen[size]);
+  lget(c, L_VA);
+  int_op(c, IOP_EQ, size + 1u);
+  simd(c, all_true[size]);
+  op(c, WASM_OP_I32_EQZ);
+  hint(c, false);
+  open_if(c, WASM_BLOCK_VOID); /* saturated */
+  lget(c, L_STATE);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
+  i32c(c, FPSR_QC);
+  op(c, WASM_OP_I32_OR);
+  mem(c, WASM_OP_I32_STORE, ALIGN_4, OFF_FPSR);
+  end_(c);
+  if (upper) {
+    static const uint8_t join[SIMD_LANE_BYTES] = {0, 1, 2, 3, 4, 5, 6, 7, 16, 17, 18, 19, 20, 21, 22, 23};
+    load_v(c, d);
+    lget(c, L_VB);
+    v128_shuffle(c, join);
+    lset(c, L_VB);
+  }
+  store_v(c, d, L_VB, upper);
+}
+
 static bool c_vector_int_arith(Ctx *c, uint32_t insn) {
   if (bit(insn, 31)) return false;
   const bool q = bit(insn, 30), u = bit(insn, 29);
@@ -4568,6 +4679,16 @@ static bool c_vector_int_arith(Ctx *c, uint32_t insn) {
   if (bits(insn, 28, 24) != 0x0E || !bit(insn, 21)) return false;
   const uint32_t size = bits(insn, 23, 22);
   if (size == 3u && !q) return false;
+  if (bit(insn, 10) && bits(insn, 15, 11) == 0x08 && size == 2u) { /* SSHL, USHL */
+    emit_vector_shift_by_register(c, u, q, rn, rm, rd);
+    return true;
+  }
+  if (!bit(insn, 10) && !bit(insn, 11) && (bits(insn, 15, 12) == 0x0 || bits(insn, 15, 12) == 0x2)) {
+    /* three different: (S|U)ADDL, (S|U)SUBL */
+    if (size == 3u) return false;
+    emit_vector_add_sub_long(c, u, q, bits(insn, 15, 12) == 0x2, size, rn, rm, rd);
+    return true;
+  }
   if (bit(insn, 10)) { /* three same */
     const uint32_t opcode = bits(insn, 15, 11);
     uint32_t iop;
@@ -4620,6 +4741,10 @@ static bool c_vector_int_arith(Ctx *c, uint32_t insn) {
     return true;
   }
   if (bits(insn, 20, 17) != 0 || bits(insn, 11, 10) != 2) return false;
+  if (!u && bits(insn, 16, 12) == 0x14 && size < 2u) { /* SQXTN */
+    emit_vector_sqxtn(c, size, q, rn, rd);
+    return true;
+  }
   /* Two-register misc. */
   const uint32_t key = (bits(insn, 16, 12) << 1) | (u ? 1u : 0u);
   enum { CNT = 0x05u << 1, NOT = (0x05u << 1) | 1u, CMGT0 = 0x08u << 1, CMGE0 = (0x08u << 1) | 1u, CMEQ0 = 0x09u << 1,

@@ -226,7 +226,16 @@ static uint32_t ftype(void) { return pick(8) == 0 ? 3u : pick(2); } /* single/do
 static uint32_t fp_vreg(void) { return pick(4) ? 16u + pick(12) : vreg(); }
 static uint32_t gen_simd_inline(void) {
   const uint32_t q = pick(4) ? 1u : 0u, u = pick(2);
-  switch (pick(12)) {
+  switch (pick(13)) {
+  case 12: /* SSHL/USHL (register), (S|U)ADDL/(S|U)SUBL(2), SQXTN(2)/UQXTN */
+    switch (pick(3)) {
+    case 0: /* mostly 32-bit lanes, the ones the JIT shifts itself; counts mostly from V28-V31 (random bits) */
+      return 0x0E204400u | (q << 30) | (u << 29) | ((pick(4) ? 2u : pick(4)) << 22) |
+             ((pick(4) ? 28u + pick(4) : vreg()) << 16) | (vreg() << 5) | vreg();
+    case 1: return 0x0E200000u | (q << 30) | (u << 29) | (pick(4) << 22) | (vreg() << 16) | ((pick(2) * 2u) << 12) |
+                   (vreg() << 5) | vreg();
+    default: return 0x0E214800u | (q << 30) | (pick(4) == 0 ? u << 29 : 0) | (pick(4) << 22) | (vreg() << 5) | vreg();
+    }
   case 0: /* copy: DUP/INS/SMOV/UMOV general, INS element, scalar DUP */
     if (pick(4) == 0) return 0x5E000400u | ((1u + pick(31)) << 16) | (fp_vreg() << 5) | vreg();
     static const uint32_t moves[4] = {1, 3, 5, 7}; /* DUP, INS, SMOV, UMOV (general) */
@@ -358,7 +367,8 @@ static uint32_t cache_vreg(void) { return 16u + pick(4); }
 static uint32_t gen_fp_cache_mix(void) {
   const uint32_t type = pick(2) << 22, d = cache_vreg(), n = cache_vreg(), m = cache_vreg();
   static const uint32_t arith[5] = {0u, 1u, 2u, 3u, 8u}; /* FMUL FDIV FADD FSUB FNMUL */
-  switch (pick(15)) {
+  switch (pick(16)) {
+  case 15: return 0x4EA04400u | (pick(2) << 29) | ((28u + pick(4)) << 16) | (n << 5) | d; /* SSHL/USHL v.4s, counts from V28-V31 */
   case 10: return 0x1F000000u | type | (pick(2) << 21) | (m << 16) | (pick(2) << 15) | (cache_vreg() << 10) | (n << 5) | d; /* FMADD family */
   case 11: return 0x1E204800u | type | (m << 16) | (pick(4) << 12) | (n << 5) | d;      /* FMAX/FMIN/FMAXNM/FMINNM */
   case 12: return pick(2) ? 0x1E22C000u | (n << 5) | d : 0x1E624000u | (n << 5) | d;    /* FCVT d, s / s, d */
