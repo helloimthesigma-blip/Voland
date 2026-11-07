@@ -12,7 +12,7 @@ export interface MountOptions {
   readonly adapterLabel: string;
   readonly cpuBackend:   string;
   readonly guestRamMiB:  number;
-  readonly loadGame:     (file: File) => Promise<GameLoadOutcome>;
+  readonly loadGame:     (file: File, extras?: readonly File[]) => Promise<GameLoadOutcome>;
   readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard:  () => Promise<SdImportOutcome>;
   readonly systemFiles:  SystemFilesApi;

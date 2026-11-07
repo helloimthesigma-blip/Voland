@@ -64,7 +64,8 @@ add_executable(program_nca_fixture program_nca_fixture.c)
 target_link_libraries(program_nca_fixture PRIVATE switch_core loader_fixtures)
 file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/fixtures)
 add_test(NAME program_nca_fixture
-         COMMAND program_nca_fixture ${CMAKE_BINARY_DIR}/fixtures/synthetic_program.nca)
+         COMMAND program_nca_fixture ${CMAKE_BINARY_DIR}/fixtures/synthetic_program.nca
+                 ${CMAKE_BINARY_DIR}/fixtures/synthetic_control.nca)
 
 #
 # core/hle/kernel (§12 process bootstrap): the page allocator and address

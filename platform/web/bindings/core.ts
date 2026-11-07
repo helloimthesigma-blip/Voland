@@ -33,6 +33,11 @@ export interface SwitchCoreExports {
   readonly _emulator_unload_program_ffi:      () => void;
   readonly _emulator_last_error_message_ffi:  () => bigint; /* const char* or 0 */
   readonly _emulator_program_id_ffi:          () => bigint;
+  /* From the game's control NCA, if one came with it: the name (char*,
+   * 0: none) and the icon (a JPEG; 0 / size 0: none). */
+  readonly _emulator_title_name_ffi:          () => bigint;
+  readonly _emulator_icon_ffi:                () => bigint;
+  readonly _emulator_icon_size_ffi:           () => number;
 
   /* Execution (§7): one scheduler slice; returns EmulatorStatus. */
   readonly _emulator_run_slice_ffi:     (cycleBudget: bigint) => number;

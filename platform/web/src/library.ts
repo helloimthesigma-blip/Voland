@@ -4,8 +4,12 @@
  * one click (and one permission prompt per browser session) instead of
  * re-picking a multi-gigabyte file. Browsers without
  * showOpenFilePicker keep the entry but ask for the file again when it is
- * launched. Only handles and labels are stored - never the game's bytes.
+ * launched. Only handles and labels are stored - never the game's bytes
+ * (the icon from a game's control NCA is the one exception: a small JPEG).
+ * A game can also be a dumped game folder (src/game-folder.ts): its
+ * directory handle is kept and scanned again at each launch.
  */
+import { type GameFolder, folderFiles, scanGameFolder } from "./game-folder.ts";
 
 /* Permission methods of File System Access handles (not in TS's DOM lib). */
 interface PermissionedHandle {
@@ -24,6 +28,11 @@ export interface LibraryGame {
   readonly lastPlayedAt: number | null;
   /** Absent where the browser cannot keep file handles. */
   readonly handle: FileSystemFileHandle | null;
+  /** A game folder's handle (the entry is the folder, not one file). */
+  readonly folder?: FileSystemDirectoryHandle | null;
+  /** From the game's control NCA, once it has been loaded with it. */
+  readonly title?: string | null;
+  readonly icon?: Blob | null;
 }
 
 const DB_NAME = "voland-library";
@@ -82,51 +91,86 @@ export async function listGames(): Promise<readonly LibraryGame[]> {
     (b.lastPlayedAt ?? b.addedAt) - (a.lastPlayedAt ?? a.addedAt));
 }
 
+/** The key a game folder is remembered under: the folder's name and its
+ * Program NCA's identity. Pure. */
+export function folderIdOf(folderName: string, program: { readonly name: string; readonly size: number; readonly lastModified: number }): string {
+  return `folder:${folderName}/${gameIdOf(program)}`;
+}
+
 /** Remembers `file` (with its handle when the browser gave one); keeps an
- * existing entry's title id and play time. Returns the entry. */
-export async function rememberGame(file: File, handle: FileSystemFileHandle | null): Promise<LibraryGame> {
-  const id = gameIdOf(file);
+ * existing entry's title id and play time. Returns the entry. `folder`:
+ * the game folder `file` is the Program NCA of. */
+export async function rememberGame(file: File, handle: FileSystemFileHandle | null,
+                                   folder: { readonly name: string; readonly handle: FileSystemDirectoryHandle | null } | null = null): Promise<LibraryGame> {
+  const id = folder ? folderIdOf(folder.name, file) : gameIdOf(file);
   const existing = await run<unknown>("readonly", (store) => store.get(id));
   const before = isGame(existing) ? existing : null;
   const game: LibraryGame = {
     id,
-    name: before?.name ?? displayNameOf(file.name),
+    name: before?.name ?? (folder ? folder.name : displayNameOf(file.name)),
     fileName: file.name,
     size: file.size,
     titleId: before?.titleId ?? null,
     addedAt: before?.addedAt ?? Date.now(),
     lastPlayedAt: before?.lastPlayedAt ?? null,
     handle: handle ?? before?.handle ?? null,
+    folder: folder?.handle ?? before?.folder ?? null,
+    title: before?.title ?? null,
+    icon: before?.icon ?? null,
   };
   await run("readwrite", (store) => store.put(game));
   return game;
 }
 
-/** Records a launch (and the title id the core reported). */
-export async function markPlayed(id: string, titleId: string | null): Promise<void> {
+/** Records a launch (and the title id, name and icon the core reported). */
+export async function markPlayed(id: string, titleId: string | null, title: string | null = null,
+                                 icon: ArrayBuffer | null = null): Promise<void> {
   const existing = await run<unknown>("readonly", (store) => store.get(id));
   if (!isGame(existing)) return;
-  await run("readwrite", (store) => store.put({ ...existing, titleId: titleId ?? existing.titleId, lastPlayedAt: Date.now() }));
+  await run("readwrite", (store) => store.put({
+    ...existing,
+    titleId: titleId ?? existing.titleId,
+    title: title ?? existing.title ?? null,
+    icon: icon ? new Blob([icon], { type: "image/jpeg" }) : existing.icon ?? null,
+    lastPlayedAt: Date.now(),
+  }));
+}
+
+/** The name a game shows under: its own title once known. Pure. */
+export function shownNameOf(game: LibraryGame): string {
+  return game.title ?? game.name;
 }
 
 export async function forgetGame(id: string): Promise<void> {
   await run("readwrite", (store) => store.delete(id));
 }
 
-/** The game's file, asking for read permission when the browser needs to
- * (must run inside a click). Null if there is no handle, permission was
- * refused, or the file is gone/changed. */
-export async function openGameFile(game: LibraryGame): Promise<File | null> {
-  const handle = game.handle;
-  if (!handle) return null;
+/** Read permission on a kept handle, asking when the browser needs to
+ * (must run inside a click). */
+async function readable(handle: FileSystemHandle): Promise<boolean> {
+  const options = { mode: "read" } as const;
+  const permissioned = handle as unknown as PermissionedHandle;
+  let permission = await permissioned.queryPermission?.(options) ?? "granted";
+  if (permission !== "granted") permission = await permissioned.requestPermission?.(options) ?? "denied";
+  return permission === "granted";
+}
+
+/** The game's file (and, for a game folder, the folder's other NCAs),
+ * asking for read permission when the browser needs to (must run inside
+ * a click). Null if there is no handle, permission was refused, or the
+ * file is gone/changed. */
+export async function openGameFile(game: LibraryGame): Promise<{ readonly file: File; readonly extras: readonly File[] } | null> {
   try {
-    const options = { mode: "read" } as const;
-    const permissioned = handle as unknown as PermissionedHandle;
-    let permission = await permissioned.queryPermission?.(options) ?? "granted";
-    if (permission !== "granted") permission = await permissioned.requestPermission?.(options) ?? "denied";
-    if (permission !== "granted") return null;
+    if (game.folder) {
+      if (!await readable(game.folder)) return null;
+      const folder = await scanGameFolder(await folderFiles(game.folder));
+      return folder.program && folderIdOf(game.folder.name, folder.program) === game.id
+        ? { file: folder.program, extras: folder.extras } : null;
+    }
+    const handle = game.handle;
+    if (!handle || !await readable(handle)) return null;
     const file = await handle.getFile();
-    return gameIdOf(file) === game.id ? file : null;
+    return gameIdOf(file) === game.id ? { file, extras: [] } : null;
   } catch {
     return null;
   }
@@ -155,4 +199,22 @@ export async function pickGameFile(): Promise<{ readonly file: File; readonly ha
   } catch {
     return null; /* cancelled */
   }
+}
+
+/** Whether this browser can keep folder handles (showDirectoryPicker). */
+export function canKeepFolders(): boolean {
+  return canKeepFiles() && "showDirectoryPicker" in window;
+}
+
+/** Opens the system folder picker and scans the chosen game folder. */
+export async function pickGameFolder(): Promise<{ readonly folder: GameFolder; readonly name: string; readonly handle: FileSystemDirectoryHandle } | null> {
+  const picker = (window as unknown as { showDirectoryPicker?: (o: object) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker;
+  if (!picker) return null;
+  let handle: FileSystemDirectoryHandle;
+  try {
+    handle = await picker({ id: "voland-game-folders", mode: "read" });
+  } catch {
+    return null; /* cancelled */
+  }
+  return { folder: await scanGameFolder(await folderFiles(handle)), name: handle.name, handle };
 }

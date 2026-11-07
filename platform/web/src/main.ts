@@ -147,7 +147,7 @@ interface BootResult {
   readonly adapterLabel: string;
   readonly cpuBackend:   string;
   readonly guestRamMiB:  number;
-  readonly loadGame:     (file: File) => Promise<GameLoadOutcome>;
+  readonly loadGame:     (file: File, extras?: readonly File[]) => Promise<GameLoadOutcome>;
   readonly addToSdCard:  (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard:  () => Promise<SdImportOutcome>;
   readonly systemFiles:  SystemFilesApi;
@@ -274,9 +274,10 @@ async function boot(): Promise<BootResult | null> {
         appendLogLine("warn", "cpu halted");
       } else if (msg.type === "game-loaded") {
         appendLogLine("debug", `loaded title ${msg.titleId}, entry 0x${msg.entryPoint.toString(16)}`);
-        if (loadingFileName) rememberTitleName(msg.titleId, loadingFileName);
+        if (msg.title) rememberTitleName(msg.titleId, msg.title);
+        else if (loadingFileName) rememberTitleName(msg.titleId, loadingFileName);
         gpuWorker.postMessage({ type: "title", titleId: msg.titleId } satisfies MainToGPUMessage);
-        pendingLoad?.({ success: true, titleId: msg.titleId, entryPoint: msg.entryPoint });
+        pendingLoad?.({ success: true, titleId: msg.titleId, entryPoint: msg.entryPoint, title: msg.title, icon: msg.icon });
         pendingLoad = null;
       } else if (msg.type === "guest-output") {
         appendGuestOutput(msg.text);
@@ -496,7 +497,7 @@ async function boot(): Promise<BootResult | null> {
     window.__VOLAND_STATS__ = { fps, presents: published };
   }, 1000);
 
-  function loadGame(file: File): Promise<GameLoadOutcome> {
+  function loadGame(file: File, extras: readonly File[] = []): Promise<GameLoadOutcome> {
     if (pendingLoad) {
       return Promise.resolve<GameLoadOutcome>({
         success: false,
@@ -518,7 +519,7 @@ async function boot(): Promise<BootResult | null> {
       pendingLoad = resolve;
       loadingFileName = file.name;
       resetGuestConsole();
-      cpuWorker.postMessage({ type: "load-game", file } satisfies MainToCPUMessage);
+      cpuWorker.postMessage({ type: "load-game", file, extras } satisfies MainToCPUMessage);
     });
   }
 

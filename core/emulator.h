@@ -65,6 +65,12 @@
 #define EMULATOR_ADDON_BASE_OFFSET 0x1000ull
 /* An update's program id is its base game's plus this. */
 #define EMULATOR_UPDATE_ID_OFFSET 0x800ull
+/* A control NCA's icon_<language>.dat: a 256x256 JPEG, well under this. */
+#define EMULATOR_MAX_ICON_BYTES ((uint32_t)0x20000)
+/* control.nacp's title entries: {name, publisher} per language. */
+#define EMULATOR_NACP_TITLE_COUNT 16u
+#define EMULATOR_NACP_TITLE_BYTES 0x300u
+#define EMULATOR_NACP_NAME_BYTES 0x200u
 
 typedef struct Emulator
 {
@@ -164,6 +170,13 @@ typedef struct Emulator
   uint32_t addon_indices[EMULATOR_MAX_ADDONS];
   Byte_Source addon_romfs[EMULATOR_MAX_ADDONS];
   uint32_t addon_count;
+  /* The game's control NCA among the mods' "nca/" files (control.nacp
+   * and an icon_<language>.dat), served by ns; has_control false: none. */
+  bool has_control;
+  uint8_t control_nacp[NS_CONTROL_NACP_BYTES];
+  uint8_t control_icon[EMULATOR_MAX_ICON_BYTES];
+  uint32_t control_icon_size;
+  char title_name[EMULATOR_NACP_NAME_BYTES + 1];
   Arena mods_arena;
   bool mods_arena_live;
   Layered_RomFS layered_romfs;

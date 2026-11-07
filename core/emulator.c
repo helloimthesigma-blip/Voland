@@ -87,6 +87,7 @@ static void layer_romfs_mods(Emulator* emulator) {
 
 static void locate_romfs_base(Emulator* emulator, bool is_nro);
 static void find_addons(Emulator* emulator, uint64_t program_id);
+static void find_control(Emulator* emulator, uint64_t program_id);
 
 /* Cheats (§19): every cheats/<mod>/<build id>.txt whose id matches main. */
 static void load_cheats(Emulator* emulator) {
@@ -725,8 +726,15 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
   locate_romfs(emulator, is_nro);
   load_cheats(emulator);
   fs_reset_process(&emulator->fs, emulator->romfs, emulator->process.npdm.program_id);
-  if (!is_nro) find_addons(emulator, emulator->process.npdm.program_id);
-  else emulator->addon_count = 0;
+  if (!is_nro) {
+    find_addons(emulator, emulator->process.npdm.program_id);
+    find_control(emulator, emulator->process.npdm.program_id);
+  } else {
+    emulator->addon_count = 0;
+    emulator->has_control = false;
+    emulator->title_name[0] = '\0';
+    ns_set_loaded_title(&emulator->ns, 0, NULL, NULL, 0);
+  }
   fs_set_addons(&emulator->fs, emulator->addon_ids, emulator->addon_romfs, emulator->addon_count);
   ns_set_addons(&emulator->ns, emulator->addon_indices, emulator->addon_count);
   emulator->program_loaded = true;
@@ -794,6 +802,92 @@ static void find_addons(Emulator* emulator, uint64_t program_id) {
     emulator->addon_romfs[emulator->addon_count] = *nca_section_source(nca, (uint32_t)section);
     emulator->addon_count++;
     log_notice("mods: add-on content %016llx from %s", (unsigned long long)id, f->path);
+  }
+}
+
+/* Tables of a control NCA's RomFS (control.nacp and a dozen icons). */
+#define CONTROL_ROMFS_ARENA_BYTES ((size_t)256 * 1024)
+#define CONTROL_NACP_PATH "/control.nacp"
+#define CONTROL_ICON_PREFIX "icon_"
+#define CONTROL_ICON_PREFERRED "/icon_AmericanEnglish.dat"
+
+/* The first icon_*.dat in the RomFS root (NULL-safe: false if none). */
+static bool find_any_icon(const RomFS* fs, RomFS_File_Entry* out) {
+  RomFS_Dir_Entry root;
+  if (!error_is_ok(romfs_dir_entry(fs, ROMFS_ROOT_DIR_OFFSET, &root))) return false;
+  const size_t prefix = strlen(CONTROL_ICON_PREFIX);
+  for (uint32_t at = root.first_child_file; at != ROMFS_NO_ENTRY; at = out->next_sibling) {
+    if (!error_is_ok(romfs_file_entry(fs, at, out))) return false;
+    if (out->name_length > prefix && memcmp(out->name, CONTROL_ICON_PREFIX, prefix) == 0) return true;
+  }
+  return false;
+}
+
+/* control.nacp and an icon from `nca`'s RomFS into the emulator. */
+static bool read_control(Emulator* emulator, const NCA_File* nca) {
+  const int section = nca_find_section(nca, NCA_FS_ROMFS);
+  if (section < 0 || !error_is_ok(nca_probe_section(nca, (uint32_t)section))) return false;
+  Arena arena;
+  if (!arena_create(&arena, CONTROL_ROMFS_ARENA_BYTES)) return false;
+  RomFS fs;
+  RomFS_File_Entry nacp, icon;
+  bool ok = error_is_ok(romfs_open(nca_section_source(nca, (uint32_t)section), &arena, &fs)) &&
+            error_is_ok(romfs_find_file(&fs, CONTROL_NACP_PATH, &nacp)) && nacp.data_size >= NS_CONTROL_NACP_BYTES &&
+            error_is_ok(romfs_read_file(&fs, &nacp, 0, emulator->control_nacp, NS_CONTROL_NACP_BYTES));
+  emulator->control_icon_size = 0;
+  if (ok && (error_is_ok(romfs_find_file(&fs, CONTROL_ICON_PREFERRED, &icon)) || find_any_icon(&fs, &icon)) &&
+      icon.data_size <= EMULATOR_MAX_ICON_BYTES &&
+      error_is_ok(romfs_read_file(&fs, &icon, 0, emulator->control_icon, icon.data_size))) {
+    emulator->control_icon_size = (uint32_t)icon.data_size;
+  }
+  arena_destroy(&arena);
+  return ok;
+}
+
+/* The game's name: the first language's non-empty title in control.nacp. */
+static void control_title_name(Emulator* emulator) {
+  emulator->title_name[0] = '\0';
+  for (uint32_t i = 0; i < EMULATOR_NACP_TITLE_COUNT; i++) {
+    const char* name = (const char*)emulator->control_nacp + i * EMULATOR_NACP_TITLE_BYTES;
+    if (!name[0]) continue;
+    size_t length = 0;
+    while (length < EMULATOR_NACP_NAME_BYTES && name[length]) length++; /* strnlen is POSIX */
+    memcpy(emulator->title_name, name, length);
+    emulator->title_name[length] = '\0';
+    return;
+  }
+}
+
+/* The mods' control NCA for `program_id` (its update's, if both are
+ * there: the newer version's name and icon), handed to ns. */
+static void find_control(Emulator* emulator, uint64_t program_id) {
+  emulator->has_control = false;
+  emulator->title_name[0] = '\0';
+  const Mod_Set* mods = &emulator->mods;
+  const size_t prefix = strlen(MODS_NCA_PREFIX);
+  for (uint32_t i = 0; mods->live && i < mods->count; i++) {
+    const Mod_File* f = &mods->files[i];
+    if (f->path_length <= prefix || memcmp(f->path, MODS_NCA_PREFIX, prefix) != 0) continue;
+    NCA_File nca;
+    if (!error_is_ok(nca_open(&f->source, &nca)) || nca.header.content_type != NCA_CONTENT_CONTROL) continue;
+    const uint64_t id = nca.header.program_id;
+    if (id != program_id && id != program_id + EMULATOR_UPDATE_ID_OFFSET) continue;
+    if (emulator->has_control && id == program_id) continue; /* the update's control wins */
+    if (!read_control(emulator, &nca)) {
+      log_warn("mods: control NCA %s has no readable control.nacp; skipped", f->path);
+      continue;
+    }
+    emulator->has_control = true;
+    control_title_name(emulator);
+    log_notice("title: %s (control %s, icon %u bytes)", emulator->title_name, f->path,
+               (unsigned)emulator->control_icon_size);
+    if (id != program_id) break;
+  }
+  if (emulator->has_control) {
+    ns_set_loaded_title(&emulator->ns, program_id, emulator->control_nacp,
+                        emulator->control_icon_size ? emulator->control_icon : NULL, emulator->control_icon_size);
+  } else {
+    ns_set_loaded_title(&emulator->ns, 0, NULL, NULL, 0);
   }
 }
 

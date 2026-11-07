@@ -404,6 +404,8 @@
   border-radius: 7px; font: 600 22px/1 system-ui, sans-serif; letter-spacing: 0.04em; color: #fff;
   background: linear-gradient(135deg, hsl(var(--hue) 55% 42%), hsl(calc(var(--hue) + 40) 60% 22%));
 }
+/* A game's own icon (square, from its control NCA), letterboxed in the tile. */
+.voland-game-icon { object-fit: contain; background: #0d0e16; }
 .voland-game-name { color: #e6e6ea; font-weight: 600; font-size: 13px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .voland-game-meta { color: #7d8199; font-size: 11px; }
 .voland-game-forget {

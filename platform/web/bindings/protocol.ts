@@ -31,7 +31,9 @@ export type MainToCPUMessage =
   /* ?jitasync=1: the JIT compiles regions off-thread (docs/JIT.md "Sync vs
    * async compile"); before the first compile. */
   | { readonly type: "set-jit-async"; readonly on: boolean }
-  | { readonly type: "load-game"; readonly file: File }
+  /* `extras`: the other decrypted NCAs from the game's folder (src/game-folder.ts),
+   * offered to the core like an update/DLC mod; empty for a lone file. */
+  | { readonly type: "load-game"; readonly file: File; readonly extras: readonly File[] }
   /* Copy files onto the emulated SD card (§15): .nro files go to /switch/
    * (where homebrew menus look), anything else to the root. Answered by
    * exactly one sd-files-added. */
@@ -154,7 +156,10 @@ export type CPUToMainMessage =
   | { readonly type: "log"; readonly level: LogLevel; readonly message: string }
   | { readonly type: "halted" }
   | { readonly type: "error"; readonly message: string }
-  | { readonly type: "game-loaded"; readonly titleId: string; readonly entryPoint: bigint }
+  /* `title`/`icon`: from the game's control NCA when one came with it
+   * (icon: JPEG bytes, transferred); null otherwise. */
+  | { readonly type: "game-loaded"; readonly titleId: string; readonly entryPoint: bigint;
+      readonly title: string | null; readonly icon: ArrayBuffer | null }
   /* Mods applied at the last load, and its cheats (§19). */
   | { readonly type: "cheats"; readonly titleId: string; readonly buildId: string; readonly mods: readonly string[]; readonly cheats: readonly CheatInfo[] }
   | { readonly type: "load-failed"; readonly failure: LoadFailure }

@@ -10,6 +10,10 @@
  * must never contain Nintendo data (§1.6). Every byte here is synthetic:
  * a tiny rtld and main NSO, a main.npdm, and an ExeFS around them, all
  * from loader_fixtures.c.
+ *
+ * With a second path it also writes the game's CONTROL NCA (a
+ * control.nacp naming it FIXTURE_TITLE and a stand-in icon), which the
+ * game-folder e2e (platform/web/e2e/library.spec.ts) loads beside it.
  */
 #define CHECK_NAME "program_nca_fixture"
 #include "check.h"
@@ -86,6 +90,33 @@ static void build_program_nca(Fixture_Buffer *nca_image) {
   fixture_buffer_free(&npdm_image);
 }
 
+/* Must match platform/web/e2e/library.spec.ts. */
+#define FIXTURE_TITLE "Voland Fixture Quest"
+
+static void build_control_nca(Fixture_Buffer *nca_image) {
+  static uint8_t nacp[NS_CONTROL_NACP_BYTES];
+  static const char k_icon[] = "\xFF\xD8 synthetic icon";
+  memcpy(nacp, FIXTURE_TITLE, sizeof(FIXTURE_TITLE));
+  const Fixture_RomFS_Entry entries[] = {
+      {"/control.nacp", false, (const char *)nacp, sizeof(nacp)},
+      {"/icon_AmericanEnglish.dat", false, k_icon, sizeof(k_icon) - 1},
+  };
+  Fixture_Buffer romfs;
+  fixture_build_romfs(entries, 2, 0, &romfs);
+  Fixture_NCA_Section sections[4];
+  memset(sections, 0, sizeof(sections));
+  sections[0] = (Fixture_NCA_Section){true, FIXTURE_NCA_FS_TYPE_ROMFS, FIXTURE_NCA_HASH_SHA256, 3, &romfs, 0x200};
+  fixture_build_nca(NCA_MAGIC_NCA3, NCA_CONTENT_CONTROL, FIXTURE_PROGRAM_ID, sections, nca_image);
+  fixture_buffer_free(&romfs);
+}
+
+static void write_file(const char *path, const Fixture_Buffer *b) {
+  FILE *out = fopen(path, "wb");
+  CHECK(out != NULL);
+  CHECK(fwrite(b->bytes, 1, b->size, out) == b->size);
+  CHECK(fclose(out) == 0);
+}
+
 /* byte_source.h `read` over a stdio FILE: the native analogue of the web
  * worker's FileReaderSync hook. */
 static Error file_read(void *user, uint64_t offset, void *out, uint64_t size) {
@@ -96,9 +127,15 @@ static Error file_read(void *user, uint64_t offset, void *out, uint64_t size) {
 }
 
 int main(int argc, char **argv) {
-  if (argc != 2) {
-    fprintf(stderr, "usage: %s <output.nca>\n", argv[0]);
+  if (argc != 2 && argc != 3) {
+    fprintf(stderr, "usage: %s <output.nca> [<control.nca>]\n", argv[0]);
     return 2;
+  }
+  if (argc == 3) {
+    Fixture_Buffer control;
+    build_control_nca(&control);
+    write_file(argv[2], &control);
+    fixture_buffer_free(&control);
   }
 
   Fixture_Buffer nca_image;

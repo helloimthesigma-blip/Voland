@@ -144,8 +144,13 @@ async function ncaProgramId(file: File): Promise<string | null> {
   return header.getBigUint64(NCA_PROGRAM_ID_OFFSET - 0x200, true).toString(16).padStart(16, "0");
 }
 
-/** Lists the title's enabled mods into the core (before emulator_load). */
-async function prepareMods(file: File): Promise<void> {
+/** The mod name a game folder's other NCAs go to the core under. */
+const GAME_FOLDER_MOD = "(game folder)";
+
+/** Lists the title's enabled mods into the core (before emulator_load),
+ * then `extras`, the game folder's other NCAs (after the mods, so an
+ * update installed as a mod wins over the folder's). */
+async function prepareMods(file: File, extras: readonly File[]): Promise<void> {
   modFiles = [];
   modNames = [];
   const target = core;
@@ -167,6 +172,16 @@ async function prepareMods(file: File): Promise<void> {
     }
     modNames = [...used];
     if (modFiles.length > 0) log("info", `mods: ${modFiles.length} file(s) from ${modNames.join(", ")}`);
+    let fromFolder = 0;
+    for (const extra of extras) {
+      withCString(GAME_FOLDER_MOD, (mod) => withCString(extra.name, (path) => {
+        if (target._emulator_mods_add_ffi(mod, path, BigInt(`0x${titleId}`), BigInt(extra.size), modFiles.length) === 1) {
+          modFiles.push(extra);
+          fromFolder++;
+        }
+      }));
+    }
+    if (fromFolder > 0) log("info", `game folder: ${fromFolder} more NCA file(s) (control, update, DLC)`);
     else if (files.length > 0) log("warn", `mods: none of the ${files.length} file(s) in the enabled mods are romfs/, exefs/, cheats/ or patch files for ${titleId}`);
   } catch (e) {
     log("warn", `mods: could not read the installed mods: ${e instanceof Error ? e.message : String(e)}`);
@@ -1132,6 +1147,19 @@ async function clearSdCard(): Promise<CPUToMainMessage> {
   return { type: "sd-files-added", added: [], failed: [] };
 }
 
+/** Upper bound on the control NCA's title (control.nacp's name field + NUL). */
+const TITLE_NAME_MAX_BYTES = 0x201;
+
+/** The loaded game's name and icon from its control NCA (core copies). */
+function controlData(target: SwitchCoreExports, memory: WebAssembly.Memory): { title: string | null; icon: ArrayBuffer | null } {
+  const name = Number(target._emulator_title_name_ffi());
+  const title = name ? readCString(memory.buffer, name, TITLE_NAME_MAX_BYTES) : "";
+  const at = Number(target._emulator_icon_ffi());
+  const size = target._emulator_icon_size_ffi();
+  const icon = at && size ? new Uint8Array(memory.buffer, at, size).slice().buffer : null;
+  return { title: title || null, icon };
+}
+
 function loadGame(file: File): CPUToMainMessage {
   if (!core || !coreMemory) {
     return { type: "load-failed", failure: { reason: "internal", message: "the emulator core is not loaded" } };
@@ -1182,6 +1210,7 @@ function loadGame(file: File): CPUToMainMessage {
     type: "game-loaded",
     titleId: loadedTitleId,
     entryPoint: core._cpu_get_pc_ffi(),
+    ...controlData(core, coreMemory),
   };
 }
 
@@ -1259,9 +1288,9 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   if (msg.type === "load-game") {
     const file = msg.file;
     running = false;
-    void prepareMods(file).then(() => {
+    void prepareMods(file, msg.extras).then(() => {
       const outcome = loadGame(file);
-      self.postMessage(outcome);
+      self.postMessage(outcome, outcome.type === "game-loaded" && outcome.icon ? [outcome.icon] : []);
       if (outcome.type === "game-loaded") {
         self.postMessage(cheatsMessage(outcome.titleId));
         startRunning();

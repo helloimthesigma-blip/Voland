@@ -60,6 +60,9 @@ EXPORT int emulator_load_program_ffi(uint64_t file_size, uint64_t aslr_seed);
 EXPORT void emulator_unload_program_ffi(void);
 EXPORT uint64_t emulator_last_error_message_ffi(void);
 EXPORT uint64_t emulator_program_id_ffi(void);
+EXPORT uint64_t emulator_title_name_ffi(void);
+EXPORT uint64_t emulator_icon_ffi(void);
+EXPORT uint32_t emulator_icon_size_ffi(void);
 EXPORT int emulator_run_slice_ffi(uint64_t cycle_budget);
 EXPORT uint64_t emulator_virtual_ticks_ffi(void);
 EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity);
@@ -856,6 +859,30 @@ EXPORT uint64_t emulator_program_id_ffi(void)
   if (!g_initialised || !g_emulator.program_loaded)
     return 0;
   return g_emulator.process.npdm.program_id;
+}
+
+/* The loaded game's name from its control NCA (a NUL-terminated UTF-8
+ * string; empty when the game came without one). */
+EXPORT uint64_t emulator_title_name_ffi(void)
+{
+  if (!g_initialised || !g_emulator.program_loaded || !g_emulator.has_control)
+    return 0;
+  return (uint64_t)(uintptr_t)g_emulator.title_name;
+}
+
+/* The control NCA's icon (a JPEG, emulator_icon_size_ffi bytes); 0: none. */
+EXPORT uint64_t emulator_icon_ffi(void)
+{
+  if (!g_initialised || !g_emulator.program_loaded || !g_emulator.has_control || !g_emulator.control_icon_size)
+    return 0;
+  return (uint64_t)(uintptr_t)g_emulator.control_icon;
+}
+
+EXPORT uint32_t emulator_icon_size_ffi(void)
+{
+  if (!g_initialised || !g_emulator.program_loaded || !g_emulator.has_control)
+    return 0;
+  return g_emulator.control_icon_size;
 }
 
 #ifndef __EMSCRIPTEN__

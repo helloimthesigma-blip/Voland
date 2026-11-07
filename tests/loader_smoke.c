@@ -310,6 +310,47 @@ int main(void) {
   fixture_buffer_free(&update_image);
   fixture_buffer_free(&update_romfs);
 
+  /* --- The game's control NCA beside it (a dumped game folder): ns and
+   * the library get its name and icon; another title's is ignored. --- */
+  {
+    static uint8_t nacp[NS_CONTROL_NACP_BYTES];
+    static const char k_name[] = "Fixture Quest";
+    static const char k_icon[] = "\xFF\xD8jpeg-icon";
+    memcpy(nacp + 2 * EMULATOR_NACP_TITLE_BYTES, k_name, sizeof(k_name)); /* languages 0, 1 empty */
+    const Fixture_RomFS_Entry control_entries[] = {
+        {"/control.nacp", false, (const char *)nacp, sizeof(nacp)},
+        {"/icon_Japanese.dat", false, k_icon, sizeof(k_icon) - 1}, /* no AmericanEnglish: any icon */
+    };
+    Fixture_Buffer control_romfs, control_image, other_image;
+    fixture_build_romfs(control_entries, 2, 0, &control_romfs);
+    Fixture_NCA_Section control_sections[4];
+    memset(control_sections, 0, sizeof(control_sections));
+    control_sections[0] = (Fixture_NCA_Section){true, FIXTURE_NCA_FS_TYPE_ROMFS, FIXTURE_NCA_HASH_SHA256, 3, &control_romfs, 0x200};
+    fixture_build_nca(NCA_MAGIC_NCA3, NCA_CONTENT_CONTROL, PROGRAM_ID + 1, control_sections, &other_image);
+    fixture_build_nca(NCA_MAGIC_NCA3, NCA_CONTENT_CONTROL, PROGRAM_ID, control_sections, &control_image);
+    const Fixture_Buffer *control_files[] = {&other_image, &control_image};
+    emulator_mods_bind(&emu, read_files, control_files);
+    emulator_mods_clear(&emu);
+    CHECK_OK(emulator_mods_add(&emu, "nca/(game folder)/other.nca", other_image.size, 0));
+    CHECK_OK(emulator_mods_add(&emu, "nca/(game folder)/control.nca", control_image.size, 1));
+    CHECK_OK(emulator_load_program(&emu, &file, 0));
+    CHECK(emu.has_control);
+    CHECK(strcmp(emu.title_name, k_name) == 0);
+    CHECK(emu.control_icon_size == sizeof(k_icon) - 1);
+    CHECK(memcmp(emu.control_icon, k_icon, sizeof(k_icon) - 1) == 0);
+    CHECK(emu.ns.has_title && emu.ns.title_id == PROGRAM_ID && emu.ns.icon_size == sizeof(k_icon) - 1);
+    CHECK(memcmp(emu.ns.nacp + 2 * EMULATOR_NACP_TITLE_BYTES, k_name, sizeof(k_name)) == 0);
+    emulator_unload_program(&emu);
+    /* Without it, ns lists nothing. */
+    emulator_mods_clear(&emu);
+    CHECK_OK(emulator_load_program(&emu, &file, 0));
+    CHECK(!emu.has_control && emu.title_name[0] == '\0' && !emu.ns.has_title);
+    emulator_unload_program(&emu);
+    fixture_buffer_free(&control_image);
+    fixture_buffer_free(&other_image);
+    fixture_buffer_free(&control_romfs);
+  }
+
   /* --- Atmosphere's romfs.bin and exefs.nsp: whole-image replacements,
    * with loose romfs/ files still layered over the image. --- */
   static const char k_image_sky[] = "image-sky";

@@ -15,11 +15,13 @@ import GameLibrary from "./GameLibrary";
 import SaveStates from "./SaveStates";
 import CompatReport from "./CompatReport";
 import {
-  type LibraryGame, canKeepFiles, forgetGame, listGames, markPlayed, openGameFile, pickGameFile, rememberGame,
+  type LibraryGame, canKeepFiles, canKeepFolders, forgetGame, listGames, markPlayed, openGameFile, pickGameFile,
+  pickGameFolder, rememberGame,
 } from "../library";
+import { type GameFolder, folderFiles, noGameMessage, scanGameFolder } from "../game-folder";
 
 interface LoadPanelProps {
-  readonly loadGame: (file: File) => Promise<GameLoadOutcome>;
+  readonly loadGame: (file: File, extras?: readonly File[]) => Promise<GameLoadOutcome>;
   readonly addToSdCard: (files: readonly File[]) => Promise<SdImportOutcome>;
   readonly clearSdCard: () => Promise<SdImportOutcome>;
   readonly systemFiles: SystemFilesApi;
@@ -52,6 +54,7 @@ function LoadPanel(props: LoadPanelProps) {
   const [state, setState] = createSignal<LoadState>({ kind: "idle" });
   const [guest, setGuest] = createSignal<GuestConsoleState>(getGuestConsole());
   let input: HTMLInputElement | undefined;
+  let folderInput: HTMLInputElement | undefined;
   let sdInput: HTMLInputElement | undefined;
   let systemInput: HTMLInputElement | undefined;
   let firmwareInput: HTMLInputElement | undefined;
@@ -103,11 +106,11 @@ function LoadPanel(props: LoadPanelProps) {
     void canvas?.requestFullscreen?.().catch(() => undefined);
   }
 
-  async function load(file: File, gameId: string | null = null): Promise<void> {
+  async function load(file: File, gameId: string | null = null, extras: readonly File[] = []): Promise<void> {
     setState({ kind: "loading", fileName: file.name });
-    const outcome = await props.loadGame(file);
+    const outcome = await props.loadGame(file, extras);
     if (outcome.success && gameId) {
-      await markPlayed(gameId, outcome.titleId);
+      await markPlayed(gameId, outcome.titleId, outcome.title, outcome.icon);
       await refreshLibrary();
     }
     setState(outcome.success
@@ -141,15 +144,49 @@ function LoadPanel(props: LoadPanelProps) {
     await load(picked.file, game.id);
   }
 
+  /* A scanned game folder: remember it and play its Program NCA with the
+   * folder's other NCAs (control, update, DLC) beside it. */
+  async function loadFolder(folder: GameFolder, name: string, handle: FileSystemDirectoryHandle | null): Promise<void> {
+    if (!folder.program) {
+      setState({ kind: "failed", fileName: name, failure: {
+        reason: folder.encrypted > 0 ? "encrypted-input" : "unsupported-content", message: noGameMessage(folder) } });
+      return;
+    }
+    const game = await rememberGame(folder.program, null, { name, handle });
+    await refreshLibrary();
+    await load(folder.program, game.id, folder.extras);
+  }
+
+  async function onFolderChosen(event: Event & { currentTarget: HTMLInputElement }): Promise<void> {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+    if (files.length === 0) return;
+    const name = files[0]?.webkitRelativePath.split("/")[0] || "game folder";
+    await loadFolder(await scanGameFolder(files), name, null);
+  }
+
+  /* Picks a game folder: kept as a handle where the browser can, else a
+   * plain folder input (asked for again at each launch). */
+  async function chooseFolder(): Promise<void> {
+    if (!canKeepFolders()) {
+      folderInput?.click();
+      return;
+    }
+    const picked = await pickGameFolder();
+    if (picked) await loadFolder(picked.folder, picked.name, picked.handle);
+  }
+
   async function launch(game: LibraryGame): Promise<void> {
-    const file = await openGameFile(game);
-    if (file) {
-      await load(file, game.id);
+    const opened = await openGameFile(game);
+    if (opened) {
+      await load(opened.file, game.id, opened.extras);
       return;
     }
     /* No handle, permission refused, or the file changed: pick it again
      * (it is remembered under the same entry if it is the same file). */
-    if (canKeepFiles()) await chooseGame();
+    if (game.folder !== undefined && game.folder !== null) await chooseFolder();
+    else if (game.id.startsWith("folder:")) folderInput?.click();
+    else if (canKeepFiles()) await chooseGame();
     else input?.click();
   }
 
@@ -157,6 +194,12 @@ function LoadPanel(props: LoadPanelProps) {
     const pending = Array.from(items).filter((item) => item.kind === "file").map(async (item) => {
       const withHandle = item as DataTransferItem & { getAsFileSystemHandle?: () => Promise<FileSystemHandle | null> };
       const handle = await withHandle.getAsFileSystemHandle?.().catch(() => null) ?? null;
+      if (handle && handle.kind === "directory") {
+        const dir = handle as FileSystemDirectoryHandle;
+        const folder = await scanGameFolder(await folderFiles(dir));
+        if (folder.program) await rememberGame(folder.program, null, { name: dir.name, handle: dir });
+        return;
+      }
       if (handle && handle.kind === "file") {
         const fileHandle = handle as FileSystemFileHandle;
         await rememberGame(await fileHandle.getFile(), fileHandle);
@@ -183,6 +226,14 @@ function LoadPanel(props: LoadPanelProps) {
         class="voland-load-input"
         data-testid="load-input"
         onChange={(event) => { void onFileChosen(event); }}
+      />
+      <input
+        ref={(el) => { folderInput = el; el.setAttribute("webkitdirectory", ""); }}
+        type="file"
+        multiple
+        class="voland-load-input"
+        data-testid="load-folder-input"
+        onChange={(event) => { void onFolderChosen(event); }}
       />
       <input
         ref={sdInput}
@@ -314,6 +365,15 @@ function LoadPanel(props: LoadPanelProps) {
         <button
           type="button"
           class="voland-load-button voland-load-secondary"
+          disabled={state().kind === "loading"}
+          data-testid="load-folder"
+          onClick={() => { void chooseFolder(); }}
+        >
+          Load game folder…
+        </button>
+        <button
+          type="button"
+          class="voland-load-button voland-load-secondary"
           data-testid="run-demo"
           disabled={state().kind === "loading"}
           onClick={() => { void runDemo(); }}
@@ -322,7 +382,8 @@ function LoadPanel(props: LoadPanelProps) {
         </button>
       </div>
       <p class="voland-load-note voland-load-hint">
-        A decrypted Program NCA or a homebrew NRO. Games you load once stay in the library above.
+        A decrypted Program NCA or a homebrew NRO, or the folder of your decrypted game's NCAs (it brings the
+        game's name and icon, and any update or DLC in it). Games you load once stay in the library above.
       </p>
       <Show when={props.toolsMount()}>
         {(mount) => (

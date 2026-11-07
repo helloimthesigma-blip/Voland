@@ -1,10 +1,12 @@
 /**
  * The game library: one tile per game the player has loaded (src/library.ts).
  * Click a tile to play; the browser may ask once per session to let Voland
- * read the file again. Drop game files onto the library to add them.
+ * read the file again. Drop game files (or game folders) onto the library
+ * to add them. A game loaded with its control NCA shows its own name and
+ * icon.
  */
-import { For, Show, createSignal } from "solid-js";
-import type { LibraryGame } from "../library";
+import { For, Show, createSignal, onCleanup } from "solid-js";
+import { type LibraryGame, shownNameOf } from "../library";
 
 interface GameLibraryProps {
   readonly games: readonly LibraryGame[];
@@ -61,22 +63,32 @@ function GameLibrary(props: GameLibraryProps) {
       }>
         <div class="voland-library-grid">
           <For each={props.games}>
-            {(game) => (
+            {(game) => {
+              const name = shownNameOf(game);
+              const iconUrl = game.icon ? URL.createObjectURL(game.icon) : null;
+              onCleanup(() => { if (iconUrl) URL.revokeObjectURL(iconUrl); });
+              return (
               <div class="voland-game" data-testid="library-game" data-game={game.id}>
-                <button type="button" class="voland-game-play" disabled={props.busy} title={`Play ${game.name}`}
+                <button type="button" class="voland-game-play" disabled={props.busy} title={`Play ${name}`}
                   onClick={() => props.onLaunch(game)}>
-                  <span class="voland-game-art" style={{ "--hue": `${hueOf(game.id)}` }}>{initialsOf(game.name)}</span>
-                  <span class="voland-game-name">{game.name}</span>
+                  <Show when={iconUrl} fallback={
+                    <span class="voland-game-art" style={{ "--hue": `${hueOf(game.id)}` }}>{initialsOf(name)}</span>
+                  }>
+                    {(url) => <img class="voland-game-art voland-game-icon" src={url()} alt="" data-testid="library-icon" />}
+                  </Show>
+                  <span class="voland-game-name">{name}</span>
                   <span class="voland-game-meta">
                     {formatSize(game.size)} · {playedLabel(game)}
-                    <Show when={!game.handle}> · asks for the file</Show>
+                    <Show when={game.folder}> · folder</Show>
+                    <Show when={!game.handle && !game.folder}> · asks for the {game.id.startsWith("folder:") ? "folder" : "file"}</Show>
                   </span>
                 </button>
                 <button type="button" class="voland-game-forget" title="Remove from library (the file is not deleted)"
-                  aria-label={`Remove ${game.name} from the library`} data-testid="library-forget"
+                  aria-label={`Remove ${name} from the library`} data-testid="library-forget"
                   onClick={() => props.onForget(game)}>×</button>
               </div>
-            )}
+              );
+            }}
           </For>
         </div>
       </Show>

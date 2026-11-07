@@ -67,7 +67,8 @@ export function runStateAfterSlice(status: number): RunState | null {
 
 /** What the main thread hands the UI for one load request. */
 export type GameLoadOutcome =
-  | { readonly success: true;  readonly titleId: string; readonly entryPoint: bigint }
+  | { readonly success: true;  readonly titleId: string; readonly entryPoint: bigint;
+      readonly title: string | null; readonly icon: ArrayBuffer | null }
   | { readonly success: false; readonly failure: LoadFailure };
 
 /** Maps a non-OK core Result to the user-actionable failure category. */
