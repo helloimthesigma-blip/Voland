@@ -363,7 +363,8 @@ static uint32_t gen_fp_cache_mix(void) {
   case 11: return 0x1E204800u | type | (m << 16) | (pick(4) << 12) | (n << 5) | d;      /* FMAX/FMIN/FMAXNM/FMINNM */
   case 12: return pick(2) ? 0x1E22C000u | (n << 5) | d : 0x1E624000u | (n << 5) | d;    /* FCVT d, s / s, d */
   case 13: return (pick(2) ? 0x1E220000u : 0x9E620000u) | type | (reg() << 5) | d;      /* SCVTF from w / x */
-  case 14: return 0x1E244000u | type | (pick(8) << 15) | (n << 5) | d;                  /* FRINT* */
+  case 14: return pick(2) ? 0x1E244000u | type | (pick(8) << 15) | (n << 5) | d        /* FRINT* */
+                          : 0x1E200400u | type | (m << 16) | (pick(16) << 12) | (n << 5) | (pick(2) << 4) | pick(16); /* FCCMP(E) */
   case 0: case 1: case 2: return 0x1E200800u | type | (m << 16) | (arith[pick(5)] << 12) | (n << 5) | d;
   case 3: return 0x1E21C000u | type | (n << 5) | d;                                       /* FSQRT */
   case 4: return (pick(2) ? 0xBD400000u : 0xFD400000u) | (pick(16) << 10) | (base_reg() << 5) | d; /* LDR s/d */

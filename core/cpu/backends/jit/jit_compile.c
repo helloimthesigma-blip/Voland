@@ -3118,6 +3118,50 @@ static void emit_fp_compare(Ctx *c, bool dbl, uint32_t n, uint32_t m, bool with_
   c->flag_kind = FLAGS_LIVE;
 }
 
+/* FCCMP/FCCMPE: NZCV from an ordered compare of V[n] and V[m] if `cond`
+ * holds, else the immediate `nzcv`. NaNs (where FCCMPE would signal)
+ * take the exact path, as in emit_fp_compare. */
+static void emit_fp_cond_compare(Ctx *c, bool dbl, uint32_t n, uint32_t m, uint32_t cond, uint32_t nzcv) {
+  if (c->flag_kind != FLAGS_LIVE) materialize(c); /* the condition, and the exact path's input */
+  const uint32_t a = dbl ? L_FD : L_FS, b = dbl ? L_FD2 : L_FS2;
+  load_fp(c, n, dbl);
+  lset(c, a);
+  load_fp(c, m, dbl);
+  lset(c, b);
+  const uint8_t eq = dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ, lt = dbl ? WASM_OP_F64_LT : WASM_OP_F32_LT;
+  lget(c, a); /* no NaN: each equals itself */
+  lget(c, a);
+  op(c, eq);
+  lget(c, b);
+  lget(c, b);
+  op(c, eq);
+  op(c, WASM_OP_I32_AND);
+  and_not_subnormal(c, a, dbl);
+  and_not_subnormal(c, b, dbl);
+  emit_fpcr_mode(c, true);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  i32c(c, CPU_PSTATE_N);                /* a < b: 1000 */
+  i32c(c, CPU_PSTATE_Z | CPU_PSTATE_C); /* a == b: 0110 */
+  i32c(c, CPU_PSTATE_C);                /* a > b: 0010 */
+  lget(c, a);
+  lget(c, b);
+  op(c, eq);
+  op(c, WASM_OP_SELECT);
+  lget(c, a);
+  lget(c, b);
+  op(c, lt);
+  op(c, WASM_OP_SELECT);
+  i32c(c, nzcv << NZCV_SHIFT_V); /* the immediate is N Z C V, bits 3:0 */
+  emit_condition(c, cond);
+  op(c, WASM_OP_SELECT);
+  store_flags(c);
+  Sync flags = {0};
+  flags.nzcv = true;
+  fp_else_exact(c, &flags);
+  c->flag_kind = FLAGS_LIVE;
+}
+
 /* 2^e as f32/f64 bits (|e| small enough to stay normal). */
 #define F32_EXPONENT_BIAS 127
 #define F64_EXPONENT_BIAS 1023
@@ -3450,6 +3494,9 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
     emit_fp_arith(c, dbl, opcode, true, rn, rm, rd);
     return true;
   }
+  case 1: /* FCCMP, FCCMPE */
+    emit_fp_cond_compare(c, dbl, rn, rm, bits(insn, 15, 12), bits(insn, 3, 0));
+    return true;
   case 3: /* FCSEL */
     state_load64(c, OFF_V(rn));
     width(c, dbl);
