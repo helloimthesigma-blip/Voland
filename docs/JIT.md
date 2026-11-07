@@ -254,6 +254,16 @@ retires it.
     still needs IXC set beforehand. Seeded mutations were each caught in
     100k streams: no IXC set, a sum or a truncation's exactness wrong, the
     Dekker error ignored, an integer always exact.
+  - **The environment, once per function.** Scalar FADD/FSUB/FMUL/FDIV/
+    FNMUL/FSQRT read FPCR and FPSR into a local (`L_FPENV`) the first time
+    a function needs them. While FPCR is as assumed and IXC is set, the
+    fast arm needs only the result checks: no exactness, no FPSR update.
+    MSR goes through the interpreter, and the local is forgotten after
+    every interpreter or direct call and whenever a fast arm sets IXC.
+    The IXC update itself is a branch, not a store in every instruction.
+    jit_bench's scalar FP loop: 1.8 -> 1.5 ns per instruction.
+    `jit_diff_test` puts FADD, MSR FPSR/FPCR, FADD in a row; leaving out
+    the reset after the interpreter's call fails it.
   - **Tests:** `jit_diff_test` generates these forms on registers holding
     ordinary floats; seeded mutations of each were caught. One mutation
     is not caught in 20000 streams: signed instead of unsigned truncation

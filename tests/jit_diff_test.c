@@ -153,7 +153,7 @@ static uint32_t gen_branch(void) {
 }
 static uint32_t gen_system(void) {
   static const uint32_t crms[6] = {10, 11, 12, 14, 13, 5}; /* DC CVAC/CVAU/CVAP/CIVAC; 13: undefined; IC IVAU */
-  switch (pick(9)) {
+  switch (pick(10)) {
   case 0: return 0xD503201Fu;                                   /* NOP */
   case 1: return 0xD5033BBFu;                                   /* DMB ISH */
   case 2: return 0xD503305Fu;                                   /* CLREX */
@@ -163,6 +163,8 @@ static uint32_t gen_system(void) {
   case 6: return pick(2) ? 0xD53BE040u | dst() : 0xD50B7420u | (pick(4) ? 20u + pick(4) : reg()); /* MRS CNTVCT / DC ZVA */
   case 7: /* SYS #3, C7, Cm, #op2, xN: cache maintenance by VA (op2 != 1: undefined) */
     return 0xD50B7000u | (crms[pick(6)] << 8) | ((pick(4) ? 1u : pick(8)) << 5) | reg();
+  case 8: /* MSR FPSR (clearing IXC mid-region) or FPCR: the FP environment fast arms cache */
+    return (pick(2) ? 0xD51B4420u : 0xD51B4400u) | (pick(2) ? 31u : reg());
   default: return 0xD51BD040u | reg();                          /* MSR TPIDR_EL0, xN */
   }
 }
@@ -492,6 +494,12 @@ static void run_case(uint32_t iteration) {
       code[i + 1u] = 0xF9000600u | (pick(2) ? 1u : 2u); /* str x1|x2, [x16, #8] */
       code[i + 2u] = (0x25u << 26) | (uint32_t)(((CODE2_GVA + 32u - (CODE_GVA + 4u * (i + 2u))) >> 2) & 0x3FFFFFFu);
       i += 2u;
+      continue;
+    }
+    if (i + 2u < length && pick(32) == 0) { /* FADD, MSR FPSR or FPCR, FADD: the cached FP environment must be reread */
+      code[i++] = 0x1E202800u | (fp_vreg() << 16) | (fp_vreg() << 5) | fp_vreg();
+      code[i++] = (pick(2) ? 0xD51B4420u : 0xD51B4400u) | (pick(2) ? 31u : reg());
+      code[i] = 0x1E202800u | (fp_vreg() << 16) | (fp_vreg() << 5) | fp_vreg();
       continue;
     }
     if (pick(10) == 0) { /* BL into the second page: a leaf function, the PLT stub or the shim (code2 below) */

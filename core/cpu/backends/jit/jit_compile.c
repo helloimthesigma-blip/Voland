@@ -89,7 +89,8 @@ enum {
   L_RESUME, /* $helper: the region block to resume in */
   L_PASS,   /* store-exclusive: did the monitor pass */
   L_EXACT,  /* FP fast paths: FP_EXACT, FP_INEXACT or FP_UNKNOWN (fp_note_inexact) */
-  L_LAST_I32 = L_EXACT,
+  L_FPENV,  /* emit_fp_env_cached: FP_ENV_UNKNOWN, FP_ENV_SLOW or FP_ENV_FAST */
+  L_LAST_I32 = L_FPENV,
   L_FS,     /* FP fast paths: f32 */
   L_FS2,
   L_FS3,
@@ -554,6 +555,17 @@ static void compute_room(Ctx *c) {
   lset(c, L_ROOM);
 }
 
+/* L_FPENV (emit_fp_env_cached). */
+#define FP_ENV_UNKNOWN 0u
+#define FP_ENV_SLOW 1u
+#define FP_ENV_FAST 2u
+
+/* FPCR or FPSR may have changed: emit_fp_env_cached reads them again. */
+static void forget_fp_env(Ctx *c) {
+  i32c(c, FP_ENV_UNKNOWN);
+  lset(c, L_FPENV);
+}
+
 /* regs.pc = L_HPC, then the interpreter runs L_HINSN; i32 status on the
  * stack. The state must be spilled and its cycles flushed. */
 static void call_interpreter(Ctx *c) {
@@ -562,6 +574,7 @@ static void call_interpreter(Ctx *c) {
   lget(c, L_HINSN);
   op(c, WASM_OP_CALL);
   wasm_uleb(c->b, FUNC_INTERPRET);
+  forget_fp_env(c); /* it may have run MSR FPCR/FPSR */
 }
 
 /* This instruction through the interpreter, then return to the
@@ -2306,6 +2319,7 @@ static void emit_direct_call(Ctx *c, const Sync *sync) {
   i32c(c, c->insn);
   op(c, WASM_OP_CALL);
   wasm_uleb(c->b, FUNC_SIMD);
+  forget_fp_env(c);
   hint(c, false);
   open_if(c, WASM_BLOCK_VOID);
   leave_via_interpreter(c);
@@ -2493,18 +2507,49 @@ static void emit_fp_env_ok_exact_as(Ctx *c, bool fz_safe) {
   op(c, WASM_OP_I32_AND);
 }
 
-/* In a fast arm guarded by emit_fp_env_ok_exact: IXC |= (L_EXACT == FP_INEXACT). */
+/* L_FPENV: whether FPCR is what fz_safe fast arms assume and FPSR.IXC is
+ * set - then every scalar arithmetic fast arm needs only its result
+ * checks. Read from the state once per function (locals start at 0,
+ * unknown) instead of in every instruction: FPCR and FPSR change only
+ * through MSR, which the interpreter runs (forget_fp_env after its calls),
+ * and the fast arms only ever set IXC (fp_note_inexact forgets too). Two
+ * loads per FP instruction were a quarter of jit_bench's scalar FP loop. */
+
+/* i32: L_FPENV == FP_ENV_FAST, computed first if unknown. */
+static void emit_fp_env_cached(Ctx *c) {
+  lget(c, L_FPENV);
+  op(c, WASM_OP_I32_EQZ);
+  hint(c, false);
+  open_if(c, WASM_BLOCK_VOID);
+  emit_fp_env_ok_as(c, true);
+  i32c(c, FP_ENV_SLOW);
+  op(c, WASM_OP_I32_ADD);
+  lset(c, L_FPENV);
+  end_(c);
+  lget(c, L_FPENV);
+  i32c(c, FP_ENV_FAST);
+  op(c, WASM_OP_I32_EQ);
+}
+
+/* In a fast arm guarded by emit_fp_env_ok_exact: IXC |= (L_EXACT == FP_INEXACT).
+ * Branched, not an unconditional read-modify-write: a store to FPSR in every
+ * FP instruction chained them all through memory (jit_bench's scalar FP
+ * loop: 1.8 -> 0.9 ns per instruction), and once IXC is set the branch is
+ * never taken. */
 static void fp_note_inexact(Ctx *c) {
-  lget(c, L_STATE);
-  lget(c, L_STATE);
-  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
   lget(c, L_EXACT);
   i32c(c, FP_INEXACT);
   op(c, WASM_OP_I32_EQ);
-  i32c(c, FPSR_IXC_BIT);
-  op(c, WASM_OP_I32_SHL);
+  hint(c, false);
+  open_if(c, WASM_BLOCK_VOID);
+  lget(c, L_STATE);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
+  i32c(c, (int32_t)(1u << FPSR_IXC_BIT));
   op(c, WASM_OP_I32_OR);
   mem(c, WASM_OP_I32_STORE, ALIGN_4, OFF_FPSR);
+  forget_fp_env(c);
+  end_(c);
 }
 
 /* L_EXACT = the i32 exactness bit on the stack ? FP_EXACT : FP_INEXACT. */
@@ -2842,8 +2887,15 @@ static void emit_fp_arith_lane(Ctx *c, bool dbl, uint32_t opcode, bool two, uint
   }
   and_not_subnormal(c, a, dbl);
   if (two) and_not_subnormal(c, b, dbl);
+  emit_fp_env_cached(c);
+  open_if(c, WASM_TYPE_I32); /* the usual case: FPCR as assumed and IXC set, exactness irrelevant */
+  i32c(c, FP_EXACT);
+  lset(c, L_EXACT);
+  i32c(c, 1);
+  else_(c);
   emit_arith_exact(c, dbl, opcode, two, a, b, r);
   emit_fp_env_ok_exact_as(c, true);
+  end_(c);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   store_fp_local(c, d, dbl, r);
