@@ -5613,13 +5613,17 @@ static void emit_tlb_load(Ctx *c) {
     lset(c, g_carried[i].delta);
   }
   else_(c);
-  /* Entries this region does not use are stale in the new generation:
-   * empty them in the state too. */
+  /* Every entry is stale in the new generation: empty them in the state
+   * too, the ones this region uses as well - the state claims the new
+   * generation from here on, and an exit that does not store the
+   * region's entries back (emit_tlb_store) must not leave older bases
+   * behind it (jit_diff_test: zeroed bases then matched guest page 0, and
+   * a store to it reached host address 0 instead of faulting). */
   state_store64_local(c, OFF_TLB_GENERATION, L_T0);
   for (uint32_t i = 0; i < 3u; i++) {
     i64c(c, TLB_EMPTY);
     lset(c, g_carried[i].base);
-    if (!(c->tlb_carried & (1u << i))) state_store64_local(c, g_carried[i].base_offset, g_carried[i].base);
+    state_store64_local(c, g_carried[i].base_offset, g_carried[i].base);
   }
   end_(c);
   for (uint32_t i = 0; i < 3u; i++) { /* unused: never matches, never stored */
