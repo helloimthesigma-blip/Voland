@@ -33,20 +33,50 @@
 #define PREDECODE_INDEX(pc) (((pc) >> 2) & (PREDECODE_CACHE_BLOCKS - 1u))
 #define REG_ZR 31u
 
-typedef struct Op Op;
-typedef Interp_Status (*Op_Handler)(Interp_State *s, const Op *op);
+/* Which handler runs an op: the run loop switches on it, so the handlers
+ * inline into it instead of being called through a pointer. */
+typedef enum Op_Kind {
+  OP_REFERENCE,
+  OP_ADD_IMM,
+  OP_SUB_IMM,
+  OP_ADDS_IMM,
+  OP_AND_IMM,
+  OP_ORR_IMM,
+  OP_EOR_IMM,
+  OP_ANDS_IMM,
+  OP_MOV_CONST,
+  OP_MOVK,
+  OP_ADD_SUB_SHIFTED,
+  OP_LOGICAL_SHIFTED,
+  OP_COND_SELECT,
+  OP_BITFIELD,
+  OP_MULTIPLY_ADD,
+  OP_ADR,
+  OP_BRANCH,
+  OP_BRANCH_COND,
+  OP_COMPARE_BRANCH,
+  OP_TEST_BRANCH,
+  OP_BRANCH_REGISTER,
+  OP_LOAD_UNSIGNED,
+  OP_STORE_UNSIGNED,
+  OP_LOAD_IMM9,
+  OP_STORE_IMM9,
+  OP_LOAD_REGISTER,
+  OP_STORE_REGISTER,
+  OP_LOAD_PAIR,
+  OP_STORE_PAIR,
+} Op_Kind;
 
-struct Op {
-  Op_Handler fn;
+typedef struct Op {
   uint32_t insn;
   uint8_t rd, rn, rm, ra; /* register fields, as the handler uses them */
   uint8_t flags;          /* handler-specific (sf, set_flags, condition, ...) */
   uint8_t size;           /* access bytes, shift amount, bit position */
   uint8_t aux;
-  uint8_t pad;
+  uint8_t kind;           /* Op_Kind */
   uint64_t imm;           /* immediate, mask, or absolute target */
   uint64_t imm2;          /* second mask (bitfield tmask) */
-};
+} Op;
 
 typedef struct Block {
   uint64_t pc;
@@ -452,6 +482,41 @@ static Interp_Status op_store_pair(Interp_State *s, const Op *op) {
   return advance(s);
 }
 
+static Interp_Status execute_op(Interp_State *s, const Op *op) {
+  switch ((Op_Kind)op->kind) {
+  case OP_REFERENCE: return op_reference(s, op);
+  case OP_ADD_IMM: return op_add_imm(s, op);
+  case OP_SUB_IMM: return op_sub_imm(s, op);
+  case OP_ADDS_IMM: return op_adds_imm(s, op);
+  case OP_AND_IMM: return op_and_imm(s, op);
+  case OP_ORR_IMM: return op_orr_imm(s, op);
+  case OP_EOR_IMM: return op_eor_imm(s, op);
+  case OP_ANDS_IMM: return op_ands_imm(s, op);
+  case OP_MOV_CONST: return op_mov_const(s, op);
+  case OP_MOVK: return op_movk(s, op);
+  case OP_ADD_SUB_SHIFTED: return op_add_sub_shifted(s, op);
+  case OP_LOGICAL_SHIFTED: return op_logical_shifted(s, op);
+  case OP_COND_SELECT: return op_cond_select(s, op);
+  case OP_BITFIELD: return op_bitfield(s, op);
+  case OP_MULTIPLY_ADD: return op_multiply_add(s, op);
+  case OP_ADR: return op_adr(s, op);
+  case OP_BRANCH: return op_branch(s, op);
+  case OP_BRANCH_COND: return op_branch_cond(s, op);
+  case OP_COMPARE_BRANCH: return op_compare_branch(s, op);
+  case OP_TEST_BRANCH: return op_test_branch(s, op);
+  case OP_BRANCH_REGISTER: return op_branch_register(s, op);
+  case OP_LOAD_UNSIGNED: return op_load_unsigned(s, op);
+  case OP_STORE_UNSIGNED: return op_store_unsigned(s, op);
+  case OP_LOAD_IMM9: return op_load_imm9(s, op);
+  case OP_STORE_IMM9: return op_store_imm9(s, op);
+  case OP_LOAD_REGISTER: return op_load_register(s, op);
+  case OP_STORE_REGISTER: return op_store_register(s, op);
+  case OP_LOAD_PAIR: return op_load_pair(s, op);
+  case OP_STORE_PAIR: return op_store_pair(s, op);
+  }
+  return op_reference(s, op);
+}
+
 /* ------------------------------------------------------------------ */
 /* Decode.                                                             */
 /* ------------------------------------------------------------------ */
@@ -459,7 +524,7 @@ static Interp_Status op_store_pair(Interp_State *s, const Op *op) {
 static Op reference_op(uint32_t insn) {
   Op op;
   memset(&op, 0, sizeof(op));
-  op.fn = op_reference;
+  op.kind = OP_REFERENCE;
   op.insn = insn;
   return op;
 }
@@ -474,16 +539,16 @@ static bool decode_load_store_unsigned(uint32_t insn, Op *op) {
   op->size = (uint8_t)bytes;
   op->imm = (uint64_t)bits(insn, 21, 10) << size;
   switch (opc) {
-  case 0: op->fn = op_store_unsigned; return true;
-  case 1: op->fn = op_load_unsigned; return true;
+  case 0: op->kind = OP_STORE_UNSIGNED; return true;
+  case 1: op->kind = OP_LOAD_UNSIGNED; return true;
   case 2:
     if (size == 3) return false;                   /* PRFM */
-    op->fn = op_load_unsigned;
+    op->kind = OP_LOAD_UNSIGNED;
     op->flags = F_SIGNED;
     return true;
   default:
     if (size >= 2) return false;
-    op->fn = op_load_unsigned;
+    op->kind = OP_LOAD_UNSIGNED;
     op->flags = F_SIGNED32;
     return true;
   }
@@ -521,7 +586,7 @@ static bool decode_load_store_single(uint32_t insn, Op *op) {
     if (form == 2u) return false; /* unprivileged LDTR/STTR */
     op->imm = (uint64_t)sign_extend(bits(insn, 20, 12), 9);
     op->flags |= (uint8_t)((form == 1u || form == 3u ? F_WBACK : 0u) | (form == 1u ? F_POST : 0u));
-    op->fn = load ? op_load_imm9 : op_store_imm9;
+    op->kind = load ? OP_LOAD_IMM9 : OP_STORE_IMM9;
     return true;
   }
   if (form != 2u) return false; /* atomics, PAC loads */
@@ -532,7 +597,7 @@ static bool decode_load_store_single(uint32_t insn, Op *op) {
   op->rm = (uint8_t)bits(insn, 20, 16);
   op->aux = (uint8_t)option;
   op->ra = (uint8_t)(bit(insn, 12) ? scale : 0u);
-  op->fn = load ? op_load_register : op_store_register;
+  op->kind = load ? OP_LOAD_REGISTER : OP_STORE_REGISTER;
   return true;
 }
 
@@ -554,7 +619,7 @@ static bool decode_pair(uint32_t insn, Op *op) {
   op->size = (uint8_t)bytes;
   op->imm = (uint64_t)sign_extend(bits(insn, 21, 15), 7) * bytes;
   op->flags = (uint8_t)((wback ? F_WBACK : 0u) | (form == 1 ? F_POST : 0u));
-  op->fn = load ? op_load_pair : op_store_pair;
+  op->kind = load ? OP_LOAD_PAIR : OP_STORE_PAIR;
   return true;
 }
 
@@ -567,7 +632,7 @@ static bool decode_dp_immediate(uint32_t insn, uint64_t pc, Op *op) {
   case 0x20: case 0x21: { /* ADR / ADRP */
     const uint64_t imm = (uint64_t)sign_extend((bits(insn, 23, 5) << 2) | bits(insn, 30, 29), 21);
     op->imm = bit(insn, 31) ? (pc & ~(uint64_t)0xFFF) + (imm << 12) : pc + imm;
-    op->fn = op_adr;
+    op->kind = OP_ADR;
     return true;
   }
   case 0x22: { /* add/sub immediate */
@@ -575,9 +640,9 @@ static bool decode_dp_immediate(uint32_t insn, uint64_t pc, Op *op) {
     op->imm = (uint64_t)bits(insn, 21, 10) << (bit(insn, 22) ? 12 : 0);
     if (set_flags) {
       op->flags |= sub ? F_SUB : 0u;
-      op->fn = op_adds_imm;
+      op->kind = OP_ADDS_IMM;
     } else {
-      op->fn = sub ? op_sub_imm : op_add_imm;
+      op->kind = sub ? OP_SUB_IMM : OP_ADD_IMM;
     }
     return true;
   }
@@ -587,8 +652,8 @@ static bool decode_dp_immediate(uint32_t insn, uint64_t pc, Op *op) {
     uint64_t imm = 0, unused = 0;
     if (!interp_decode_bit_masks(n, bits(insn, 15, 10), bits(insn, 21, 16), true, sf, &imm, &unused)) return false;
     op->imm = imm;
-    static const Op_Handler k_logical[4] = {op_and_imm, op_orr_imm, op_eor_imm, op_ands_imm};
-    op->fn = k_logical[opc];
+    static const uint8_t k_logical[4] = {OP_AND_IMM, OP_ORR_IMM, OP_EOR_IMM, OP_ANDS_IMM};
+    op->kind = k_logical[opc];
     return true;
   }
   case 0x26: { /* bitfield */
@@ -602,7 +667,7 @@ static bool decode_dp_immediate(uint32_t insn, uint64_t pc, Op *op) {
     op->size = (uint8_t)immr;
     op->aux = (uint8_t)imms;
     op->rm = (uint8_t)opc;
-    op->fn = op_bitfield;
+    op->kind = OP_BITFIELD;
     return true;
   }
   case 0x25: { /* move wide */
@@ -613,10 +678,10 @@ static bool decode_dp_immediate(uint32_t insn, uint64_t pc, Op *op) {
     if (opc == 3) {
       op->imm = imm;
       op->size = (uint8_t)shift;
-      op->fn = op_movk;
+      op->kind = OP_MOVK;
     } else {
       op->imm = (opc == 0 ? ~imm : imm) & width_mask(sf);
-      op->fn = op_mov_const;
+      op->kind = OP_MOV_CONST;
     }
     return true;
   }
@@ -638,7 +703,7 @@ static bool decode_dp_register(uint32_t insn, Op *op) {
     op->aux = (uint8_t)type;
     op->ra = (uint8_t)bit(insn, 21); /* invert */
     op->imm = bits(insn, 30, 29);
-    op->fn = op_logical_shifted;
+    op->kind = OP_LOGICAL_SHIFTED;
     return true;
   }
   if (bits(insn, 28, 24) == 0x0B && !bit(insn, 21)) { /* add/sub shifted register */
@@ -646,20 +711,20 @@ static bool decode_dp_register(uint32_t insn, Op *op) {
     op->size = (uint8_t)amount;
     op->aux = (uint8_t)type;
     op->flags |= (uint8_t)((bit(insn, 30) ? F_SUB : 0u) | (bit(insn, 29) ? F_SET_FLAGS : 0u));
-    op->fn = op_add_sub_shifted;
+    op->kind = OP_ADD_SUB_SHIFTED;
     return true;
   }
   if (bits(insn, 28, 21) == 0xD4) { /* conditional select */
     if (bit(insn, 29) || bit(insn, 11)) return false;
     op->size = (uint8_t)bits(insn, 15, 12);
     op->aux = (uint8_t)(bit(insn, 30) | (bit(insn, 10) << 1));
-    op->fn = op_cond_select;
+    op->kind = OP_COND_SELECT;
     return true;
   }
   if (bits(insn, 28, 24) == 0x1B && bits(insn, 23, 21) == 0 && bits(insn, 30, 29) == 0) { /* MADD/MSUB */
     op->ra = (uint8_t)bits(insn, 14, 10);
     op->flags |= bit(insn, 15) ? F_SUB : 0u;
-    op->fn = op_multiply_add;
+    op->kind = OP_MULTIPLY_ADD;
     return true;
   }
   return false;
@@ -670,28 +735,28 @@ static bool decode_branch(uint32_t insn, uint64_t pc, Op *op) {
   if (bits(insn, 30, 26) == 0x05) { /* B / BL */
     op->imm = pc + (uint64_t)sign_extend((uint64_t)bits(insn, 25, 0) << 2, 28);
     op->flags = bit(insn, 31) ? F_LINK : 0u;
-    op->fn = op_branch;
+    op->kind = OP_BRANCH;
     return true;
   }
   if (bits(insn, 31, 24) == 0x54) { /* B.cond */
     if (bit(insn, 4)) return false;
     op->size = (uint8_t)bits(insn, 3, 0);
     op->imm = pc + (uint64_t)sign_extend((uint64_t)bits(insn, 23, 5) << 2, 21);
-    op->fn = op_branch_cond;
+    op->kind = OP_BRANCH_COND;
     return true;
   }
   if (bits(insn, 30, 25) == 0x1A) { /* CBZ / CBNZ */
     op->flags = bit(insn, 31) ? F_SF : 0u;
     op->aux = (uint8_t)bit(insn, 24);
     op->imm = pc + (uint64_t)sign_extend((uint64_t)bits(insn, 23, 5) << 2, 21);
-    op->fn = op_compare_branch;
+    op->kind = OP_COMPARE_BRANCH;
     return true;
   }
   if (bits(insn, 30, 25) == 0x1B) { /* TBZ / TBNZ */
     op->size = (uint8_t)((bit(insn, 31) << 5) | bits(insn, 23, 19));
     op->aux = (uint8_t)bit(insn, 24);
     op->imm = pc + (uint64_t)sign_extend((uint64_t)bits(insn, 18, 5) << 2, 16);
-    op->fn = op_test_branch;
+    op->kind = OP_TEST_BRANCH;
     return true;
   }
   /* BR (D61F0000), BLR (D63F0000), RET (D65F0000), no PAC variants. */
@@ -699,7 +764,7 @@ static bool decode_branch(uint32_t insn, uint64_t pc, Op *op) {
   if (masked == 0xD61F0000u || masked == 0xD63F0000u || masked == 0xD65F0000u) {
     op->rn = (uint8_t)bits(insn, 9, 5);
     op->flags = masked == 0xD63F0000u ? F_LINK : 0u;
-    op->fn = op_branch_register;
+    op->kind = OP_BRANCH_REGISTER;
     return true;
   }
   return false;
@@ -795,10 +860,13 @@ bool interp_predecode_run_block(Interp_State *s, uint64_t cycle_budget, uint32_t
   }
   const uint32_t count = b ? b->count : 1u;
   const bool pc_log = interp_pc_log_enabled();
+  /* Each op retires exactly one cycle or ends the run, so a block that
+   * fits the remaining budget can never meet the check below. */
+  const bool fits = b && s->cycles_consumed + count <= cycle_budget;
   for (uint32_t i = 0; i < count; i++) {
     /* Exactly the reference loop's budget/grace rule (interpreter.c),
      * before every instruction. */
-    if (s->cycles_consumed >= cycle_budget) {
+    if (!fits && s->cycles_consumed >= cycle_budget) {
       if (!s->exclusive_valid || *grace >= INTERP_EXCLUSIVE_GRACE_INSTRUCTIONS) {
         *exit_reason = CPU_EXIT_CYCLES_ELAPSED;
         return false;
@@ -809,14 +877,14 @@ bool interp_predecode_run_block(Interp_State *s, uint64_t cycle_budget, uint32_t
     const Op *op = &b->ops[i];
     const uint64_t at = s->regs.pc;
     if (pc_log) interp_pc_log_check(s);
-    const Interp_Status status = op->fn(s, op);
+    const Interp_Status status = execute_op(s, op);
     if (status == INTERP_CONTINUE) { /* the common case, retired inline */
       s->cycles_consumed++;
       s->total_cycles++;
     } else if (!interp_retire(s, status, at, op->insn, exit_reason)) {
       return false;
     }
-    if (op->fn == op_reference && is_cache_maintenance(op->insn)) {
+    if (op->kind == OP_REFERENCE && is_cache_maintenance(op->insn)) {
       interp_predecode_flush();
       return true;
     }
