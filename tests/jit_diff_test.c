@@ -536,6 +536,14 @@ static void run_case(uint32_t iteration) {
       i--;
       continue;
     }
+    if (i + 4u < length && pick(32) == 0) { /* FPCR = FZ, then fused multiply-adds on singles that may be subnormal */
+      code[i++] = 0xD2A02009u; /* movz x9, #0x100, lsl #16: FPCR.FZ */
+      code[i++] = 0xD51B4409u; /* msr fpcr, x9 */
+      code[i++] = 0x1F000000u | (pick(2) << 21) | (cache_vreg() << 16) | (pick(2) << 15) | (cache_vreg() << 10) |
+                  (cache_vreg() << 5) | cache_vreg();
+      code[i] = 0x1F000000u | (cache_vreg() << 16) | (cache_vreg() << 10) | (cache_vreg() << 5) | cache_vreg();
+      continue;
+    }
     if (i + 2u < length && pick(32) == 0) { /* FADD, MSR FPSR or FPCR, FADD: the cached FP environment must be reread */
       code[i++] = 0x1E202800u | (fp_vreg() << 16) | (fp_vreg() << 5) | fp_vreg();
       code[i++] = (pick(2) ? 0xD51B4420u : 0xD51B4400u) | (pick(2) ? 31u : reg());

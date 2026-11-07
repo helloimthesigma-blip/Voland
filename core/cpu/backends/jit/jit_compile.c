@@ -3010,16 +3010,21 @@ static void emit_fp_arith(Ctx *c, bool dbl, uint32_t opcode, bool two, uint32_t 
 
 /* Single-precision FMADD/FMSUB/FNMADD/FNMSUB: addend + n*m in f64 (the
  * product is exact there, the sum rounds once), then to f32 - the same
- * as one rounding unless the f64 sum sits exactly on an f32 midpoint. */
+ * as one rounding unless the f64 sum sits exactly on an f32 midpoint.
+ * FZ-safe (Silksong runs with FZ: every FMADD took softfloat): no input
+ * subnormal, and the result is never tiny. */
 static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t m, uint32_t a, uint32_t d) {
   load_fp(c, a, false);
   op(c, WASM_OP_F64_PROMOTE_F32);
+  ltee(c, L_FD2);
   if (o1) op(c, WASM_OP_F64_NEG);
   load_fp(c, n, false);
   op(c, WASM_OP_F64_PROMOTE_F32);
+  ltee(c, L_FD3);
   if (o0 != o1) op(c, WASM_OP_F64_NEG);
   load_fp(c, m, false);
   op(c, WASM_OP_F64_PROMOTE_F32);
+  ltee(c, L_FD4);
   op(c, WASM_OP_F64_MUL);
   op(c, WASM_OP_F64_ADD);
   ltee(c, L_FD);
@@ -3036,7 +3041,14 @@ static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t 
   i64c(c, F32_MIDPOINT);
   op(c, WASM_OP_I64_NE);
   op(c, WASM_OP_I32_AND);
-  emit_fp_env_ok(c);
+  if (c->fz) { /* FZ would flush a subnormal input (the result is already not tiny) */
+    for (uint32_t local = L_FD2; local <= L_FD4; local++) {
+      emit_tiny_single_in_double(c, local);
+      op(c, WASM_OP_I32_EQZ);
+      op(c, WASM_OP_I32_AND);
+    }
+  }
+  emit_fp_env_ok_as(c, true);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   store_fp_local(c, d, false, L_FS);
