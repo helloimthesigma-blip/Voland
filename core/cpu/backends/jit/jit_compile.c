@@ -2920,13 +2920,16 @@ static void fp_else_exact(Ctx *c, const Sync *sync) {
 }
 /* The same for an instruction that writes only the scalar V[d]: both arms
  * leave it in its cached local (the fast arm through store_fp_local). */
-static void fp_else_exact_scalar(Ctx *c, uint32_t d, bool dbl) {
+static void fp_else_exact_scalar_sync(Ctx *c, const Sync *sync, uint32_t d, bool dbl) {
   jit_note_fast_path(c->insn);
   else_(c);
-  Sync none = {0};
-  emit_direct_call_writing(c, &none, d, dbl);
+  emit_direct_call_writing(c, sync, d, dbl);
   end_(c);
   fp_cache_define(c, d, dbl ? FP_CACHE_F64 : FP_CACHE_F32);
+}
+static void fp_else_exact_scalar(Ctx *c, uint32_t d, bool dbl) {
+  Sync none = {0};
+  fp_else_exact_scalar_sync(c, &none, d, dbl);
 }
 
 static uint32_t fp_result_local(bool dbl) { return dbl ? L_FD : L_FS; }
@@ -3037,8 +3040,7 @@ static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t 
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   store_fp_local(c, d, false, L_FS);
-  Sync none = {0};
-  fp_else_exact(c, &none);
+  fp_else_exact_scalar(c, d, false);
 }
 
 /* FMAX/FMIN/FMAXNM/FMINNM without NaNs and with FPCR 0: the result is
@@ -3068,8 +3070,7 @@ static void emit_fp_min_max(Ctx *c, bool dbl, bool min, uint32_t n, uint32_t m, 
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   store_fp_local(c, d, dbl, r);
-  Sync none = {0};
-  fp_else_exact(c, &none);
+  fp_else_exact_scalar(c, d, dbl);
 }
 
 /* FCMP/FCMPE (and with #0.0): NZCV from an ordered compare. */
@@ -3187,7 +3188,7 @@ static void emit_int_to_fp(Ctx *c, bool sf, bool is_unsigned, bool dbl, uint32_t
   Sync sync = {0};
   sync_x(&sync, rn);
   sync_x(&sync, rd);
-  fp_else_exact(c, &sync);
+  fp_else_exact_scalar_sync(c, &sync, rd, dbl);
 }
 
 /* i32: low < local < top for a truncation to a `to64`-bit integer, as
@@ -3298,8 +3299,7 @@ static void emit_fp_round_integral(Ctx *c, bool dbl, uint32_t rn, uint32_t rd, u
   op(c, fp_round_op(mode, dbl));
   lset(c, a);
   store_fp_local(c, rd, dbl, a);
-  Sync none = {0};
-  fp_else_exact(c, &none);
+  fp_else_exact_scalar(c, rd, dbl);
 }
 
 /* Scalar FP with a native fast path; false: not one of these forms. */
@@ -3420,8 +3420,7 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
         fp_fast_arm(c);
         store_fp_local(c, rd, false, L_FS);
       }
-      Sync none = {0};
-      fp_else_exact(c, &none);
+      fp_else_exact_scalar(c, rd, !dbl);
       return true;
     }
     default:
