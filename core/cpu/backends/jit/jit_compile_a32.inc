@@ -1543,6 +1543,7 @@ static void a32_store_vec(Ctx *c, uint32_t r, uint32_t local, bool q) {
     simd(c, WASM_SIMD_V128_STORE);
     wasm_uleb(c->b, ALIGN_8);
     wasm_uleb(c->b, OFF_V(r >> 1));
+    fp_cache_forget(c, r >> 1);
     return;
   }
   simd(c, WASM_SIMD_I64X2_EXTRACT_LANE);

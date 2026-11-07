@@ -255,15 +255,30 @@ retires it.
     100k streams: no IXC set, a sum or a truncation's exactness wrong, the
     Dekker error ignored, an integer always exact.
   - **The environment, once per function.** Scalar FADD/FSUB/FMUL/FDIV/
-    FNMUL/FSQRT read FPCR and FPSR into a local (`L_FPENV`) the first time
-    a function needs them. While FPCR is as assumed and IXC is set, the
-    fast arm needs only the result checks: no exactness, no FPSR update.
-    MSR goes through the interpreter, and the local is forgotten after
-    every interpreter or direct call and whenever a fast arm sets IXC.
-    The IXC update itself is a branch, not a store in every instruction.
-    jit_bench's scalar FP loop: 1.8 -> 1.5 ns per instruction.
-    `jit_diff_test` puts FADD, MSR FPSR/FPCR, FADD in a row; leaving out
-    the reset after the interpreter's call fails it.
+    FNMUL/FSQRT read FPCR and FPSR into a local (`L_FPENV`) when the
+    function starts and again after every interpreter or direct call and
+    whenever a fast arm sets IXC (MSR goes through the interpreter). While
+    FPCR is as assumed and IXC is set, one branch on the result checks and
+    that local leads to the fast arm: no exactness, no FPSR update. The
+    IXC update itself is a branch, not a store in every instruction.
+  - **Scalars in locals (`fp_cache`).** The low f32/f64 of V[n] is kept in
+    a local after it is loaded or written; writes still go through to the
+    state, so only the reloads go. Compile-time bookkeeping: a store into
+    V[n] (any width, `mem` and the v128 stores) or a direct call forgets
+    entries; an entry changed inside an if/block is forgotten at its else
+    and end; region blocks start empty; an instruction the compiler gives
+    up on restores the state it started with.
+  - jit_bench's scalar FP loop: 1.8 -> 1.5 (environment) -> 1.19 ns per
+    instruction (one branch, scalars in locals). Super Mario Odyssey in
+    Cap Kingdom: 41-44 -> 45-46 fps, its busier scenes 31-33 -> 35-37.
+  - `jit_diff_test` puts FADD, MSR FPSR/FPCR, FADD in a row, and runs of
+    scalar arithmetic among other writers of the same V registers (LDR,
+    FMOV from a general register, vector FADD, INS, MOVI, short B.cond).
+    Leaving out the refresh after the interpreter's call, the store hook
+    or the v128 stores' forgetting fails it. The else/end/block-start
+    rules and forgetting all after a direct call are not observable with
+    today's emitters (every writer also stores in its arm); they stay as
+    the invariant's defenses.
   - **Tests:** `jit_diff_test` generates these forms on registers holding
     ordinary floats; seeded mutations of each were caught. One mutation
     is not caught in 20000 streams: signed instead of unsigned truncation

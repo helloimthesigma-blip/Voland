@@ -350,6 +350,25 @@ static uint32_t gen_simd_fp(void) {
 }
 
 /* Flag setters and readers, for the setter-then-reader idiom (lazy flags). */
+/* Scalar FP arithmetic among other writers of the same few V registers
+ * (loads, FMOV from a general register, vector ops, lane inserts, MOVI)
+ * and short forward branches: the JIT's cached scalars (fp_cache) must
+ * be forgotten wherever the state's copy changes or paths join. */
+static uint32_t cache_vreg(void) { return 16u + pick(4); }
+static uint32_t gen_fp_cache_mix(void) {
+  const uint32_t type = pick(2) << 22, d = cache_vreg(), n = cache_vreg(), m = cache_vreg();
+  static const uint32_t arith[5] = {0u, 1u, 2u, 3u, 8u}; /* FMUL FDIV FADD FSUB FNMUL */
+  switch (pick(10)) {
+  case 0: case 1: case 2: return 0x1E200800u | type | (m << 16) | (arith[pick(5)] << 12) | (n << 5) | d;
+  case 3: return 0x1E21C000u | type | (n << 5) | d;                                       /* FSQRT */
+  case 4: return (pick(2) ? 0xBD400000u : 0xFD400000u) | (pick(16) << 10) | (base_reg() << 5) | d; /* LDR s/d */
+  case 5: return pick(2) ? 0x1E270000u | (reg() << 5) | d : 0x9E670000u | (reg() << 5) | d;  /* FMOV s, w / d, x */
+  case 6: return 0x4E20D400u | (m << 16) | (n << 5) | d;                                  /* FADD v.4s */
+  case 7: return 0x4E001C00u | ((((pick(4)) << 3) | 4u) << 16) | (reg() << 5) | d;          /* INS v.s[i], w */
+  case 8: return 0x2F00E400u | d;                                                         /* MOVI d, #0 */
+  default: return 0x54000040u | pick(14);                                                 /* B.cond +2 */
+  }
+}
 static uint32_t gen_flag_setter(void) {
   if (pick(4) == 0) { /* SUBS/ADDS rd, rn, rn: equal operands */
     const uint32_t r = reg();
@@ -494,6 +513,11 @@ static void run_case(uint32_t iteration) {
       code[i + 1u] = 0xF9000600u | (pick(2) ? 1u : 2u); /* str x1|x2, [x16, #8] */
       code[i + 2u] = (0x25u << 26) | (uint32_t)(((CODE2_GVA + 32u - (CODE_GVA + 4u * (i + 2u))) >> 2) & 0x3FFFFFFu);
       i += 2u;
+      continue;
+    }
+    if (pick(8) == 0) { /* a run of cached-scalar traffic */
+      for (const uint32_t end = i + 4u + pick(12); i < length && i < end; i++) code[i] = gen_fp_cache_mix();
+      i--;
       continue;
     }
     if (i + 2u < length && pick(32) == 0) { /* FADD, MSR FPSR or FPCR, FADD: the cached FP environment must be reread */

@@ -89,12 +89,13 @@ enum {
   L_RESUME, /* $helper: the region block to resume in */
   L_PASS,   /* store-exclusive: did the monitor pass */
   L_EXACT,  /* FP fast paths: FP_EXACT, FP_INEXACT or FP_UNKNOWN (fp_note_inexact) */
-  L_FPENV,  /* emit_fp_env_cached: FP_ENV_UNKNOWN, FP_ENV_SLOW or FP_ENV_FAST */
+  L_FPENV,  /* refresh_fp_env: FP_ENV_SLOW or FP_ENV_FAST */
   L_LAST_I32 = L_FPENV,
   L_FS,     /* FP fast paths: f32 */
   L_FS2,
   L_FS3,
-  L_LAST_F32 = L_FS3,
+  L_VS0,    /* the V registers' cached scalars (fp_cache): f32 */
+  L_LAST_F32 = L_VS0 + 31,
   L_FD,     /* ...f64 */
   L_FD2,
   L_FD3,
@@ -102,7 +103,8 @@ enum {
   L_FD5,
   L_FD6,
   L_FD7,
-  L_LAST_F64 = L_FD7,
+  L_VD0,    /* ...and f64 */
+  L_LAST_F64 = L_VD0 + 31,
   L_VA,     /* vector FP fast paths: v128 */
   L_VB,
   L_VD,
@@ -229,6 +231,26 @@ typedef enum Flag_Kind {
 
 typedef enum Flag_Event { FLAG_EVENT_NONE, FLAG_EVENT_READ, FLAG_EVENT_WRITE } Flag_Event;
 
+/* Scalar FP registers in locals: the low f32/f64 of V[n] is also in
+ * L_VS0 + n / L_VD0 + n where `kind` says so. Writes go through to the
+ * state as well, so the cache only saves loads - the store-to-load round
+ * trip on every FP result was on the critical path of dependent FP code.
+ * Compile-time state: valid on every path to the current point. An entry
+ * changed inside an if/block (`stamp` after the construct's opening) is
+ * forgotten at its else and end; stores into V[n] and direct calls forget
+ * entries; region blocks start empty. */
+#define FP_CACHE_NONE 0u
+#define FP_CACHE_F32 1u
+#define FP_CACHE_F64 2u
+#define FP_CACHE_DEPTHS 128u /* deeper constructs forget everything at their end */
+#define FP_CACHE_REGS 32u
+typedef struct Fp_Cache {
+  uint8_t kind[FP_CACHE_REGS];
+  uint32_t stamp[FP_CACHE_REGS];
+  uint32_t clock;
+  uint32_t opened[FP_CACHE_DEPTHS]; /* clock when the construct at that depth opened */
+} Fp_Cache;
+
 typedef struct Ctx {
   Wasm_Buf *b;
   const Jit_Link *link;
@@ -276,6 +298,8 @@ typedef struct Ctx {
   uint8_t tlb_slot[2][31];
   bool a32;               /* the code is A32 (jit_compile_a32.inc) */
   bool fz;                /* compiled under FPCR = FZ only: FZ-safe fast paths guard on that */
+  Fp_Cache fp;            /* scalars of V registers held in locals (fp_cache_*) */
+  bool uses_fp_env;       /* L_FPENV is read (the analysis pass's): refresh_fp_env */
 } Ctx;
 
 /* ------------------------------------------------------------------ */
@@ -309,24 +333,64 @@ static void ltee(Ctx *c, uint32_t local) {
   op(c, WASM_OP_LOCAL_TEE);
   wasm_uleb(c->b, local);
 }
+static void fp_cache_forget(Ctx *c, uint32_t n) {
+  c->fp.kind[n] = FP_CACHE_NONE;
+  c->fp.stamp[n] = ++c->fp.clock;
+}
+static void fp_cache_forget_all(Ctx *c) {
+  for (uint32_t n = 0; n < FP_CACHE_REGS; n++) {
+    if (c->fp.kind[n] != FP_CACHE_NONE) fp_cache_forget(c, n);
+  }
+}
+static void fp_cache_define(Ctx *c, uint32_t n, uint8_t kind) {
+  c->fp.kind[n] = kind;
+  c->fp.stamp[n] = ++c->fp.clock;
+}
+static uint32_t fp_cache_local(uint32_t n, bool dbl) { return (dbl ? L_VD0 : L_VS0) + n; }
+/* Entering a construct at the current depth / leaving one of its arms. */
+static void fp_cache_open(Ctx *c) {
+  if (c->depth < FP_CACHE_DEPTHS) c->fp.opened[c->depth] = c->fp.clock;
+}
+static void fp_cache_close(Ctx *c) {
+  const uint32_t opened = c->depth < FP_CACHE_DEPTHS ? c->fp.opened[c->depth] : 0u;
+  for (uint32_t n = 0; n < FP_CACHE_REGS; n++) {
+    if (c->fp.kind[n] != FP_CACHE_NONE && c->fp.stamp[n] > opened) fp_cache_forget(c, n);
+  }
+}
+/* A store into the state at `offset`: V[n] there is no longer cached. */
+static void fp_cache_note_store(Ctx *c, uint64_t offset) {
+  const uint64_t first = STATE_OFFSET(interp.v);
+  if (offset < first) return;
+  const uint64_t n = (offset - first) / sizeof(CPU_Vector_Register);
+  if (n < FP_CACHE_REGS) fp_cache_forget(c, (uint32_t)n);
+}
+static bool is_store(uint8_t opcode) { return opcode >= WASM_OP_I32_STORE && opcode <= WASM_OP_I64_STORE32; }
+
 static void mem(Ctx *c, uint8_t opcode, uint32_t align_log2, uint64_t offset) {
   op(c, opcode);
   wasm_uleb(c->b, align_log2);
   wasm_uleb(c->b, offset);
+  if (is_store(opcode)) fp_cache_note_store(c, offset);
 }
 static void open_block(Ctx *c) {
   op(c, WASM_OP_BLOCK);
   op(c, WASM_BLOCK_VOID);
   c->depth++;
+  fp_cache_open(c);
 }
 static void open_if(Ctx *c, uint8_t result_type) {
   op(c, WASM_OP_IF);
   op(c, result_type);
   c->depth++;
+  fp_cache_open(c);
 }
-static void else_(Ctx *c) { op(c, WASM_OP_ELSE); }
+static void else_(Ctx *c) {
+  op(c, WASM_OP_ELSE);
+  fp_cache_close(c);
+}
 static void end_(Ctx *c) {
   op(c, WASM_OP_END);
+  fp_cache_close(c);
   c->depth--;
 }
 static void br(Ctx *c, uint32_t level) {
@@ -555,16 +619,11 @@ static void compute_room(Ctx *c) {
   lset(c, L_ROOM);
 }
 
-/* L_FPENV (emit_fp_env_cached). */
-#define FP_ENV_UNKNOWN 0u
+/* L_FPENV (refresh_fp_env). */
 #define FP_ENV_SLOW 1u
 #define FP_ENV_FAST 2u
+static void refresh_fp_env(Ctx *c);
 
-/* FPCR or FPSR may have changed: emit_fp_env_cached reads them again. */
-static void forget_fp_env(Ctx *c) {
-  i32c(c, FP_ENV_UNKNOWN);
-  lset(c, L_FPENV);
-}
 
 /* regs.pc = L_HPC, then the interpreter runs L_HINSN; i32 status on the
  * stack. The state must be spilled and its cycles flushed. */
@@ -574,7 +633,8 @@ static void call_interpreter(Ctx *c) {
   lget(c, L_HINSN);
   op(c, WASM_OP_CALL);
   wasm_uleb(c->b, FUNC_INTERPRET);
-  forget_fp_env(c); /* it may have run MSR FPCR/FPSR */
+  refresh_fp_env(c); /* it may have run MSR FPCR/FPSR */
+  fp_cache_forget_all(c);
 }
 
 /* This instruction through the interpreter, then return to the
@@ -2299,7 +2359,13 @@ static void sync_xsp(Sync *sync, uint32_t r) { sync->regs |= (uint64_t)1 << r; }
  * after, every other register stays in its local. The instruction
  * counts as retired inline; one the interpreter refuses (undefined, a
  * fault) leaves through $leave with nothing changed. */
-static void emit_direct_call(Ctx *c, const Sync *sync) {
+/* `writes`: the one V register the instruction writes (its cached scalar
+ * is reloaded, in format `dbl`), or FP_WRITES_UNKNOWN. */
+#define FP_WRITES_UNKNOWN UINT32_MAX
+static void load_fp(Ctx *c, uint32_t n, bool dbl);
+static void emit_direct_call_writing(Ctx *c, const Sync *sync, uint32_t writes, bool dbl);
+static void emit_direct_call(Ctx *c, const Sync *sync) { emit_direct_call_writing(c, sync, FP_WRITES_UNKNOWN, false); }
+static void emit_direct_call_writing(Ctx *c, const Sync *sync, uint32_t writes, bool dbl) {
   for (uint32_t r = 0; r < REG_ZR; r++) {
     if (sync->regs & ((uint64_t)1 << r)) {
       c->used |= (uint64_t)1 << r;
@@ -2319,11 +2385,20 @@ static void emit_direct_call(Ctx *c, const Sync *sync) {
   i32c(c, c->insn);
   op(c, WASM_OP_CALL);
   wasm_uleb(c->b, FUNC_SIMD);
-  forget_fp_env(c);
+  refresh_fp_env(c);
+  if (writes == FP_WRITES_UNKNOWN) {
+    fp_cache_forget_all(c); /* the interpreter wrote V registers through the state */
+  } else {
+    fp_cache_forget(c, writes);
+  }
   hint(c, false);
   open_if(c, WASM_BLOCK_VOID);
   leave_via_interpreter(c);
   end_(c);
+  if (writes != FP_WRITES_UNKNOWN) { /* back in its local */
+    load_fp(c, writes, dbl);
+    op(c, WASM_OP_DROP);
+  }
   for (uint32_t r = 0; r < REG_ZR; r++) {
     if (sync->regs & ((uint64_t)1 << r)) {
       state_load64(c, OFF_X(r));
@@ -2509,26 +2584,17 @@ static void emit_fp_env_ok_exact_as(Ctx *c, bool fz_safe) {
 
 /* L_FPENV: whether FPCR is what fz_safe fast arms assume and FPSR.IXC is
  * set - then every scalar arithmetic fast arm needs only its result
- * checks. Read from the state once per function (locals start at 0,
- * unknown) instead of in every instruction: FPCR and FPSR change only
- * through MSR, which the interpreter runs (forget_fp_env after its calls),
- * and the fast arms only ever set IXC (fp_note_inexact forgets too). Two
- * loads per FP instruction were a quarter of jit_bench's scalar FP loop. */
-
-/* i32: L_FPENV == FP_ENV_FAST, computed first if unknown. */
-static void emit_fp_env_cached(Ctx *c) {
-  lget(c, L_FPENV);
-  op(c, WASM_OP_I32_EQZ);
-  hint(c, false);
-  open_if(c, WASM_BLOCK_VOID);
+ * checks. Read from the state when a function that has such arms starts
+ * and again after anything that may change FPCR or FPSR: MSR runs in the
+ * interpreter (refresh_fp_env after its calls), and fast arms only ever
+ * set IXC (fp_note_inexact refreshes too). Two loads and branches per FP
+ * instruction were a third of jit_bench's scalar FP loop. */
+static void refresh_fp_env(Ctx *c) {
+  if (!c->uses_fp_env) return;
   emit_fp_env_ok_as(c, true);
   i32c(c, FP_ENV_SLOW);
   op(c, WASM_OP_I32_ADD);
   lset(c, L_FPENV);
-  end_(c);
-  lget(c, L_FPENV);
-  i32c(c, FP_ENV_FAST);
-  op(c, WASM_OP_I32_EQ);
 }
 
 /* In a fast arm guarded by emit_fp_env_ok_exact: IXC |= (L_EXACT == FP_INEXACT).
@@ -2548,7 +2614,7 @@ static void fp_note_inexact(Ctx *c) {
   i32c(c, (int32_t)(1u << FPSR_IXC_BIT));
   op(c, WASM_OP_I32_OR);
   mem(c, WASM_OP_I32_STORE, ALIGN_4, OFF_FPSR);
-  forget_fp_env(c);
+  refresh_fp_env(c);
   end_(c);
 }
 
@@ -2754,8 +2820,15 @@ static void emit_arith_exact(Ctx *c, bool dbl, uint32_t opcode, bool two, uint32
 
 /* The scalar in V[n] as f32/f64 on the stack. */
 static void load_fp(Ctx *c, uint32_t n, bool dbl) {
+  const uint8_t kind = dbl ? FP_CACHE_F64 : FP_CACHE_F32;
+  if (c->fp.kind[n] == kind) {
+    lget(c, fp_cache_local(n, dbl));
+    return;
+  }
   lget(c, L_STATE);
   mem(c, dbl ? WASM_OP_F64_LOAD : WASM_OP_F32_LOAD, dbl ? ALIGN_8 : ALIGN_4, OFF_V(n));
+  ltee(c, fp_cache_local(n, dbl));
+  fp_cache_define(c, n, kind);
 }
 
 /* V[d] = the f32/f64 in `local`, the rest of the register zeroed. */
@@ -2771,6 +2844,9 @@ static void store_fp_local(Ctx *c, uint32_t d, bool dbl, uint32_t local) {
   lget(c, L_STATE);
   lget(c, local);
   mem(c, dbl ? WASM_OP_F64_STORE : WASM_OP_F32_STORE, dbl ? ALIGN_8 : ALIGN_4, OFF_V(d));
+  lget(c, local);
+  lset(c, fp_cache_local(d, dbl));
+  fp_cache_define(c, d, dbl ? FP_CACHE_F64 : FP_CACHE_F32);
 }
 
 /* V[d] = the i64 bit pattern on the stack (a scalar of the format), the
@@ -2842,6 +2918,16 @@ static void fp_else_exact(Ctx *c, const Sync *sync) {
   emit_direct_call(c, sync);
   end_(c);
 }
+/* The same for an instruction that writes only the scalar V[d]: both arms
+ * leave it in its cached local (the fast arm through store_fp_local). */
+static void fp_else_exact_scalar(Ctx *c, uint32_t d, bool dbl) {
+  jit_note_fast_path(c->insn);
+  else_(c);
+  Sync none = {0};
+  emit_direct_call_writing(c, &none, d, dbl);
+  end_(c);
+  fp_cache_define(c, d, dbl ? FP_CACHE_F64 : FP_CACHE_F32);
+}
 
 static uint32_t fp_result_local(bool dbl) { return dbl ? L_FD : L_FS; }
 
@@ -2855,9 +2941,13 @@ static void emit_fp_arith_lane(Ctx *c, bool dbl, uint32_t opcode, bool two, uint
   load_fp(c, n, dbl);
   ltee(c, a);
   if (two) {
-    lget(c, L_STATE);
-    mem(c, dbl ? WASM_OP_F64_LOAD : WASM_OP_F32_LOAD, dbl ? ALIGN_8 : ALIGN_4,
-        OFF_V(m) + m_lane * (dbl ? sizeof(uint64_t) : sizeof(uint32_t)));
+    if (m_lane == 0) {
+      load_fp(c, m, dbl);
+    } else {
+      lget(c, L_STATE);
+      mem(c, dbl ? WASM_OP_F64_LOAD : WASM_OP_F32_LOAD, dbl ? ALIGN_8 : ALIGN_4,
+          OFF_V(m) + m_lane * (dbl ? sizeof(uint64_t) : sizeof(uint32_t)));
+    }
     ltee(c, b);
     const uint32_t k = opcode == 8u ? 0u : opcode;
     op(c, dbl ? ops64[k] : ops32[k]);
@@ -2887,21 +2977,28 @@ static void emit_fp_arith_lane(Ctx *c, bool dbl, uint32_t opcode, bool two, uint
   }
   and_not_subnormal(c, a, dbl);
   if (two) and_not_subnormal(c, b, dbl);
-  emit_fp_env_cached(c);
-  open_if(c, WASM_TYPE_I32); /* the usual case: FPCR as assumed and IXC set, exactness irrelevant */
-  i32c(c, FP_EXACT);
-  lset(c, L_EXACT);
-  i32c(c, 1);
+  /* One branch in the usual case - FPCR as assumed and IXC already set,
+   * where exactness changes nothing; otherwise exactness and the state's
+   * environment decide between the fast arm and softfloat. */
+  c->uses_fp_env = true;
+  ltee(c, L_EXACT); /* the result checks, for the second arm */
+  lget(c, L_FPENV);
+  i32c(c, FP_ENV_FAST);
+  op(c, WASM_OP_I32_EQ);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  store_fp_local(c, d, dbl, r);
   else_(c);
+  lget(c, L_EXACT);
   emit_arith_exact(c, dbl, opcode, two, a, b, r);
   emit_fp_env_ok_exact_as(c, true);
-  end_(c);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   store_fp_local(c, d, dbl, r);
   fp_note_inexact(c);
-  Sync none = {0};
-  fp_else_exact(c, &none);
+  fp_else_exact_scalar(c, d, dbl);
+  end_(c);
+  fp_cache_define(c, d, dbl ? FP_CACHE_F64 : FP_CACHE_F32); /* every arm left it there */
 }
 
 static void emit_fp_arith(Ctx *c, bool dbl, uint32_t opcode, bool two, uint32_t n, uint32_t m, uint32_t d) {
@@ -3489,6 +3586,7 @@ static void store_v(Ctx *c, uint32_t d, uint32_t local, bool q) {
     simd(c, WASM_SIMD_V128_STORE);
     wasm_uleb(c->b, ALIGN_8);
     wasm_uleb(c->b, OFF_V(d));
+    fp_cache_forget(c, d);
     return;
   }
   lget(c, L_STATE);
@@ -5363,6 +5461,7 @@ static uint32_t compile_block_code(Ctx *c, uint32_t b) {
   const uint32_t available = (uint32_t)((page + VMM_PAGE_SIZE - start) / INSN_BYTES);
   c->known_mask = 0;
   c->predicted_mask = 0;
+  fp_cache_forget_all(c); /* entered from anywhere */
   if (c->a32 && b == 0 && c->link->span_calls) a32_seed_predictions(c);
   const uint32_t count = available < c->max_block_insns ? available : c->max_block_insns;
   c->block_len = c->blocks[b].length;
@@ -5376,6 +5475,7 @@ static uint32_t compile_block_code(Ctx *c, uint32_t b) {
     const uint32_t mark = c->b->length;
     const uint64_t used = c->used, written = c->written;
     const uint32_t depth = c->depth, blocks = c->block_count;
+    const Fp_Cache fp = c->fp;
     Outcome outcome = compile_instruction(c, c->insn);
     if (outcome == OUTCOME_HELPER || outcome == OUTCOME_END_HELPER) {
       /* Throw away anything a decoder emitted before giving up. */
@@ -5384,6 +5484,7 @@ static uint32_t compile_block_code(Ctx *c, uint32_t b) {
       c->written = written;
       c->depth = depth;
       c->block_count = blocks;
+      c->fp = fp;
     }
     switch (outcome) {
     case OUTCOME_NEXT: break;
@@ -5594,6 +5695,7 @@ static void emit_function(Ctx *c) {
   /* Prologue. The caller checked that block 0 fits the budget. */
   state_load64(c, OFF_L1);
   lset(c, L_L1);
+  refresh_fp_env(c);
   emit_tlb_load(c);
   reload(c);
   i64c(c, c->blocks[0].length);
@@ -5893,6 +5995,7 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     memcpy(c.blocks, analysis.blocks, sizeof(c.blocks));
     c.block_count = analysis.block_count;
     c.uses_helper = analysis.uses_helper;
+    c.uses_fp_env = analysis.uses_fp_env;
     c.declared_local = analysis.max_local;
     c.uses_tlb = analysis.uses_tlb;
     c.tlb_carried = analysis.tlb_carried;
