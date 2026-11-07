@@ -271,6 +271,22 @@ retires it.
   - jit_bench's scalar FP loop: 1.8 -> 1.5 (environment) -> 1.19 ns per
     instruction (one branch, scalars in locals). Super Mario Odyssey in
     Cap Kingdom: 41-44 -> 45-46 fps, its busier scenes 31-33 -> 35-37.
+  - **Recorded flags widen the fast arms.** Once FPSR already holds a
+    flag, an operation that would raise it again changes nothing, so the
+    native IEEE result is the architecture's whenever FPCR is 0:
+    - vector FADD/FSUB/FMUL/FDIV with UFC and IXC set: any finite result,
+      subnormals included (Silksong squares tiny lanes);
+    - the same with IOC set as well: NaN lanes too, replaced by the
+      architecture's NaN (a signalling n quieted, then m, then a quiet n
+      or m, else the default NaN) - unused lanes holding NaNs sent every
+      vector op of a Silksong run to softfloat;
+    - single FMADD keeps its fast arm on an exact f32 midpoint when
+      TwoSum shows the f64 sum exact (only a rounded sum can round
+      twice); sums of floats of similar size land there often.
+    Silksong's direct SIMD&FP calls: ~10M -> ~1M per 10 s. FCCMP, SSHL/USHL
+    (32-bit lanes), (S|U)ADDL/(S|U)SUBL and SQXTN have fast paths too.
+    The parallel jit report counts direct SIMD&FP calls and the last FPCR,
+    and `VOLAND_JIT_FALLBACKS=N` lists what still goes through them.
   - `jit_diff_test` puts FADD, MSR FPSR/FPCR, FADD in a row, and runs of
     scalar arithmetic among other writers of the same V registers (LDR,
     FMOV from a general register, vector FADD, INS, MOVI, short B.cond).
