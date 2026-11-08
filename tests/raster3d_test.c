@@ -1133,6 +1133,7 @@ static void test_gpu_compressed_upload(Raster3d *r) {
   Seen_Draw seen = gpu_draw_once(r, FRONT_CW_REG);
   CHECK(seen.last_texture_format == GPU_FMT_BC1_UNORM, "BCn device: BC1 texture (format %u)", seen.last_texture_format);
   CHECK(seen.level_writes == 1u, "BCn device: one level write (%u)", seen.level_writes);
+  CHECK(seen.samplers == 1u, "BCn device: the device's sampler filters BC1 (%u samplers)", seen.samplers);
   const Gpu_Rec_Texture_Write_Level *w = &seen.first_level_write;
   CHECK(w->level == 0 && w->layer == 0 && w->y == 0 && w->width == 8u && w->height == 8u && w->bytes_per_row == 16u &&
             w->data_bytes == 32u,
@@ -1157,6 +1158,7 @@ static void test_gpu_compressed_upload(Raster3d *r) {
         "6x6 BC1: BC1 texture %ux%u (format %u), level write %u wide", seen.last_texture_width,
         seen.last_texture_height, seen.last_texture_format, seen.first_level_write.width);
   CHECK(size_word == (6u | (6u << 16)), "6x6 BC1: sampled at 6x6 (size word %08x)", size_word);
+  CHECK(seen.samplers == 0u, "6x6 BC1: padded, filtered in the shader (%u samplers)", seen.samplers);
   g_bc1_size = 8u;
   /* The same texture changed, on a device without BCn: decoded. */
   memset(g_gpu + (TEXELS - GPU_BASE), 9, 8);

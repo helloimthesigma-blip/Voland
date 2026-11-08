@@ -191,7 +191,11 @@ typedef struct Raster3d_Gpu_Stats {
   uint64_t shaders;
   uint64_t untranslated_draws;
   uint64_t texture_uploads;
-  uint64_t surface_upload_bytes; /* render targets re-uploaded from guest memory (gpu_surface_upload*) */
+  uint64_t surface_upload_bytes;
+  /* Texture bindings by how they are filtered: the device's sampler, or the
+   * shader's taps because the sample is integer, a cube, padded, the
+   * format unfilterable, or a wrap mode beyond the sampler's. */
+  uint64_t tex_hw, tex_sw_int, tex_sw_cube, tex_sw_padded, tex_sw_format, tex_sw_wrap; /* render targets re-uploaded from guest memory (gpu_surface_upload*) */
   uint64_t texture_budget_drops; /* GPU copies dropped for RASTER_GPU_TEXTURE_BUDGET_BYTES */
   uint64_t upload_bytes;
   uint64_t surfaces;

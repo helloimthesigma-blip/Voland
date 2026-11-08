@@ -3308,8 +3308,14 @@ static bool gpu_format_is_int(uint32_t f, bool *is_signed) {
          f == GPU_FMT_RG32_UINT || f == GPU_FMT_R32_UINT;
 }
 
-/* Formats a WebGPU filtering sampler accepts without optional features. */
+/* Formats a WebGPU filtering sampler accepts without optional features:
+ * also the block-compressed ones (BCn, ASTC) uploaded as they are, whose
+ * shader taps (textureLoad) read the same decoded texels the sampler
+ * filters - Super Mario Odyssey filtered most of its texture samples in
+ * the shader before they were listed. */
 static bool gpu_format_filterable(uint32_t f) {
+  if (f >= GPU_FMT_BC1_UNORM && f <= GPU_FMT_BC7_SRGB) return true;
+  if (f >= GPU_FMT_ASTC_FIRST && f <= GPU_FMT_ASTC_LAST) return true;
   switch (f) {
   case GPU_FMT_RGBA8_UNORM: case GPU_FMT_RGBA8_SRGB: case GPU_FMT_BGRA8_UNORM: case GPU_FMT_BGRA8_SRGB:
   case GPU_FMT_RGBA16_FLOAT: case GPU_FMT_R8_UNORM: case GPU_FMT_RG8_UNORM: case GPU_FMT_R16_FLOAT:
@@ -4731,6 +4737,13 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
   /* A hardware sampler where it gives the reference's result (not on a
    * padded texture: it would filter, wrap and clamp across the padding). */
   const bool cube_map = h.type == TEX_TYPE_CUBE || h.type == TEX_TYPE_CUBE_ARRAY;
+  Raster3d_Gpu_Stats *ts = &r->gpu_stats;
+  if (sample_type != WGSL_SAMPLE_FLOAT) ts->tex_sw_int++;
+  else if (cube_map) ts->tex_sw_cube++;
+  else if (padded) ts->tex_sw_padded++;
+  else if (!gpu_format_filterable(gpu_format)) ts->tex_sw_format++;
+  else if (s.wrap[0] > 2u || s.wrap[1] > 2u) ts->tex_sw_wrap++;
+  else ts->tex_hw++;
   if (sample_type == WGSL_SAMPLE_FLOAT && !cube_map && !padded && gpu_format_filterable(gpu_format) &&
       s.wrap[0] <= 2u && s.wrap[1] <= 2u) {
     desc->hw_sample_mask |= 1u << b;

@@ -1159,7 +1159,8 @@ static void report_stream(Emulator* emulator) {
   log_info("[gpu] stream detail (MiB): textures %llu uploads %.1f (hashed new %llu unsampled %llu changed %llu "
            "periodic %llu forced %llu), surfaces %.1f; draw data %.1f pulled %.1f vertices %.1f indices %.1f; "
            "pool %.1f written %.1f reused; surfaces created %llu, draws %llu, vertices on the CPU: topology %llu bindless %llu globals %llu "
-           "small %llu window %llu",
+           "small %llu window %llu; textures sampler %llu, shader-filtered: integer %llu cube %llu padded %llu "
+           "format %llu wrap %llu",
            (unsigned long long)(now->texture_uploads - was->texture_uploads),
            (double)(now->upload_bytes - was->upload_bytes - (now->surface_upload_bytes - was->surface_upload_bytes)) / mib,
            (unsigned long long)(now->hashed_new - was->hashed_new),
@@ -1176,7 +1177,11 @@ static void report_stream(Emulator* emulator) {
            (unsigned long long)(now->cpu_vs_bindless - was->cpu_vs_bindless),
            (unsigned long long)(now->cpu_vs_globals - was->cpu_vs_globals),
            (unsigned long long)(now->cpu_vs_small - was->cpu_vs_small),
-           (unsigned long long)(now->cpu_vs_window - was->cpu_vs_window));
+           (unsigned long long)(now->cpu_vs_window - was->cpu_vs_window), (unsigned long long)(now->tex_hw - was->tex_hw),
+           (unsigned long long)(now->tex_sw_int - was->tex_sw_int), (unsigned long long)(now->tex_sw_cube - was->tex_sw_cube),
+           (unsigned long long)(now->tex_sw_padded - was->tex_sw_padded),
+           (unsigned long long)(now->tex_sw_format - was->tex_sw_format),
+           (unsigned long long)(now->tex_sw_wrap - was->tex_sw_wrap));
   emulator->stream_stats_reported = *now;
 }
 
