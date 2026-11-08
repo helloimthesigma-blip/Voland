@@ -5,6 +5,9 @@ import { fileURLToPath } from "node:url";
 
 import { expect, test } from "@playwright/test";
 
+import { writeSaveArchive } from "../bindings/save-archive.ts";
+import { tarNameOfSave, writeTar } from "../workers/save-store.ts";
+
 /**
  * The Voland folder ("Your files"): one folder with games/, firmware/ and
  * mods/ is read once and everything in it is found - the game goes in the
@@ -56,4 +59,72 @@ test("one folder brings the game, its system files and its mods", async ({ page 
   await expect(page.getByTestId("library-game")).toContainText("Voland Fixture Quest");
   await expect(page.getByTestId("mods-panel")).toContainText("Test Mod");
   await expect(page.getByTestId("mods-panel")).toContainText("from your Voland folder");
+});
+
+/* A Player save of program 010013C00E930000 for user 1 (as saves.spec.ts). */
+const SAVE_NAME = `01-${"0000930ec0130001"}${"0100444e414c4f560100000000000000"}${"0000000000000000"}01${"00".repeat(31)}`;
+
+test("a kept folder is read again at load, backs saves up and follows its mods", async ({ page }) => {
+  test.skip(![PROGRAM_NCA, CONTROL_NCA].every(existsSync), "fixtures not built: run ctest --preset native-noop");
+  await page.goto("/");
+  await expect(page.getByTestId("files-panel")).toBeVisible({ timeout: 20_000 });
+  const tar = writeTar(new Map([[tarNameOfSave(SAVE_NAME), writeSaveArchive(new Map([["/user1.dat", new Uint8Array(8)]]))]]));
+  await page.getByTestId("saves").locator("summary").click();
+  await page.getByTestId("saves-import-input").setInputFiles({ name: "backup.tar", mimeType: "application/x-tar", buffer: Buffer.from(tar) });
+  await expect(page.getByTestId("saves-note")).toContainText("Imported 1 save", { timeout: 30_000 });
+
+  await page.evaluate(async (files) => {
+    const root = await (await navigator.storage.getDirectory()).getDirectoryHandle("kept-voland", { create: true });
+    for (const [path, bytes] of Object.entries(files)) {
+      const parts = path.split("/");
+      const leaf = parts.pop() ?? "";
+      let dir = root;
+      for (const part of parts) dir = await dir.getDirectoryHandle(part, { create: true });
+      const writable = await (await dir.getFileHandle(leaf, { create: true })).createWritable();
+      await writable.write(new Uint8Array(bytes));
+      await writable.close();
+    }
+    await new Promise<void>((resolve, reject) => {
+      const open = indexedDB.open("voland-folder", 1);
+      open.onupgradeneeded = (): void => { open.result.createObjectStore("handles"); };
+      open.onsuccess = (): void => {
+        const tx = open.result.transaction("handles", "readwrite");
+        tx.objectStore("handles").put(root, "root");
+        tx.oncomplete = (): void => resolve();
+        tx.onerror = (): void => reject(tx.error);
+      };
+      open.onerror = (): void => reject(open.error);
+    });
+  }, {
+    "games/Fixture/fedcba9876543210fedcba9876543210.nca": [...readFileSync(PROGRAM_NCA)],
+    "games/Fixture/0123456789abcdef0123456789abcdef.nca": [...readFileSync(CONTROL_NCA)],
+    "firmware/readme.txt": [...Buffer.from("x")],
+    "mods/Fixture/Kept Mod/romfs/a.txt": [...Buffer.from("modded")],
+  });
+
+  await page.reload();
+  await expect(page.getByTestId("voland-folder-ready")).toBeVisible({ timeout: 20_000 });
+  await expect(page.getByTestId("files-games")).toContainText("Fixture");
+  await expect(page.getByTestId("files-mods")).toContainText("installed Fixture/Kept Mod", { timeout: 20_000 });
+  await expect(page.getByTestId("library-game")).toHaveCount(1);
+  await expect(page.getByTestId("library-game")).not.toContainText("asks for");
+
+  await page.getByTestId("files-save-backup").check();
+  await expect(page.getByTestId("files-saves")).toContainText("1 save(s) backed up to saves/voland-saves-", { timeout: 20_000 });
+  const backups = await page.evaluate(async () => {
+    const dir = await (await (await navigator.storage.getDirectory()).getDirectoryHandle("kept-voland")).getDirectoryHandle("saves");
+    const out: [string, number][] = [];
+    for await (const [name, handle] of dir.entries()) out.push([name, (await (handle as FileSystemFileHandle).getFile()).size]);
+    return out;
+  });
+  expect(backups).toHaveLength(1);
+  expect(backups[0]?.[0]).toMatch(/^voland-saves-\d{4}-\d{2}-\d{2}\.tar$/);
+  expect(backups[0]?.[1]).toBeGreaterThan(0);
+
+  await page.evaluate(async () => {
+    const root = await (await navigator.storage.getDirectory()).getDirectoryHandle("kept-voland");
+    await (await root.getDirectoryHandle("mods")).removeEntry("Fixture", { recursive: true });
+  });
+  await page.getByTestId("voland-folder-rescan").click();
+  await expect(page.getByTestId("files-mods")).toContainText("removed Fixture/Kept Mod", { timeout: 20_000 });
 });

@@ -7,15 +7,15 @@
  * when they leave the folder). A kept folder is scanned again when the
  * page opens if the browser still allows it, else after one click.
  */
-import { For, Show, createSignal, onMount } from "solid-js";
+import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { SYSTEM_FILES, systemFileName } from "@bindings/load";
 import type { SystemFilesApi } from "@bindings/load";
 import { archiveFiles, installMod, listMods, recordModSource, removeMod, safeModName } from "@workers/mod-store";
 import { type LibraryGame, canKeepFolders, shownNameOf } from "../library";
-import { titleNames } from "../saves";
+import { exportFileName, exportSaves, titleNames } from "../saves";
 import {
   FOLDER_SOURCE, type FolderScan, MODS_DIR, askFolderPermission, folderPermission, inputFiles, keepFolder, keptFolder, modTitleId,
-  pickVolandFolder, scanFolder, setUpFolder, walkFolder,
+  SAVES_DIR, contentHash, pickVolandFolder, scanFolder, setUpFolder, walkFolder, writeSaveBackup,
 } from "../voland-folder";
 
 interface FilesPanelProps {
@@ -29,6 +29,14 @@ interface FilesPanelProps {
 }
 
 const FIRMWARE_SEEN_KEY = "voland-folder-firmware";
+const SAVE_BACKUP_KEY = "voland-folder-save-backup";
+/** How often saves are copied to saves/ while backups are on (a copy is
+ * written only when a save changed). */
+const SAVE_BACKUP_MS = 5 * 60 * 1000;
+
+function backupWanted(): boolean {
+  try { return localStorage.getItem(SAVE_BACKUP_KEY) === "1"; } catch { return false; }
+}
 
 type FolderState =
   | { readonly kind: "none" }
@@ -56,6 +64,48 @@ function FilesPanel(props: FilesPanelProps) {
   const [mods, setMods] = createSignal<ModResult | null>(null);
   const [usage, setUsage] = createSignal<string | null>(null);
   let folderInput: HTMLInputElement | undefined;
+  const [backup, setBackup] = createSignal(backupWanted());
+  const [backupNote, setBackupNote] = createSignal<string | null>(null);
+  let lastBackupHash = -1;
+
+  /* Copies every save to saves/ if any changed since the last copy and
+   * the folder still allows writing (asked for when backups are turned
+   * on or the folder is opened with a click). */
+  const backUpSaves = async (): Promise<void> => {
+    const s = state();
+    if (!backup() || s.kind !== "ready" || !s.handle) return;
+    if (await folderPermission(s.handle, "readwrite") !== "granted") {
+      setBackupNote("Save backups wait for permission to write: click Look again.");
+      return;
+    }
+    const result = await exportSaves();
+    if (result.count === 0) return;
+    const hash = contentHash(new Uint8Array(result.tar));
+    if (hash === lastBackupHash) return;
+    const path = await writeSaveBackup(s.handle, exportFileName(new Date()), result.tar);
+    if (path) lastBackupHash = hash;
+    setBackupNote(path
+      ? `${result.count} save(s) backed up to ${path} at ${new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}.`
+      : `Could not write to ${SAVES_DIR}/.`);
+  };
+  const backupTimer = window.setInterval(() => { void backUpSaves(); }, SAVE_BACKUP_MS);
+  const onHide = (): void => { if (document.visibilityState === "hidden") void backUpSaves(); };
+  document.addEventListener("visibilitychange", onHide);
+  onCleanup(() => {
+    window.clearInterval(backupTimer);
+    document.removeEventListener("visibilitychange", onHide);
+  });
+
+  async function toggleBackup(on: boolean, handle: FileSystemDirectoryHandle): Promise<void> {
+    if (on && !await askFolderPermission(handle, "readwrite")) {
+      setBackupNote("The browser did not allow writing to the folder, so saves are not backed up there.");
+      return;
+    }
+    setBackup(on);
+    try { localStorage.setItem(SAVE_BACKUP_KEY, on ? "1" : "0"); } catch { /* storage blocked */ }
+    setBackupNote(on ? null : "Save backups to the folder are off.");
+    if (on) await backUpSaves();
+  }
 
   const refreshUsage = async (): Promise<void> => {
     const estimate = await navigator.storage?.estimate?.().catch(() => null);
@@ -133,6 +183,7 @@ function FilesPanel(props: FilesPanelProps) {
     setMods(await syncMods(scan));
     if (note()?.startsWith("Installing")) setNote(null);
     await refreshUsage();
+    await backUpSaves();
   };
 
   const scanKept = async (handle: FileSystemDirectoryHandle): Promise<void> => {
@@ -167,7 +218,7 @@ function FilesPanel(props: FilesPanelProps) {
   }
 
   async function reconnect(handle: FileSystemDirectoryHandle): Promise<void> {
-    if (await askFolderPermission(handle)) await scanKept(handle);
+    if (await askFolderPermission(handle, backup() ? "readwrite" : "read")) await scanKept(handle);
     else setNote("The browser did not allow reading the folder.");
   }
 
@@ -300,6 +351,18 @@ function FilesPanel(props: FilesPanelProps) {
                   )}
                 </Show>
               </li>
+              <Show when={r().handle}>
+                {(handle) => (
+                  <li data-testid="files-saves">
+                    <label>
+                      <input type="checkbox" checked={backup()} data-testid="files-save-backup"
+                             onChange={(e) => { void toggleBackup(e.currentTarget.checked, handle()); }} />
+                      {" "}Back up saves to {SAVES_DIR}/ (one file a day, written only when a save changed)
+                    </label>
+                    <Show when={backupNote()}>{(text) => <small> - {text()}</small>}</Show>
+                  </li>
+                )}
+              </Show>
               <Show when={r().scan.encrypted.length > 0}>
                 <li class="voland-missing" data-testid="files-encrypted">
                   Still encrypted (left out; decrypt them with your own tools first): {r().scan.encrypted.join(", ")}

@@ -10,11 +10,12 @@
  *               need are kept - LoadPanel's "System files")
  *   mods/<game>/<mod>   a mod folder, .zip / .7z or update / DLC .nca;
  *               <game> is the game's title id or its name in the library
+ *   saves/      backups of every save (one .tar a day), if turned on
  *
  * The folder is kept as a directory handle (IndexedDB) where the browser
  * can, else picked again with a folder input. Voland reads it in place and
- * only ever writes the three empty subfolders and a README when asked to
- * set one up. Like a game folder (game-folder.ts), still-encrypted NCAs
+ * only ever writes the empty subfolders and a README when asked to set one
+ * up, and save backups into saves/ when those are turned on. Like a game folder (game-folder.ts), still-encrypted NCAs
  * are counted and left out; Voland never decrypts (§1.6).
  */
 import { type NcaInfo, classifyNcaHeader } from "./game-folder.ts";
@@ -22,6 +23,8 @@ import { type NcaInfo, classifyNcaHeader } from "./game-folder.ts";
 export const GAMES_DIR = "games";
 export const FIRMWARE_DIR = "firmware";
 export const MODS_DIR = "mods";
+/** Save backups, written only when the player turns them on. */
+export const SAVES_DIR = "saves";
 export const README_NAME = "README.txt";
 /** Marks a mod installed from the Voland folder (mod-store sources). */
 export const FOLDER_SOURCE = "voland-folder";
@@ -291,6 +294,8 @@ firmware/   Your console's decrypted firmware NCAs. Voland keeps only the
 mods/       One subfolder per game, named after the game (as the library
             shows it) or its title id, e.g. mods/Celeste/MyMod/romfs/...
             A mod can be a folder, a .zip / .7z, or an update / DLC .nca.
+saves/      If you turn on save backups, a copy of every save each day
+            (voland-saves-<date>.tar; restore one under Save data).
 
 Decrypt everything with your own tools first. Voland never decrypts and
 never asks for keys.
@@ -386,4 +391,28 @@ export async function setUpFolder(handle: FileSystemDirectoryHandle): Promise<bo
   } catch {
     return false;
   }
+}
+
+/** Writes `tar` as saves/<name> (asks for nothing: the caller holds write
+ * permission). The path written, or null if it could not be. */
+export async function writeSaveBackup(root: FileSystemDirectoryHandle, name: string, tar: ArrayBuffer): Promise<string | null> {
+  try {
+    const dir = await root.getDirectoryHandle(SAVES_DIR, { create: true });
+    const file = await dir.getFileHandle(name, { create: true });
+    const writable = await file.createWritable();
+    await writable.write(tar);
+    await writable.close();
+    return `${SAVES_DIR}/${name}`;
+  } catch {
+    return null;
+  }
+}
+
+/** FNV-1a of `bytes`: whether a backup changed since the last one. Pure. */
+export function contentHash(bytes: Uint8Array): number {
+  const FNV_OFFSET = 0x811c9dc5;
+  const FNV_PRIME = 0x01000193;
+  let h = FNV_OFFSET;
+  for (let i = 0; i < bytes.length; i++) h = Math.imul(h ^ (bytes[i] ?? 0), FNV_PRIME);
+  return h >>> 0;
 }

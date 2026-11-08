@@ -2539,7 +2539,8 @@ The format of this register is "what could go wrong," not "what will go wrong." 
     - "Empty SD card" keeps system files.
   - **The Voland folder** (`src/voland-folder.ts`, `src/ui/FilesPanel.tsx` "Your files"). One folder of the user's chosen once: `games/` (a game per subfolder, or loose NCAs grouped by program id - an update is the game's id + 0x800, DLC + 0x1000 + index, as `find_update` / `find_addons` take them), `firmware/` and `mods/<game name or title id>/<mod>`.
     - Kept as a directory handle in IndexedDB (`voland-folder`) and scanned again at page load while the browser still grants read, else after one click; a `webkitdirectory` input elsewhere.
-    - Read only. Voland writes to it only when asked to set it up (the three folders and a README, after a readwrite prompt).
+    - Read only, except when asked: setting it up (the three folders and a README) and save backups. Both ask for readwrite first.
+    - Save backups (opt-in): the "Back up all saves" tar written to `saves/voland-saves-<date>.tar` (one a day, overwritten that day) every 5 minutes and when the page is hidden, only if its FNV-1a hash changed since the last copy.
     - A scan remembers its games in the library under the same keys as `rememberGame`, so a tile launches from the folder with its loose update and DLC.
     - `firmware/` goes through "System files" while any archive in `SYSTEM_FILES` is missing and the folder changed since its last import.
     - `mods/` is installed into OPFS (`mod-store.installMod`) with source `voland-folder` and a fingerprint (file count, bytes, newest mtime), installed again when that changes and removed when the mod leaves the folder.

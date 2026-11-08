@@ -182,6 +182,8 @@ Voland/
       other-mod.zip       a mod folder, a .zip / .7z, or an update / DLC .nca
 ```
 
+Tick *Back up saves to saves/* and Voland also keeps a copy of every save there (one `voland-saves-<date>.tar` a day; restore one with *Restore a backup…* under *Save data*).
+
 Voland lists what it found and what is missing: each game with its update and DLC, which system files are in, which mods were installed, and any NCAs that are still encrypted, have no game beside them, or sit outside the three folders. Games appear in the library; mods are installed again when they change and removed when you delete them from the folder. Chrome and Edge remember the folder (they ask once per visit before reading it again); other browsers ask you to pick it each time.
 
 You can also load a single game: *Load game folder…* takes one game's folder, and *Load NCA or homebrew NRO…* one file. Voland reads your games in place - they are never uploaded or copied into browser storage.
