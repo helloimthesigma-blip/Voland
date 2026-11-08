@@ -8,7 +8,7 @@ to install, and no keys or firmware.
 real commercial Switch games booting, running cutscenes and playing at full
 game speed, at or near 60 fps on a recent Mac.
 
-> **Status:** Phase 4 (First Boot). In Chrome on an M4 Mac mini, Celeste and Hollow Knight run at about 60 fps, Silksong at 55-60, Nine Sols at about 48 and Super Mario Odyssey at 33-45 depending on the scene; Super Smash Bros. Ultimate, Mario Kart 8 Deluxe (32-bit, on its own AArch32 JIT) and Animal Crossing play, and Tears of the Kingdom runs slowly (about 9 fps). A dumped game's whole folder of decrypted NCAs can be loaded, giving the library the game's own name and icon, and mods (LayeredFS, patches, cheats, updates, DLC) load from zip, 7z or folders. Not done yet: Opus audio; the per-game state is in [NEW_GAMES.md](docs/NEW_GAMES.md) and the full task list in [DESIGN.md §25](docs/DESIGN.md#25-development-phases).
+> **Status:** Phase 4 (First Boot). In Chrome on an M4 Mac mini, Celeste and Hollow Knight run at about 60 fps, Silksong at 55-60, Nine Sols at about 52 and Super Mario Odyssey at 33-45 depending on the scene; Super Smash Bros. Ultimate and Mario Kart 8 Deluxe (32-bit, on its own AArch32 JIT) hold 60, Animal Crossing runs at about 55, and Tears of the Kingdom runs slowly (about 8 fps). A dumped game's whole folder of decrypted NCAs can be loaded, giving the library the game's own name and icon, and mods (LayeredFS, patches, cheats, updates, DLC) load from zip, 7z or folders. Not done yet: Opus audio; the per-game state is in [NEW_GAMES.md](docs/NEW_GAMES.md) and the full task list in [DESIGN.md §25](docs/DESIGN.md#25-development-phases).
 
 ### What works today
 
