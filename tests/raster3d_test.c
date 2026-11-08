@@ -201,6 +201,7 @@ static void build_programs(void) {
 #define REG_SURFACE_CLIP_H_TEST 0x3fdu /* SURFACE_CLIP horizontal, then vertical */
 #define REG_VIEWPORT_CLIP_TEST 0x300u  /* VIEWPORT_CLIP horizontal, then vertical */
 static uint32_t g_regs[GPU_3D_REGISTER_WORDS];
+#define REG_BASE_INSTANCE_TEST 0x50eu /* raster3d.c REG_BASE_INSTANCE */
 static uint32_t g_vs_offset = VS_OFFSET; /* base_state's vertex program */
 static uint64_t g_vertices = VERTICES;   /* base_state's vertex stream */
 static Raster3d_Bindings g_bindings;
@@ -961,6 +962,7 @@ static uint32_t g_ps_override; /* gpu_draw_topology: this pixel program instead 
 static bool g_draw_twice;      /* gpu_draw_topology: the same draw again */
 static bool g_gpu_rt_bl;       /* gpu_draw_topology: into RT_BL (block linear) instead of RT */
 static uint64_t g_gpu_rt_offset; /* ... this far past RT_BL */
+static uint32_t g_base_instance; /* gpu_draw_topology: REG_BASE_INSTANCE */
 static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_t topology, uint32_t count) {
   static Gpu_Stream stream;
   Seen_Draw seen;
@@ -970,6 +972,7 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
   base_state(g_gpu_rt_bl ? RT_BL + g_gpu_rt_offset : RT, g_gpu_rt_bl, g_ps_override ? g_ps_override : g_gpu_textured ? PS_TEX_OFFSET : PS_OFFSET);
   if (g_gpu_textured) texture_state();
   if (g_bc1_texture) texture_state_bc1();
+  g_regs[REG_BASE_INSTANCE_TEST] = g_base_instance;
   g_regs[REG_CULL_ENABLE_TEST] = 1;
   g_regs[REG_CULL_FACE_TEST] = CULL_BACK_REG;
   g_regs[REG_FRONT_FACE_TEST] = front_face_reg;
@@ -1175,8 +1178,13 @@ static void test_gpu_vertex_stage(Raster3d *r) {
    * coordinates, y down - the CPU's screen space). Decoded inputs first. */
   r->cpu_vertices = false;
   r->no_vertex_pull = true;
+  g_base_instance = 5u; /* the instance id is 5 + the instance (0) */
   Seen_Draw gpu = gpu_draw_once(r, FRONT_CW_REG);
+  g_base_instance = 0;
   CHECK(gpu.count == 1 && gpu.last.vs_shader_id != 0, "GPU vertices: a vertex stage is used");
+  uint32_t iid;
+  memcpy(&iid, g_seen_data + 4u * WGSL_DRAW_VS_INSTANCE, sizeof(iid));
+  CHECK(iid == 5u, "a decoded-input vertex stage reads its draw's instance id (%u), as a pulled one does", iid);
   CHECK(gpu.vertex_shader, "the vertex stage's WGSL is streamed");
   CHECK(gpu.last.cull_mode == GPU_CULL_BACK, "cull mode back (%u)", gpu.last.cull_mode);
   CHECK(gpu.last.front_face == GPU_FRONT_CW, "front face CW on screen -> GPU_FRONT_CW (%u)", gpu.last.front_face);

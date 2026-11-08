@@ -4838,6 +4838,10 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
     vp[WGSL_VP_TARGET + 1u] = u32f((float)g->height);
     vp[WGSL_VP_FLAGS] = rs->viewport_transform ? WGSL_VP_TRANSFORM : 0u;
     vp[WGSL_VP_SWIZZLE] = rs->viewport_swizzle;
+    /* Every vertex stage reads its instance id here (wgsl.c's iid), pulled
+     * or not: gpu_data outlives the draw, so an unset word is the last
+     * pulled draw's - every instance of an instanced draw at one place. */
+    data[WGSL_DRAW_VS_INSTANCE] = shader_instance_id(ctx);
   }
   gpu_copy_globals(ctx, data, scratch, WGSL_DRAW_PS_GLOBALS, GPU_POOL_KEY_PS_GLOBALS, g->ps_global_count,
                    g->ps_global_base, g->ps_global_size);
@@ -4978,7 +4982,6 @@ static void gpu_emit_draw(Raster_State *rs) {
       at[2] = rs->ctx->regs[REG_VERTEX_ATTRIB + g->input_vector[l]];
       at[3] = streams[k].instanced ? 0u : g->id_lo;
     }
-    words[WGSL_DRAW_VS_INSTANCE] = shader_instance_id(rs->ctx);
     uint8_t *blob = p + (size_t)g->data_words * 4u;
     memset(blob, 0, (size_t)pull_bytes);
     for (uint32_t k = 0; k < stream_count; k++) {
