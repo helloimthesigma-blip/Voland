@@ -85,6 +85,10 @@ void parallel_set_device_hook(Parallel *p, void (*devices)(void *ctx), void *ctx
   (void)devices;
   (void)ctx;
 }
+void parallel_set_pace_hook(Parallel *p, void (*pace)(void *ctx)) {
+  (void)p;
+  (void)pace;
+}
 Scheduler_Status parallel_run_for(Parallel *p, uint64_t host_ns, uint64_t budget) {
   (void)p;
   (void)host_ns;
@@ -174,6 +178,7 @@ struct Parallel {
   /* Free-running mode (docs/PARALLEL.md "Free-running mode"). */
   void (*devices)(void *ctx);  /* the emulator's device updates, under the kernel lock */
   void *devices_ctx;
+  void (*pace)(void *ctx);     /* the emulator's pacing (parallel_set_pace_hook), ctx = devices_ctx */
   uint64_t free_gen;           /* a new value starts a free run */
   bool free_running;           /* cores keep running; cleared to pause them */
   uint32_t free_active;        /* cores in the free run, not yet parked */
@@ -205,6 +210,25 @@ static void lock_kernel(Parallel *p, uint64_t *waited) {
 static void wait_core_cv(Parallel *p, uint64_t *waited) {
   const uint64_t t0 = now_ns();
   pthread_cond_wait(&p->core_cv, &p->kernel);
+  *waited += now_ns() - t0;
+}
+
+/* An idle core held at the pacing limit looks at the wall clock again this
+ * often (free-running mode, parallel_set_pace_hook): a vsync is late by
+ * at most this much rather than by up to a burst. */
+#define PARALLEL_PACE_POLL_NS 1000000l
+#define PARALLEL_NS_PER_SECOND 1000000000l
+
+static void wait_core_cv_paced(Parallel *p, uint64_t *waited) {
+  const uint64_t t0 = now_ns();
+  struct timespec until;
+  clock_gettime(CLOCK_REALTIME, &until);
+  until.tv_nsec += PARALLEL_PACE_POLL_NS;
+  if (until.tv_nsec >= PARALLEL_NS_PER_SECOND) {
+    until.tv_sec++;
+    until.tv_nsec -= PARALLEL_NS_PER_SECOND;
+  }
+  (void)pthread_cond_timedwait(&p->core_cv, &p->kernel, &until);
   *waited += now_ns() - t0;
 }
 
@@ -358,7 +382,9 @@ static void run_free_on_core(Parallel *p, Core *core) {
         continue;
       }
       if (p->busy == 0 && p->free_status == SCHEDULER_RAN) {
-        /* Nothing runnable anywhere: the serial idle step, then devices. */
+        /* Nothing runnable anywhere: virtual time up to the wall clock,
+         * the serial idle step, then devices. */
+        if (p->pace) p->pace(p->devices_ctx);
         const uint64_t before = sched->ticks;
         const Scheduler_Status idle = scheduler_idle(sched);
         if (idle == SCHEDULER_EXITED || idle == SCHEDULER_DEADLOCK) {
@@ -367,9 +393,13 @@ static void run_free_on_core(Parallel *p, Core *core) {
         }
         if (p->devices && sched->ticks >= sched->device_wake_at) p->devices(p->devices_ctx);
         pthread_cond_broadcast(&p->core_cv);
-        /* Held at the pacing limit (wall time): wait for work or the end of
-         * the burst instead of spinning on the lock. */
-        if (sched->ticks == before && scheduler_pick(sched) < 0) wait_core_cv(p, &core->time.idle_ns);
+        /* Held at the pacing limit (wall time): wait for work, or until the
+         * wall clock has moved on (with a pace hook) or the burst ends,
+         * instead of spinning on the lock. */
+        if (sched->ticks == before && scheduler_pick(sched) < 0) {
+          if (p->pace) wait_core_cv_paced(p, &core->time.idle_ns);
+          else wait_core_cv(p, &core->time.idle_ns);
+        }
         continue;
       }
       wait_core_cv(p, &core->time.idle_ns);
@@ -639,6 +669,8 @@ Scheduler_Status parallel_tick(Parallel *p, uint64_t budget) {
   pthread_mutex_unlock(&p->kernel);
   return status;
 }
+
+void parallel_set_pace_hook(Parallel *p, void (*pace)(void *ctx)) { p->pace = pace; }
 
 void parallel_set_device_hook(Parallel *p, void (*devices)(void *ctx), void *ctx) {
   p->devices = devices;

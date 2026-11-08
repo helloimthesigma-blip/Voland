@@ -250,6 +250,9 @@ static uint64_t wall_ns(void) {
   return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
 }
 
+/* Longer than the polls program's 11 ms of sleeps with room to spare. */
+#define PACED_BURST_MS 60u
+
 static void test_pacing(void) {
   for (uint32_t cores = 0; cores <= 3; cores += 3) {
     for (int paced = 0; paced <= 1; paced++) {
@@ -282,6 +285,23 @@ static void test_pacing(void) {
     CHECK(ticks <= wall_ticks + scheduler_ns_to_ticks(6000000ull)); /* the 4 ms lead, plus 2 ms slack */
     guest_shutdown(&g_run);
   }
+  /* Free-running, idle cores re-pace within a burst (parallel_set_pace_hook):
+   * in one long burst, the 10 ms sleep wakes about 10 ms later - not at the
+   * next burst, held at the pacing limit set when the burst began. */
+  guest_boot(&g_run, TEST_BACKEND, k_programs[6].code, k_programs[6].size);
+  CHECK(emulator_set_host_cores(&g_run.emu, 3) == 3);
+  emulator_set_free_running(&g_run.emu, true);
+  emulator_set_pacing(&g_run.emu, true);
+  const uint64_t t0 = wall_ns();
+  Emulator_Status status = EMULATOR_RUNNING;
+  for (uint32_t bursts = 0; (status == EMULATOR_RUNNING || status == EMULATOR_IDLE) && bursts < FREE_MAX_BURSTS; bursts++)
+    status = emulator_run_for(&g_run.emu, PACED_BURST_MS, 997);
+  const uint64_t took_ms = (wall_ns() - t0) / 1000000ull;
+  CHECK(status == EMULATOR_EXITED && strstr(g_run.output, k_programs[6].expected) != NULL);
+  printf("[parallel_test] paced waits, free-running in %u ms bursts: done in %llu ms\n", PACED_BURST_MS,
+         (unsigned long long)took_ms);
+  CHECK(took_ms < PACED_BURST_MS);
+  guest_shutdown(&g_run);
 }
 
 /* Pinned cores (docs/PARALLEL.md): a thread runs only on its ideal core's

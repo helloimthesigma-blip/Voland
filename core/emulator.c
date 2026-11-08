@@ -1183,6 +1183,8 @@ static void pace(Emulator* emulator) {
   emulator->paced_ticks += behind;
 }
 
+static void pace_hook(void* emulator) { pace((Emulator*)emulator); }
+
 void emulator_set_pacing(Emulator* emulator, bool on) {
   if (!emulator) return;
   emulator->pacing = on;
@@ -1363,6 +1365,7 @@ uint32_t emulator_set_host_cores(Emulator* emulator, uint32_t cores) {
   emulator->parallel = parallel_create(&emulator->scheduler, emulator->cpu_backend, cores);
   if (!emulator->parallel) return 0;
   parallel_set_device_hook(emulator->parallel, update_devices_hook, emulator);
+  parallel_set_pace_hook(emulator->parallel, pace_hook);
 #ifdef SWITCH_CPU_BACKEND_JIT
   if (emulator->cpu_backend == &CPU_BACKEND_JIT || emulator->cpu_backend == &CPU_BACKEND_A32_JIT)
     parallel_set_report_hook(emulator->parallel, report_jit);

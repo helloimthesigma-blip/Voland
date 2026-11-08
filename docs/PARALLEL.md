@@ -279,6 +279,17 @@ deterministic).
     earliest wake or device event.
   - It then runs the device updates, and the cores continue.
   - DEADLOCK and EXITED stop the call, which returns that status.
+- **Pacing inside a burst.** With wall-clock pacing, the idle step first
+  moves virtual time up to the wall clock (`parallel_set_pace_hook`, the
+  emulator's `pace()`; safe there: no core is in guest code and the kernel
+  lock is held). A core still held at the pacing limit waits at most
+  `PARALLEL_PACE_POLL_NS` (1 ms) before looking again. Before 2026-11-07
+  pacing ran only at the start of each burst, so idle cores held at
+  "burst start + 4 ms" waited for the next burst and a vsync came up to
+  ~8 ms late: games idle between frames lost frames only in this mode
+  (Celeste 47-48 fps vs 59.6 in slices; after the fix 58-59 free-running,
+  Hollow Knight 59.8, Silksong 54-60 vs 48-50). `parallel_test` checks
+  that a 10 ms sleep inside one 60 ms burst ends in about 10 ms.
 - **Virtual time:** the same rule as slice mode. A run starts at the global
   time and ends at `max(time, start + cycles)`. Timeouts expire before
   every pick. A device event is handled by the first core to see time

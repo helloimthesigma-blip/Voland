@@ -64,6 +64,12 @@ Scheduler_Status parallel_tick(Parallel *p, uint64_t budget);
  * Returns RAN, or EXITED / DEADLOCK / CRASHED if the run stopped. */
 Scheduler_Status parallel_run_for(Parallel *p, uint64_t host_ns, uint64_t budget);
 void parallel_set_device_hook(Parallel *p, void (*devices)(void *ctx), void *ctx);
+/* Free-running mode: the emulator's wall-clock pacing (the device hook's
+ * ctx), called by a core at the idle step - no guest code running, the
+ * kernel lock held - so virtual time follows the wall clock within a
+ * burst, not only at its start. Without it, idle cores held at the pacing
+ * limit wait for the next burst and a due vsync comes up to a burst late. */
+void parallel_set_pace_hook(Parallel *p, void (*pace)(void *ctx));
 
 /* scheduler_kernel_enter/exit in parallel mode. */
 void parallel_kernel_enter(Parallel *p, const CPU_State *state);
