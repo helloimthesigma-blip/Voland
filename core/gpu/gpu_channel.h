@@ -147,6 +147,12 @@ void gpu_channel_submit_words(Gpu_Channel *channel, const Gpu_Memory *memory, co
 /* A GPFIFO entry's length in words; the entries' words into `out` (false:
  * more than `capacity` words, or unreadable). */
 uint32_t gpu_channel_entry_words(uint64_t entry);
+
+/* The bytes from its destination offset a copy-engine LAUNCH with these
+ * registers can write: lines and lengths in elements of the remapped size
+ * (1 byte without remapping), the whole block-linear destination. What
+ * re-validates cached surfaces and textures over the destination. */
+uint64_t gpu_channel_dma_dst_span(const Gpu_Channel *channel, uint32_t launch);
 bool gpu_channel_capture(const Gpu_Memory *memory, const uint64_t *entries, uint32_t count, uint32_t *out,
                          uint32_t capacity);
 

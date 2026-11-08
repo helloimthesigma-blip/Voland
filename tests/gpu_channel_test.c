@@ -217,6 +217,27 @@ static void test_linear_and_remap(void) {
   CHECK(g_channel.faults == 1);
 }
 
+/* What a copy can write (gpu_channel_dma_dst_span): lengths count
+ * elements of the remapped size - bytes without remapping, not 16-byte
+ * worst cases (a 16x span re-uploaded Super Mario Odyssey's render target
+ * next to a copy's destination every frame). */
+static void test_dma_dst_span(void) {
+  Gpu_Channel ch;
+  memset(&ch, 0, sizeof(ch));
+  ch.dma[R(0x414)] = 0x400; /* pitch out */
+  ch.dma[R(0x418)] = 0x100; /* line length */
+  ch.dma[R(0x41C)] = 4;     /* lines */
+  const uint32_t pitch = 2u | (1u << 7) | (1u << 8) | (1u << 9);
+  CHECK(gpu_channel_dma_dst_span(&ch, pitch) == 0x400u * 3u + 0x100u);
+  ch.dma[R(0x708)] = (1u << 16) | (1u << 20) | (2u << 24); /* 2-byte components, 2 in, 3 out */
+  CHECK(gpu_channel_dma_dst_span(&ch, pitch | (1u << 10)) == 0x400u * 3u + 0x100u * 6u);
+  /* Block-linear destination: its whole surface, width in elements. */
+  ch.dma[R(0x710)] = 64;  /* width */
+  ch.dma[R(0x714)] = 8;   /* height */
+  ch.dma[R(0x70C)] = 0;   /* one-GOB blocks */
+  CHECK(gpu_channel_dma_dst_span(&ch, 2u | (1u << 7) | (1u << 9)) == block_linear_size(64u, 8u, 0u));
+}
+
 static void test_3d_sync(void) {
   /* deko3d's fence signal: SYNCPT_ACTION increment, then a one-word
    * REPORT_SEMAPHORE release; plus a four-word counter report. */
@@ -512,6 +533,7 @@ static void test_2d_blit(void) {
 int main(void) {
   test_headers_and_host();
   test_pitch_to_block_linear();
+  test_dma_dst_span();
   test_linear_and_remap();
   test_3d_sync();
   test_conditional_render();

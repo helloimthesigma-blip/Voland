@@ -308,6 +308,26 @@ static void dma_fault(Gpu_Channel *ch, const char *what, const Dma_Surface *src,
            dst->pitch, dst->width_bytes, dst->origin_x, dst->origin_y, length);
 }
 
+/* Bytes per element on each side: 1, or the remapped component size times
+ * the side's component count. */
+static void dma_elements(const Gpu_Channel *ch, uint32_t launch, uint32_t *src_elem, uint32_t *dst_elem) {
+  const bool remap = (launch & LAUNCH_REMAP) != 0;
+  const uint32_t rc = ch->dma[DMA_REMAP_COMPONENTS];
+  const uint32_t comp = ((rc >> 16) & 3u) + 1u;
+  *src_elem = remap ? comp * (((rc >> 20) & 3u) + 1u) : 1u;
+  *dst_elem = remap ? comp * (((rc >> 24) & 3u) + 1u) : 1u;
+}
+
+uint64_t gpu_channel_dma_dst_span(const Gpu_Channel *ch, uint32_t launch) {
+  uint32_t src_elem, dst_elem;
+  dma_elements(ch, launch, &src_elem, &dst_elem);
+  const uint64_t lines = (launch & LAUNCH_MULTI_LINE) ? ch->dma[DMA_LINE_COUNT] : 1u;
+  if (launch & LAUNCH_DST_PITCH)
+    return (uint64_t)ch->dma[DMA_PITCH_OUT] * (lines ? lines - 1u : 0u) + (uint64_t)ch->dma[DMA_LINE_LENGTH_IN] * dst_elem;
+  return block_linear_size(ch->dma[DMA_DST_WIDTH] * dst_elem, ch->dma[DMA_DST_HEIGHT],
+                           BLOCK_HEIGHT_LOG2(ch->dma[DMA_DST_BLOCK_SIZE]));
+}
+
 static void dma_launch(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t launch) {
   if (mem->renderer) {
     /* The copy may read what the 3D engine drew, or overwrite what it
@@ -318,19 +338,12 @@ static void dma_launch(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t launch) 
   if (mem->renderer && (launch & LAUNCH_TRANSFER_MASK)) {
     /* Decoded textures over the destination re-validate. */
     const uint64_t dst_base = addr40(ch->dma[DMA_OFFSET_OUT_UPPER], ch->dma[DMA_OFFSET_OUT_LOWER]);
-    const uint64_t lines = (launch & LAUNCH_MULTI_LINE) ? ch->dma[DMA_LINE_COUNT] : 1u;
-    const uint64_t span = (launch & LAUNCH_DST_PITCH)
-                              ? (uint64_t)ch->dma[DMA_PITCH_OUT] * (lines ? lines - 1u : 0u) + ch->dma[DMA_LINE_LENGTH_IN] * 16ull
-                              : block_linear_size(ch->dma[DMA_DST_WIDTH] * 16u, ch->dma[DMA_DST_HEIGHT],
-                                                  BLOCK_HEIGHT_LOG2(ch->dma[DMA_DST_BLOCK_SIZE]));
-    raster3d_sync_range(mem->renderer, mem, dst_base, span, true);
+    raster3d_sync_range(mem->renderer, mem, dst_base, gpu_channel_dma_dst_span(ch, launch), true);
   }
   if (launch & LAUNCH_TRANSFER_MASK) {
     const bool remap = (launch & LAUNCH_REMAP) != 0;
-    const uint32_t rc = ch->dma[DMA_REMAP_COMPONENTS];
-    const uint32_t comp = ((rc >> 16) & 3u) + 1u;
-    const uint32_t src_elem = remap ? comp * (((rc >> 20) & 3u) + 1u) : 1u;
-    const uint32_t dst_elem = remap ? comp * (((rc >> 24) & 3u) + 1u) : 1u;
+    uint32_t src_elem, dst_elem;
+    dma_elements(ch, launch, &src_elem, &dst_elem);
     const uint32_t length = ch->dma[DMA_LINE_LENGTH_IN];
     const uint32_t lines = (launch & LAUNCH_MULTI_LINE) ? ch->dma[DMA_LINE_COUNT] : 1u;
     const Dma_Surface src = surface_of(ch, true, launch, src_elem);
