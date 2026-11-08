@@ -4,11 +4,11 @@ A Nintendo Switch emulator that runs in your browser. A C11 core compiled to
 WebAssembly, its own ARM64 → WebAssembly JIT, and a WebGPU renderer. Nothing
 to install, and no keys or firmware.
 
-**Hollow Knight and Hollow Knight: Silksong are fully playable in a browser
-tab**: real commercial Switch games booting, running cutscenes and playing at
-full game speed, at a stable ~15 fps on a fast desktop.
+**Hollow Knight, Silksong and Celeste are fully playable in a browser tab**:
+real commercial Switch games booting, running cutscenes and playing at full
+game speed, at or near 60 fps on a recent Mac.
 
-> **Status:** Phase 4 (First Boot). Hollow Knight, Silksong, Celeste and Nine Sols (now with its VP8 intro) play in the browser, Super Smash Bros. Ultimate fights run at about 40 fps, and Mario Kart 8 Deluxe, a 32-bit game on its own AArch32 JIT, plays whole races at about 23 fps on three cores; Tears of the Kingdom reaches its 3D opening (slowly) and Animal Crossing plays through its opening and character creation and arrives on the island in 3D ([NEW_GAMES.md](docs/NEW_GAMES.md) has the per-game state). SSBU's VP9 opening movie now plays too. Not done yet: Opus audio; full task list in [DESIGN.md §25](docs/DESIGN.md#25-development-phases).
+> **Status:** Phase 4 (First Boot). In Chrome on an M4 Mac mini, Celeste and Hollow Knight run at about 60 fps, Silksong at 55-60, Nine Sols at about 48 and Super Mario Odyssey at 33-45 depending on the scene; Super Smash Bros. Ultimate, Mario Kart 8 Deluxe (32-bit, on its own AArch32 JIT) and Animal Crossing play, and Tears of the Kingdom runs slowly (about 9 fps). A dumped game's whole folder of decrypted NCAs can be loaded, giving the library the game's own name and icon, and mods (LayeredFS, patches, cheats, updates, DLC) load from zip, 7z or folders. Not done yet: Opus audio; the per-game state is in [NEW_GAMES.md](docs/NEW_GAMES.md) and the full task list in [DESIGN.md §25](docs/DESIGN.md#25-development-phases).
 
 ### What works today
 
