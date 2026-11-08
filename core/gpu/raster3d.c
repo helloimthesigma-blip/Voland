@@ -3557,6 +3557,7 @@ static void gpu_surface_upload(Raster3d *r, Raster3d_Gpu_Surface *s, const Gpu_M
   if (format_lacks_alpha(s->format) && s->bytes_per_pixel == 4u) /* the pad byte: alpha 1 */
     for (uint64_t i = 3; i < (uint64_t)row * s->height; i += 4u) pixels[i] = 0xffu;
   gpu_write_rows(r, s->id, s->width, s->height, 0, row, pixels);
+  r->gpu_stats.surface_upload_bytes += (uint64_t)row * s->height;
 }
 
 /* Re-uploads the rows of a surface that hold guest bytes [lo, hi) (from
@@ -3595,6 +3596,7 @@ static void gpu_surface_upload_range(Raster3d *r, Raster3d_Gpu_Surface *s, const
   if (format_lacks_alpha(s->format) && s->bytes_per_pixel == 4u)
     for (uint64_t i = 3; i < (uint64_t)row * (y1 - y0); i += 4u) pixels[i] = 0xffu;
   gpu_write_rows_at(r, s->id, s->width, y0, y1 - y0, 0, row, pixels);
+  r->gpu_stats.surface_upload_bytes += (uint64_t)row * (y1 - y0);
 }
 
 #define SURFACE_DROP_LOG_LIMIT 16u /* "table full" warnings (a title cycling targets drops old ones steadily) */

@@ -84,6 +84,7 @@ uint8_t *gpu_stream_begin(Gpu_Stream *s, uint32_t type, uint32_t payload_bytes) 
   s->open = true;
   s->records++;
   s->bytes += size;
+  s->type_bytes[type < GPU_STREAM_TYPE_STATS ? type : GPU_STREAM_TYPE_STATS - 1u] += size;
   return record + GPU_STREAM_RECORD_HEADER_BYTES;
 }
 

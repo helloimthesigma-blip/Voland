@@ -214,6 +214,9 @@ typedef struct Emulator
    * worker, in the layout's gpu_ring region. */
   Gpu_Stream gpu_stream;
   bool gpu_stream_ready;
+  uint64_t stream_report_frames;                        /* the next report_stream (diagnostics) */
+  uint64_t stream_type_reported[GPU_STREAM_TYPE_STATS]; /* type_bytes at the last one */
+  Raster3d_Gpu_Stats stream_stats_reported;             /* renderer stats at the last one */
   /* Video decode (§13): NVDEC requests and decoded frames, in the
    * layout's video region (video/video_stream.h). Set up once. */
   Video_Stream video;

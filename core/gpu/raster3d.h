@@ -191,6 +191,7 @@ typedef struct Raster3d_Gpu_Stats {
   uint64_t shaders;
   uint64_t untranslated_draws;
   uint64_t texture_uploads;
+  uint64_t surface_upload_bytes; /* render targets re-uploaded from guest memory (gpu_surface_upload*) */
   uint64_t texture_budget_drops; /* GPU copies dropped for RASTER_GPU_TEXTURE_BUDGET_BYTES */
   uint64_t upload_bytes;
   uint64_t surfaces;

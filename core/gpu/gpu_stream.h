@@ -49,6 +49,9 @@
 /* Waits until *word != expected (or a short timeout); returns when it may
  * have changed. The web build blocks with memory.atomic.wait32; elsewhere
  * a test can install its own (e.g. drain the ring itself). */
+/* Diagnostics: bytes per record type (GPU_REC_*), higher types in the last. */
+#define GPU_STREAM_TYPE_STATS 16u
+
 typedef void (*Gpu_Stream_Wait)(void *user, volatile int32_t *word, int32_t expected);
 
 typedef struct Gpu_Stream {
@@ -63,6 +66,7 @@ typedef struct Gpu_Stream {
   void *wait_user;
   uint64_t records;         /* diagnostics */
   uint64_t bytes;
+  uint64_t type_bytes[GPU_STREAM_TYPE_STATS];
   uint64_t stalls;          /* times the producer waited for room */
 } Gpu_Stream;
 

@@ -1108,6 +1108,8 @@ static uint64_t gpu_max_latency_ticks(void) {
  * the next time one of them signals something. Slice mode runs it before
  * every slice; free-running mode on whichever core finds it due, under the
  * kernel lock (docs/PARALLEL.md "Free-running mode"). */
+static void report_stream(Emulator* emulator);
+
 static void update_devices(Emulator* emulator) {
   /* GPU completions (§13) arrive at scheduler-tick cadence; the async
    * GPU stays within a frame of the guest's virtual time. */
@@ -1119,6 +1121,7 @@ static void update_devices(Emulator* emulator) {
              emulator->scheduler.ticks);
   /* Display (§13): vsync composites queued buffers into the §6 slots. */
   vi_update(&emulator->vi, &emulator->hle, emulator->scheduler.ticks);
+  report_stream(emulator);
   run_cheats(emulator);
   /* Audio (§14): queued PCM / rendered frames into the ring at 48kHz of
    * virtual time. */
@@ -1131,6 +1134,43 @@ static void update_devices(Emulator* emulator) {
     const uint64_t first = audio < vsync ? audio : vsync;
     emulator->scheduler.device_wake_at = decode < first ? decode : first;
   }
+}
+
+/* Diagnostics: what the GPU stream carried per record type, every
+ * EMULATOR_STREAM_REPORT_FRAMES presented frames. */
+#define EMULATOR_STREAM_REPORT_FRAMES 600u
+#define EMULATOR_BYTES_PER_MIB (1024.0 * 1024.0)
+static void report_stream(Emulator* emulator) {
+  if (!emulator->gpu_stream_ready || emulator->vi.frames_presented < emulator->stream_report_frames) return;
+  emulator->stream_report_frames = emulator->vi.frames_presented + EMULATOR_STREAM_REPORT_FRAMES;
+  char line[512];
+  int at = snprintf(line, sizeof(line), "[gpu] stream MiB per %u frames by record type:", EMULATOR_STREAM_REPORT_FRAMES);
+  for (uint32_t t = 0; t < GPU_STREAM_TYPE_STATS && at > 0 && (size_t)at < sizeof(line); t++) {
+    const uint64_t delta = emulator->gpu_stream.type_bytes[t] - emulator->stream_type_reported[t];
+    emulator->stream_type_reported[t] = emulator->gpu_stream.type_bytes[t];
+    if (delta) at += snprintf(line + at, sizeof(line) - (size_t)at, " %u:%.1f", t, (double)delta / EMULATOR_BYTES_PER_MIB);
+  }
+  log_info("%s; frames queued %llu, dropped %llu, presented %llu", line,
+           (unsigned long long)emulator->vi.frames_queued, (unsigned long long)emulator->vi.frames_dropped,
+           (unsigned long long)emulator->vi.frames_presented);
+  const Raster3d_Gpu_Stats *now = &emulator->renderer.gpu_stats;
+  const Raster3d_Gpu_Stats *was = &emulator->stream_stats_reported;
+  const double mib = EMULATOR_BYTES_PER_MIB;
+  log_info("[gpu] stream detail (MiB): textures %llu uploads %.1f (hashed new %llu unsampled %llu changed %llu "
+           "periodic %llu forced %llu), surfaces %.1f; draw data %.1f pulled %.1f vertices %.1f indices %.1f; "
+           "pool %.1f written %.1f reused",
+           (unsigned long long)(now->texture_uploads - was->texture_uploads),
+           (double)(now->upload_bytes - was->upload_bytes - (now->surface_upload_bytes - was->surface_upload_bytes)) / mib,
+           (unsigned long long)(now->hashed_new - was->hashed_new),
+           (unsigned long long)(now->hashed_unsampled - was->hashed_unsampled),
+           (unsigned long long)(now->hashed_changed - was->hashed_changed),
+           (unsigned long long)(now->hashed_periodic - was->hashed_periodic),
+           (unsigned long long)(now->hashed_forced - was->hashed_forced),
+           (double)(now->surface_upload_bytes - was->surface_upload_bytes) / mib,
+           (double)(now->draw_data_bytes - was->draw_data_bytes) / mib, (double)(now->pulled_bytes - was->pulled_bytes) / mib,
+           (double)(now->vertex_bytes - was->vertex_bytes) / mib, (double)(now->index_bytes - was->index_bytes) / mib,
+           (double)(now->pool_bytes - was->pool_bytes) / mib, (double)(now->pool_reused_bytes - was->pool_reused_bytes) / mib);
+  emulator->stream_stats_reported = *now;
 }
 
 static void update_devices_hook(void* emulator) { update_devices((Emulator*)emulator); }
