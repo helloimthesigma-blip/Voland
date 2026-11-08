@@ -402,15 +402,19 @@ static uint32_t g_tic_rt_bl_width; /* texture_state: sample RT_BL's target at th
 static uint32_t g_tic_rt_bl_height = RT_SIZE;
 static uint32_t g_tic_rt_bl_depth; /* ... as a 3D texture this deep (0: 2D) */
 static uint32_t g_tic_rt_bl_cube_levels; /* ... as a cube map with this many levels (0: not a cube) */
+static uint32_t g_tic_word0; /* texture_state: this format, data types and swizzle (0: A8B8G8R8 UNORM) */
+static bool g_tic_srgb;      /* texture_state: the sRGB bit */
 static void texture_state(void) {
   uint32_t tic[8];
   memset(tic, 0, sizeof(tic));
   tic[0] = 0x08u | (2u << 7) | (2u << 10) | (2u << 13) | (2u << 16) | (2u << 19) | (3u << 22) | (4u << 25) | (5u << 28);
+  if (g_tic_word0) tic[0] = g_tic_word0;
   tic[1] = (uint32_t)TEXELS & ~0x1fu;
   tic[2] = (uint32_t)(TEXELS >> 32) | (2u << 21); /* header version: pitch */
   tic[3] = 32u >> 5;                               /* pitch, in 32-byte units */
   tic[4] = (2u - 1u) | (1u << 23);                 /* width-1, 2D */
   tic[5] = (2u - 1u) | (1u << 31);                 /* height-1, normalized */
+  if (g_tic_srgb) tic[4] |= 1u << 22;
   if (g_tic_rt_bl_width) { /* RT_BL's target, block linear, this wide */
     tic[1] = (uint32_t)RT_BL & ~0x1ffu;
     tic[2] = (uint32_t)(RT_BL >> 32) | (3u << 21); /* header version: block linear */
@@ -1164,6 +1168,31 @@ static void test_gpu_compressed_upload(Raster3d *r) {
   g_bc1_texture = false;
 }
 
+/* Packed formats WebGPU samples as they are (ZF32, R11G11B10F, unsigned
+ * normalized A2B10G10R10) upload undecoded, BCn device or not: 4 bytes a
+ * texel, not the 16 of RGBA32F. An sRGB A2B10G10R10 is decoded. */
+static void test_gpu_packed_upload(Raster3d *r) {
+  g_gpu_textured = true;
+  raster3d_set_gpu_compression(r, 0);
+  const uint32_t swizzle = (2u << 19) | (3u << 22) | (4u << 25) | (5u << 28);
+  g_tic_word0 = 0x2fu | (7u << 7) | (7u << 10) | (7u << 13) | (7u << 16) | swizzle; /* ZF32, FLOAT */
+  Seen_Draw seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.last_texture_format == GPU_FMT_R32_FLOAT && seen.level_writes == 1u &&
+            seen.first_level_write.bytes_per_row == 8u && seen.first_level_bytes[0] == 0xffu,
+        "ZF32: an r32float texture, texels as they are (format %u, %u level writes, %u bytes a row)",
+        seen.last_texture_format, seen.level_writes, seen.first_level_write.bytes_per_row);
+  g_tic_word0 = 0x09u | (2u << 7) | (2u << 10) | (2u << 13) | (2u << 16) | swizzle; /* A2B10G10R10, UNORM */
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.last_texture_format == GPU_FMT_RGB10A2_UNORM, "A2B10G10R10: rgb10a2unorm (format %u)", seen.last_texture_format);
+  g_tic_srgb = true;
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.last_texture_format == GPU_FMT_RGBA32_FLOAT && seen.level_writes == 0u,
+        "sRGB A2B10G10R10: decoded (format %u)", seen.last_texture_format);
+  g_tic_srgb = false;
+  g_tic_word0 = 0;
+  g_gpu_textured = false;
+}
+
 /* Render targets of different layouts over the same memory (a game
  * reusing it within a frame) each keep their GPU surface: drawing to the
  * first again creates nothing and uploads nothing. */
@@ -1561,6 +1590,7 @@ int main(void) {
   test_worker_count_invariance(&r);
   test_gpu_vertex_stage(&r);
   test_gpu_aliased_targets(&r);
+  test_gpu_packed_upload(&r);
   test_gpu_compressed_upload(&r);
   test_gpu_padded_target(&r);
   test_gpu_gathered_cube(&r);

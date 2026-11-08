@@ -3399,16 +3399,39 @@ static void gpu_write_rows(Raster3d *r, uint32_t id, uint32_t width, uint32_t he
 static const uint8_t k_astc_formats[GPU_ASTC_FOOTPRINTS] = {0x40, 0x50, 0x41, 0x51, 0x42, 0x55, 0x52,
                                                             0x44, 0x56, 0x57, 0x53, 0x45, 0x54, 0x46};
 
-/* The GPU format a texture uploads to undecoded, or GPU_FMT_NONE: BCn /
- * ASTC the device samples, 2D (array, cube) images, LDR ASTC only. An
- * image that is not whole blocks gets a GPU texture that is (WebGPU's
- * rule; gpu_texture_native), sampled at the image's own size. */
+/* Packed formats WebGPU samples as they are, giving what tex_decode_texel
+ * does (missing components 0, alpha 1) - 4 bytes a texel instead of the
+ * 16 of the decoded RGBA32F copy. */
+#define TEX_FORMAT_A2B10G10R10 0x09u
+#define TEX_FORMAT_BF10GF11RF11 0x21u
+#define TEX_FORMAT_ZF32 0x2fu
+
+static uint32_t gpu_packed_format(const Tex_Header *h) {
+  switch (h->format) {
+  case TEX_FORMAT_ZF32: return GPU_FMT_R32_FLOAT;              /* the decoder reads the float as it is */
+  case TEX_FORMAT_BF10GF11RF11: return GPU_FMT_RG11B10_UFLOAT; /* likewise, whatever the data types */
+  case TEX_FORMAT_A2B10G10R10:
+    if (h->srgb) return GPU_FMT_NONE; /* no sRGB variant */
+    for (uint32_t c = 0; c < 4u; c++)
+      if (h->data_type[c] != TEX_DATA_UNORM) return GPU_FMT_NONE;
+    return GPU_FMT_RGB10A2_UNORM;
+  default: return GPU_FMT_NONE;
+  }
+}
+
+/* The GPU format a texture uploads to undecoded, or GPU_FMT_NONE: the
+ * packed formats above, BCn / ASTC the device samples; 2D (array, cube)
+ * images, LDR ASTC only. An image that is not whole blocks gets a GPU
+ * texture that is (WebGPU's rule; gpu_texture_native), sampled at the
+ * image's own size. */
 static uint32_t gpu_native_format(const Raster3d *r, const Tex_Header *h) {
-  if (!r->gpu || !r->gpu_compression) return GPU_FMT_NONE;
+  if (!r->gpu) return GPU_FMT_NONE;
   if (h->type != TEX_TYPE_2D && h->type != TEX_TYPE_2D_NO_MIPMAP && h->type != TEX_TYPE_2D_ARRAY &&
       h->type != TEX_TYPE_CUBE && h->type != TEX_TYPE_CUBE_ARRAY)
     return GPU_FMT_NONE;
   if (h->layout != TEX_LAYOUT_BLOCK_LINEAR && h->layout != TEX_LAYOUT_PITCH) return GPU_FMT_NONE;
+  const uint32_t packed = gpu_packed_format(h);
+  if (packed != GPU_FMT_NONE || !r->gpu_compression) return packed;
   uint32_t bytes = 0, bw = 0, bh = 0;
   if (!tex_format_info(h->format, &bytes, &bw, &bh) || bw == 1u) return GPU_FMT_NONE;
   const bool bc = (r->gpu_compression & GPU_COMPRESSION_BC) != 0, srgb = h->srgb;
