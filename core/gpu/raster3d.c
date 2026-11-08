@@ -3658,8 +3658,13 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
       s->stale = false;
       return s;
     }
-    if (load && !carried && surface_same_bytes(s, d)) carried = s->id;
-    else gpu_destroy(r, s->id); /* re-described */
+    /* Another description of the same bytes (format view): its texels
+     * carry over. A different layout at the same address is memory the
+     * game reuses within a frame (Super Mario Odyssey: three targets at
+     * one address, a downsample chain at another) - kept, so each target
+     * lives on instead of being rebuilt and re-uploaded every frame. */
+    if (!load || carried || !surface_same_bytes(s, d)) continue;
+    carried = s->id;
     surface_index_remove(r, slot);
     s->in_use = false;
   }
@@ -3862,17 +3867,20 @@ static Raster3d_Gpu_Surface *gpu_surface_touch(Raster3d *r, Raster3d_Gpu_Surface
   return s;
 }
 
+/* Of the targets at `address` (several descriptions of reused memory can
+ * live there), the one written last. */
 static Raster3d_Gpu_Surface *gpu_surface_at(Raster3d *r, uint64_t address, uint32_t width) {
   const uint32_t head = r->gpu_surface_head[surface_bucket(address)];
+  Raster3d_Gpu_Surface *best = NULL;
   for (uint32_t at = head; at; at = r->gpu_surface_next[at - 1u]) {
     Raster3d_Gpu_Surface *s = &r->gpu_surfaces[at - 1u];
-    if (s->in_use && s->address == address && (!width || s->width == width)) return gpu_surface_touch(r, s);
+    if (s->in_use && s->address == address && (!width || s->width == width) && (!best || s->written > best->written)) best = s;
   }
-  for (uint32_t at = head; at; at = r->gpu_surface_next[at - 1u]) { /* a GOB-padded target */
+  for (uint32_t at = head; at && !best; at = r->gpu_surface_next[at - 1u]) { /* a GOB-padded target */
     Raster3d_Gpu_Surface *s = &r->gpu_surfaces[at - 1u];
-    if (s->in_use && s->address == address && surface_width_matches(s, width)) return gpu_surface_touch(r, s);
+    if (s->in_use && s->address == address && surface_width_matches(s, width) && (!best || s->written > best->written)) best = s;
   }
-  return NULL;
+  return best ? gpu_surface_touch(r, best) : NULL;
 }
 
 /* Mip levels for a texture's GPU copy: the guest's count, within the

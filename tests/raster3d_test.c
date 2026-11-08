@@ -1164,6 +1164,24 @@ static void test_gpu_compressed_upload(Raster3d *r) {
   g_bc1_texture = false;
 }
 
+/* Render targets of different layouts over the same memory (a game
+ * reusing it within a frame) each keep their GPU surface: drawing to the
+ * first again creates nothing and uploads nothing. */
+static void test_gpu_aliased_targets(Raster3d *r) {
+  Seen_Draw seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.count == 1, "64x64 target drawn");
+  const uint64_t created = r->gpu_stats.surfaces;
+  g_rt_height = RT_SIZE / 2u;
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.count == 1 && r->gpu_stats.surfaces == created + 1u, "64x32 at the same address: its own surface");
+  g_rt_height = RT_SIZE;
+  const uint64_t uploaded = r->gpu_stats.surface_upload_bytes;
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.count == 1 && r->gpu_stats.surfaces == created + 1u && r->gpu_stats.surface_upload_bytes == uploaded,
+        "64x64 again: the kept surface (%llu created, %llu bytes uploaded)",
+        (unsigned long long)(r->gpu_stats.surfaces - created), (unsigned long long)(r->gpu_stats.surface_upload_bytes - uploaded));
+}
+
 static void test_gpu_vertex_stage(Raster3d *r) {
   /* Software vertices: the reference culls on the CPU - a clockwise
    * triangle is a back face under FRONT_FACE CCW, drawn under CW. */
@@ -1542,6 +1560,7 @@ int main(void) {
   test_derivatives(&r);
   test_worker_count_invariance(&r);
   test_gpu_vertex_stage(&r);
+  test_gpu_aliased_targets(&r);
   test_gpu_compressed_upload(&r);
   test_gpu_padded_target(&r);
   test_gpu_gathered_cube(&r);
