@@ -58,6 +58,8 @@ export interface SwitchCoreExports {
   /* Compatibility report: distinct problems text, renderer counters (u64[10]). */
   readonly _emulator_distinct_problems_ffi: () => bigint;
   readonly _emulator_render_stats_ffi: () => bigint;
+  /** Guest RAM the game has used (the page allocator's high-water mark). */
+  readonly _emulator_guest_ram_used_ffi: () => bigint;
   readonly _emulator_set_gpu_mode_ffi:     (on: number) => void;
   /** GPU_COMPRESSION_* bits: block-compressed textures the GPU samples upload as they are. */
   readonly _emulator_set_gpu_compression_ffi: (mask: number) => void;

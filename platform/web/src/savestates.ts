@@ -51,8 +51,15 @@ function request<T>(queue: ((value: T) => void)[], message: MainToCPUMessage, fa
 
 const NO_WORKER: StateResult = { ok: false, error: "the emulator is not running", info: null };
 
-export function saveState(): Promise<StateResult> {
-  return request(pendingSaves, { type: "save-state" }, NO_WORKER);
+/** `auto`: an automatic state (src/autostate.ts), replacing the game's
+ * previous one. */
+export function saveState(auto = false): Promise<StateResult> {
+  return request(pendingSaves, { type: "save-state", auto }, NO_WORKER);
+}
+
+/** The newest state of `titleId` (automatic or the player's), if any. */
+export async function latestState(titleId: string): Promise<SavestateInfo | null> {
+  return (await listStates()).find((s) => s.titleId === titleId) ?? null;
 }
 
 export function loadState(id: string): Promise<StateResult> {

@@ -6,12 +6,16 @@
  * icon.
  */
 import { For, Show, createSignal, onCleanup } from "solid-js";
+import type { SavestateInfo } from "@bindings/protocol";
 import { type LibraryGame, shownNameOf } from "../library";
 
 interface GameLibraryProps {
   readonly games: readonly LibraryGame[];
   readonly busy: boolean;
   readonly onLaunch: (game: LibraryGame) => void;
+  /** The newest save state per title id: those tiles offer Continue. */
+  readonly resumable: ReadonlyMap<string, SavestateInfo>;
+  readonly onContinue: (game: LibraryGame, state: SavestateInfo) => void;
   readonly onForget: (game: LibraryGame) => void;
   readonly onDropFiles: (items: DataTransferItemList) => void;
 }
@@ -33,6 +37,14 @@ function initialsOf(name: string): string {
 
 function formatSize(bytes: number): string {
   return bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${Math.max(1, Math.round(bytes / 1024 ** 2))} MB`;
+}
+
+function agoLabel(at: number): string {
+  const minutes = Math.max(0, Math.round((Date.now() - at) / 60_000));
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  return hours < 24 ? `${hours} h ago` : `${Math.round(hours / 24)} days ago`;
 }
 
 function playedLabel(game: LibraryGame): string {
@@ -83,6 +95,15 @@ function GameLibrary(props: GameLibraryProps) {
                     <Show when={!game.handle && !game.folder}> · asks for the {game.id.startsWith("folder:") ? "folder" : "file"}</Show>
                   </span>
                 </button>
+                <Show when={game.titleId ? props.resumable.get(game.titleId) : undefined}>
+                  {(state) => (
+                    <button type="button" class="voland-game-continue" disabled={props.busy} data-testid="library-continue"
+                      title={`Start ${name} and go back to where you were (${state().auto ? "automatic save state" : "your save state"})`}
+                      onClick={() => props.onContinue(game, state())}>
+                      Continue · {agoLabel(state().createdAt)}
+                    </button>
+                  )}
+                </Show>
                 <button type="button" class="voland-game-forget" title="Remove from library (the file is not deleted)"
                   aria-label={`Remove ${name} from the library`} data-testid="library-forget"
                   onClick={() => props.onForget(game)}>×</button>

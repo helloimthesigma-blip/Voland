@@ -392,7 +392,10 @@ async function main() {
     });
     /* Slices are the recipes' clock, and free-running cores (the page's
      * default) count a burst as one: slices unless --url-params says free=. */
-    const params = /(^|&)free=/.test(opts.urlParams) ? opts.urlParams : [opts.urlParams, "free=0"].filter(Boolean).join("&");
+    const sliced = /(^|&)free=/.test(opts.urlParams) ? opts.urlParams : [opts.urlParams, "free=0"].filter(Boolean).join("&");
+    /* No automatic save states: they freeze the game for a moment and
+     * write hundreds of MB (src/autostate.ts). */
+    const params = /(^|&)autostate=/.test(sliced) ? sliced : `${sliced}&autostate=0`;
     const pageUrl = `${baseUrl}?${params}`;
     /* Page responsiveness while the game runs (the owner's "lag"): long
      * main-thread tasks, gaps between animation frames, and how late a

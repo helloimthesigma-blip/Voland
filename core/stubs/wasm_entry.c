@@ -71,6 +71,7 @@ EXPORT uint64_t emulator_recent_problems_ffi(void);
 EXPORT uint64_t emulator_distinct_problems_ffi(void);
 EXPORT uint64_t emulator_take_log_events_ffi(void);
 EXPORT uint64_t emulator_render_stats_ffi(void);
+EXPORT uint64_t emulator_guest_ram_used_ffi(void);
 EXPORT void emulator_set_program_path_ffi(uint64_t path);
 EXPORT void emulator_setenv_ffi(uint64_t name, uint64_t value);
 EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
@@ -646,6 +647,14 @@ EXPORT uint64_t emulator_distinct_problems_ffi(void)
  * draws, shader faults, unknown shader ops, texture misses, GPU-mode draws,
  * untranslated (not drawn) GPU draws, translated shaders, texture uploads,
  * presents. */
+/* Guest RAM the running game has used: the page allocator's high-water
+ * mark (pages, once touched, stay committed in linear memory). The web
+ * shell remembers it per game to warn before a heavy one loads. */
+EXPORT uint64_t emulator_guest_ram_used_ffi(void)
+{
+  return g_initialised ? g_emulator.pages.used_bytes : 0;
+}
+
 #define RENDER_STATS_COUNT 10u
 EXPORT uint64_t emulator_render_stats_ffi(void)
 {

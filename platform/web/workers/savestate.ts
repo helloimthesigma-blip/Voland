@@ -230,8 +230,9 @@ export function readState(file: FileSystemSyncAccessHandle, memory: ArrayBufferL
 
 /* ---- the list the UI shows ---------------------------------------- */
 
-export function stateInfo(id: string, titleId: string, plan: Plan, bytes: number, createdAt: number): SavestateInfo {
-  return { id, titleId, createdAt, virtualSeconds: plan.virtualTicks / TIMER_HZ, bytes };
+export function stateInfo(id: string, titleId: string, plan: Plan, bytes: number, createdAt: number, auto = false): SavestateInfo {
+  const info = { id, titleId, createdAt, virtualSeconds: plan.virtualTicks / TIMER_HZ, bytes };
+  return auto ? { ...info, auto: true } : info;
 }
 
 export async function writeStateInfo(info: SavestateInfo): Promise<void> {

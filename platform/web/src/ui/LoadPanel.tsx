@@ -5,7 +5,7 @@
  * input gets §1.6's dumping-guide error. "Run the demo" loads Voland's own
  * hand-written homebrew (public/demo/hello.nro, from tests/guest/hello.s).
  */
-import { For, Match, Show, Switch, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createSignal, onCleanup, onMount } from "solid-js";
 import { Portal } from "solid-js/web";
 import { SYSTEM_FILES, systemFileName } from "@bindings/load";
 import type { GameLoadOutcome, LoadFailure, SdImportOutcome, SystemFilesApi } from "@bindings/load";
@@ -13,7 +13,13 @@ import { type GuestConsoleState, getGuestConsole, subscribeGuestConsole } from "
 import { describeLoadFailure } from "./load-failure-copy";
 import GameLibrary from "./GameLibrary";
 import SaveStates from "./SaveStates";
-import CompatReport from "./CompatReport";
+import CompatReport, { buildReportText } from "./CompatReport";
+import type { SavestateInfo } from "@bindings/protocol";
+import { latestState, listStates, loadState } from "../savestates";
+import { subscribeAutoStates } from "../autostate";
+import { memoryUseOf, memoryWarning } from "../memory-guard";
+import { setCurrentGame } from "../game-settings";
+import { titleNames } from "../saves";
 import FilesPanel from "./FilesPanel";
 import {
   type LibraryGame, canKeepFiles, canKeepFolders, forgetGame, listGames, markPlayed, openGameFile, pickGameFile,
@@ -84,7 +90,21 @@ function LoadPanel(props: LoadPanelProps) {
   const [sd, setSd] = createSignal<SdImportOutcome | null>(null);
   const [bootHint, setBootHint] = createSignal(false);
   const [games, setGames] = createSignal<readonly LibraryGame[]>([]);
-  const refreshLibrary = async (): Promise<void> => { setGames(await listGames()); };
+  /* The newest save state per title: "Continue" on its tile. */
+  const [resumable, setResumable] = createSignal<ReadonlyMap<string, SavestateInfo>>(new Map());
+  const refreshResumable = async (): Promise<void> => {
+    const newest = new Map<string, SavestateInfo>();
+    for (const state of await listStates()) if (!newest.has(state.titleId)) newest.set(state.titleId, state);
+    setResumable(newest);
+  };
+  const refreshLibrary = async (): Promise<void> => {
+    setGames(await listGames());
+    await refreshResumable();
+  };
+  /* "Heavy game" before and while one loads (src/memory-guard.ts). */
+  const [memoryNote, setMemoryNote] = createSignal<string | null>(null);
+  /* A "Continue" waiting for its game to load. */
+  let pendingContinue: SavestateInfo | null = null;
   /* The Voland folder's last scan (FilesPanel): its games launch from it. */
   let folderScan: FolderScan | null = null;
 
@@ -113,6 +133,7 @@ function LoadPanel(props: LoadPanelProps) {
   onMount(() => {
     const off = subscribeGuestConsole(setGuest);
     onCleanup(off);
+    onCleanup(subscribeAutoStates(() => { void refreshResumable(); }));
     void refreshLibrary();
     void refreshSystemFiles();
   });
@@ -124,9 +145,16 @@ function LoadPanel(props: LoadPanelProps) {
     void canvas?.requestFullscreen?.().catch(() => undefined);
   }
 
-  async function load(file: File, gameId: string | null = null, extras: readonly File[] = []): Promise<void> {
+  async function load(file: File, gameId: string | null = null, extras: readonly File[] = []): Promise<boolean> {
+    const titleId = games().find((g) => g.id === gameId)?.titleId ?? null;
+    const deviceMemory = (navigator as Navigator & { readonly deviceMemory?: number }).deviceMemory ?? null;
+    setMemoryNote(memoryWarning(titleId ? memoryUseOf(titleId) : null, file.size, deviceMemory));
     setState({ kind: "loading", fileName: file.name });
     const outcome = await props.loadGame(file, extras);
+    /* The game's own settings (frame skip, threads) apply from here. */
+    setCurrentGame(outcome.success
+      ? { titleId: outcome.titleId, name: outcome.title ?? titleNames()[outcome.titleId] ?? file.name.replace(/\.(nca|nro)$/i, "") }
+      : null);
     if (outcome.success && gameId) {
       await markPlayed(gameId, outcome.titleId, outcome.title, outcome.icon);
       await refreshLibrary();
@@ -137,6 +165,10 @@ function LoadPanel(props: LoadPanelProps) {
     window.clearTimeout(bootHintTimer);
     setBootHint(outcome.success);
     if (outcome.success) bootHintTimer = window.setTimeout(() => setBootHint(false), BOOT_HINT_MS);
+    const resume = pendingContinue;
+    pendingContinue = null;
+    if (outcome.success && resume && resume.titleId === outcome.titleId) await applyContinue(resume);
+    return outcome.success;
   }
 
   async function onFileChosen(event: Event & { currentTarget: HTMLInputElement }): Promise<void> {
@@ -194,28 +226,67 @@ function LoadPanel(props: LoadPanelProps) {
     if (picked) await loadFolder(picked.folder, picked.name, picked.handle);
   }
 
-  async function launch(game: LibraryGame): Promise<void> {
+  /** Starts `game`; true once it is loaded (false if it failed or a file
+   * picker had to be shown instead). */
+  async function launch(game: LibraryGame): Promise<boolean> {
     /* A game from the Voland folder brings its update and DLC from there,
      * loose .nca files included. */
     const inFolder = folderScan?.games.find((g) => g.id === game.id);
     if (inFolder) {
       const fresh = await freshFiles(inFolder).catch(() => null);
-      if (fresh) {
-        await load(fresh.file, game.id, fresh.extras);
-        return;
-      }
+      if (fresh) return load(fresh.file, game.id, fresh.extras);
     }
     const opened = await openGameFile(game);
-    if (opened) {
-      await load(opened.file, game.id, opened.extras);
-      return;
-    }
+    if (opened) return load(opened.file, game.id, opened.extras);
     /* No handle, permission refused, or the file changed: pick it again
      * (it is remembered under the same entry if it is the same file). */
     if (game.folder !== undefined && game.folder !== null) await chooseFolder();
     else if (game.id.startsWith("folder:")) folderInput?.click();
     else if (canKeepFiles()) await chooseGame();
     else input?.click();
+    return false;
+  }
+
+  /* Recovery: a message about going back to a save state. */
+  const [recoverNote, setRecoverNote] = createSignal<string | null>(null);
+
+  /* "Continue": start the game, then go back to its newest save state.
+   * When the browser has to ask for the file first, the state waits for
+   * that game's next load (load() applies it). */
+  async function continueGame(game: LibraryGame, state: SavestateInfo): Promise<void> {
+    pendingContinue = state;
+    await launch(game);
+  }
+
+  async function applyContinue(saved: SavestateInfo): Promise<void> {
+    setRecoverNote("Going back to where you were…");
+    const result = await loadState(saved.id);
+    setRecoverNote(result.ok ? null : `Could not continue: ${result.error} The game started from the beginning instead.`);
+  }
+
+  /* After a crash or a hang: the newest save state of the running game. */
+  const [crashState, setCrashState] = createSignal<SavestateInfo | null>(null);
+  const [reportCopied, setReportCopied] = createSignal(false);
+  createEffect(() => {
+    const s = state();
+    const stopped = guest().runState === "crashed" || guest().runState === "deadlock";
+    if (s.kind !== "loaded" || !stopped) {
+      setCrashState(null);
+      return;
+    }
+    setReportCopied(false);
+    void latestState(s.titleId).then(setCrashState);
+  });
+
+  async function goBack(saved: SavestateInfo): Promise<void> {
+    setRecoverNote("Going back…");
+    const result = await loadState(saved.id);
+    setRecoverNote(result.ok ? null : `Could not go back: ${result.error}`);
+  }
+
+  async function copyCrashReport(titleId: string, fileName: string): Promise<void> {
+    const text = await buildReportText({ titleId, fileName, gpuAdapter: props.gpuAdapter });
+    await navigator.clipboard?.writeText(text).then(() => setReportCopied(true)).catch(() => setReportCopied(false));
   }
 
   async function addDropped(items: DataTransferItemList): Promise<void> {
@@ -288,6 +359,14 @@ function LoadPanel(props: LoadPanelProps) {
         data-testid="firmware-input"
         onChange={(event) => { void onSystemFilesChosen(event); }}
       />
+      <Show when={memoryNote()}>
+        {(text) => (
+          <p class="voland-load-detail voland-memory-note" role="status" data-testid="memory-warning">
+            {text()}{" "}
+            <button type="button" class="voland-link-button" onClick={() => setMemoryNote(null)}>Dismiss</button>
+          </p>
+        )}
+      </Show>
       <Switch>
         <Match when={(() => { const s = state(); return s.kind === "loading" ? s : null; })()}>
           {(loading) => <p class="voland-load-note">Loading {loading().fileName}…</p>}
@@ -346,8 +425,29 @@ function LoadPanel(props: LoadPanelProps) {
                 </p>
               </Show>
               <Show when={guest().runState === "crashed" || guest().runState === "deadlock"}>
-                <p class="voland-load-detail">{guest().detail}</p>
+                <div class="voland-recover" role="alert" data-testid="crash-recover">
+                  <p>
+                    <strong>{guest().runState === "crashed" ? "The game crashed." : "The game is stuck."}</strong>{" "}
+                    <Show when={crashState()} fallback={<>There is no save state of it to go back to; load the game again.</>}>
+                      {(saved) => <>You can go back to {saved().auto ? "the automatic save state" : "your save state"} from{" "}
+                        {new Date(saved().createdAt).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })}.</>}
+                    </Show>
+                  </p>
+                  <div class="voland-player-bar">
+                    <Show when={crashState()}>
+                      {(saved) => (
+                        <button type="button" data-testid="crash-go-back" onClick={() => { void goBack(saved()); }}>Go back</button>
+                      )}
+                    </Show>
+                    <button type="button" data-testid="crash-report"
+                            onClick={() => { void copyCrashReport(loaded().titleId, loaded().fileName); }}>
+                      {reportCopied() ? "Report copied" : "Copy crash report"}
+                    </button>
+                  </div>
+                  <p class="voland-load-detail">{guest().detail}</p>
+                </div>
               </Show>
+              <Show when={recoverNote()}>{(text) => <p class="voland-load-note" data-testid="recover-note">{text()}</p>}</Show>
             </div>
           )}
         </Match>
@@ -377,6 +477,8 @@ function LoadPanel(props: LoadPanelProps) {
         games={games()}
         busy={state().kind === "loading"}
         onLaunch={(game) => { void launch(game); }}
+        resumable={resumable()}
+        onContinue={(game, saved) => { void continueGame(game, saved); }}
         onForget={(game) => { void forgetGame(game.id).then(refreshLibrary); }}
         onDropFiles={(items) => { void addDropped(items); }}
       />

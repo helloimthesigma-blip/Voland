@@ -69,7 +69,7 @@ function SaveStates(props: SaveStatesProps) {
           <For each={states()}>
             {(state) => (
               <li class="voland-state" data-testid="state-entry">
-                <span class="voland-state-when">{formatWhen(state.createdAt)}</span>
+                <span class="voland-state-when">{formatWhen(state.createdAt)}{state.auto ? " (automatic)" : ""}</span>
                 <span class="voland-state-meta">game time {formatGameTime(state.virtualSeconds)} · {(state.bytes / 2 ** 20).toFixed(0)} MB</span>
                 <span class="voland-save-actions">
                   <button type="button" data-testid="state-load" disabled={busy() !== null} onClick={() => void onLoad(state)}>Load</button>

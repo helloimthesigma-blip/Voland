@@ -14,23 +14,28 @@ interface CompatReportProps {
   readonly gpuAdapter: string;
 }
 
+/** The report's text for the running game (also the crash panel's). */
+export async function buildReportText(props: CompatReportProps): Promise<string> {
+  const guest = getGuestConsole();
+  const core = await requestCoreReport();
+  return formatReport(core, {
+    gameName: titleNames()[props.titleId] ?? props.fileName,
+    runState: guest.runState,
+    runDetail: guest.detail,
+    fps: guest.fps,
+    gpuAdapter: props.gpuAdapter,
+    userAgent: navigator.userAgent,
+    settings: location.search.replace(/^\?/, ""),
+    now: new Date(),
+  });
+}
+
 function CompatReport(props: CompatReportProps) {
   const [text, setText] = createSignal<string | null>(null);
   const [copied, setCopied] = createSignal(false);
 
   async function build(): Promise<void> {
-    const guest = getGuestConsole();
-    const core = await requestCoreReport();
-    setText(formatReport(core, {
-      gameName: titleNames()[props.titleId] ?? props.fileName,
-      runState: guest.runState,
-      runDetail: guest.detail,
-      fps: guest.fps,
-      gpuAdapter: props.gpuAdapter,
-      userAgent: navigator.userAgent,
-      settings: location.search.replace(/^\?/, ""),
-      now: new Date(),
-    }));
+    setText(await buildReportText(props));
     setCopied(false);
   }
 

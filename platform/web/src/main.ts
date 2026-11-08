@@ -18,6 +18,8 @@ import type { GameLoadOutcome, SdImportOutcome, SystemFileOutcome, SystemFilesAp
 import type { MainToVideoMessage, VideoToMainMessage } from "@bindings/video";
 import { handleSavesMessage, registerSavesWorker, rememberTitleName } from "./saves";
 import { handleSavestateMessage, registerSavestateWorker } from "./savestates";
+import { startAutoStates } from "./autostate";
+import { recordMemoryUse } from "./memory-guard";
 import { handleModsMessage, registerModsWorker } from "./mods";
 import { handleReportMessage, registerReportWorker } from "./compat-report";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
@@ -221,6 +223,7 @@ async function boot(): Promise<BootResult | null> {
   const cpuWorker = new Worker(new URL("../workers/cpu.worker.ts", import.meta.url), { type: "module" });
   registerSavesWorker(cpuWorker);
   registerSavestateWorker(cpuWorker);
+  startAutoStates();
   registerModsWorker(cpuWorker);
   registerReportWorker(cpuWorker);
   const gpuWorker = new Worker(new URL("../workers/gpu.worker.ts", import.meta.url), { type: "module" });
@@ -291,6 +294,8 @@ async function boot(): Promise<BootResult | null> {
         /* game-save backup replies (src/saves.ts) */
       } else if (handleReportMessage(msg)) {
         /* compatibility report (src/compat-report.ts) */
+      } else if (msg.type === "memory-use") {
+        recordMemoryUse(msg.titleId, msg.guestRamBytes);
       } else if (handleSavestateMessage(msg)) {
         /* save-state replies (src/savestates.ts) */
       } else if (handleModsMessage(msg)) {

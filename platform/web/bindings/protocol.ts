@@ -64,7 +64,7 @@ export type MainToCPUMessage =
    * or delete (state-deleted) them. */
   /* The compatibility report's core half (answered by compat-report). */
   | { readonly type: "compat-report" }
-  | { readonly type: "save-state" }
+  | { readonly type: "save-state"; readonly auto: boolean }
   | { readonly type: "load-state"; readonly id: string }
   | { readonly type: "list-states" }
   | { readonly type: "delete-state"; readonly id: string }
@@ -136,6 +136,9 @@ export interface SavestateInfo {
   /** The game's virtual time when it was taken. */
   readonly virtualSeconds: number;
   readonly bytes: number;
+  /** Taken by itself (src/autostate.ts), not by the player: one is kept
+   * per game, the newest, for "Continue" and crash recovery. */
+  readonly auto?: boolean;
 }
 
 /** One stored save: its name ("SS-<attribute hex>") and archive bytes. */
@@ -177,6 +180,8 @@ export type CPUToMainMessage =
   | { readonly type: "state-loaded"; readonly ok: boolean; readonly error: string }
   | { readonly type: "states-listed"; readonly states: readonly SavestateInfo[] }
   | { readonly type: "state-deleted"; readonly id: string }
+  /* A running game's guest RAM use, every 30 s (src/memory-guard.ts). */
+  | { readonly type: "memory-use"; readonly titleId: string; readonly guestRamBytes: number }
   /* Guest debug text (svcOutputDebugString) and run-state changes: both
    * happen at guest pace, never per frame (§6). */
   | { readonly type: "guest-output"; readonly text: string }

@@ -797,6 +797,16 @@ function listSystemFiles(): CPUToMainMessage {
 /* ------------------------------------------------------------------ */
 
 const SD_MIRROR_MS = 3000;
+
+/** How often a running game's guest RAM use goes to the page
+ * (src/memory-guard.ts remembers each game's most, to warn next time). */
+const MEMORY_REPORT_MS = 30_000;
+
+function reportMemoryUse(): void {
+  if (!core || !running || !loadedTitleId) return;
+  self.postMessage({ type: "memory-use", titleId: loadedTitleId,
+                     guestRamBytes: Number(core._emulator_guest_ram_used_ffi()) } satisfies CPUToMainMessage);
+}
 let mirrorGeneration = -1;
 let mirrorManifest: ReadonlyMap<string, string> = new Map();
 let mirroring = false;
@@ -1011,6 +1021,8 @@ async function deleteSave(name: string): Promise<CPUToMainMessage> {
 /* ------------------------------------------------------------------ */
 
 let stateBusy = false;
+/** Automatic states' ids start with this (their info says auto too). */
+const AUTO_STATE_PREFIX = "auto-";
 
 const RENDER_STAT_NAMES = [
   "draws", "skippedDraws", "shaderFaults", "unknownShaderOps", "textureMisses",
@@ -1051,13 +1063,16 @@ function coreErrorMessage(): string {
   return readCString(coreMemory.buffer, Number(core._emulator_last_error_message_ffi()), CORE_ERROR_MESSAGE_MAX_BYTES);
 }
 
-async function saveState(): Promise<CPUToMainMessage> {
+/** `auto`: a state taken by itself (src/autostate.ts) - only of a running
+ * game (never of a crash), and it replaces the game's previous one. */
+async function saveState(auto: boolean): Promise<CPUToMainMessage> {
   const titleId = loadedTitleId;
   if (!core || !coreMemory || !titleId) return { type: "state-saved", info: null, error: "no game is running" };
   if (stateBusy) return { type: "state-saved", info: null, error: "another save state is in progress" };
+  if (auto && !running) return { type: "state-saved", info: null, error: "the game is not running" };
   stateBusy = true;
   const createdAt = Date.now();
-  const id = newStateId(titleId, createdAt);
+  const id = `${auto ? AUTO_STATE_PREFIX : ""}${newStateId(titleId, createdAt)}`;
   let file: FileSystemSyncAccessHandle | null = null;
   try {
     file = await createStateFile(id); /* before freezing: opening is asynchronous */
@@ -1073,8 +1088,12 @@ async function saveState(): Promise<CPUToMainMessage> {
     }
     file.close();
     file = null;
-    const info = stateInfo(id, titleId, plan, bytes, createdAt);
+    const info = stateInfo(id, titleId, plan, bytes, createdAt, auto);
     await writeStateInfo(info);
+    if (auto) {
+      /* The new one is stored: the older automatic states of this game go. */
+      for (const old of await listStates()) if (old.auto && old.titleId === titleId && old.id !== id) await deleteState(old.id);
+    }
     log("info", `save state: ${(bytes / 2 ** 20).toFixed(0)} MiB in ${((performance.now() - started) / 1000).toFixed(1)} s`);
     return { type: "state-saved", info, error: "" };
   } catch (e) {
@@ -1260,6 +1279,7 @@ async function init(memory: WebAssembly.Memory): Promise<void> {
   baselineCommittedSaves();
   setInterval(() => void mirrorSdChanges(), SD_MIRROR_MS);
   setInterval(() => void mirrorCommittedSaves(), SAVE_COMMIT_POLL_MS);
+  setInterval(reportMemoryUse, MEMORY_REPORT_MS);
 
   const layoutPtr = core._layout_get_ffi();
   const layout = readMemoryLayout(memory, layoutPtr);
@@ -1341,7 +1361,7 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     return;
   }
   if (msg.type === "save-state") {
-    void saveState().then((reply) => self.postMessage(reply));
+    void saveState(msg.auto).then((reply) => self.postMessage(reply));
     return;
   }
   if (msg.type === "load-state") {

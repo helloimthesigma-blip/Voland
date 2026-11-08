@@ -19,6 +19,7 @@ import TextInputDialog from "./TextInputDialog";
 import LoadPanel from "./LoadPanel";
 import FrameSkipSetting from "./FrameSkipSetting";
 import ThreadsSetting from "./ThreadsSetting";
+import AutoStateSetting from "./AutoStateSetting";
 import { inLauncherFrame, openInBlankTab } from "../blank-launch";
 
 interface AppProps {
@@ -93,6 +94,7 @@ function App(props: AppProps) {
             <h4>Settings</h4>
             <FrameSkipSetting setFrameSkip={props.setFrameSkip} />
             <ThreadsSetting setHostCores={props.setHostCores} />
+            <AutoStateSetting />
             <Show when={!inLauncherFrame()}>
               <div class="voland-setting">
                 <button type="button" class="voland-load-button voland-load-secondary" data-testid="open-blank"

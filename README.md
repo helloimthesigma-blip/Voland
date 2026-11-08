@@ -101,6 +101,11 @@ Homebrew `.nro` files load directly. The app also has a built-in demo.
 | ZL / ZR | Q / O | D-pad | Arrow keys |
 | + / − | = / - | Stick clicks | F / N |
 
+**Pick up where you left off.** Voland saves the whole game by itself
+every 10 minutes (Settings, *Resume point*), so a game's library tile
+offers *Continue*, and a crash offers *Go back*. Frame skip and threads
+you change while a game runs are kept for that game.
+
 **Saves** are kept in the browser automatically. Use *Back up saves* in the
 app to download them and *Restore saves…* to bring them back, for example
 on another machine.
