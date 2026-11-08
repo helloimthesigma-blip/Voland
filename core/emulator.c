@@ -1158,7 +1158,8 @@ static void report_stream(Emulator* emulator) {
   const double mib = EMULATOR_BYTES_PER_MIB;
   log_info("[gpu] stream detail (MiB): textures %llu uploads %.1f (hashed new %llu unsampled %llu changed %llu "
            "periodic %llu forced %llu), surfaces %.1f; draw data %.1f pulled %.1f vertices %.1f indices %.1f; "
-           "pool %.1f written %.1f reused",
+           "pool %.1f written %.1f reused; draws %llu, vertices on the CPU: topology %llu bindless %llu globals %llu "
+           "small %llu window %llu",
            (unsigned long long)(now->texture_uploads - was->texture_uploads),
            (double)(now->upload_bytes - was->upload_bytes - (now->surface_upload_bytes - was->surface_upload_bytes)) / mib,
            (unsigned long long)(now->hashed_new - was->hashed_new),
@@ -1169,7 +1170,12 @@ static void report_stream(Emulator* emulator) {
            (double)(now->surface_upload_bytes - was->surface_upload_bytes) / mib,
            (double)(now->draw_data_bytes - was->draw_data_bytes) / mib, (double)(now->pulled_bytes - was->pulled_bytes) / mib,
            (double)(now->vertex_bytes - was->vertex_bytes) / mib, (double)(now->index_bytes - was->index_bytes) / mib,
-           (double)(now->pool_bytes - was->pool_bytes) / mib, (double)(now->pool_reused_bytes - was->pool_reused_bytes) / mib);
+           (double)(now->pool_bytes - was->pool_bytes) / mib, (double)(now->pool_reused_bytes - was->pool_reused_bytes) / mib,
+           (unsigned long long)(now->draws - was->draws), (unsigned long long)(now->cpu_vs_topology - was->cpu_vs_topology),
+           (unsigned long long)(now->cpu_vs_bindless - was->cpu_vs_bindless),
+           (unsigned long long)(now->cpu_vs_globals - was->cpu_vs_globals),
+           (unsigned long long)(now->cpu_vs_small - was->cpu_vs_small),
+           (unsigned long long)(now->cpu_vs_window - was->cpu_vs_window));
   emulator->stream_stats_reported = *now;
 }
 

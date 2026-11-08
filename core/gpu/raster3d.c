@@ -4358,6 +4358,24 @@ static void gpu_copy_globals(Draw_Context *ctx, uint32_t *data, uint32_t *scratc
  * shading on the CPU is cheaper (2-triangle quads of a program indexing a
  * 64 KiB constant buffer). */
 #define GPU_VS_BYTES_PER_VERTEX 4096u
+
+/* VOLAND_GPU_VS_BYTES_PER_VERTEX overrides it (tuning; 0 = never small).
+ * Not a speed switch yet: with 0, Tears of the Kingdom's subtitle glyphs
+ * (quads indexing a large constant buffer) render garbled on the GPU path
+ * (2026-11-08), and its fps did not clearly change (7.8 vs 6.2 median of 4,
+ * noisy). */
+static uint64_t gpu_vs_bytes_per_vertex(void) {
+  static int parsed;
+  static uint64_t value = GPU_VS_BYTES_PER_VERTEX;
+  if (!parsed) {
+    parsed = 1;
+    const char *spec = getenv("VOLAND_GPU_VS_BYTES_PER_VERTEX");
+    if (spec) value = strtoull(spec, NULL, 0);
+    if (spec) log_info("[gpu] vertex constants per vertex before shading on the CPU: %llu bytes%s",
+                       (unsigned long long)value, value ? "" : " (never)");
+  }
+  return value;
+}
 static uint64_t g_vs_cpu_small;
 
 static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_t topology, uint32_t vertex_count) {
@@ -4387,7 +4405,8 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
   for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++)
     if (ctx->env[0].cbuf[s]) vs_words += cbuf_words_read(ctx->vs, &ctx->env[0], s);
   for (uint32_t k = 0; k < g->global_count; k++) vs_words += g->global_size[k] / 4u;
-  if (vs_words * 4u > (uint64_t)vertex_count * GPU_VS_BYTES_PER_VERTEX) {
+  const uint64_t per_vertex = gpu_vs_bytes_per_vertex();
+  if (per_vertex && vs_words * 4u > (uint64_t)vertex_count * per_vertex) {
     st->cpu_vs_small++;
     if (!g_vs_cpu_small++)
       log_warn("[gpu] vertices on the CPU: %u vertices, %llu bytes of vertex constants", vertex_count,
