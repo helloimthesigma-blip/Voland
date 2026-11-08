@@ -192,6 +192,10 @@ typedef struct Raster3d_Gpu_Stats {
   uint64_t untranslated_draws;
   uint64_t texture_uploads;
   uint64_t surface_upload_bytes;
+  /* VOLAND_VERTEX_PAGE_STATS (docs/NEXT.md 3): guest pages read for vertex
+   * streams and index buffers, once per frame each; of those, changed since
+   * the frame they were last read, and first seen. */
+  uint64_t vertex_pages, vertex_pages_changed, vertex_pages_new;
   /* Texture bindings by how they are filtered: the device's sampler, or the
    * shader's taps because the sample is integer, a cube, padded, the
    * format unfilterable, or a wrap mode beyond the sampler's. */

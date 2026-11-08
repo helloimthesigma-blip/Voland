@@ -161,6 +161,18 @@ chunk ids and offsets for vertices and indices), a version bump, and
 GPU_COMMAND_STREAM.md. Header changes in `core/common/vmm.h` (watch,
 dirty bitmap) per the interface rule.
 
-**Measure first.** How many of SMO's vertex/index pages are written per
-frame (a counting pass with the watch bit but no GPU change), and the
-store-walk cost of the extra bit in `tests/jit_bench.c`.
+**Measured (2026-11-08, `VOLAND_VERTEX_PAGE_STATS=1`, SMO gameplay on the
+mini).** Per 600 frames, vertex streams and index buffers were read from
+303.5k guest pages (once per frame each, ~506 pages = ~2 MB a frame), of
+which ~4.3k had changed since the frame they were last read in: **~7
+pages a frame (1.4%)**. Nearly all of the ~5 MB re-sent per frame is the
+same bytes.
+
+That also changes the cost argument above: hashing a page at its first
+use in a submission (what `gpu_mirror` does) costs about the pages a frame
+reads, ~2 MB of hashing, not every vertex page per submission - far
+cheaper than the three copies of ~5 MB it replaces. So the first version
+can keep `gpu_mirror`'s hash-on-use and needs no write tracking; the work
+is on the GPU side (chunked mirrors over a byte budget instead of 32 x 4
+MiB, several resident bindings or one chunk pool, indices from a mirror).
+Write tracking stays the fallback if hashing shows up in profiles.

@@ -1130,6 +1130,41 @@ static bool guest_hash(const Gpu_Memory *mem, uint64_t va, uint64_t n, uint64_t 
   return true;
 }
 
+/* Diagnostics (VOLAND_VERTEX_PAGE_STATS; docs/NEXT.md 3, "measure first"):
+ * each guest page a vertex stream or index buffer is read from, hashed
+ * once per frame and compared with the frame it was last read in. */
+#define VERTEX_PAGE_SLOTS (1u << 16)
+#define VERTEX_PAGE_PROBES 8u
+#define VERTEX_PAGE_BYTES 4096u
+typedef struct Vertex_Page {
+  uint64_t page, hash, frame;
+} Vertex_Page;
+static Vertex_Page g_vertex_pages[VERTEX_PAGE_SLOTS];
+static int g_vertex_page_stats = -1;
+
+static void vertex_pages_note(Raster3d *r, const Gpu_Memory *mem, uint64_t va, uint64_t bytes) {
+  if (g_vertex_page_stats < 0) g_vertex_page_stats = getenv("VOLAND_VERTEX_PAGE_STATS") ? 1 : 0;
+  if (!g_vertex_page_stats || !bytes) return;
+  const uint64_t frame = (uint64_t)r->texture_epoch + 1u; /* 0 = an empty slot's */
+  for (uint64_t page = va / VERTEX_PAGE_BYTES; page <= (va + bytes - 1u) / VERTEX_PAGE_BYTES; page++) {
+    Vertex_Page *e = NULL;
+    for (uint32_t k = 0; k < VERTEX_PAGE_PROBES && !e; k++) {
+      Vertex_Page *c = &g_vertex_pages[(uint32_t)((page * 0x9E3779B97F4A7C15ull) >> 48) + k & (VERTEX_PAGE_SLOTS - 1u)];
+      if (c->page == page || !c->frame) e = c;
+    }
+    if (!e) e = &g_vertex_pages[(uint32_t)((page * 0x9E3779B97F4A7C15ull) >> 48) & (VERTEX_PAGE_SLOTS - 1u)];
+    if (e->page == page && e->frame == frame) continue;
+    uint64_t h = 0;
+    if (!guest_hash(mem, page * VERTEX_PAGE_BYTES, VERTEX_PAGE_BYTES, &h)) continue;
+    r->gpu_stats.vertex_pages++;
+    if (e->page != page || !e->frame) r->gpu_stats.vertex_pages_new++;
+    else if (e->hash != h) r->gpu_stats.vertex_pages_changed++;
+    e->page = page;
+    e->hash = h;
+    e->frame = frame;
+  }
+}
+
 #define RT_FORMAT_A8B8G8R8_UNORM 0xD5u
 #define TEX_FORMAT_A8B8G8R8 0x08u
 
@@ -4916,6 +4951,7 @@ static void gpu_emit_draw(Raster_State *rs) {
       stream_bytes[k] = streams[k].instanced ? streams[k].end
                                              : (uint64_t)(g->id_hi - g->id_lo) * streams[k].stride + streams[k].end;
       const uint64_t from = streams[k].address + (streams[k].instanced ? 0u : (uint64_t)g->id_lo * streams[k].stride);
+      vertex_pages_note(r, rs->ctx->mem, from, stream_bytes[k]);
       uint32_t id = 0;
       resident[k] = gpu_mirror_resident(from, stream_bytes[k], &id, &resident_offset[k]) &&
                     (!resident_id || resident_id == id);
@@ -5563,6 +5599,7 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     const bool inline_indices = draw->kind == RASTER_DRAW_INLINE;
     const uint32_t size = inline_indices ? 4u : draw->index_size;
     const uint64_t base = addr40(regs[REG_INDEX_BUFFER], regs[REG_INDEX_BUFFER + 1u]) + (uint64_t)draw->first * size;
+    if (r->gpu && !inline_indices) vertex_pages_note(r, mem, base, (uint64_t)draw->count * size);
     const uint32_t restart_value = size == 4u ? restart_index : (restart_index & ((1u << (8u * size)) - 1u));
     static uint8_t batch[INDEX_BATCH * 4u];
     for (uint32_t done = 0; done < draw->count;) {
