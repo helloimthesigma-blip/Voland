@@ -445,3 +445,9 @@
 .voland-cheats h5 { margin: 0.75rem 0 0.25rem; }
 
 .voland-log-tools { display: flex; align-items: center; justify-content: space-between; gap: 0.5rem; margin: 0.5rem 0; }
+
+/* "Your files" (FilesPanel.tsx): the Voland folder's checklist. */
+.voland-files code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: #9a9aa8; }
+.voland-files-folder { margin: 0 0 6px; }
+.voland-checklist { margin: 0 0 10px; padding-left: 18px; color: #c8c8d0; line-height: 1.5; overflow-wrap: anywhere; }
+.voland-checklist ul { margin: 2px 0 4px; padding-left: 16px; }

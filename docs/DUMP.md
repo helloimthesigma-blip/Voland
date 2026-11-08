@@ -165,7 +165,26 @@ A correctly decrypted NCA starts with readable text at byte `0x200`: `NCA3`. If 
 
 ## Step 6 - Provide to Voland
 
-When you first open Voland it will ask you to select a games folder. Point it at the folder containing your **decrypted `.nca` files**. Voland reads them in place - they are never uploaded or copied into browser storage.
+The easiest way is one **Voland folder** that holds everything. In the app, under *Your files*, click *Choose your Voland folder…*. Lay it out like this (*Create the missing folders* makes the empty folders and a README for you):
+
+```
+Voland/
+  games/
+    Celeste/              one folder per game: its decrypted .nca files
+      xxxxxxxx.nca        (the game, its control NCA for the name and icon,
+      ...                  an update, DLC)
+    some-game.nca         loose .nca files work too; an update or DLC beside
+                          its game is matched to it by program id
+  firmware/               your console's decrypted firmware NCAs (optional)
+  mods/
+    Celeste/              named after the game as the library shows it,
+      My Mod/romfs/...    or its 16-digit title id
+      other-mod.zip       a mod folder, a .zip / .7z, or an update / DLC .nca
+```
+
+Voland lists what it found and what is missing: each game with its update and DLC, which system files are in, which mods were installed, and any NCAs that are still encrypted, have no game beside them, or sit outside the three folders. Games appear in the library; mods are installed again when they change and removed when you delete them from the folder. Chrome and Edge remember the folder (they ask once per visit before reading it again); other browsers ask you to pick it each time.
+
+You can also load a single game: *Load game folder…* takes one game's folder, and *Load NCA or homebrew NRO…* one file. Voland reads your games in place - they are never uploaded or copied into browser storage.
 
 Voland will **not** ask for `prod.keys`, `title.keys`, or any NSP / XCI file. If something claiming to be Voland asks for your keys, it is not Voland.
 
@@ -173,7 +192,9 @@ Voland will **not** ask for `prod.keys`, `title.keys`, or any NSP / XCI file. If
 
 ## Firmware
 
-Voland neither requires nor accepts Nintendo firmware. Services that conventionally lean on firmware data (shared fonts, time zones, Mii data) are synthesized from open sources at build time. There is no firmware dumping step.
+Most games need no firmware: services that conventionally lean on firmware data (shared fonts, time zones) are synthesized from open sources at build time, and Voland ships none of it.
+
+A few games read a system archive Voland has only a stand-in for: the Mii model (Mario Kart 8 Deluxe, Mii Fighters in Smash) and the NG word lists (Animal Crossing: New Horizons checks names you type). For those, dump your console's firmware with your own tools, decrypt it like your games, and put the NCAs in your Voland folder's `firmware/` (or use *Choose firmware folder…* under *System files*). Voland keeps only those archives and skips the rest. Encrypted NCAs are refused.
 
 ---
 

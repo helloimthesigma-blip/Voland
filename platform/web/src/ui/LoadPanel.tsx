@@ -14,11 +14,13 @@ import { describeLoadFailure } from "./load-failure-copy";
 import GameLibrary from "./GameLibrary";
 import SaveStates from "./SaveStates";
 import CompatReport from "./CompatReport";
+import FilesPanel from "./FilesPanel";
 import {
   type LibraryGame, canKeepFiles, canKeepFolders, forgetGame, listGames, markPlayed, openGameFile, pickGameFile,
   pickGameFolder, rememberGame,
 } from "../library";
 import { type GameFolder, folderFiles, noGameMessage, scanGameFolder } from "../game-folder";
+import { type FolderScan, freshFiles } from "../voland-folder";
 
 interface LoadPanelProps {
   readonly loadGame: (file: File, extras?: readonly File[]) => Promise<GameLoadOutcome>;
@@ -83,6 +85,22 @@ function LoadPanel(props: LoadPanelProps) {
   const [bootHint, setBootHint] = createSignal(false);
   const [games, setGames] = createSignal<readonly LibraryGame[]>([]);
   const refreshLibrary = async (): Promise<void> => { setGames(await listGames()); };
+  /* The Voland folder's last scan (FilesPanel): its games launch from it. */
+  let folderScan: FolderScan | null = null;
+
+  async function onFolderScan(scan: FolderScan | null, root: FileSystemDirectoryHandle | null): Promise<void> {
+    folderScan = scan;
+    if (!scan) return;
+    for (const game of scan.games) {
+      if (game.dir !== null) {
+        const dir = root ? await root.getDirectoryHandle("games").then((g) => g.getDirectoryHandle(game.dir ?? "")).catch(() => null) : null;
+        await rememberGame(game.program.file, null, { name: game.dir, handle: dir });
+      } else {
+        await rememberGame(game.program.file, game.program.handle ?? null);
+      }
+    }
+    await refreshLibrary();
+  }
   let bootHintTimer = 0;
   onCleanup(() => window.clearTimeout(bootHintTimer));
 
@@ -177,6 +195,16 @@ function LoadPanel(props: LoadPanelProps) {
   }
 
   async function launch(game: LibraryGame): Promise<void> {
+    /* A game from the Voland folder brings its update and DLC from there,
+     * loose .nca files included. */
+    const inFolder = folderScan?.games.find((g) => g.id === game.id);
+    if (inFolder) {
+      const fresh = await freshFiles(inFolder).catch(() => null);
+      if (fresh) {
+        await load(fresh.file, game.id, fresh.extras);
+        return;
+      }
+    }
     const opened = await openGameFile(game);
     if (opened) {
       await load(opened.file, game.id, opened.extras);
@@ -388,6 +416,8 @@ function LoadPanel(props: LoadPanelProps) {
       <Show when={props.toolsMount()}>
         {(mount) => (
           <Portal mount={mount()}>
+            <FilesPanel systemFiles={props.systemFiles} systemIds={systemIds} onSystemFilesChanged={refreshSystemFiles}
+                        games={games} onScan={onFolderScan} />
             <section class="voland-panel" data-testid="sd-card">
               <h4>SD card</h4>
               <p class="voland-load-note">Homebrew you add appears in a homebrew menu such as hbmenu.</p>

@@ -14,6 +14,7 @@ import {
 import { titleNames } from "../saves";
 import { type RunningMods, runningMods, setCheatEnabled, subscribeRunningMods } from "../mods";
 import ModRepos from "./ModRepos";
+import { FOLDER_SOURCE } from "../voland-folder";
 
 function formatBytes(bytes: number): string {
   if (bytes < 1024 * 1024) return `${Math.max(1, Math.round(bytes / 1024))} KB`;
@@ -190,7 +191,7 @@ function ModsPanel() {
                          onChange={(e) => void act(() => setModEnabled(title(), mod.name, e.currentTarget.checked))} />
                   <span class="voland-mod-name">{mod.name}</span>
                 </label>
-                <span class="voland-mod-meta">{mod.files} file(s) · {formatBytes(mod.bytes)}{mod.source ? ` · ${mod.source.version} from a repository` : ""}</span>
+                <span class="voland-mod-meta">{mod.files} file(s) · {formatBytes(mod.bytes)}{mod.source?.repo === FOLDER_SOURCE ? " · from your Voland folder" : mod.source ? ` · ${mod.source.version} from a repository` : ""}</span>
                 <span class="voland-mod-actions">
                   <button type="button" title="Higher priority" disabled={index() === 0}
                           onClick={() => void act(() => moveMod(title(), mod.name, -1))}>▲</button>

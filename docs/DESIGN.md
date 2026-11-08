@@ -2537,6 +2537,13 @@ The format of this register is "what could go wrong," not "what will go wrong." 
       - Encrypted NCAs are refused: Voland never decrypts (§1.6).
     - The file is stored at `/systemdata/<id>.nca|.romfs` and kept in OPFS like the SD card.
     - "Empty SD card" keeps system files.
+  - **The Voland folder** (`src/voland-folder.ts`, `src/ui/FilesPanel.tsx` "Your files"). One folder of the user's chosen once: `games/` (a game per subfolder, or loose NCAs grouped by program id - an update is the game's id + 0x800, DLC + 0x1000 + index, as `find_update` / `find_addons` take them), `firmware/` and `mods/<game name or title id>/<mod>`.
+    - Kept as a directory handle in IndexedDB (`voland-folder`) and scanned again at page load while the browser still grants read, else after one click; a `webkitdirectory` input elsewhere.
+    - Read only. Voland writes to it only when asked to set it up (the three folders and a README, after a readwrite prompt).
+    - A scan remembers its games in the library under the same keys as `rememberGame`, so a tile launches from the folder with its loose update and DLC.
+    - `firmware/` goes through "System files" while any archive in `SYSTEM_FILES` is missing and the folder changed since its last import.
+    - `mods/` is installed into OPFS (`mod-store.installMod`) with source `voland-folder` and a fingerprint (file count, bytes, newest mtime), installed again when that changes and removed when the mod leaves the folder.
+    - The checklist names still-encrypted NCAs (counted and left out, §1.6), updates / DLC with no game beside them, NCAs outside the three folders and mod folders no game matches.
 - **A32 JIT (docs/JIT.md "AArch32").** 32-bit titles run on `CPU_BACKEND_A32_JIT`, the ARM64→WASM JIT's runtime with an A32 front end (`jit_compile_a32.inc`) and the A32 interpreter as its cold path and fallback.
   - `CPU_Backend.aarch32` replaces the backend-pointer test in HLE.
   - `A32_State` overlays `Jit_State`, which gains `isa`.

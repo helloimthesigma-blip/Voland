@@ -84,6 +84,12 @@ and contains no decryption code. You dump and decrypt the game yourself,
 from a Switch you own, with separate tools. The [dumping guide](docs/DUMP.md)
 walks through it.
 
+**Keep it all in one folder.** Choose a *Voland folder* in the app (under
+*Your files*) with `games/`, `firmware/` and `mods/` in it. Voland finds your
+games, their updates and DLC, the system files a few games need, and your
+mods, and shows a checklist of anything missing or still encrypted. The
+[dumping guide](docs/DUMP.md#step-6---provide-to-voland) shows the layout.
+
 Homebrew `.nro` files load directly. The app also has a built-in demo.
 
 **Controls:** gamepads work out of the box (standard layout). Keyboard:
