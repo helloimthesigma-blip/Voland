@@ -192,6 +192,9 @@ export type MainToGPUMessage =
       /* Diagnostics (?trivialshaders=1): every pixel shader replaced by
        * one that writes nothing - is a title limited by GPU shading? */
       readonly trivialShaders: boolean;
+      /* Diagnostics (?writestaging=0): buffer writes under pending commands
+       * submit the batch first instead of copying in command order. */
+      readonly noWriteStaging: boolean;
     }
   | { readonly type: "resize"; readonly width: number; readonly height: number }
   /* The title that just loaded (lifecycle): its persistent shader cache

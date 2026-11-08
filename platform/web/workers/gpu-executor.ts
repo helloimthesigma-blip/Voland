@@ -101,6 +101,9 @@ const DATA_ALIGN = 256;
  * (the most a draw carries: constants + 18 constant buffers of 64 KB), so
  * one bind group serves every draw with the same textures and samplers. */
 const DATA_WINDOW_BYTES = 2 * 1024 * 1024;
+/** Room for buffer writes that land under pending commands (bufferWrite):
+ * past it, the batch is submitted first. */
+const WRITE_STAGING_BYTES = 4 * 1024 * 1024;
 const BIND_GROUP_CACHE_LIMIT = 4096;
 const MAX_TEXTURES = 16; /* core/gpu/wgsl.h WGSL_MAX_TEXTURES: samplers bind at 1 + MAX_TEXTURES + i */
 
@@ -351,6 +354,10 @@ export class GpuExecutor {
   private vertexUsed = 0;
   private dataUsed = 0;
   private encoder: GPUCommandEncoder | null = null;
+  /** Buffer writes over contents pending commands still read: staged here
+   * and copied in command order (bufferWrite), reset once submitted. */
+  private readonly writeStaging: GPUBuffer;
+  private writeStagingUsed = 0;
   private pass: GPURenderPassEncoder | null = null;
   /** Diagnostics: log each draw of the frame after a target dump, up to its present. */
   private traceFrame = false;
@@ -384,6 +391,7 @@ export class GpuExecutor {
     }
     this.linearSampler = device.createSampler({ magFilter: "linear", minFilter: "linear" });
     this.pool = device.createBuffer({ size: POOL_BYTES, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST });
+    this.writeStaging = device.createBuffer({ size: WRITE_STAGING_BYTES, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
   }
 
   /** A chunk appended to the pool. Unsubmitted commands never read where it
@@ -480,6 +488,7 @@ export class GpuExecutor {
     this.prof.write += t1 - t0; this.prof.finish += t2 - t1; this.prof.submit += t3 - t2;
     this.stats.submits++;
     this.encoder = null;
+    this.writeStagingUsed = 0; /* the queue orders later writes after this submission's copies */
     if (this.vertexUsed || this.dataUsed) this.set = (this.set + 1) % BUFFER_SETS;
     this.vertexUsed = 0;
     this.dataUsed = 0;
@@ -652,7 +661,21 @@ export class GpuExecutor {
       this.warnOnce(`buffer write ${b.size}`, `buffer write past the end (${offset}+${bytes} of ${b.size})`);
       return;
     }
-    if (this.touchedBuffers.has(b)) this.flush(); /* earlier commands use the old contents */
+    if (this.touchedBuffers.has(b)) {
+      /* Earlier commands read the old contents: the new bytes go in by a
+       * copy recorded after them (the vertex pool rewrites a page a few
+       * times a frame; a submit for each doubled the submits). */
+      if (this.encoder && this.writeStagingUsed + bytes <= WRITE_STAGING_BYTES &&
+          !(globalThis as { NO_WRITE_STAGING?: boolean }).NO_WRITE_STAGING) {
+        this.endPass();
+        this.device.queue.writeBuffer(this.writeStaging, this.writeStagingUsed, payload, BUFFER_WRITE_BYTES, bytes);
+        this.encoder.copyBufferToBuffer(this.writeStaging, this.writeStagingUsed, b, offset, bytes);
+        this.writeStagingUsed += bytes;
+        this.bufferBytes += bytes;
+        return;
+      }
+      this.flush();
+    }
     this.device.queue.writeBuffer(b, offset, payload, BUFFER_WRITE_BYTES, bytes);
     this.bufferBytes += bytes;
   }
