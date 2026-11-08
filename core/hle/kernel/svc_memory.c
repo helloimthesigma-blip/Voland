@@ -9,11 +9,13 @@
 #include "common/layout.h"
 #include "common/log.h"
 #include "hle/kernel/handle_table.h"
+#include "hle/kernel/scheduler.h"
 #include "hle/kernel/shared_memory.h"
 #include "hle/kernel/transfer_memory.h"
 #include "hle/loader/nro.h"
 
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 static bool ranges_overlap(uint64_t a_base, uint64_t a_size, uint64_t b_base, uint64_t b_size) {
@@ -342,6 +344,21 @@ static bool range_is_rw(VMM_Context *vmm, uint64_t gva, uint64_t size) {
 
 static bool alias_pages(VMM_Context *vmm, uint64_t dst, uint64_t src, uint64_t size, uint32_t perms);
 
+/* VOLAND_LOG_PERMS=1 (diagnostics): every range this file hides
+ * (permission none) or gives back, with the calling thread's pc and lr -
+ * which one a later fault on a mapped page with no permissions fell in. */
+static void log_perms(HLE_Context *context, const char *what, uint64_t addr, uint64_t size, uint32_t perms) {
+  static int on = -1;
+  if (on < 0) on = getenv("VOLAND_LOG_PERMS") ? 1 : 0;
+  if (!on) return;
+  const Sched_Thread *self = context->scheduler ? scheduler_current(context->scheduler) : NULL;
+  const CPU_Register_File *rf =
+      self && self->thread.cpu_state ? context->cpu_backend->get_register_file(self->thread.cpu_state) : NULL;
+  log_warn("[perms] %s %llx+%llx -> %x (thread %llu, pc %llx, lr %llx)", what, (unsigned long long)addr,
+           (unsigned long long)size, perms, self ? (unsigned long long)self->thread_id : 0ull,
+           rf ? (unsigned long long)rf->pc : 0ull, rf ? (unsigned long long)rf->x[30] : 0ull);
+}
+
 void hle_svc_map_memory(HLE_Context *context, CPU_State *cpu_state) {
   CPU_Register_File *regs = context->cpu_backend->get_register_file(cpu_state);
   Process *process = context->process;
@@ -406,6 +423,7 @@ void hle_svc_map_memory(HLE_Context *context, CPU_State *cpu_state) {
   }
   err = vmm_reprotect(vmm, src, size, VMM_PERM_NONE);
   SWITCH_ASSERT_ALWAYS(error_is_ok(err), "hle_svc_map_memory: reprotect of validated src failed");
+  log_perms(context, "MapMemory src", src, size, VMM_PERM_NONE);
 
   process->heap_borrows[process->heap_borrow_count++] =
       (Memory_Borrow){.dst_base = dst, .src_base = src, .size = size};
@@ -445,6 +463,7 @@ void hle_svc_unmap_memory(HLE_Context *context, CPU_State *cpu_state) {
   SWITCH_ASSERT_ALWAYS(error_is_ok(err), "hle_svc_unmap_memory: unmap of a tracked alias failed");
   err = vmm_reprotect(vmm, src, size, VMM_PERM_RW);
   SWITCH_ASSERT_ALWAYS(error_is_ok(err), "hle_svc_unmap_memory: reprotect of a tracked borrow failed");
+  log_perms(context, "UnmapMemory src", src, size, VMM_PERM_RW);
 
   /* Swap-remove: heap_borrows has no meaningful order. */
   process->heap_borrows[(uint32_t)index] = process->heap_borrows[--process->heap_borrow_count];
@@ -852,6 +871,7 @@ void hle_svc_set_memory_permission(HLE_Context *context, CPU_State *cpu_state) {
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_STATE;
     return;
   }
+  log_perms(context, "SetMemoryPermission", addr, size, perm);
   regs->x[0] = HLE_RESULT_SUCCESS;
 }
 
@@ -910,6 +930,7 @@ void hle_svc_create_transfer_memory(HLE_Context *context, CPU_State *cpu_state) 
     return;
   }
   *object = (Kernel_Transfer_Memory){1, addr, size, perm};
+  log_perms(context, "CreateTransferMemory", addr, size, perm);
   regs->x[0] = HLE_RESULT_SUCCESS;
   regs->x[1] = handle;
 }
@@ -918,5 +939,6 @@ void hle_transfer_memory_release(HLE_Context *context, void *object) {
   Kernel_Transfer_Memory *tmem = (Kernel_Transfer_Memory *)object;
   if (!tmem || !tmem->references || --tmem->references) return;
   (void)vmm_reprotect(context->vmm, tmem->address, tmem->size, VMM_PERM_RW);
+  log_perms(context, "TransferMemory released", tmem->address, tmem->size, VMM_PERM_RW);
   memset(tmem, 0, sizeof(*tmem));
 }

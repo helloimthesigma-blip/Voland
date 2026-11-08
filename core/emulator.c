@@ -1109,6 +1109,8 @@ static uint64_t gpu_max_latency_ticks(void) {
  * every slice; free-running mode on whichever core finds it due, under the
  * kernel lock (docs/PARALLEL.md "Free-running mode"). */
 static void report_stream(Emulator* emulator);
+static void watch_word(Emulator* emulator);
+static const char *module_of(const Emulator *emulator, uint64_t pc, uint64_t *offset);
 
 static void update_devices(Emulator* emulator) {
   /* GPU completions (§13) arrive at scheduler-tick cadence; the async
@@ -1122,6 +1124,7 @@ static void update_devices(Emulator* emulator) {
   /* Display (§13): vsync composites queued buffers into the §6 slots. */
   vi_update(&emulator->vi, &emulator->hle, emulator->scheduler.ticks);
   report_stream(emulator);
+  watch_word(emulator);
   run_cheats(emulator);
   /* Audio (§14): queued PCM / rendered frames into the ring at 48kHz of
    * virtual time. */
@@ -1190,6 +1193,47 @@ static void report_stream(Emulator* emulator) {
            (double)(now->vpool_upload_bytes - was->vpool_upload_bytes) / mib,
            (unsigned long long)(now->vpool_chunk_loads - was->vpool_chunk_loads));
   emulator->stream_stats_reported = *now;
+}
+
+/* VOLAND_WATCH_WORD=GVA (diagnostics; ?env= in the browser): the 8 guest
+ * bytes there, read at every device update (before every slice in slice
+ * mode); each change is logged with every thread that may have run since
+ * - who overwrote a word (Tears of the Kingdom's object vtable pointer,
+ * docs in the LOG). */
+#define WATCH_WORD_LOG_LIMIT 64u
+static void watch_word(Emulator* emulator) {
+  static int parsed;
+  static uint64_t gva, last;
+  static bool have;
+  static uint32_t logged;
+  if (!parsed) {
+    parsed = 1;
+    const char* spec = getenv("VOLAND_WATCH_WORD");
+    gva = spec ? strtoull(spec, NULL, 0) : 0;
+    if (gva) log_warn("[watch] watching the 8 bytes at %llx", (unsigned long long)gva);
+  }
+  if (!gva || logged >= WATCH_WORD_LOG_LIMIT) return;
+  uint64_t value = 0;
+  if (!error_is_ok(vmm_read64(emulator->vmm, gva, &value))) return;
+  if (have && value == last) return;
+  logged++;
+  log_warn("[watch] %llx: %016llx -> %016llx at tick %llu", (unsigned long long)gva, (unsigned long long)last,
+           (unsigned long long)value, (unsigned long long)emulator->scheduler.ticks);
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS && have; i++) {
+    const Sched_Thread* th = &emulator->scheduler.threads[i];
+    if (th->state != THREAD_STATE_RUNNABLE || !th->thread.cpu_state) continue;
+    uint64_t offset = 0;
+    const uint64_t pc = emulator->cpu_backend->get_pc(th->thread.cpu_state);
+    const char* module = module_of(emulator, pc, &offset);
+    const CPU_Register_File* rf = emulator->cpu_backend->get_register_file(th->thread.cpu_state);
+    uint64_t lr_offset = 0;
+    const char* lr_module = module_of(emulator, rf->x[30], &lr_offset);
+    log_warn("[watch]   thread %llu (handle 0x%x, last core %u) at %s+0x%llx, lr %s+0x%llx",
+             (unsigned long long)th->thread_id, th->handle, th->last_core, module, (unsigned long long)offset, lr_module,
+             (unsigned long long)lr_offset);
+  }
+  last = value;
+  have = true;
 }
 
 static void update_devices_hook(void* emulator) { update_devices((Emulator*)emulator); }

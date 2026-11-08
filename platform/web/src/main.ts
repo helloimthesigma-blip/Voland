@@ -389,6 +389,9 @@ async function boot(): Promise<BootResult | null> {
         }
         /* ?aslr=0: modules at fixed addresses, as voland-cli loads them -
          * for the PCs debug variables name. */
+        /* ?aslrseed=N: that layout seed (the log names each run's). */
+        const aslrSeed = new URLSearchParams(location.search).get("aslrseed");
+        if (aslrSeed) cpuWorker.postMessage({ type: "set-aslr-seed", seed: aslrSeed } satisfies MainToCPUMessage);
         if (new URLSearchParams(location.search).get("aslr") === "0") {
           cpuWorker.postMessage({ type: "set-aslr", on: false } satisfies MainToCPUMessage);
         }

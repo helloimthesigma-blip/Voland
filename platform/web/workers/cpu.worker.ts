@@ -603,12 +603,17 @@ async function loadCoreModule(memory: WebAssembly.Memory): Promise<SwitchCoreExp
 
 /** ?aslr=0 (set-aslr): load programs without address-space randomisation. */
 let aslr = true;
+/** ?aslrseed=N (set-aslr-seed): this seed instead of a random one - to
+ * replay a layout a run logged (diagnostics). */
+let fixedAslrSeed: bigint | null = null;
 
 function randomAslrSeed(): bigint {
   if (!aslr) return 0n;
   const words = crypto.getRandomValues(new BigUint64Array(1));
-  const seed = words[0] ?? 1n;
-  return seed === 0n ? 1n : seed; // 0 disables ASLR (address_space.h)
+  const random = words[0] ?? 1n;
+  const seed = fixedAslrSeed ?? (random === 0n ? 1n : random); // 0 disables ASLR (address_space.h)
+  log("info", `address-space layout seed ${seed} (?aslrseed=${seed} replays it)`);
+  return seed;
 }
 
 /** Copies `bytes` into a fresh `_malloc` block; the caller owns it. */
@@ -1416,6 +1421,11 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   if (msg.type === "set-free-running") {
     requestedFreeFromSlice = msg.fromSlice;
     log("info", msg.fromSlice > 0 ? `free-running guest cores from slice ${msg.fromSlice}` : "free-running guest cores off");
+    return;
+  }
+
+  if (msg.type === "set-aslr-seed") {
+    fixedAslrSeed = /^[0-9]+$/.test(msg.seed) ? BigInt(msg.seed) : null;
     return;
   }
 
