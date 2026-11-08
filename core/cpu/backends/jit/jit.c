@@ -172,6 +172,8 @@ static void note_block(Jit_Thread *t, uint64_t pc_and_flag) {
 /* A run ended in a fault or breakpoint: the registers and how the
  * dispatcher got there (chained regions do not pass through it, so a
  * compiled entry may have run through several regions). */
+#define JIT_FAULT_REPORT_BEFORE 0x1000u /* the page before a fault, in the report */
+
 static void report_stop(const Jit_Thread *t, const Interp_State *s, CPU_ExitReason reason) {
   log_error("[jit] %s at pc=0x%010llx (fault address 0x%010llx), sp=0x%010llx nzcv=%x",
             reason == CPU_EXIT_FAULT ? "fault" : "breakpoint", (unsigned long long)s->regs.pc,
@@ -191,6 +193,18 @@ static void report_stop(const Jit_Thread *t, const Interp_State *s, CPU_ExitReas
     if (used >= sizeof(line)) break;
   }
   log_error("[jit] recent block starts (oldest first, * = compiled region entered):%s", line);
+  if (reason != CPU_EXIT_FAULT || !s->vmm) return;
+  /* What the address space holds there now: mapped means the access saw
+   * stale translation state (or a mapping that landed in between), not a
+   * hole in the guest's memory. */
+  for (uint32_t k = 0; k < 2u; k++) {
+    const uint64_t at = k ? s->fault_address - JIT_FAULT_REPORT_BEFORE : s->fault_address;
+    VMM_Region_Info info;
+    if (!error_is_ok(vmm_query(s->vmm, at, &info))) continue;
+    log_error("[jit]   %s %llx: %s run %llx+%llx perms %x", k ? "before" : "fault", (unsigned long long)at,
+              info.is_mapped ? "mapped" : "unmapped", (unsigned long long)info.base_gva, (unsigned long long)info.size,
+              info.perms);
+  }
 }
 
 static Jit_Thread g_main_thread;
