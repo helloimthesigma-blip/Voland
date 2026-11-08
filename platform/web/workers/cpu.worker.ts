@@ -997,8 +997,10 @@ async function putSave(name: string, archive: ArrayBuffer): Promise<CPUToMainMes
 async function deleteSave(name: string): Promise<CPUToMainMessage> {
   const ok = isSaveName(name) && restoreSaveArchive(name, writeSaveArchive(new Map()));
   if (ok) {
-    await removeSaveArchive(name);
+    /* Baseline first: a mirror running during the await would otherwise
+     * see the emptied save as a new commit and store it back. */
     baselineCommittedSaves();
+    await removeSaveArchive(name);
   }
   return { type: "save-deleted", name, ok };
 }
