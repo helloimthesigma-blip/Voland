@@ -1165,6 +1165,89 @@ static void vertex_pages_note(Raster3d *r, const Gpu_Memory *mem, uint64_t va, u
   }
 }
 
+/* The vertex pool (docs/NEXT.md 3): pulled vertex streams read from one
+ * GPU buffer of 1 MiB chunks that mirror guest memory, instead of riding
+ * in every draw's data. A chunk's pages are read and hashed at their
+ * first use in a submission and uploaded (BUFFER_WRITE) only when they
+ * changed - Super Mario Odyssey rewrites ~1.4% of them per frame. A
+ * stream that crosses a chunk boundary, or whose pages cannot be read,
+ * rides inline as before. Chunks are reused least recently used first. */
+#define VPOOL_CHUNK_BYTES (1u << 20)
+#define VPOOL_CHUNKS 120u /* the buffer stays under WebGPU's default 128 MiB binding limit */
+#define VPOOL_PAGE_BYTES 4096u
+#define VPOOL_PAGES (VPOOL_CHUNK_BYTES / VPOOL_PAGE_BYTES)
+#define VPOOL_BUFFER_ID 0x7fff0000u /* above gpu_mirror's ids, which count up from 1 */
+
+typedef struct Vpool_Chunk {
+  uint64_t va;        /* 1 MiB aligned */
+  uint64_t last_used; /* g_vpool.tick */
+  bool used;
+  uint64_t page_hash[VPOOL_PAGES];
+  uint32_t page_sync[VPOOL_PAGES]; /* submission + 1 it was last synced in; 0 = never uploaded */
+} Vpool_Chunk;
+
+static struct {
+  int env_off; /* VOLAND_NO_VPOOL; -1: not read yet */
+  bool created;
+  uint64_t tick;
+  Vpool_Chunk chunks[VPOOL_CHUNKS];
+  uint8_t page[VPOOL_PAGE_BYTES];
+} g_vpool = {-1, false, 0, {{0}}, {0}};
+
+static void vpool_reset(void) {
+  g_vpool.created = false;
+  for (uint32_t c = 0; c < VPOOL_CHUNKS; c++) g_vpool.chunks[c].used = false;
+}
+
+/* The pool offset of guest [va, va + bytes), synced; false: read it inline. */
+static bool vpool_window(Raster3d *r, const Gpu_Memory *mem, uint64_t va, uint64_t bytes, uint32_t *offset) {
+  if (g_vpool.env_off < 0) g_vpool.env_off = getenv("VOLAND_NO_VPOOL") ? 1 : 0;
+  if (g_vpool.env_off || r->no_vertex_pool || !r->gpu || !bytes) return false;
+  const uint64_t base = va & ~(uint64_t)(VPOOL_CHUNK_BYTES - 1u);
+  if (((va + bytes - 1u) & ~(uint64_t)(VPOOL_CHUNK_BYTES - 1u)) != base) return false;
+  if (!g_vpool.created) {
+    const uint32_t create[2] = {VPOOL_BUFFER_ID, VPOOL_CHUNK_BYTES * VPOOL_CHUNKS};
+    gpu_stream_write(r->gpu, GPU_REC_BUFFER_CREATE, create, sizeof(create));
+    g_vpool.created = true;
+  }
+  Vpool_Chunk *chunk = NULL, *victim = NULL;
+  for (uint32_t c = 0; c < VPOOL_CHUNKS && !chunk; c++) {
+    Vpool_Chunk *e = &g_vpool.chunks[c];
+    if (e->used && e->va == base) chunk = e;
+    else if (!victim || !e->used || (victim->used && e->last_used < victim->last_used)) victim = e;
+  }
+  if (!chunk) {
+    chunk = victim;
+    chunk->used = true;
+    chunk->va = base;
+    memset(chunk->page_sync, 0, sizeof(chunk->page_sync));
+    r->gpu_stats.vpool_chunk_loads++;
+  }
+  chunk->last_used = ++g_vpool.tick;
+  const uint32_t slot = (uint32_t)(chunk - g_vpool.chunks);
+  const uint32_t stamp = r->submission + 1u;
+  for (uint64_t p = (va - base) / VPOOL_PAGE_BYTES; p <= (va + bytes - 1u - base) / VPOOL_PAGE_BYTES; p++) {
+    if (chunk->page_sync[p] == stamp) continue;
+    if (!mem->read(mem->user, base + p * VPOOL_PAGE_BYTES, g_vpool.page, VPOOL_PAGE_BYTES)) return false;
+    Content_Hash h;
+    content_hash_begin(&h, VPOOL_PAGE_BYTES);
+    content_hash_update(&h, g_vpool.page, VPOOL_PAGE_BYTES);
+    const uint64_t hash = content_hash_end(&h);
+    if (!chunk->page_sync[p] || chunk->page_hash[p] != hash) {
+      const uint32_t head[3] = {VPOOL_BUFFER_ID, slot * VPOOL_CHUNK_BYTES + (uint32_t)p * VPOOL_PAGE_BYTES, VPOOL_PAGE_BYTES};
+      uint8_t *rec = gpu_stream_begin(r->gpu, GPU_REC_BUFFER_WRITE, (uint32_t)sizeof(head) + VPOOL_PAGE_BYTES);
+      memcpy(rec, head, sizeof(head));
+      memcpy(rec + sizeof(head), g_vpool.page, VPOOL_PAGE_BYTES);
+      gpu_stream_end(r->gpu);
+      r->gpu_stats.vpool_upload_bytes += VPOOL_PAGE_BYTES;
+    }
+    chunk->page_hash[p] = hash;
+    chunk->page_sync[p] = stamp;
+  }
+  *offset = slot * VPOOL_CHUNK_BYTES + (uint32_t)(va - base);
+  return true;
+}
+
 #define RT_FORMAT_A8B8G8R8_UNORM 0xD5u
 #define TEX_FORMAT_A8B8G8R8 0x08u
 
@@ -3227,6 +3310,7 @@ void raster3d_set_gpu(Raster3d *r, Gpu_Stream *stream) {
   if (!r->ready) return;
   r->gpu = stream;
   gpu_mirror_reset(NULL); /* the old stream's buffers went with it */
+  vpool_reset();
   r->gpu_pool_used = GPU_POOL_WORDS; /* the next draw starts a new epoch */
   if (stream) log_info("[gpu] WebGPU renderer: draws stream to the GPU worker");
 }
@@ -4959,6 +5043,19 @@ static void gpu_emit_draw(Raster_State *rs) {
         resident_id = id;
         stream_at[k] = 0;
         r->gpu_stats.resident_streams++;
+      }
+    }
+    /* No stream on a GPU-written mirror: the vertex pool, where it holds
+     * them (one resident buffer per draw). */
+    for (uint32_t k = 0; k < stream_count; k++) {
+      const uint64_t from = streams[k].address + (streams[k].instanced ? 0u : (uint64_t)g->id_lo * streams[k].stride);
+      if (resident[k]) continue;
+      if ((!resident_id || resident_id == VPOOL_BUFFER_ID) &&
+          vpool_window(r, rs->ctx->mem, from, stream_bytes[k], &resident_offset[k])) {
+        resident[k] = true;
+        resident_id = VPOOL_BUFFER_ID;
+        stream_at[k] = 0;
+        r->gpu_stats.vpool_streams++;
         continue;
       }
       stream_at[k] = pull_bytes;

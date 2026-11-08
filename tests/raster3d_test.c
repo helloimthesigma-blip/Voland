@@ -964,6 +964,8 @@ static bool g_gpu_textured; /* gpu_draw_topology: the texturing pixel program */
 static bool g_bc1_texture;  /* ... sampling texture_state_bc1's texture */
 static uint32_t g_ps_override; /* gpu_draw_topology: this pixel program instead (0: none) */
 static bool g_draw_twice;      /* gpu_draw_topology: the same draw again */
+static bool g_twice_resubmit;  /* ... in a new submission */
+static uint64_t g_twice_poke;  /* ... after this guest address took 7.0f (0: none) */
 static bool g_gpu_rt_bl;       /* gpu_draw_topology: into RT_BL (block linear) instead of RT */
 static uint64_t g_gpu_rt_offset; /* ... this far past RT_BL */
 static uint32_t g_base_instance; /* gpu_draw_topology: REG_BASE_INSTANCE */
@@ -987,7 +989,11 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
   vertex(3, 1.0f, 1.0f, 1, 0, 0, 1);
   raster3d_begin_submission(r);
   draw_arrays(r, topology, count);
-  if (g_draw_twice) draw_arrays(r, topology, count);
+  if (g_draw_twice) {
+    if (g_twice_resubmit) raster3d_begin_submission(r);
+    if (g_twice_poke) putf(g_twice_poke, 7.0f);
+    draw_arrays(r, topology, count);
+  }
   raster3d_flush(r, &k_mem);
   gpu_stream_publish(&stream);
   stream_drain(&seen);
@@ -1259,8 +1265,10 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   CHECK(in_range, "indices address the record's vertices");
 
   /* Vertex pulling: no vertices; the indices are vertex ids and the data
-   * binding carries each input's descriptor and its stream's bytes. */
+   * binding carries each input's descriptor and its stream's bytes (the
+   * vertex pool off; it is tested below). */
   r->no_vertex_pull = false;
+  r->no_vertex_pool = true;
   gpu = gpu_draw_once(r, FRONT_CW_REG);
   CHECK(gpu.count == 1 && (gpu.last.flags & GPU_DRAW_VERTEX_PULL) && gpu.last.vertex_count == 0u &&
             gpu.last.index_count == 3u && gpu.last.vertex_input_count == 2u,
@@ -1280,6 +1288,29 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   const Seen_Draw pulled_strip = gpu_draw_topology(r, FRONT_CW_REG, TOPOLOGY_STRIP_TEST, 4);
   CHECK(pulled_strip.count == 1 && pulled_strip.last.vertex_count == 0u && pulled_strip.last.index_count == 6u,
         "pulled strip: %u vertices, %u indices", pulled_strip.last.vertex_count, pulled_strip.last.index_count);
+
+  /* The vertex pool: the stream is read from the pool buffer (resident),
+   * its page uploaded once; unchanged in the next submission, nothing is
+   * uploaded; a byte changed in the page, the page again. */
+  r->no_vertex_pool = false;
+  raster3d_begin_submission(r);
+  Seen_Draw pooled = gpu_draw_once(r, FRONT_CW_REG);
+  memcpy(vsi, g_seen_data + 4u * WGSL_DRAW_VS_INPUTS, sizeof(vsi));
+  CHECK(pooled.count == 1 && (vsi[1] & WGSL_VSI_RESIDENT) && pooled.resident_binding != 0u &&
+            pooled.buffer_creates == 1u && pooled.buffer_writes == 1u,
+        "pooled: resident %u, buffer %x, %u created, %u writes", vsi[1] & WGSL_VSI_RESIDENT, pooled.resident_binding,
+        pooled.buffer_creates, pooled.buffer_writes);
+  g_draw_twice = g_twice_resubmit = true;
+  pooled = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(pooled.count == 2 && pooled.buffer_writes == 1u, "pooled, unchanged in the next submission: no second upload (%u writes)",
+        pooled.buffer_writes);
+  g_twice_poke = VERTICES + 32u * 40u; /* the same page, past the triangle */
+  pooled = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(pooled.count == 2 && pooled.buffer_writes == 2u, "pooled, the page changed: uploaded again (%u writes)",
+        pooled.buffer_writes);
+  g_draw_twice = g_twice_resubmit = false;
+  g_twice_poke = 0;
+  r->no_vertex_pool = true;
 
   /* A triangle list of two: the first through the assembler (it prepares
    * the draw), the second in bulk - the ids as the guest ordered them. */

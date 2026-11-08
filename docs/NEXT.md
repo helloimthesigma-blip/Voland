@@ -176,3 +176,11 @@ can keep `gpu_mirror`'s hash-on-use and needs no write tracking; the work
 is on the GPU side (chunked mirrors over a byte budget instead of 32 x 4
 MiB, several resident bindings or one chunk pool, indices from a mirror).
 Write tracking stays the fallback if hashing shows up in profiles.
+
+Stream shapes (same run): 24.8 M pulled streams, 2.6 KB on average; 2.9%
+cross a 64 KiB boundary, 0.23% a 1 MiB one, 0.56% exceed 64 KiB. Distinct
+1 MiB chunks read per frame: 36 on average, 59 at most. So: one pool
+buffer of 1 MiB chunks (120 of them, under the 128 MiB default binding
+limit), LRU between frames, a stream inside one chunk read from the pool
+(the existing BUFFER_CREATE / BUFFER_WRITE records and the resident
+binding), the rest inline as today.

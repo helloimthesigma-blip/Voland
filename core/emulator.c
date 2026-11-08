@@ -1160,7 +1160,8 @@ static void report_stream(Emulator* emulator) {
            "periodic %llu forced %llu), surfaces %.1f; draw data %.1f pulled %.1f vertices %.1f indices %.1f; "
            "pool %.1f written %.1f reused; surfaces created %llu, draws %llu, vertices on the CPU: topology %llu bindless %llu globals %llu "
            "small %llu window %llu; textures sampler %llu, shader-filtered: integer %llu cube %llu padded %llu "
-           "format %llu wrap %llu; vertex pages %llu (changed %llu, new %llu)",
+           "format %llu wrap %llu; vertex pages %llu (changed %llu, new %llu); vertex pool %llu streams, %.1f MiB "
+           "uploaded, %llu chunks loaded",
            (unsigned long long)(now->texture_uploads - was->texture_uploads),
            (double)(now->upload_bytes - was->upload_bytes - (now->surface_upload_bytes - was->surface_upload_bytes)) / mib,
            (unsigned long long)(now->hashed_new - was->hashed_new),
@@ -1184,7 +1185,10 @@ static void report_stream(Emulator* emulator) {
            (unsigned long long)(now->tex_sw_wrap - was->tex_sw_wrap),
            (unsigned long long)(now->vertex_pages - was->vertex_pages),
            (unsigned long long)(now->vertex_pages_changed - was->vertex_pages_changed),
-           (unsigned long long)(now->vertex_pages_new - was->vertex_pages_new));
+           (unsigned long long)(now->vertex_pages_new - was->vertex_pages_new),
+           (unsigned long long)(now->vpool_streams - was->vpool_streams),
+           (double)(now->vpool_upload_bytes - was->vpool_upload_bytes) / mib,
+           (unsigned long long)(now->vpool_chunk_loads - was->vpool_chunk_loads));
   emulator->stream_stats_reported = *now;
 }
 

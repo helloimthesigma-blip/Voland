@@ -196,6 +196,7 @@ typedef struct Raster3d_Gpu_Stats {
    * streams and index buffers, once per frame each; of those, changed since
    * the frame they were last read, and first seen. */
   uint64_t vertex_pages, vertex_pages_changed, vertex_pages_new;
+  uint64_t vpool_streams, vpool_upload_bytes, vpool_chunk_loads; /* the vertex pool (raster3d.c) */
   /* Texture bindings by how they are filtered: the device's sampler, or the
    * shader's taps because the sample is integer, a cube, padded, the
    * format unfilterable, or a wrap mode beyond the sampler's. */
@@ -339,6 +340,7 @@ typedef struct Raster3d {
    * before GPU vertex stages; diagnostics and comparison). */
   bool cpu_vertices;
   bool no_vertex_pull; /* GPU vertex stages take decoded inputs (the CPU fetches them) */
+  bool no_vertex_pool; /* pulled streams ride in each draw's data, not the vertex pool (VOLAND_NO_VPOOL) */
   bool no_gpu_compute; /* compute dispatches stay on the CPU (stream version 6 off; diagnostics) */
   bool no_compute_memo;      /* run every CPU compute dispatch (diagnostics; compute_memo) */
 } Raster3d;
