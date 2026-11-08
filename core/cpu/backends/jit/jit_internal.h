@@ -145,9 +145,12 @@ void jit_note_fast_path(uint32_t insn);
 /* Compiler (jit_compile.c).                                           */
 /* ------------------------------------------------------------------ */
 
+#define JIT_REGION_BLOCK_PCS 32u
+
 typedef struct Jit_Compiled {
   uint32_t instructions; /* in the entry block: the budget needed to enter */
   uint32_t blocks;       /* region blocks */
+  uint64_t block_pc[JIT_REGION_BLOCK_PCS]; /* their first instructions (diagnostics; the first ones) */
   Jit_Code_Range ranges[JIT_MAX_REGION_PAGES];
   uint32_t range_count;
   uint32_t module_bytes;

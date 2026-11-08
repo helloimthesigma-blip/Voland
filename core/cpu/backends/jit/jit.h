@@ -50,6 +50,8 @@ typedef struct Jit_Stats {
   uint64_t sync_installs;      /* modules compiled and instantiated synchronously */
   uint64_t sync_install_ns;    /* ...and the host time that took (cores always; async is the CPU worker's) */
   uint64_t trimmed;            /* regions removed to stay under the live cap (also in evictions) */
+  uint64_t inner_entries;      /* regions compiled for a PC that starts a block inside another compiled region */
+  uint64_t recompiles;         /* regions compiled for an entry PC compiled before (any thread; lossy, diagnostics) */
 } Jit_Stats;
 const Jit_Stats *jit_stats(void);
 

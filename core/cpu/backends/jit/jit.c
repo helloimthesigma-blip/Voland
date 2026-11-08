@@ -762,6 +762,34 @@ static void trim_live(Jit_Thread *t) {
   }
 }
 
+/* Diagnostics: entry PCs compiled so far, any thread (lossy: a slot holds
+ * the last PC hashed to it; racy reads and writes only miscount). */
+#define JIT_SEEN_PCS (1u << 16)
+static uint64_t g_seen_pcs[JIT_SEEN_PCS];
+
+/* Diagnostics: blocks after the first of compiled regions, by exact PC
+ * (lossy like g_seen_pcs). A region compiled for one of them is
+ * "inside others" in the report. Compiling those after 1/16 of the
+ * threshold cut interpreted runs 7-10% but not frame time (Nine Sols
+ * 52.0 vs 51.7 fps, 2026-11-08), so the threshold stays the same. */
+static uint64_t g_inner_pcs[JIT_SEEN_PCS];
+
+static uint64_t *seen_slot(uint64_t *table, uint64_t pc) {
+  return &table[(uint32_t)((pc >> 2) * 0x9E3779B97F4A7C15ull >> 48) & (JIT_SEEN_PCS - 1u)];
+}
+
+static void note_region_blocks(Jit_Thread *t, uint64_t pc, const Jit_Compiled *compiled) {
+  if (__atomic_load_n(seen_slot(g_inner_pcs, pc), __ATOMIC_RELAXED) == pc) t->stats.inner_entries++;
+  for (uint32_t b = 1; b < compiled->blocks && b < JIT_REGION_BLOCK_PCS; b++)
+    __atomic_store_n(seen_slot(g_inner_pcs, compiled->block_pc[b]), compiled->block_pc[b], __ATOMIC_RELAXED);
+}
+
+static void note_compiled_pc(Jit_Thread *t, uint64_t pc) {
+  uint64_t *slot = seen_slot(g_seen_pcs, pc);
+  if (__atomic_load_n(slot, __ATOMIC_RELAXED) == pc) t->stats.recompiles++;
+  else __atomic_store_n(slot, pc, __ATOMIC_RELAXED);
+}
+
 static void install_entry(Jit_Thread *t, Jit_Entry *e, uint64_t pc, uint64_t generation, uint64_t function,
                           const Jit_Compiled *compiled, uint64_t hash, bool multicore) {
   if (e->function) {
@@ -782,6 +810,8 @@ static void install_entry(Jit_Thread *t, Jit_Entry *e, uint64_t pc, uint64_t gen
   e->pending = 0;
   e->referenced = 1; /* the trim below must not take it straight back */
   t->stats.blocks_compiled++;
+  note_compiled_pc(t, pc);
+  note_region_blocks(t, pc, compiled);
   t->stats.region_blocks += compiled->blocks;
   t->stats.module_bytes += compiled->module_bytes;
   trim_live(t);

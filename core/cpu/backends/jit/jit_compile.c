@@ -6354,6 +6354,7 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
       }
       result->instructions = c.blocks[0].length;
       result->blocks = c.block_count;
+      for (uint32_t k = 0; k < c.block_count && k < JIT_REGION_BLOCK_PCS; k++) result->block_pc[k] = c.blocks[k].pc;
       result->module_bytes = b.length;
       return true;
     }

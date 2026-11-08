@@ -1368,11 +1368,11 @@ static void report_jit(void) {
   static Jit_Stats last;
   const Jit_Stats now = *jit_stats();
   const double ms = 1e6;
-  log_info("[parallel] jit: %llu regions compiled, %llu evicted, %llu interpreted / %llu compiled block runs; "
+  log_info("[parallel] jit: %llu regions compiled (%llu again, %llu inside others), %llu evicted, %llu interpreted / %llu compiled block runs; "
            "codegen %.0f ms, compile-lock wait %.0f ms, %llu sync installs %.0f ms; "
            "%llu direct SIMD&FP calls (%llu with FPCR != 0, %llu with IXC clear), last FPCR %llx",
            (unsigned long long)(now.blocks_compiled - last.blocks_compiled),
-           (unsigned long long)(now.evictions - last.evictions),
+           (unsigned long long)(now.recompiles - last.recompiles), (unsigned long long)(now.inner_entries - last.inner_entries), (unsigned long long)(now.evictions - last.evictions),
            (unsigned long long)(now.interpreted_blocks - last.interpreted_blocks),
            (unsigned long long)(now.block_entries - last.block_entries), (double)(now.codegen_ns - last.codegen_ns) / ms,
            (double)(now.compile_lock_ns - last.compile_lock_ns) / ms,
