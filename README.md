@@ -2,20 +2,40 @@
 
 A Nintendo Switch emulator that runs in your browser. A C11 core compiled to
 WebAssembly, its own ARM64 → WebAssembly JIT, and a WebGPU renderer. Nothing
-to install, and no keys or firmware.
+to install, no keys, and most games need no firmware.
 
-**Hollow Knight, Silksong and Celeste are fully playable in a browser tab**:
-real commercial Switch games booting, running cutscenes and playing at full
-game speed, at or near 60 fps on a recent Mac.
+> **Status:** Phase 4 (First Boot). Hollow Knight, Silksong and Celeste play from boot into gameplay; six more games boot and play in places but run slower or have known faults (table below). Not done yet: Opus audio, and speed for the heavier games. Per-game details are in [NEW_GAMES.md](docs/NEW_GAMES.md), the full task list in [DESIGN.md §25](docs/DESIGN.md#25-development-phases).
 
-> **Status:** Phase 4 (First Boot). In Chrome on an M4 Mac mini, Celeste and Hollow Knight run at about 60 fps, Silksong at 55-60, Nine Sols at about 52 and Super Mario Odyssey at 33-45 depending on the scene; Super Smash Bros. Ultimate and Mario Kart 8 Deluxe (32-bit, on its own AArch32 JIT) hold 60, Animal Crossing runs at about 55, and Tears of the Kingdom runs slowly (about 8 fps). A dumped game's whole folder of decrypted NCAs can be loaded, giving the library the game's own name and icon, and mods (LayeredFS, patches, cheats, updates, DLC) load from zip, 7z or folders. Not done yet: Opus audio; the per-game state is in [NEW_GAMES.md](docs/NEW_GAMES.md) and the full task list in [DESIGN.md §25](docs/DESIGN.md#25-development-phases).
+### Where each game stands
+
+Measured in Chrome on an M4 Mac mini with default settings. fps is frames
+the game presented per second of real time, and the scene matters a lot:
+title screens are much lighter than gameplay, so both are given where they
+were measured.
+
+| Game | What has been played | Gameplay fps | Title / menus fps | Known problems |
+|---|---|---|---|---|
+| Celeste | title, file select, levels | ~59 | ~59 | none known |
+| Hollow Knight | new game through the intro into King's Pass; saved games | not measured separately | ~60 | none known |
+| Hollow Knight: Silksong | boot to gameplay, saves, video cutscenes | ~46 | ~58 | none known |
+| Super Mario Odyssey | opening, Cap Kingdom | 35-46 by scene | 37-40 (cutscenes) | the camera tutorial needs the right stick pushed up |
+| Nine Sols | title, opening cinematic, gameplay, dialogue | ~33 (Oct.) | ~52 | |
+| Super Smash Bros. Ultimate | matches, opening movie | 22-27 in a fight (Oct.) | ~60 | |
+| Mario Kart 8 Deluxe (32-bit) | whole races | ~18 in a race | ~60 | |
+| Animal Crossing: New Horizons | opening through arrival on the island | ~8 on the island (Oct.) | ~55 (intro) | the sea renders black; black blotches on shadowed surfaces |
+| Tears of the Kingdom | the opening descent | ~8 | - | slow; occasional crashes on three cores |
+
+"(Oct.)" marks numbers measured in October 2026, before later speed work, and not
+re-measured since. On an M1 Mac, Silksong gameplay runs at about 33 fps.
+Only macOS has been tested. The numbers come from `platform/web/tools/perf.mjs`,
+which loads a game in Chrome, plays a scripted input sequence and reports fps,
+so you can rerun them with your own game files.
 
 ### What works today
 
-- **Commercial games in the browser.** Hollow Knight and Hollow Knight: Silksong
-  play from boot to gameplay at real game speed, with sound and video cutscenes.
-- **Save states.** Freeze the whole machine mid-fight and jump back in a second.
-  They survive a page reload.
+- **Commercial games in the browser**, with sound and video cutscenes (see
+  the table).
+- **Save states.** Freeze the whole machine mid-game and go back to that moment later.
 - **Game saves that persist.** Each game's save directory lives in your browser.
   Browse it, drag files in, back it up and restore it.
 - **Game library.** Load a game once, then launch it from a tile with one click.
@@ -28,8 +48,8 @@ game speed, at or near 60 fps on a recent Mac.
   cores, a WebGPU renderer, and a shader cache that warms up on later visits.
 - **Homebrew.** NROs run directly, or through a homebrew menu from the emulated
   SD card.
-- **A compatibility report.** One click tells you exactly what a new game is
-  missing.
+- **A compatibility report.** One click collects every warning and error the
+  core logged, which usually shows what a new game is missing.
 
 ---
 
@@ -203,7 +223,8 @@ Voland is open source software released under the [GPL-2.0 license](LICENSE).
 Voland does not include, distribute, or help obtain Nintendo's copyrighted
 material. Users dump and decrypt game files themselves, with separate tools,
 from hardware they own. Voland accepts only the resulting decrypted NCA
-files and never consumes keys or firmware (see
+files, never consumes keys, and needs firmware only for the few system
+archives some games read, which users also dump and decrypt themselves (see
 [DESIGN.md §1.6](docs/DESIGN.md#16-legal-scope-boundaries)). Voland never
 connects to Nintendo's servers.
 
