@@ -313,7 +313,11 @@ static uint64_t run_slice_on_core(Parallel *p, Core *core) {
      * at most per run (the next check decides whether to go on). */
     const CPU_ExitReason exit_reason =
         backend->run(thread->thread.cpu_state, used < p->budget ? p->budget - used : p->budget);
-    if (timed) core->time.run_ns += (now_ns() - run_start) * PARALLEL_RUN_SAMPLE;
+    if (timed) {
+      const uint64_t ran_ns = (now_ns() - run_start) * PARALLEL_RUN_SAMPLE;
+      core->time.run_ns += ran_ns;
+      thread->run_ns += ran_ns;
+    }
 
     lock_kernel(p, &core->time.lock_ns);
     p->busy--;
@@ -418,7 +422,11 @@ static void run_free_on_core(Parallel *p, Core *core) {
     const bool timed = core->time.runs++ % PARALLEL_RUN_SAMPLE == 0;
     const uint64_t run_start = timed ? now_ns() : 0;
     const CPU_ExitReason exit_reason = backend->run(thread->thread.cpu_state, p->budget);
-    if (timed) core->time.run_ns += (now_ns() - run_start) * PARALLEL_RUN_SAMPLE;
+    if (timed) {
+      const uint64_t ran_ns = (now_ns() - run_start) * PARALLEL_RUN_SAMPLE;
+      core->time.run_ns += ran_ns;
+      thread->run_ns += ran_ns;
+    }
     host_stall(core);
 
     lock_kernel(p, &core->time.lock_ns);

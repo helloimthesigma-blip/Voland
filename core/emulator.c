@@ -1803,11 +1803,11 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
     uint64_t offset = 0;
     const char *module = module_of(emulator, pc, &offset);
     log_warn("[threads] %llu (handle 0x%x, prio %u) %s%s%s pc %s+0x%llx (last core %u, ideal %u, mask 0x%llx, run %llu, "
-             "cycles %llu)",
+             "cycles %llu, host ms %llu)",
              (unsigned long long)th->thread_id, th->handle, th->thread.priority, k_state[th->state],
              th->on_core ? " on core" : "", th->held ? " held" : "", module, (unsigned long long)offset, th->last_core,
              th->thread.preferred_core, (unsigned long long)th->core_mask, (unsigned long long)th->last_run,
-             (unsigned long long)th->cycles_run);
+             (unsigned long long)th->cycles_run, (unsigned long long)(th->run_ns / EMULATOR_NS_PER_MS));
     if (th->state == THREAD_STATE_WAITING) {
       uint32_t word = 0;
       (void)vmm_read32(emulator->vmm, th->wait_address, &word);
