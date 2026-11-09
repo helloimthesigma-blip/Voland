@@ -1769,6 +1769,12 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
   if (!emulator || !emulator->program_loaded) return;
   static const char *const k_state[] = {"free", "created", "runnable", "waiting", "dead"};
   log_warn("[threads] at tick %llu:", (unsigned long long)emulator->scheduler.ticks);
+  /* Where each module sits, to name absolute addresses (JIT region names, fault dumps). */
+  for (uint32_t m = 0; m < emulator->process.module_count; m++) {
+    const Process_Module *mod = &emulator->process.modules[m];
+    log_warn("[threads] module %s at 0x%llx (0x%llx bytes)", mod->name, (unsigned long long)mod->base_gva,
+             (unsigned long long)mod->image_size);
+  }
   /* The GPU side of a stall: submissions still queued, and syncpoints whose
    * promised value is ahead of the reached one. */
   log_warn("[threads] gpu thread: %u calls queued, %u done, %s", gpu_thread_queued(&emulator->gpu_thread),
@@ -1796,10 +1802,12 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
     const uint64_t pc = emulator->cpu_backend->get_pc(th->thread.cpu_state);
     uint64_t offset = 0;
     const char *module = module_of(emulator, pc, &offset);
-    log_warn("[threads] %llu (handle 0x%x, prio %u) %s%s%s pc %s+0x%llx (last core %u, ideal %u, mask 0x%llx, run %llu)",
+    log_warn("[threads] %llu (handle 0x%x, prio %u) %s%s%s pc %s+0x%llx (last core %u, ideal %u, mask 0x%llx, run %llu, "
+             "cycles %llu)",
              (unsigned long long)th->thread_id, th->handle, th->thread.priority, k_state[th->state],
              th->on_core ? " on core" : "", th->held ? " held" : "", module, (unsigned long long)offset, th->last_core,
-             th->thread.preferred_core, (unsigned long long)th->core_mask, (unsigned long long)th->last_run);
+             th->thread.preferred_core, (unsigned long long)th->core_mask, (unsigned long long)th->last_run,
+             (unsigned long long)th->cycles_run);
     if (th->state == THREAD_STATE_WAITING) {
       uint32_t word = 0;
       (void)vmm_read32(emulator->vmm, th->wait_address, &word);

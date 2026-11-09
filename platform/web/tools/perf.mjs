@@ -881,7 +881,9 @@ async function main() {
           for (let k = 0; k < profile.samples.length; k++) {
             const frame = byId.get(profile.samples[k])?.callFrame;
             const name = frame?.functionName || "(anonymous)";
-            if (name === "(idle)" || name === "(program)" || /futex_wait|atomic_wait|cond_timedwait/.test(name)) continue;
+            /* helper_main (common/workers.c) only waits for work itself: the
+             * build inlines its condition wait, so its self time is idle. */
+            if (name === "(idle)" || name === "(program)" || /futex_wait|atomic_wait|cond_timedwait|^helper_main$/.test(name)) continue;
             const us = profile.timeDeltas[k] ?? 0;
             merged.set(name, (merged.get(name) ?? 0) + us);
             total += us;
