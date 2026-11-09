@@ -73,7 +73,8 @@
  *   setting, e.g. frame-skip 2), "cpuspeed PERCENT" (the virtual CPU
  *   clock, as ?cpuspeed=), "measure S" (fps and virtual-time rate over S
  *   wall seconds), "cheat NAME" (switch on the running cheat whose name
- *   contains NAME, the rest of the line), "sleep MS", "go"
+ *   contains NAME, the rest of the line), "export-saves FILE" (the Saves
+ *   panel's backup tar, for --restore-saves), "sleep MS", "go"
  *   (measure now). Each
  *   command prints "drive: N done ...".
  * - --restore-saves BACKUP.tar imports a saves backup (the Saves panel's
@@ -402,7 +403,8 @@ async function main() {
      * 50 ms timer fires. Reset when the measured window opens. */
     await page.addInitScript(() => {
       const RESP_TICK_MS = 50;
-      const fresh = () => ({ longTasks: 0, longTaskMs: 0, longTaskMaxMs: 0, frames: 0, frameGapMaxMs: 0, slowFrames: 0, timerLateMaxMs: 0, timerLateSumMs: 0, timerTicks: 0 });
+      const GAPS_KEPT = 20;
+      const fresh = () => ({ longTasks: 0, longTaskMs: 0, longTaskMaxMs: 0, frames: 0, frameGapMaxMs: 0, slowFrames: 0, timerLateMaxMs: 0, timerLateSumMs: 0, timerTicks: 0, gaps: [] });
       let r = fresh();
       try {
         new PerformanceObserver((list) => {
@@ -419,7 +421,11 @@ async function main() {
           const gap = t - lastFrame;
           r.frames++;
           r.frameGapMaxMs = Math.max(r.frameGapMaxMs, gap);
-          if (gap > 50) r.slowFrames++;
+          if (gap > 50) {
+            r.slowFrames++;
+            /* When (wall-clock seconds), so a pause can be matched with the game's log. */
+            if (r.gaps.length < GAPS_KEPT) r.gaps.push(`${((performance.timeOrigin + lastFrame) / 1000).toFixed(1)}:${gap.toFixed(0)}ms`);
+          }
         }
         lastFrame = t;
         requestAnimationFrame(frame);
@@ -704,6 +710,13 @@ async function main() {
           await page.getByTestId(arg).locator("select").selectOption(arg2 ?? "");
         } else if (cmd === "click") {
           await page.getByTestId(arg).first().click();
+        } else if (cmd === "export-saves") {
+          /* The Saves panel's backup, written to FILE (to edit or restore later). */
+          const panel = page.getByTestId("saves");
+          if (!(await panel.evaluate((d) => d.open))) await panel.locator("summary").click();
+          const [download] = await Promise.all([page.waitForEvent("download"), page.getByTestId("saves-export").click()]);
+          await download.saveAs(arg);
+          note = arg;
         } else if (cmd === "status") {
           note = (await page.getByTestId(arg).first().textContent().catch(() => "")) ?? "";
         } else if (cmd === "stats") {
@@ -721,7 +734,8 @@ async function main() {
       /* Responsiveness through boot and loading, then the window's own. */
       const boot = await page.evaluate(() => window.__VOLAND_RESP__?.read() ?? null);
       if (boot) console.log(`warmup page: ${boot.longTasks} long tasks (${boot.longTaskMs.toFixed(0)} ms, max ${boot.longTaskMaxMs.toFixed(0)} ms); ` +
-                            `${boot.slowFrames} rAF gaps > 50 ms (max ${boot.frameGapMaxMs.toFixed(0)} ms); timer late max ${boot.timerLateMaxMs.toFixed(0)} ms`);
+                            `${boot.slowFrames} rAF gaps > 50 ms (max ${boot.frameGapMaxMs.toFixed(0)} ms); timer late max ${boot.timerLateMaxMs.toFixed(0)} ms` +
+                            (boot.gaps.length ? `\n  gaps (start:length): ${boot.gaps.join(" ")}` : ""));
       await page.evaluate(() => window.__VOLAND_RESP__?.reset());
     }
     if (opts.phases.length) {

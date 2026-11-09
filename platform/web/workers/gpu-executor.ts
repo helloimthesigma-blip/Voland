@@ -379,6 +379,10 @@ export class GpuExecutor {
   private poolBytes = 0; /* ... pool chunks */
   private shaderBytes = 0; /* WGSL text of the modules created */
   private submits = 0;
+  /* Pipelines and shader modules first built since the last present: the
+   * GPU process compiles them, which can hold up the page's frames. */
+  private newPipelines = 0;
+  private newModules = 0;
   /* Draws' constant buffers and global memory (stream version 9). */
   private readonly pool: GPUBuffer;
 
@@ -767,6 +771,7 @@ export class GpuExecutor {
       cached = { pipeline, layout };
       this.computePipelines.set(key, cached);
       this.stats.pipelines++;
+      this.newPipelines++;
     }
     if (Math.ceil(this.dataUsed / DATA_ALIGN) * DATA_ALIGN + Math.max(data?.byteLength ?? 0, DATA_WINDOW_BYTES) > DATA_BUFFER_BYTES) {
       this.flush();
@@ -885,6 +890,7 @@ export class GpuExecutor {
     if (!module) {
       module = this.device.createShaderModule({ code });
       this.modulesByHash.set(hash, module);
+      this.newModules++;
       this.shaderBytes += code.length;
     }
     this.shaders.set(id, module);
@@ -1026,6 +1032,7 @@ export class GpuExecutor {
     const made = make();
     this.pipelines.set(key, made);
     this.stats.pipelines++;
+    this.newPipelines++;
     return made;
   }
 
@@ -1557,6 +1564,13 @@ export class GpuExecutor {
     this.blit(pass, src, target.format, p.rect, [0, 0, target.width, target.height], flags);
     this.flush();
     this.stats.presents++;
+    if (this.newPipelines || this.newModules) {
+      /* Wall-clock time, to line a page stall up with a burst of builds. */
+      this.host.log("info", `new GPU programs at ${((performance.timeOrigin + performance.now()) / 1000).toFixed(1)}: ` +
+        `${this.newPipelines} pipelines, ${this.newModules} shader modules (present ${this.stats.presents})`);
+      this.newPipelines = 0;
+      this.newModules = 0;
+    }
     if (this.stats.presents % MEMORY_REPORT_PRESENTS === 0) this.reportMemory();
     this.host.presented(width, height);
   }
