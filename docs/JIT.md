@@ -482,6 +482,28 @@ again on top of register residency (0.5.6, which makes the caller's
 reload at most 8 registers): still 6-7% slower (fight 48.9-49.7 vs
 51.0-55.0 fps, three runs each).
 
+**Where the time goes: the front end.** Hollow Knight's and Nine Sols'
+main threads are each about one host core and run 3.9-4.8 ns per guest
+instruction, against 0.7-0.9 for their loop-heavy audio and render
+threads (per-thread host time from two `threads` dumps around a
+measurement; their code has no hot spot: `VOLAND_PC_HIST=1`). Apple's
+CPU counters (`xcrun xctrace record --template "CPU Counters" --attach
+<renderer pid>`, table `MetricAggregationForThread`) split the cycles of
+the workers that run guest code (2026-11-10, M4 mini, browser):
+
+| | useful | delivery (front end) | processing (back end) | discarded |
+|---|---|---|---|---|
+| Hollow Knight, Crossroads fight | 27% | 44% | 20% | 9% |
+| Nine Sols, first cave | 13-24% | 48-58% | ~20% | ~8% |
+
+Instruction delivery - i-cache, iTLB, fetch - is the bottleneck, not
+memory or execution: compiled regions are ~10-20 KB of machine code each
+(`node --print-wasm-code`, Hollow Knight: median 10 KB), and a Unity main
+thread runs through thousands of them per frame. That is why every
+change that added code to regions lost even where it saved work, and why
+register residency (less code at every entry and exit) won. Code size is
+the lever.
+
 **Node is not the browser here.** Node 24 (V8 13.6) bounds-checks every
 memory64 access explicitly (about five instructions each); Chromium 149
 uses guard regions and checks none, the 5.25 GB shared memory included
