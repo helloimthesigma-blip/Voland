@@ -22,7 +22,7 @@ were measured.
 | Nine Sols | title, opening cinematic, gameplay, dialogue | ~33 (Oct.) | ~52 | |
 | Super Smash Bros. Ultimate | matches, opening movie | 22-27 in a fight (Oct.) | ~60 | |
 | Mario Kart 8 Deluxe (32-bit) | whole races | ~18 in a race | ~60 | |
-| Animal Crossing: New Horizons | opening through arrival on the island | ~8 on the island (Oct.) | ~55 (intro) | the sea renders black; black blotches on shadowed surfaces |
+| Animal Crossing: New Horizons | opening through arrival on the island | ~8 on the island (Oct.) | ~55 (intro) | none known (the black sea and the dark blotches were fixed on 2026-10-30) |
 | Tears of the Kingdom | the opening descent | ~8 | - | slow; occasional crashes on three cores |
 
 "(Oct.)" marks numbers measured in October 2026, before later speed work, and not
