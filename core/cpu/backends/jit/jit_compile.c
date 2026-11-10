@@ -747,19 +747,25 @@ static int32_t find_block(const Ctx *c, uint64_t pc) {
  * store, B, the card-marking body) counts as the instructions it runs.
  * Larger callees stay regions of their own - compiled once, not into each
  * caller (measured: inlining every callee doubled module bytes). */
-#define JIT_SMALL_CALLEE_INSNS 16u
-#define JIT_SMALL_CALLER_INSNS 48u /* the larger form, with calls to leaves */
+#define JIT_SMALL_CALLEE_INSNS 16u /* A32 (a32_small_callee); A64: small_limit() */
 #define BRANCH_REGISTER_MASK 0xFF9FFC1Fu /* BR/RET with any Rn */
 #define BR_ENCODING 0xD61F0000u
 #define RET_ENCODING 0xD65F0000u
-/* JIT_SMALL_CALLEE_INSNS=N / JIT_SMALL_CALLER_INSNS=N in the environment:
- * other limits for the two forms (A/B runs). */
+/* The A64 limits for the two forms (JIT 0.5.7; the A32 front end keeps
+ * JIT_SMALL_CALLEE_INSNS). Every spanned callee is a copy in each caller,
+ * and Unity's main threads are bound by instruction delivery (docs/JIT.md
+ * "Where the time goes"): with 4/12 instead of 16/48 Hollow Knight's fight
+ * ran 4-5% faster, Nine Sols 2-3%, Silksong's end scene a little, and
+ * Celeste loaded as fast. JIT_SMALL_CALLEE_INSNS=N / JIT_SMALL_CALLER_INSNS=N
+ * in the environment set others (A/B runs). */
+#define SMALL_CALLEE_DEFAULT 4u
+#define SMALL_CALLER_DEFAULT 12u
 static uint32_t small_limit(bool calls_allowed) {
   static int callee = -1, caller = -1;
   if (callee < 0) {
     const char *a = getenv("JIT_SMALL_CALLEE_INSNS"), *b = getenv("JIT_SMALL_CALLER_INSNS");
-    callee = a && atoi(a) > 0 ? atoi(a) : (int)JIT_SMALL_CALLEE_INSNS;
-    caller = b && atoi(b) > 0 ? atoi(b) : (int)JIT_SMALL_CALLER_INSNS;
+    callee = a && atoi(a) > 0 ? atoi(a) : (int)SMALL_CALLEE_DEFAULT;
+    caller = b && atoi(b) > 0 ? atoi(b) : (int)SMALL_CALLER_DEFAULT;
   }
   return (uint32_t)(calls_allowed ? caller : callee);
 }

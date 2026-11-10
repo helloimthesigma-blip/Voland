@@ -381,11 +381,12 @@ What joins a region:
   conditional, and the fall-through after an instruction handed to the
   interpreter.
 - **Calls into small callees.** A BL target joins the region if it is a
-  leaf function or a PLT stub: within its first 16 instructions it
-  returns or branches away (RET or BR) without calling anything. So does
-  a function that returns within 48 instructions and calls only such
-  leaves: managed code's helpers (an array's length, a GC poll), which
-  Celeste calls 170 M times while it loads. The size counts the
+  leaf function or a PLT stub: within its first 4 instructions (16 for
+  A32) it returns or branches away (RET or BR) without calling anything.
+  So does a function that returns within 12 instructions and calls only
+  such leaves. (Until 0.5.7 the A64 limits were 16 and 48: managed code's
+  helpers such as an array's length with its GC poll, which Celeste calls
+  170 M times while it loads, joined their callers.) The size counts the
   instructions a call runs, following unconditional branches, so a
   function that tail-jumps through shims qualifies: IL2CPP's GC write
   barrier (two moves, B, a store, B, the card-marking body) was Nine Sols'
@@ -395,9 +396,16 @@ What joins a region:
   any function in the 48-instruction form saved another 6% of Nine Sols'
   entries but cost 20% more module bytes and no time.
   `JIT_SMALL_CALLEE_INSNS=N` and `JIT_SMALL_CALLER_INSNS=N` set the two
-  limits for A/B runs. With 0.5.6, 32/96 and 64/128 (with 64-block
-  regions) left Hollow Knight's fight a little slower (51.0-51.5 and
-  50.5-51.0 vs 52.7-53.0 fps) and Silksong about the same. The
+  limits for A/B runs. Every spanned callee is one more copy of its code,
+  and Unity's main threads are bound by instruction delivery (below), so
+  smaller limits won in the browser on 0.5.6 (two runs each):
+
+  | A64 limits | Hollow Knight fight / standing | Nine Sols | Silksong end | Celeste to 200 frames |
+  |---|---|---|---|---|
+  | 64/128, 64-block regions | 50.5-51.0 / 53.8-53.9 | | ~59 | |
+  | 16/48 (until 0.5.7) | 51.5-52.7 / 54.4-55.9 | 43.9-44.0 | 59.1-59.3 | 33-35 s |
+  | 8/24 | 53.0-55.1 / 55.8-56.8 | 44.4-44.8 | 59.4-59.5 | 33-35 s |
+  | 4/12 (0.5.7) | 53.7-54.2 / 56.9-57.3 | 44.9-45.4 | 59.75 | 34 s | The
   return site joins too, and a RET goes back to an in-region return site
   through a guarded internal transition. Larger callees stay regions of
   their own, compiled once instead of into every caller.
@@ -865,6 +873,9 @@ shows it next to the backend name.
   call cost Hollow Knight's busiest fight ~3 fps. `JIT_SHARED_WALK=1`
   restores the call. `VOLAND_JIT_ENTRIES=1` counts region entries and
   cache misses per guest thread.
+- **0.5.7** (2026-11-10) - smaller spanned callees on A64: leaves of up
+  to 4 instructions and callers of up to 12 (were 16 and 48). Hollow
+  Knight's fight +4-5%, Nine Sols +2-3% in the browser; loads unchanged.
 - **0.5.6** (2026-11-10) - register residency: at most 8 guest registers
   (the region's busiest) live in locals, the rest in the state. Hollow
   Knight's fight +4-5%, Silksong +3-4% in the browser.
