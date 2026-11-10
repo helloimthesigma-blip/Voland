@@ -127,15 +127,17 @@ before writing them.
 **Loads and stores.** The softmmu walk of `vmm_translate_inline()`
 (DESIGN.md §5) runs against the same page tables: the L1 index, the L2
 entry, the permission bits, the host offset. No pointer arithmetic into
-guest RAM happens beyond what that walk produces. The walk is a function
-of each module (`FUNC_WALK`), called by every access that misses its
-translation cache; inlining it at each access (`JIT_INLINE_WALK=1`)
-made modules 22% larger, and on Silksong's load under Node the shared
-walk took CPU from 167 to 150 s and wall time from 68 to 65.5 s (Celeste
-60 to 57 s, Nine Sols 192 to 182 s), although memory-heavy loops that
-miss the cache are slower in `tests/jit_bench.c` (V8 does not inline the
-call). The walk requires every permission bit asked for, so the SP
-entry's read-and-write walk is the same function.
+guest RAM happens beyond what that walk produces. The walk is inlined at
+every access that misses its translation cache. It can instead be a
+function of each module (`FUNC_WALK`, `JIT_SHARED_WALK=1`): modules are
+22% smaller, and on Silksong's load under Node the shared walk took CPU
+from 167 to 150 s and wall time from 68 to 65.5 s (Celeste 60 to 57 s,
+Nine Sols 192 to 182 s), so it was the default until 0.5.5. But V8 does
+not inline the call, and Unity gameplay misses the cache about once per
+10 instructions: Hollow Knight's Crossroads fight ran ~53 fps inline
+against ~49-51 with the call, for about 3% more wall time on Silksong's
+load. The walk requires every permission bit asked for, so the SP
+entry's read-and-write walk is the same code.
 
 - In front of the walk sits a one-entry translation cache per
   permission, in locals: an access within the page last translated for
@@ -751,6 +753,12 @@ shows it next to the backend name.
   chain of compiled regions stops at the next region, and a region's
   entry room is clamped to 0 instead of wrapping when the budget is
   already behind.
+- **0.5.5** (2026-11-09) - the softmmu walk is inlined again at each
+  access (it was a shared module function since 0.5.0): Unity gameplay
+  misses the translation cache about once per 10 instructions, and the
+  call cost Hollow Knight's busiest fight ~3 fps. `JIT_SHARED_WALK=1`
+  restores the call. `VOLAND_JIT_ENTRIES=1` counts region entries and
+  cache misses per guest thread.
 
 ## What a region costs on V8
 

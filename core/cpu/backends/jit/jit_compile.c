@@ -1903,13 +1903,15 @@ static void emit_walk_function(Wasm_Buf *b) {
 /* The shared walk shrinks modules (~55 bytes less per access; Silksong's
  * load compiles 22% fewer module bytes) but V8 does not inline the call,
  * so a TLB miss costs a call: memory-heavy loops that miss ran 20-90%
- * slower in tests/jit_bench.c. Real loads won anyway - Silksong to slice
- * 300k under Node: 10% less CPU, 3.5% less wall time - because engines
- * compile and cache less code. Shared by default; JIT_INLINE_WALK set in
- * the environment inlines it. */
+ * slower in tests/jit_bench.c. Loads favour the call (Silksong to slice
+ * 300k under Node: 10% less CPU, 3.5% less wall time), gameplay does not:
+ * Unity code misses about once per 10 instructions (VOLAND_JIT_ENTRIES),
+ * and Hollow Knight's busiest fight ran ~53 instead of ~49-51 fps inline,
+ * for ~3% more wall time on Silksong's load. Inline by default;
+ * JIT_SHARED_WALK set in the environment calls the shared function. */
 static bool shared_walk(void) {
   static int choice = -1;
-  if (choice < 0) choice = getenv("JIT_INLINE_WALK") == NULL;
+  if (choice < 0) choice = getenv("JIT_SHARED_WALK") != NULL;
   return choice != 0;
 }
 
