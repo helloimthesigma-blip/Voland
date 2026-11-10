@@ -628,6 +628,11 @@ installed them (every wasm thread has its own table). So:
       that poll coalescing lets the cores overlap in 91% of slices (14%
       before). `?cores=N` on the page URL overrides it through a
   `set-host-cores` message; `?cores=0` is serial.
+  - Re-checked 2026-11-10 (JIT 0.5.7, free-running, Mac mini, two
+    interleaved rounds, fps): Hollow Knight fight 2 cores 45.9 / 46.3,
+    3 cores 50.3 / 51.3, 4 cores 49.8 / 50.6; Nine Sols gameplay 46.3 /
+    45.5, 44.9 / 44.9, 44.8 / 44.3; Silksong ~59.9 on all three; no
+    crashes. Three stays the default (Nine Sols' 2-core edge is ~2%).
 - **The CPU worker is Emscripten's main runtime thread.** A core's
   syscalls (stderr, anything else not marked `__proxy: none`) are proxied
   to it synchronously, and its proxy queue only runs when asked.
