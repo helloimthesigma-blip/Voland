@@ -262,6 +262,15 @@ deterministic).
   - That is one handoff per burst instead of one per slice: about
     160 us per 12 ms, ~1.3%.
 
+A core with nothing to run while a thread is runnable only on another
+core (its affinity) broadcasts so that core looks, then waits - once per
+run that ended anywhere (each end broadcasts anyway). Broadcasting on
+every pass made two idle cores wake each other for as long as the third
+was busy: while Celeste loaded, each spent about a quarter of a host core
+in futex wakes, clock reads and picks (2026-11-10, browser profile:
+emscripten_futex_wake 7.9 s of 25 s). With the limit: 0.8 s, and Celeste
+reaches its title in 33-34 s instead of 37.
+
 ### Devices and time
 
 - **Device updates run on a core,** under the kernel lock, whenever they

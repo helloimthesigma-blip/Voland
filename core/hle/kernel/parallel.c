@@ -127,6 +127,7 @@ typedef struct Core {
   int32_t running;          /* scheduler index of the thread in run(), -1 */
   Core_Time time;
   uint64_t stall_rng;       /* VOLAND_CORE_STALL's draws */
+  uint64_t nudged;          /* Scheduler.run_counter + 1 at its last "runnable elsewhere" broadcast */
 } Core;
 
 /* A host call waiting for the driver. */
@@ -380,8 +381,15 @@ static void run_free_on_core(Parallel *p, Core *core) {
     if (index < 0) {
       if (scheduler_pick(sched) >= 0) {
         /* Runnable, but only on another core (affinity): make sure that
-         * one is looking, then wait. */
-        pthread_cond_broadcast(&p->core_cv);
+         * one is looking, then wait. Once per run that ended (each end
+         * broadcasts anyway): with that core busy, two idle cores
+         * otherwise woke each other forever - a quarter of a host core
+         * each while Celeste loaded, all futex wakes, clock reads and
+         * picks. */
+        if (core->nudged != sched->run_counter + 1u) {
+          core->nudged = sched->run_counter + 1u;
+          pthread_cond_broadcast(&p->core_cv);
+        }
         wait_core_cv(p, &core->time.idle_ns);
         continue;
       }
