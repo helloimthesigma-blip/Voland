@@ -752,8 +752,20 @@ static int32_t find_block(const Ctx *c, uint64_t pc) {
 #define BRANCH_REGISTER_MASK 0xFF9FFC1Fu /* BR/RET with any Rn */
 #define BR_ENCODING 0xD61F0000u
 #define RET_ENCODING 0xD65F0000u
+/* JIT_SMALL_CALLEE_INSNS=N / JIT_SMALL_CALLER_INSNS=N in the environment:
+ * other limits for the two forms (A/B runs). */
+static uint32_t small_limit(bool calls_allowed) {
+  static int callee = -1, caller = -1;
+  if (callee < 0) {
+    const char *a = getenv("JIT_SMALL_CALLEE_INSNS"), *b = getenv("JIT_SMALL_CALLER_INSNS");
+    callee = a && atoi(a) > 0 ? atoi(a) : (int)JIT_SMALL_CALLEE_INSNS;
+    caller = b && atoi(b) > 0 ? atoi(b) : (int)JIT_SMALL_CALLER_INSNS;
+  }
+  return (uint32_t)(calls_allowed ? caller : callee);
+}
+
 static bool small_function(const Ctx *c, uint64_t target, bool calls_allowed) {
-  const uint32_t limit = calls_allowed ? JIT_SMALL_CALLER_INSNS : JIT_SMALL_CALLEE_INSNS;
+  const uint32_t limit = small_limit(calls_allowed);
   uint64_t pc = target, page = 0;
   const uint32_t *code = NULL;
   for (uint32_t n = 0; n < limit; n++, pc += INSN_BYTES) {

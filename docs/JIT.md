@@ -393,7 +393,11 @@ What joins a region:
   entries down 4.9% (Nine Sols), 4.6% (Silksong) and 17.6% (Hollow Knight)
   in 150k Node slices, for 1-6% more module bytes; also allowing calls to
   any function in the 48-instruction form saved another 6% of Nine Sols'
-  entries but cost 20% more module bytes and no time. The
+  entries but cost 20% more module bytes and no time.
+  `JIT_SMALL_CALLEE_INSNS=N` and `JIT_SMALL_CALLER_INSNS=N` set the two
+  limits for A/B runs. With 0.5.6, 32/96 and 64/128 (with 64-block
+  regions) left Hollow Knight's fight a little slower (51.0-51.5 and
+  50.5-51.0 vs 52.7-53.0 fps) and Silksong about the same. The
   return site joins too, and a RET goes back to an in-region return site
   through a guarded internal transition. Larger callees stay regions of
   their own, compiled once instead of into every caller.
