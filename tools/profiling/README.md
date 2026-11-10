@@ -24,6 +24,12 @@ with many short slices in the PC profile are call sites, not hot code.
   `.text` around a profile block, with real module offsets.
 - `insn_mix.py DIR samples.bin [slot,slot...]`: instruction-class mix of
   `VOLAND_PC_SAMPLES`, overall and per thread slot.
+- `topdown.py run.xml`: per-thread CPU bottlenecks from Instruments' "CPU
+  Counters" (macOS): the share of each thread's cycles that retired,
+  waited on instruction delivery (front end), on the back end, or were
+  mis-speculated. Record the browser's renderer while a game runs; the
+  file's docstring has the `xctrace` commands. Unity main threads in
+  compiled code are front-end bound (docs/JIT.md).
 - `categorize-cpuprofile.js FILE.cpuprofile`: buckets a browser CPU-worker
   profile (`platform/web/tools/perf.mjs --profile`) into JIT-compiled code,
   JIT helpers, interpreter fallback, Maxwell shader interpretation, the
