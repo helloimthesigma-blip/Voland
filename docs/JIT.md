@@ -526,6 +526,22 @@ weigh even more against straight-line code, and work that only saves
 state loads and stores barely shows. Measure JIT changes in the browser
 (perf.mjs), or run `tests/jit_bench.c` in a Chromium worker.
 
+**What a transition is made of** (2026-11-10, Chromium 149 on an M1, a
+two-module ping-pong through a shared table, one memory counter per hop):
+the bare cross-instance `return_call_indirect` with a constant index takes
+3.6 ns; the full region-cache probe (hash, way compare, generation, budget,
+`referenced` store) adds 3.5 ns, but only 0.6 ns of that is the checks.
+The rest is the call's index coming from a load: an index loaded from
+memory or a global costs about 2.5 ns more than one computed from a
+register, because the callee's instance (and its memory base, which its
+first state load needs) is reached through that load. Hashing at compile
+time for a constant target saved nothing (the hash is off the critical
+path). Neither the shared probe nor JIT_LOCAL_REGS changes jit_bench's
+transition cases. So a transition's floor here is ~4 ns and at most
+~2 ns of the ~8-10 ns in jit_bench can still be cut (hoisting the probe's
+loads ahead of the exit), about 1.5% of Hollow Knight's main thread at 27
+guest instructions per entry: below what a game A/B resolves; not done.
+
 ## The region cache
 
 Each host thread has a region cache of 2^17 entries
