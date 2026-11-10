@@ -145,8 +145,12 @@ a page-indexed translation array behind the one-entry caches (it took
 ~95% of the page-table walks away but cost ~7% fps), calls that return
 (below), lowering the hot threshold (below), smaller regions (16 or 8
 blocks: fewer transitions saved matter more than smaller functions), the
-probe as a shared module function (neutral), and acyclic regions without
-the dispatch loop (fight 40.9-48.1 vs 49.0-53.2 fps). Code added to a
+probe as a shared module function (neutral), acyclic regions without
+the dispatch loop (fight 40.9-48.1 vs 49.0-53.2 fps), and regions that
+stop at other regions' entries instead of copying their code (each guest
+instruction is in ~3.8 regions; this cut the copies but cost far more in
+transitions and compiles: fight 39.4 vs 54.1 fps, Nine Sols 34.8 vs 45.1,
+Celeste's load 50 vs 36 s). Code added to a
 region costs more than the events it saves.
 
 **Lazy flags.** After ADDS, SUBS, ANDS and similar, only the operands
