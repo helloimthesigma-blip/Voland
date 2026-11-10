@@ -307,7 +307,8 @@ bool interp_pc_logged(uint64_t pc) {
   return false;
 }
 /* VOLAND_PC_LOG_WATCH=OFF: each logged PC also watches the 8 bytes at
- * [x1]+OFF (the item a queue push hands over) - every load and store of
+ * [x1]+OFF (the item a queue push hands over; VOLAND_PC_LOG_WATCH_REG
+ * below picks a register instead) - every load and store of
  * them is logged, the JIT's stores too (they take the helper path while
  * this is set). Arming replaces the previous watch. */
 static void pc_log_watch_hook(uint64_t pc, uint64_t lr, uint64_t address, uint32_t size, const void *data, bool write) {
@@ -424,7 +425,11 @@ void interp_pc_log_check(const Interp_State *s) {
     if (g_pc_log_pcs[i] != s->regs.pc) continue;
     if (!pc_log_first_time(s)) return;
     const uint64_t x1v = pc_log_word(s, s->regs.x[1]);
-    pc_log_arm(s, x1v);
+    /* VOLAND_PC_LOG_WATCH_REG=N: watch from register N's value instead
+     * (an object a function receives in x0). */
+    const char *watch_reg = getenv("VOLAND_PC_LOG_WATCH_REG");
+    const uint32_t reg = watch_reg ? (uint32_t)strtoul(watch_reg, NULL, 0) : CPU_REG_X30 + 1u;
+    pc_log_arm(s, reg <= CPU_REG_X30 ? s->regs.x[reg] : x1v);
     pc_log_dump(s->regs.pc);
     pc_log_deref(s);
     pc_log_frames(s);
