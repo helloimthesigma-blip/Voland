@@ -10,6 +10,7 @@
  * here operates on the single module-global instance instead. `layout_get`
  * needs no wrapper since it already takes no arguments.
  */
+#include "common/chunk_lz4.h"
 #include "common/layout.h"
 #include "common/log.h"
 #include "emulator.h"
@@ -108,6 +109,9 @@ EXPORT double emulator_savestate_begin_save_ffi(void);
 EXPORT void emulator_savestate_end_save_ffi(void);
 EXPORT double emulator_savestate_begin_restore_ffi(void);
 EXPORT int emulator_savestate_finish_restore_ffi(int applied);
+EXPORT double emulator_lz4_bound_ffi(double size);
+EXPORT double emulator_lz4_compress_ffi(uint64_t src, double size, uint64_t dst, double capacity);
+EXPORT int emulator_lz4_decompress_ffi(uint64_t src, double size, uint64_t dst, double expected);
 
 /* The Switch's handheld resolution. */
 #define BOOT_FRAME_WIDTH 1280u
@@ -797,6 +801,21 @@ EXPORT int emulator_save_restore_archive_ffi(uint64_t name, uint64_t bytes, doub
  * plan (a static Savestate_Plan; the worker reads its ranges and copies
  * them out of / into linear memory), 0 on failure. */
 static Savestate_Plan g_savestate_plan;
+
+/* Save-state chunks (common/chunk_lz4.h; workers/savestate.ts). */
+EXPORT double emulator_lz4_bound_ffi(double size) { return (double)chunk_lz4_bound((uint32_t)size); }
+
+EXPORT double emulator_lz4_compress_ffi(uint64_t src, double size, uint64_t dst, double capacity)
+{
+  return (double)chunk_lz4_compress((const void *)(uintptr_t)src, (uint32_t)size, (void *)(uintptr_t)dst,
+                                    (uint32_t)capacity);
+}
+
+EXPORT int emulator_lz4_decompress_ffi(uint64_t src, double size, uint64_t dst, double expected)
+{
+  return chunk_lz4_decompress((const void *)(uintptr_t)src, (uint32_t)size, (void *)(uintptr_t)dst,
+                              (uint32_t)expected) ? 1 : 0;
+}
 
 EXPORT double emulator_savestate_begin_save_ffi(void)
 {

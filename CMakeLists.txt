@@ -118,6 +118,7 @@ if(EMSCRIPTEN)
                             '_emulator_save_commits_ffi','_emulator_save_committed_manifest_ffi','_emulator_save_restore_archive_ffi',
                             '_emulator_savestate_begin_save_ffi','_emulator_savestate_end_save_ffi',
                             '_emulator_savestate_begin_restore_ffi','_emulator_savestate_finish_restore_ffi',
+                            '_emulator_lz4_bound_ffi','_emulator_lz4_compress_ffi','_emulator_lz4_decompress_ffi',
                             '_emulator_text_request_ffi','_emulator_text_respond_ffi',
                             '_malloc','_free']"
     "-sEXPORTED_RUNTIME_METHODS=['ccall','cwrap']"

@@ -9,6 +9,10 @@
  *     the core's Savestate_Plan as it was, then per range a u32 bitmap
  *     length and the bitmap (bit c: chunk c is stored), then the stored
  *     chunks in range/chunk order (a range's last chunk may be short).
+ *     Version 2 gives each stored chunk a u32 size: the chunk's length if
+ *     it is stored as is, fewer bytes if it is an LZ4 block (ChunkCodec);
+ *     version 1 stored every chunk as is, without sizes. Game memory
+ *     compresses about 4x (Celeste: 875 MB of non-zero chunks).
  *   "savestates/<id>.json": what the UI lists (title, time, size).
  *
  * The plan's addresses identify the session layout: a state only loads
@@ -21,7 +25,9 @@ import type { SavestateInfo } from "@bindings/protocol";
 
 export const SAVESTATE_DIRECTORY = "savestates";
 const MAGIC = 0x54535356; /* "VSST" */
-const FORMAT_VERSION = 1;
+const FORMAT_VERSION = 2;
+const FORMAT_RAW_CHUNKS = 1; /* still read */
+const CHUNK_SIZE_BYTES = 4;
 export const CHUNK_BYTES = 64 * 1024;
 const HEADER_BYTES = 16;
 
@@ -130,9 +136,21 @@ export function openStateFile(id: string): Promise<FileSystemSyncAccessHandle> {
   return syncHandle(`${id}.vstate`, false);
 }
 
+/** Compression of stored chunks (the core's LZ4, emulator_lz4_*_ffi). */
+export interface ChunkCodec {
+  /** The `length` bytes at linear-memory `address` as an LZ4 block (a
+   * copy, outside shared memory), or null to store them as they are. */
+  compress(address: number, length: number): Uint8Array | null;
+  /** Decodes `packed` into the `length` bytes at linear-memory
+   * `address`; false if it does not decode to exactly that. */
+  decompress(packed: Uint8Array, address: number, length: number): boolean;
+}
+
 /** Writes `plan`'s ranges out of `memory` into `file` (synchronous: the
- * machine stays frozen). Returns the bytes written. */
-export function writeState(file: FileSystemSyncAccessHandle, memory: ArrayBufferLike, plan: Plan): number {
+ * machine stays frozen), each stored chunk through `codec`. Returns the
+ * bytes written. */
+export function writeState(file: FileSystemSyncAccessHandle, memory: ArrayBufferLike, plan: Plan,
+                           codec: ChunkCodec): number {
   file.truncate(0);
   const header = new DataView(new ArrayBuffer(HEADER_BYTES));
   header.setUint32(0, MAGIC, true);
@@ -162,17 +180,32 @@ export function writeState(file: FileSystemSyncAccessHandle, memory: ArrayBuffer
     put(bitmap);
   }
   const scratch = new Uint8Array(CHUNK_BYTES); /* writes take unshared memory */
+  const size = new DataView(new ArrayBuffer(CHUNK_SIZE_BYTES));
   plan.ranges.forEach((range, r) => {
     const bitmap = bitmaps[r] as Uint8Array;
     for (let c = 0; c < chunkCount(range.bytes); c++) {
       if (!((bitmap[c >> 3] ?? 0) & (1 << (c & 7)))) continue;
+      const address = range.address + c * CHUNK_BYTES;
       const length = Math.min(CHUNK_BYTES, range.bytes - c * CHUNK_BYTES);
-      scratch.set(new Uint8Array(memory, range.address + c * CHUNK_BYTES, length));
-      put(scratch.subarray(0, length));
+      const compressed = codec.compress(address, length);
+      const packed = compressed && compressed.byteLength < length ? compressed : null; /* size === length means raw */
+      size.setUint32(0, packed ? packed.byteLength : length, true);
+      put(new Uint8Array(size.buffer));
+      if (packed) {
+        put(packed);
+      } else {
+        scratch.set(new Uint8Array(memory, address, length));
+        put(scratch.subarray(0, length));
+      }
     }
   });
   file.flush();
   return at;
+}
+
+/** A format version this reads, or null. */
+function storedFormat(version: number): number | null {
+  return version === FORMAT_VERSION || version === FORMAT_RAW_CHUNKS ? version : null;
 }
 
 /** The plan stored in `file`, or null if it is not a state file. */
@@ -180,7 +213,7 @@ export function readStoredPlan(file: FileSystemSyncAccessHandle): Plan | null {
   const header = new Uint8Array(HEADER_BYTES);
   if (file.read(header, { at: 0 }) !== HEADER_BYTES) return null;
   const v = new DataView(header.buffer);
-  if (v.getUint32(0, true) !== MAGIC || v.getUint32(4, true) !== FORMAT_VERSION) return null;
+  if (v.getUint32(0, true) !== MAGIC || storedFormat(v.getUint32(4, true)) === null) return null;
   const planBytes = v.getUint32(8, true);
   if (v.getUint32(12, true) !== CHUNK_BYTES || planBytes !== PLAN_BYTES) return null;
   const raw = new Uint8Array(planBytes);
@@ -192,7 +225,11 @@ export function readStoredPlan(file: FileSystemSyncAccessHandle): Plan | null {
  * missing ones zeroed, and what the current timeline used beyond the
  * stored extent (`now`) is zeroed too. Synchronous; false on a short read
  * (memory is then partly written: the caller must not resume it as is). */
-export function readState(file: FileSystemSyncAccessHandle, memory: ArrayBufferLike, stored: Plan, now: Plan): boolean {
+export function readState(file: FileSystemSyncAccessHandle, memory: ArrayBufferLike, stored: Plan, now: Plan,
+                          codec: ChunkCodec): boolean {
+  const header = new Uint8Array(HEADER_BYTES);
+  if (file.read(header, { at: 0 }) !== HEADER_BYTES) return false;
+  const sized = new DataView(header.buffer).getUint32(4, true) === FORMAT_VERSION;
   let at = HEADER_BYTES + PLAN_BYTES;
   const bitmaps: Uint8Array[] = [];
   for (const range of stored.ranges) {
@@ -214,10 +251,19 @@ export function readState(file: FileSystemSyncAccessHandle, memory: ArrayBufferL
       const length = Math.min(CHUNK_BYTES, range.bytes - c * CHUNK_BYTES);
       const target = new Uint8Array(memory, range.address + c * CHUNK_BYTES, length);
       if ((bitmap[c >> 3] ?? 0) & (1 << (c & 7))) {
-        const chunk = scratch.subarray(0, length);
-        if (file.read(chunk, { at }) !== length) return false;
-        at += length;
-        target.set(chunk);
+        let kept = length;
+        if (sized) {
+          const size = new Uint8Array(CHUNK_SIZE_BYTES);
+          if (file.read(size, { at }) !== CHUNK_SIZE_BYTES) return false;
+          at += CHUNK_SIZE_BYTES;
+          kept = new DataView(size.buffer).getUint32(0, true);
+          if (kept > length) return false;
+        }
+        const chunk = scratch.subarray(0, kept);
+        if (file.read(chunk, { at }) !== kept) return false;
+        at += kept;
+        if (kept === length) target.set(chunk);
+        else if (!codec.decompress(chunk, range.address + c * CHUNK_BYTES, length)) return false;
       } else {
         target.fill(0);
       }

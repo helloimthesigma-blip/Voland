@@ -12,6 +12,10 @@ add_executable(layout_test layout_test.c)
 target_link_libraries(layout_test PRIVATE switch_core)
 add_test(NAME layout_test COMMAND layout_test)
 
+add_executable(chunk_lz4_test chunk_lz4_test.c)
+target_link_libraries(chunk_lz4_test PRIVATE switch_core)
+add_test(NAME chunk_lz4_test COMMAND chunk_lz4_test)
+
 add_executable(vmm_test vmm_test.c)
 target_link_libraries(vmm_test PRIVATE switch_core)
 add_test(NAME vmm_test COMMAND vmm_test)

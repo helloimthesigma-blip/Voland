@@ -6,7 +6,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { PLAN_BYTES, newStateId, parsePlan, planMismatch } from "../../workers/savestate.ts";
+import {
+  CHUNK_BYTES, type ChunkCodec, PLAN_BYTES, newStateId, parsePlan, planMismatch, readState, readStoredPlan, writeState,
+} from "../../workers/savestate.ts";
 
 function planBytes(program: bigint, ranges: readonly (readonly [number, number, number, number])[]): Uint8Array {
   const bytes = new Uint8Array(PLAN_BYTES);
@@ -45,4 +47,76 @@ test("a state loads only into the same layout and game", () => {
 
 test("state ids name the title and moment", () => {
   assert.equal(newStateId("010013C00E930000", 36), "010013C00E930000-10");
+});
+
+/* An in-memory FileSystemSyncAccessHandle: the calls savestate.ts makes. */
+function memoryFile(): FileSystemSyncAccessHandle {
+  let data = new Uint8Array(0);
+  const handle = {
+    truncate(size: number): void { data = data.slice(0, size); },
+    write(bytes: Uint8Array, options: { at: number }): number {
+      const end = options.at + bytes.byteLength;
+      if (end > data.byteLength) {
+        const grown = new Uint8Array(end);
+        grown.set(data);
+        data = grown;
+      }
+      data.set(bytes, options.at);
+      return bytes.byteLength;
+    },
+    read(into: Uint8Array, options: { at: number }): number {
+      const part = data.subarray(options.at, options.at + into.byteLength);
+      into.set(part);
+      return part.byteLength;
+    },
+    getSize(): number { return data.byteLength; },
+    flush(): void {},
+    close(): void {},
+  };
+  return handle as unknown as FileSystemSyncAccessHandle;
+}
+
+/* Packs a chunk of one repeated byte into that byte; anything else raw. */
+function fillCodec(memory: ArrayBuffer): ChunkCodec {
+  return {
+    compress(address, length) {
+      const bytes = new Uint8Array(memory, address, length);
+      return bytes.every((b) => b === bytes[0]) ? Uint8Array.of(bytes[0] ?? 0) : null;
+    },
+    decompress(packed, address, length) {
+      if (packed.byteLength !== 1) return false;
+      new Uint8Array(memory, address, length).fill(packed[0] ?? 0);
+      return true;
+    },
+  };
+}
+
+test("states round-trip packed, raw and zero chunks", () => {
+  const base = 0x10000;
+  const bytes = 3 * CHUNK_BYTES + 100;
+  const plan = parsePlan(planBytes(1n, [[base, bytes, bytes, 1]]));
+  const memory = new ArrayBuffer(base + 4 * CHUNK_BYTES);
+  const view = new Uint8Array(memory, base, bytes);
+  view.fill(0xAB, 0, CHUNK_BYTES);                                   /* packs */
+  for (let i = CHUNK_BYTES; i < 2 * CHUNK_BYTES; i++) view[i] = i * 7; /* raw */
+  view.fill(0x5A, 3 * CHUNK_BYTES);                                  /* short tail, packs */
+  const expected = view.slice();
+  const file = memoryFile();
+  const written = writeState(file, memory, plan, fillCodec(memory));
+  assert.ok(written < 2 * CHUNK_BYTES);
+  const stored = readStoredPlan(file);
+  assert.ok(stored);
+  view.fill(0xFF);
+  assert.ok(readState(file, memory, stored, plan, fillCodec(memory)));
+  assert.deepEqual(new Uint8Array(memory, base, bytes), expected);
+});
+
+test("a packed chunk that does not decode refuses the load", () => {
+  const plan = parsePlan(planBytes(1n, [[0, CHUNK_BYTES, CHUNK_BYTES, 1]]));
+  const memory = new ArrayBuffer(CHUNK_BYTES);
+  new Uint8Array(memory).fill(3);
+  const file = memoryFile();
+  writeState(file, memory, plan, fillCodec(memory));
+  const refuse: ChunkCodec = { compress: () => null, decompress: () => false };
+  assert.equal(readState(file, memory, plan, plan, refuse), false);
 });

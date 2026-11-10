@@ -108,6 +108,12 @@ export interface SwitchCoreExports {
   readonly _emulator_savestate_end_save_ffi: () => void;
   readonly _emulator_savestate_begin_restore_ffi: () => number;
   readonly _emulator_savestate_finish_restore_ffi: (applied: number) => number;
+  /* LZ4 for stored chunks (core/common/chunk_lz4.h): compress returns the
+   * size written, 0 to store the chunk raw; decompress returns 1 if the
+   * chunk decoded to exactly `expected` bytes. */
+  readonly _emulator_lz4_bound_ffi: (size: number) => number;
+  readonly _emulator_lz4_compress_ffi: (src: bigint, size: number, dst: bigint, capacity: number) => number;
+  readonly _emulator_lz4_decompress_ffi: (src: bigint, size: number, dst: bigint, expected: number) => number;
   /* Software keyboard (v3.54): writes the pending request's fields joined
    * by U+001F and returns 1 (0 = none); respond with UTF-8 text. */
   readonly _emulator_text_request_ffi: (out: bigint, max: number) => number;

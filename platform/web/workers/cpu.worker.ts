@@ -24,7 +24,8 @@ import { clearSdFiles, diffManifests, parseManifest, persistSdFile, removeSdFile
 import { isSaveName, loadSaveArchives, readTar, removeSaveArchive, saveNameOfTar, storeSaveArchive, tarNameOfSave, writeTar } from "./save-store";
 import { writeSaveArchive } from "@bindings/save-archive";
 import {
-  PLAN_BYTES, createStateFile, deleteState, listStates, newStateId, openStateFile, parsePlan, planMismatch,
+  CHUNK_BYTES, type ChunkCodec, PLAN_BYTES, createStateFile, deleteState, listStates, newStateId, openStateFile,
+  parsePlan, planMismatch,
   readState, readStoredPlan, stateInfo, writeState, writeStateInfo,
 } from "./savestate";
 import { parseTextInputRequest } from "./text-input";
@@ -1081,7 +1082,7 @@ async function saveState(auto: boolean): Promise<CPUToMainMessage> {
     if (!plan) throw new Error(coreErrorMessage());
     let bytes = 0;
     try {
-      bytes = writeState(file, coreMemory.buffer, plan);
+      bytes = writeState(file, coreMemory.buffer, plan, chunkCodec(core, coreMemory));
     } finally {
       core._emulator_savestate_end_save_ffi();
       core._emulator_pacing_resync_ffi(); /* the frozen moment does not count */
@@ -1105,6 +1106,29 @@ async function saveState(auto: boolean): Promise<CPUToMainMessage> {
   } finally {
     stateBusy = false;
   }
+}
+
+/* Save-state chunks through the core's LZ4 (savestate.ts ChunkCodec): the
+ * packed side goes through one scratch area in core memory, allocated on
+ * first use and kept for the session. Without it chunks are stored as is. */
+let chunkScratch = 0;
+const RAW_CHUNKS: ChunkCodec = { compress: () => null, decompress: () => false };
+function chunkCodec(c: SwitchCoreExports, memory: WebAssembly.Memory): ChunkCodec {
+  const bound = c._emulator_lz4_bound_ffi(CHUNK_BYTES);
+  if (chunkScratch === 0) chunkScratch = c._malloc(bound);
+  if (chunkScratch === 0) return RAW_CHUNKS;
+  const scratch = chunkScratch;
+  return {
+    compress(address, length) {
+      const n = c._emulator_lz4_compress_ffi(BigInt(address), length, BigInt(scratch), bound);
+      return n > 0 ? new Uint8Array(memory.buffer, scratch, n).slice() : null;
+    },
+    decompress(packed, address, length) {
+      if (packed.byteLength > bound) return false;
+      new Uint8Array(memory.buffer, scratch, packed.byteLength).set(packed);
+      return c._emulator_lz4_decompress_ffi(BigInt(scratch), packed.byteLength, BigInt(address), length) === 1;
+    },
+  };
 }
 
 async function loadState(id: string): Promise<CPUToMainMessage> {
@@ -1132,7 +1156,7 @@ async function loadState(id: string): Promise<CPUToMainMessage> {
       core._emulator_savestate_finish_restore_ffi(0);
       return { type: "state-loaded", ok: false, error: `This state cannot be loaded: ${mismatch}.` };
     }
-    if (!readState(file, coreMemory.buffer, stored, now)) {
+    if (!readState(file, coreMemory.buffer, stored, now, chunkCodec(core, coreMemory))) {
       /* Memory is half written: the running game cannot continue as it was. */
       core._emulator_savestate_finish_restore_ffi(0);
       running = false;

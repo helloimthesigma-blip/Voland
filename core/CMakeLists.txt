@@ -3,6 +3,7 @@
 set(SWITCH_CORE_SOURCES
   common/log.c
   common/arena.c
+  common/chunk_lz4.c
   common/layout.c
   common/vmm.c
   common/input_region.c
@@ -122,6 +123,7 @@ set_source_files_properties(${SWITCH_CORE_THIRD_PARTY_SOURCES} PROPERTIES
 set(SWITCH_CORE_PUBLIC_HEADERS
   common/log.h
   common/arena.h
+  common/chunk_lz4.h
   common/assert.h
   common/result.h
   common/layout.h
