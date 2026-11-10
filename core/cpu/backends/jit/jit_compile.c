@@ -128,12 +128,14 @@ enum {
 #define FUNC_SIMD 4u
 #define FUNC_BLOCK 5u
 #define FUNC_WALK 6u /* module-local: the softmmu walk, shared by every access */
+#define FUNC_PROBE 7u /* module-local with JIT_SHARED_PROBE: the region-cache probe */
 #define TYPE_BLOCK 0u
 #define TYPE_INTERPRET 1u
 #define TYPE_READ 2u
 #define TYPE_STORE 3u
 #define TYPE_WALK 4u /* (l1, address, page offset limit, perm) -> host address or 0 */
-#define TYPE_COUNT 5u
+#define TYPE_PROBE 5u /* (state, pc, cycles) -> table index or 0 */
+#define TYPE_COUNT 6u
 #define IMPORT_COUNT 7u /* table, interpret, read, store, write, simd, memory */
 
 /* Label levels (the wasm depth right after the label's block opened). */
@@ -5875,11 +5877,20 @@ static uint32_t compile_block_code(Ctx *c, uint32_t b) {
   return count;
 }
 
-/* ...and if the next block is compiled, validated in the current code
- * generation and fits the remaining budget, tail-call it (the dispatcher
- * in jit.c makes the same checks). L_T0 holds cycles_consumed. */
-static void emit_chain(Ctx *c) {
-  lget(c, L_NPC);
+/* The locals a region-cache probe uses: the PC, the set's address,
+ * cycles_consumed and the found function's table index. */
+typedef struct Probe_Locals {
+  uint32_t npc, host, cycles, addr;
+} Probe_Locals;
+#define PROBE_TAIL_CALL UINT32_MAX
+
+/* Looks l->npc up in this host thread's region cache: if it is compiled,
+ * validated in the current code generation and fits the remaining budget
+ * (the dispatcher in jit.c makes the same checks), tail-calls it - or,
+ * with `found` (a label level), leaves its table index in l->addr and
+ * branches there. Falls through on a miss. */
+static void emit_cache_probe(Ctx *c, const Probe_Locals *l, uint32_t found) {
+  lget(c, l->npc);
   i64c(c, JIT_INSN_SHIFT);
   op(c, WASM_OP_I64_SHR_U);
   i64c(c, JIT_HASH_MULTIPLIER);
@@ -5890,59 +5901,124 @@ static void emit_chain(Ctx *c) {
   op(c, WASM_OP_I64_MUL);
   state_load64(c, OFF_THREAD_CACHE); /* this host thread's cache */
   op(c, WASM_OP_I64_ADD);
-  lset(c, L_HOST); /* the set */
+  lset(c, l->host); /* the set */
   open_block(c);   /* $miss: no way holds an enterable region */
   const uint32_t miss = c->depth;
   for (uint32_t way = 0; way < JIT_CACHE_WAYS; way++) {
     const uint64_t at = (uint64_t)way * sizeof(Jit_Entry);
     open_block(c); /* $other: not this way */
-    lget(c, L_HOST);
+    lget(c, l->host);
     mem(c, WASM_OP_I64_LOAD, ALIGN_8, at + ENTRY_OFFSET(pc));
-    lget(c, L_NPC);
+    lget(c, l->npc);
     op(c, WASM_OP_I64_NE);
     br_if(c, c->depth);
     /* The pc is in this way (it is in at most one): enter it or give up. */
-    lget(c, L_HOST);
+    lget(c, l->host);
     mem(c, WASM_OP_I64_LOAD, ALIGN_8, at + ENTRY_OFFSET(generation));
     i64c(c, c->link->generation_address);
     mem(c, WASM_OP_I64_LOAD, ALIGN_8, 0);
     op(c, WASM_OP_I64_NE);
     hint(c, false);
     br_if(c, miss);
-    lget(c, L_T0);
-    lget(c, L_HOST);
+    lget(c, l->cycles);
+    lget(c, l->host);
     mem(c, WASM_OP_I64_LOAD32_U, ALIGN_4, at + ENTRY_OFFSET(length));
     op(c, WASM_OP_I64_ADD);
     state_load64(c, OFF_BUDGET);
     op(c, WASM_OP_I64_GT_U);
     hint(c, false);
     br_if(c, miss);
-    lget(c, L_HOST);
+    lget(c, l->host);
     mem(c, WASM_OP_I64_LOAD, ALIGN_8, at + ENTRY_OFFSET(function));
-    ltee(c, L_ADDR);
+    ltee(c, l->addr);
     op(c, WASM_OP_I64_EQZ);
     hint(c, false);
     br_if(c, miss);
-    lget(c, L_HOST); /* second chance: entered */
+    lget(c, l->host); /* second chance: entered */
     i32c(c, 1);
     mem(c, WASM_OP_I32_STORE8, ALIGN_1, at + ENTRY_OFFSET(referenced));
     if (c->link->count_entries) {
-      lget(c, L_HOST);
-      lget(c, L_HOST);
+      lget(c, l->host);
+      lget(c, l->host);
       mem(c, WASM_OP_I64_LOAD, ALIGN_8, at + ENTRY_OFFSET(entries));
       i64c(c, 1);
       op(c, WASM_OP_I64_ADD);
       mem(c, WASM_OP_I64_STORE, ALIGN_8, at + ENTRY_OFFSET(entries));
       state_count(c, OFF_REGION_ENTRIES);
     }
-    lget(c, L_STATE);
-    lget(c, L_ADDR);
-    op(c, WASM_OP_RETURN_CALL_INDIRECT);
-    wasm_uleb(c->b, TYPE_BLOCK);
-    wasm_uleb(c->b, TABLE_INDEX);
+    if (found == PROBE_TAIL_CALL) {
+      lget(c, L_STATE);
+      lget(c, l->addr);
+      op(c, WASM_OP_RETURN_CALL_INDIRECT);
+      wasm_uleb(c->b, TYPE_BLOCK);
+      wasm_uleb(c->b, TABLE_INDEX);
+    } else {
+      br(c, found);
+    }
     end_(c); /* $other */
   }
   end_(c); /* $miss */
+}
+
+/* JIT_SHARED_PROBE=1 in the environment: the probe is a module function
+ * (FUNC_PROBE) each region's exit calls, instead of four unrolled ways
+ * in every region (A/B runs: smaller regions, one more call). */
+static bool shared_probe(void) {
+  static int on = -1;
+  if (on < 0) on = getenv("JIT_SHARED_PROBE") != NULL;
+  return on != 0;
+}
+
+/* ...and the exit chains there if it hits. L_T0 holds cycles_consumed. */
+static void emit_chain(Ctx *c) {
+  static const Probe_Locals region = {L_NPC, L_HOST, L_T0, L_ADDR};
+  if (!shared_probe()) {
+    emit_cache_probe(c, &region, PROBE_TAIL_CALL);
+    return;
+  }
+  lget(c, L_STATE);
+  lget(c, L_NPC);
+  lget(c, L_T0);
+  op(c, WASM_OP_CALL);
+  wasm_uleb(c->b, FUNC_PROBE);
+  ltee(c, L_ADDR);
+  op(c, WASM_OP_I64_EQZ);
+  op(c, WASM_OP_I32_EQZ);
+  hint(c, true);
+  open_if(c, WASM_BLOCK_VOID);
+  lget(c, L_STATE);
+  lget(c, L_ADDR);
+  op(c, WASM_OP_RETURN_CALL_INDIRECT);
+  wasm_uleb(c->b, TYPE_BLOCK);
+  wasm_uleb(c->b, TABLE_INDEX);
+  end_(c);
+}
+
+/* The module's own functions: the block, the walk, and the probe. */
+static uint32_t module_functions(void) { return shared_probe() ? 3u : 2u; }
+
+/* FUNC_PROBE: (state, pc, cycles_consumed) -> the table index of the
+ * region to enter, or 0. Locals: the set's address, the index. */
+#define PROBE_PARAMS 3u
+static void emit_probe_function(Wasm_Buf *b, const Jit_Link *link) {
+  static Ctx p;
+  memset(&p, 0, sizeof(p));
+  p.b = b;
+  p.link = link;
+  p.discover = true; /* no branch hints (they are the block function's) */
+  const Probe_Locals locals = {1u, PROBE_PARAMS, 2u, PROBE_PARAMS + 1u};
+  const uint32_t body = wasm_reserve_size(b);
+  wasm_uleb(b, 1);
+  wasm_uleb(b, 2);
+  wasm_u8(b, WASM_TYPE_I64);
+  open_block(&p); /* $found */
+  emit_cache_probe(&p, &locals, p.depth);
+  i64c(&p, 0);
+  op(&p, WASM_OP_RETURN);
+  end_(&p);
+  lget(&p, locals.addr);
+  op(&p, WASM_OP_END);
+  wasm_patch_size(b, body);
 }
 
 /* The translation caches from the state when its generation is current;
@@ -6263,6 +6339,11 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
   for (uint32_t i = 0; i < 4u; i++) wasm_u8(b, WASM_TYPE_I64);
   wasm_uleb(b, 1);
   wasm_u8(b, WASM_TYPE_I64);
+  wasm_u8(b, WASM_TYPE_FUNC); /* TYPE_PROBE: (i64, i64, i64) -> i64 */
+  wasm_uleb(b, PROBE_PARAMS);
+  for (uint32_t i = 0; i < PROBE_PARAMS; i++) wasm_u8(b, WASM_TYPE_I64);
+  wasm_uleb(b, 1);
+  wasm_u8(b, WASM_TYPE_I64);
   wasm_patch_size(b, size);
 
   wasm_u8(b, WASM_SECTION_IMPORT);
@@ -6304,9 +6385,10 @@ static void emit_module_header(Wasm_Buf *b, uint64_t memory_pages) {
 
   wasm_u8(b, WASM_SECTION_FUNCTION);
   size = wasm_reserve_size(b);
-  wasm_uleb(b, 2);
+  wasm_uleb(b, module_functions());
   wasm_uleb(b, TYPE_BLOCK);
   wasm_uleb(b, TYPE_WALK);
+  if (shared_probe()) wasm_uleb(b, TYPE_PROBE);
   wasm_patch_size(b, size);
 
   wasm_u8(b, WASM_SECTION_EXPORT);
@@ -6367,6 +6449,17 @@ static bool emit_branch_hints(Wasm_Buf *b, const Ctx *c, uint32_t code_section) 
   return true;
 }
 
+/* JIT_MAX_REGION_BLOCKS=N in the environment: regions of at most N blocks
+ * (A/B runs; at most JIT_MAX_REGION_BLOCKS). */
+static uint32_t region_blocks_max(void) {
+  static int max = -1;
+  if (max < 0) {
+    const char *v = getenv("JIT_MAX_REGION_BLOCKS");
+    max = v && atoi(v) > 0 && (uint32_t)atoi(v) < JIT_MAX_REGION_BLOCKS ? atoi(v) : (int)JIT_MAX_REGION_BLOCKS;
+  }
+  return (uint32_t)max;
+}
+
 /* Analysis output is discarded; it only needs room. */
 #define JIT_ANALYSIS_BYTES (256u * 1024u)
 static uint8_t g_analysis[JIT_ANALYSIS_BYTES];
@@ -6374,7 +6467,7 @@ static uint8_t g_analysis[JIT_ANALYSIS_BYTES];
 bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memory_pages, const Jit_Link *link,
                        uint8_t *out, uint32_t capacity, Jit_Compiled *result) {
   static Ctx analysis, c;
-  uint32_t max_blocks = JIT_MAX_REGION_BLOCKS, max_block_insns = JIT_MAX_BLOCK_INSNS;
+  uint32_t max_blocks = region_blocks_max(), max_block_insns = JIT_MAX_BLOCK_INSNS;
   for (;;) {
     /* Pass 1: the region's blocks and pages, and which registers they touch. */
     Wasm_Buf scratch = wasm_buf(g_analysis, JIT_ANALYSIS_BYTES);
@@ -6400,7 +6493,7 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     const uint32_t code_section = b.length;
     wasm_u8(&b, WASM_SECTION_CODE);
     const uint32_t section = wasm_reserve_size(&b);
-    wasm_uleb(&b, 2);
+    wasm_uleb(&b, module_functions());
     const uint32_t body = wasm_reserve_size(&b);
     memset(&c, 0, sizeof(c));
     c.body_start = body + WASM_PATCHABLE_LEB_BYTES;
@@ -6432,6 +6525,7 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     emit_function(&c);
     wasm_patch_size(&b, body);
     emit_walk_function(&b);
+    if (shared_probe()) emit_probe_function(&b, link);
     wasm_patch_size(&b, section);
     if (!emit_branch_hints(&b, &c, code_section)) b.overflow = true;
     emit_name_section(&b, pc);

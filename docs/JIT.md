@@ -398,9 +398,10 @@ What joins a region:
   is read from the GOT at compile time. The prediction is guarded, so a
   stale GOT only costs an exit, never correctness.
 
-Limits: 32 blocks per region (`JIT_MAX_REGION_BLOCKS`), 128 instructions
-per block (`JIT_MAX_BLOCK_INSNS`), and four code pages
-(`JIT_MAX_REGION_PAGES`), each validated by its own range hash.
+Limits: 32 blocks per region (`JIT_MAX_REGION_BLOCKS`; the environment
+variable of that name lowers it for A/B runs), 128 instructions per block
+(`JIT_MAX_BLOCK_INSNS`), and four code pages (`JIT_MAX_REGION_PAGES`),
+each validated by its own range hash.
 `voland-cli --jit-no-calls` turns call spanning off.
 
 Before a branch to another region block, the code checks that the
@@ -426,7 +427,9 @@ so this shapes the design in two ways:
    is the same check the dispatcher makes. The exit then tail-calls the
    function with `return_call_indirect` on the core's table, so chains
    of regions never grow the host stack. Only a miss returns to the C
-   loop.
+   loop. The probe is unrolled over the four ways in every region;
+   `JIT_SHARED_PROBE=1` makes it a module function each exit calls
+   (smaller regions for one more call; A/B runs).
 
 Compiled code reads the cache's address from `Jit_State.thread_cache`
 and the code generation from the shared `g_vmm_generation`. It never
