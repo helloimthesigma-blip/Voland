@@ -101,6 +101,9 @@ import { fileURLToPath } from "node:url";
 
 import { chromium } from "@playwright/test";
 
+/** The server port of runs with a persistent profile (see opts.port). */
+const PROFILE_PORT = 4877;
+
 let WEB_DIR = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /* Virtual ticks per second (the Switch's 19.2 MHz counter). */
 const TICKS_PER_SECOND = 19_200_000;
@@ -357,7 +360,11 @@ function categoriseProfile(profile) {
 
 async function main() {
   const opts = parseArgs(process.argv.slice(2));
-  if (!opts.port) opts.port = await freePort();
+  /* A persistent profile (--user-data-dir) keeps the page's storage (OPFS:
+   * saves, save states, caches) for the next run - but storage belongs to
+   * the origin, port included, so such runs share one port unless --port
+   * says otherwise (a random port each time hid the last run's states). */
+  if (!opts.port) opts.port = opts.userDataDir ? PROFILE_PORT : await freePort();
   if (!opts.debugPort) opts.debugPort = await freePort();
   if (opts.build) await run("npx", ["vite", "build", "--logLevel", "warn"]);
   const preview = spawn("npx", ["vite", "preview", "--port", String(opts.port), "--strictPort"], { cwd: WEB_DIR, stdio: "ignore" });
