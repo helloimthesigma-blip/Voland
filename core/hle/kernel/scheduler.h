@@ -53,6 +53,10 @@ typedef enum Wait_Kind {
                         * (parallel mode): until it leaves the core. wait_address = its index. */
 } Wait_Kind;
 
+/* Blocks per thread VOLAND_PC_HIST keeps (heavy hitters: Misra-Gries). */
+#define SCHEDULER_PC_HIST_BLOCKS 16u
+#define SCHEDULER_PC_HIST_BLOCK_BITS 8u
+
 typedef struct Sched_Thread {
   Guest_Thread thread;      /* cpu_state, TLS block, priority, core */
   Thread_Run_State state;
@@ -83,6 +87,12 @@ typedef struct Sched_Thread {
   uint64_t held_back_at;    /* free placement: ticks + 1 when a better thread pinned to its core first kept it waiting; 0 = not */
   uint64_t cycles_run;      /* guest cycles it has run (diagnostics: where guest time goes) */
   uint64_t run_ns;          /* host time inside the backend on parallel cores (sampled estimate; diagnostics) */
+  /* VOLAND_PC_HIST=1 (diagnostics): runs ended by the budget, with the
+   * heaviest 256-byte guest code blocks among their stop PCs (an unbiased
+   * sample of what the thread executes), and runs ended otherwise. */
+  uint64_t budget_runs, other_runs;
+  uint64_t hist_block[SCHEDULER_PC_HIST_BLOCKS];
+  uint64_t hist_hits[SCHEDULER_PC_HIST_BLOCKS];
 } Sched_Thread;
 
 typedef struct Parallel Parallel; /* hle/kernel/parallel.h */

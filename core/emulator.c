@@ -1808,6 +1808,23 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
              th->on_core ? " on core" : "", th->held ? " held" : "", module, (unsigned long long)offset, th->last_core,
              th->thread.preferred_core, (unsigned long long)th->core_mask, (unsigned long long)th->last_run,
              (unsigned long long)th->cycles_run, (unsigned long long)(th->run_ns / EMULATOR_NS_PER_MS));
+    if (th->budget_runs || th->other_runs) { /* VOLAND_PC_HIST */
+      char line[512];
+      int n = snprintf(line, sizeof(line), "%llu budget-ended runs, %llu others; blocks:",
+                       (unsigned long long)th->budget_runs, (unsigned long long)th->other_runs);
+      for (uint32_t k = 0; k < SCHEDULER_PC_HIST_BLOCKS && n > 0 && (size_t)n < sizeof(line); k++) {
+        if (!th->hist_hits[k]) continue;
+        uint64_t block_offset = 0;
+        const char *m = module_of(emulator, th->hist_block[k] << SCHEDULER_PC_HIST_BLOCK_BITS, &block_offset);
+        n += snprintf(line + n, sizeof(line) - (size_t)n, " %s+0x%llx(%llu)", m, (unsigned long long)block_offset,
+                      (unsigned long long)th->hist_hits[k]);
+      }
+      log_warn("[threads]   %s", line);
+      /* The next dump shows what ran in between. */
+      Sched_Thread *reset = &emulator->scheduler.threads[i];
+      reset->budget_runs = reset->other_runs = 0;
+      memset(reset->hist_hits, 0, sizeof(reset->hist_hits));
+    }
 #ifdef SWITCH_CPU_BACKEND_JIT
     uint64_t region_entries = 0, misses = 0;
     if (jit_region_counts(th->thread.cpu_state, &region_entries, &misses) && region_entries)

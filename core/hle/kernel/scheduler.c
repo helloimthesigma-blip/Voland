@@ -596,6 +596,41 @@ Scheduler_Status scheduler_idle(Scheduler *sched) {
   return SCHEDULER_IDLE;
 }
 
+static bool pc_hist(void) {
+  static int parsed;
+  static bool on;
+  if (!parsed) {
+    parsed = 1;
+    on = getenv("VOLAND_PC_HIST") != NULL;
+  }
+  return on;
+}
+
+/* Heavy hitters of the budget-ended runs' stop blocks (Misra-Gries: any
+ * block above 1/(SCHEDULER_PC_HIST_BLOCKS + 1) of the samples stays). */
+static void note_stop_pc(Sched_Thread *t, CPU_ExitReason exit_reason, uint64_t pc) {
+  if (exit_reason != CPU_EXIT_CYCLES_ELAPSED) {
+    t->other_runs++;
+    return;
+  }
+  t->budget_runs++;
+  const uint64_t block = pc >> SCHEDULER_PC_HIST_BLOCK_BITS;
+  uint32_t empty = SCHEDULER_PC_HIST_BLOCKS;
+  for (uint32_t i = 0; i < SCHEDULER_PC_HIST_BLOCKS; i++) {
+    if (t->hist_hits[i] && t->hist_block[i] == block) {
+      t->hist_hits[i]++;
+      return;
+    }
+    if (!t->hist_hits[i] && empty == SCHEDULER_PC_HIST_BLOCKS) empty = i;
+  }
+  if (empty < SCHEDULER_PC_HIST_BLOCKS) {
+    t->hist_block[empty] = block;
+    t->hist_hits[empty] = 1;
+    return;
+  }
+  for (uint32_t i = 0; i < SCHEDULER_PC_HIST_BLOCKS; i++) t->hist_hits[i]--;
+}
+
 Scheduler_Status scheduler_finish_run(Scheduler *sched, const CPU_Backend *backend, Sched_Thread *thread,
                                       uint64_t start_ticks, CPU_ExitReason exit_reason) {
   const uint64_t cycles = backend->get_cycles_consumed(thread->thread.cpu_state);
@@ -623,6 +658,7 @@ Scheduler_Status scheduler_finish_run(Scheduler *sched, const CPU_Backend *backe
                        preemption_disabled(sched, thread);
   if (thread->no_preempt) defer_preemption(sched, thread);
   thread->cycles_run += cycles;
+  if (pc_hist()) note_stop_pc(thread, exit_reason, backend->get_pc(thread->thread.cpu_state));
   if (exit_reason != CPU_EXIT_SVC) thread->spinning = false; /* it ran its budget: real work */
   if (!thread->spinning) sched->work_epoch++;
 
