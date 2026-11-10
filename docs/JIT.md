@@ -29,7 +29,7 @@ interpreter; it runs on top of it.
 - Cold code runs in the predecoded interpreter
   (`interp_predecode_run_block`). Each block start's execution count is
   kept in a small hashed counter table.
-- When a count reaches the hot threshold (256 by default;
+- When a count reaches the hot threshold (8192 by default, see "Hot threshold";
   `jit_set_hot_threshold`, `voland-cli --jit-threshold N`), the region at
   that PC is compiled to one wasm function and installed.
 - Anything the compiler does not inline is executed by the interpreter,
@@ -594,7 +594,9 @@ Hollow Knight's gameplay, where much of the main thread's per-frame code
 stays under the threshold for minutes, still did best at 8192
 (2026-11-10, browser, two runs each: walk 47.3/46.7 fps at 8192,
 44.7/44.3 at 1024, 39.9/37.3 at 256; the fight 49.6/48.3, 47.0/46.2,
-46.0/45.5) - compiled code cost more than interpreting it.
+46.0/45.5) - compiled code cost more than interpreting it. Celeste's
+load, mostly one-shot managed init code, too: 34/34 s to the title at
+8192, 35/36 s at 2048, 35/35 s at 512 (2026-11-10, mini).
 `VOLAND_JIT_THRESHOLD=N` overrides it (in the browser through
 `?env=VOLAND_JIT_THRESHOLD=N`), for A/B runs without a rebuild.
 `VOLAND_JIT_FALLBACKS=N` is the browser's `--jit-fallbacks`: every N
