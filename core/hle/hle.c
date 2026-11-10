@@ -231,7 +231,7 @@ static void dispatch_svc(HLE_Context *context, CPU_State *cpu_state, uint32_t sw
   case 0x08: hle_svc_create_thread(context, cpu_state); break;
   case 0x09: hle_svc_start_thread(context, cpu_state); break;
   case 0x0A: hle_svc_exit_thread(context, cpu_state); break;
-  case 0x0B: hle_svc_sleep_thread(context, cpu_state); break;
+  case HLE_SVC_SLEEP_THREAD: hle_svc_sleep_thread(context, cpu_state); break;
   case 0x0C: hle_svc_get_thread_priority(context, cpu_state); break;
   case 0x0D: hle_svc_set_thread_priority(context, cpu_state); break;
   case 0x0E: hle_svc_get_thread_core_mask(context, cpu_state); break;

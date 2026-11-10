@@ -58,6 +58,7 @@ void hle_svc_exit_process(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_create_thread(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_start_thread(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_exit_thread(HLE_Context *context, CPU_State *cpu_state);
+#define HLE_SVC_SLEEP_THREAD 0x0Bu
 void hle_svc_sleep_thread(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_get_thread_priority(HLE_Context *context, CPU_State *cpu_state);
 void hle_svc_set_thread_priority(HLE_Context *context, CPU_State *cpu_state);

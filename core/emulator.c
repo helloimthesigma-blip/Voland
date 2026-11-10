@@ -1769,6 +1769,8 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
   if (!emulator || !emulator->program_loaded) return;
   static const char *const k_state[] = {"free", "created", "runnable", "waiting", "dead"};
   log_warn("[threads] at tick %llu:", (unsigned long long)emulator->scheduler.ticks);
+  log_warn("[threads] polling yields %llu (slept to the next event %llu)",
+           (unsigned long long)emulator->scheduler.polling_yields, (unsigned long long)emulator->scheduler.lone_yields);
   /* Where each module sits, to name absolute addresses (JIT region names, fault dumps). */
   for (uint32_t m = 0; m < emulator->process.module_count; m++) {
     const Process_Module *mod = &emulator->process.modules[m];
