@@ -421,16 +421,64 @@ static void spread_leaders(const Scheduler *sched, int32_t leader[THREAD_CORE_CO
   }
 }
 
-static int32_t pick_leaders(const Scheduler *sched, bool affine, uint32_t core, bool busy) {
-  int32_t leader[THREAD_CORE_COUNT], second[THREAD_CORE_COUNT];
-  for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++) leader[g] = second[g] = -1;
+/* Free placement: the best priority among running threads pinned to
+ * just guest core g, per g (THREAD_PRIORITY_LOWEST + 1 where none). */
+#define NO_OCCUPANT (THREAD_PRIORITY_LOWEST + 1u)
+static void pinned_occupants(const Scheduler *sched, uint32_t occupant[THREAD_CORE_COUNT]) {
+  for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++) occupant[g] = NO_OCCUPANT;
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     const Sched_Thread *t = &sched->threads[i];
+    if (!t->on_core) continue;
+    const uint64_t mask = guest_cores_of(t);
+    if (mask & (mask - 1u)) continue; /* not pinned */
+    for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++)
+      if (((mask >> g) & 1u) && t->thread.priority < occupant[g]) occupant[g] = t->thread.priority;
+  }
+}
+
+/* VOLAND_PINNED_PRIORITY=0 turns the rule below off (A/B runs). */
+static bool pinned_priority(const Scheduler *sched) {
+  static int parsed;
+  static bool on;
+  if (!parsed) {
+    parsed = 1;
+    on = switch_on("VOLAND_PINNED_PRIORITY");
+  }
+  return on && sched->free_placement;
+}
+
+/* How long the rule below keeps a thread waiting: past it the thread
+ * runs beside the better one. A better thread that stays runnable for
+ * that long is only so because emulation is slower than the Switch, and
+ * waiting on did starve Hollow Knight (1 boot of 27 stalled with one host
+ * core busy and the others idle). */
+#define PINNED_PRIORITY_MAX_WAIT_NS 2000000ull
+
+/* ...and `*led` the guest core the pick leads. */
+static int32_t pick_leaders(Scheduler *sched, bool affine, uint32_t core, bool busy, uint32_t *led) {
+  int32_t leader[THREAD_CORE_COUNT], second[THREAD_CORE_COUNT];
+  for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++) leader[g] = second[g] = -1;
+  /* Free placement keeps one rule of the Switch's: a thread does not lead
+   * a guest core while a better thread pinned to it runs (pick, below,
+   * covers the other way round). Hollow Knight's priority-38 audio
+   * thread publishes a codec object, then fills it in; its priority-49
+   * stream thread, pinned to the same core, read it half-made on another
+   * host core and called a null callback (docs/PARALLEL.md). */
+  uint32_t occupant[THREAD_CORE_COUNT];
+  const bool pinned = pinned_priority(sched);
+  if (pinned) pinned_occupants(sched, occupant);
+  const uint64_t max_wait = pinned ? scheduler_ns_to_ticks(PINNED_PRIORITY_MAX_WAIT_NS) : 0;
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    Sched_Thread *t = &sched->threads[i];
     if (t->state != THREAD_STATE_RUNNABLE || t->paused || t->on_core) continue;
     if (busy && solo(t)) continue;
     const uint64_t mask = guest_cores_of(t);
     for (uint32_t g = 0; g < THREAD_CORE_COUNT; g++) {
       if (!((mask >> g) & 1u)) continue;
+      if (pinned && occupant[g] < t->thread.priority) {
+        if (!t->held_back_at) t->held_back_at = sched->ticks + 1u;
+        if (sched->ticks + 1u - t->held_back_at < max_wait) continue;
+      }
       if (leader[g] < 0 || leads_core(t, &sched->threads[leader[g]], affine, core)) {
         second[g] = leader[g];
         leader[g] = (int32_t)i;
@@ -446,9 +494,33 @@ static int32_t pick_leaders(const Scheduler *sched, bool affine, uint32_t core, 
     if (i < 0 || i == best) continue;
     const Sched_Thread *t = &sched->threads[i];
     if (affine && !scheduler_runs_on(sched, t, core)) continue;
-    if (best < 0 || better_leader(t, &sched->threads[best], affine, core)) best = i;
+    if (best < 0 || better_leader(t, &sched->threads[best], affine, core)) {
+      best = i;
+      *led = g;
+    }
   }
   return best;
+}
+
+/* Free placement: the pick leads guest core `g`, where worse threads
+ * pinned to g run. On the Switch it would preempt them; here they stop
+ * first (request_stop, or a deferral inside a preemption-disabled
+ * region) and the pick waits - the cores re-check when a run ends.
+ * True if any still runs. */
+static bool stop_worse_pinned(Scheduler *sched, const Sched_Thread *pick, uint32_t g) {
+  bool running = false;
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    Sched_Thread *r = &sched->threads[i];
+    if (!r->on_core || r->thread.priority <= pick->thread.priority || guest_cores_of(r) != ((uint64_t)1 << g)) continue;
+    running = true;
+    if (preemption_disabled(sched, r)) {
+      defer_preemption(sched, r);
+    } else if (sched->backend && sched->backend->request_stop) {
+      sched->backend->request_stop(r->thread.cpu_state);
+      sched->preemptions++;
+    }
+  }
+  return running;
 }
 
 static int32_t pick(Scheduler *sched, bool affine, uint32_t core) {
@@ -462,7 +534,13 @@ static int32_t pick(Scheduler *sched, bool affine, uint32_t core) {
       busy = true;
     }
   }
-  if (sched->host_cores > 1u) return pick_leaders(sched, affine, core, busy);
+  if (sched->host_cores > 1u) {
+    uint32_t led = 0;
+    best = pick_leaders(sched, affine, core, busy, &led);
+    if (best >= 0 && pinned_priority(sched) && stop_worse_pinned(sched, &sched->threads[best], led)) return -1;
+    if (best >= 0 && affine) sched->threads[best].held_back_at = 0; /* it runs (scheduler_pick only looks) */
+    return best;
+  }
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     const Sched_Thread *t = &sched->threads[i];
     if (t->state != THREAD_STATE_RUNNABLE || t->paused || t->on_core) continue;

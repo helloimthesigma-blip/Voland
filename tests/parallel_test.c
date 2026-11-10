@@ -378,6 +378,60 @@ static void test_leader_one_core(void) {
   printf("[parallel_test] a thread leads one guest core\n");
 }
 
+/* Free placement keeps the Switch's priority rule for threads pinned to
+ * one guest core: a worse one does not start beside a better one running
+ * there, and a better one first stops the worse ones (Hollow Knight's
+ * stream thread read a codec object its audio thread was still filling
+ * in). Equal priorities still run side by side. */
+#define PINNED_WAIT_PAST_NS 3000000ull /* past scheduler.c's 2 ms */
+static uint32_t g_stops;
+static CPU_State *g_stopped;
+static void count_stop(CPU_State *state) {
+  g_stops++;
+  g_stopped = state;
+}
+static void test_free_placement_priority(void) {
+  static Scheduler sched;
+  static CPU_Backend backend;
+  memset(&sched, 0, sizeof(sched));
+  memset(&backend, 0, sizeof(backend));
+  backend.request_stop = count_stop;
+  sched.backend = &backend;
+  sched.host_cores = 3;
+  sched.free_placement = true;
+  Sched_Thread *audio = &sched.threads[0], *stream = &sched.threads[1];
+  audio->state = stream->state = THREAD_STATE_RUNNABLE;
+  audio->thread.priority = 38;
+  stream->thread.priority = 49;
+  audio->core_mask = stream->core_mask = 0x2;
+  audio->thread.preferred_core = stream->thread.preferred_core = 1;
+  audio->thread.cpu_state = (CPU_State *)&sched.threads[0];
+  stream->thread.cpu_state = (CPU_State *)&sched.threads[1];
+  /* The better one runs: the worse one waits, on every host core. */
+  audio->on_core = true;
+  CHECK(scheduler_pick_for_core(&sched, 0) == -1 && scheduler_pick_for_core(&sched, 2) == -1);
+  CHECK(g_stops == 0);
+  /* ...but not for ever: past the limit it runs beside it. */
+  sched.ticks += scheduler_ns_to_ticks(PINNED_WAIT_PAST_NS);
+  CHECK(scheduler_pick_for_core(&sched, 0) == 1 && stream->held_back_at == 0);
+  CHECK(scheduler_pick_for_core(&sched, 0) == -1); /* held back afresh */
+  /* The worse one runs: the better one stops it and waits for it. */
+  audio->on_core = false;
+  stream->on_core = true;
+  CHECK(scheduler_pick_for_core(&sched, 0) == -1);
+  CHECK(g_stops == 1 && g_stopped == stream->thread.cpu_state);
+  stream->on_core = false;
+  CHECK(scheduler_pick_for_core(&sched, 0) == 0);
+  /* Equal priorities, and threads not pinned, are not held back. */
+  stream->thread.priority = 38;
+  audio->on_core = true;
+  CHECK(scheduler_pick_for_core(&sched, 0) == 1);
+  stream->thread.priority = 49;
+  stream->core_mask = 0x3;
+  CHECK(scheduler_pick_for_core(&sched, 0) == 1);
+  printf("[parallel_test] free placement keeps priority order on a pinned core\n");
+}
+
 static pthread_t g_driver;
 static bool g_ran_on_driver;
 static void note_thread(void *ctx) {
@@ -506,6 +560,7 @@ int main(void) {
   test_host_calls();
   test_pinned_cores();
   test_leader_one_core();
+  test_free_placement_priority();
   test_gpu_lock();
   printf("[parallel_test] passed\n");
   return 0;

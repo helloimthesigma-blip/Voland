@@ -396,6 +396,28 @@ lower-priority threads there, one of them holding a lock main needs,
 starve: no frame after ~50 s, while cores 0 and 2 sit ~90% idle. Free
 placement reaches the title at 22-29 fps with no errors.
 
+Free placement still keeps one rule of the Switch's for threads pinned
+to a single guest core (`pick_leaders` / `stop_worse_pinned` in
+`scheduler.c`): a thread does not start while a better thread pinned to
+the same guest core runs, and a better one that becomes the core's
+leader first stops the worse ones running there (`request_stop`, or a
+deferral inside a preemption-disabled region) and waits for them.
+Equal priorities still run side by side, as do threads whose mask names
+several cores, so the load that starved host core 1 stays spread.
+Without the rule, Hollow Knight crashed in about 1 boot of 16 (2026-11-09):
+its priority-38 audio thread allocates a codec object, stores it in its
+parent (`parent+656`) and only then copies the object's callbacks in;
+its priority-49 stream thread, pinned to the same core, decoded the
+parent on another host core in that window and called a null read
+callback (`blr` to 0 at main+0x1528468). On the Switch the stream thread
+cannot run while the audio thread does. A thread the rule has kept
+waiting for 2 ms of virtual time runs anyway: a better thread runnable
+that long is so only because emulation is slower than the Switch, and
+without the limit 1 Hollow Knight boot of 27 stalled with one host core
+busy and the other two idle. With the limit: 30 boots, no crash and no
+stall; fight fps within the noise of the rule switched off.
+`VOLAND_PINNED_PRIORITY=0` turns the rule off (A/B runs).
+
 Tears of the Kingdom, native interpreter, three cores, 300k slices
 (2026-10-24):
 

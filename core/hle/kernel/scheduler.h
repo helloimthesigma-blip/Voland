@@ -80,6 +80,7 @@ typedef struct Sched_Thread {
   uint64_t last_run;        /* round-robin stamp */
   bool held;                /* its budget preempted it: first among its core's equal priorities (VOLAND_HOLD_CORE) */
   bool no_preempt;          /* its slice ended with preemption disabled (TLS): it runs on before anything else */
+  uint64_t held_back_at;    /* free placement: ticks + 1 when a better thread pinned to its core first kept it waiting; 0 = not */
   uint64_t cycles_run;      /* guest cycles it has run (diagnostics: where guest time goes) */
   uint64_t run_ns;          /* host time inside the backend on parallel cores (sampled estimate; diagnostics) */
 } Sched_Thread;
