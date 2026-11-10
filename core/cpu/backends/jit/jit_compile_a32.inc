@@ -177,7 +177,7 @@ static void a32_leave_for_val_predicted(Ctx *c, bool predicted, uint64_t predict
     end_(c);
   }
   lget(c, L_NPC);
-  exit_to_stack(c);
+  exit_to_stack(c, JIT_EXIT_INDIRECT);
 }
 
 /* A callee the region can follow a BL into: an ARM function that returns
@@ -243,7 +243,7 @@ static void a32_branch_link(Ctx *c, uint64_t target) {
   set_x(c, A32_REG_LR);
   if (!c->link->span_calls || (c->discover && find_block(c, target) < 0 && !a32_small_callee(c, target))) {
     i64c(c, target);
-    exit_to_stack(c);
+    exit_to_stack(c, JIT_EXIT_CALL);
     return;
   }
   if (c->discover && add_block(c, target) && add_block(c, back)) c->blocks[find_block(c, back)].return_site = true;

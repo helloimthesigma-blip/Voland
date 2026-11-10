@@ -241,6 +241,16 @@ bool jit_region_counts(const CPU_State *state, uint64_t *entries, uint64_t *miss
   return true;
 }
 
+const char *const jit_exit_kind_names[JIT_EXIT_KINDS] = {"branch", "budget", "call", "return", "indirect",
+                                                         "interpreter"};
+
+bool jit_region_exits(const CPU_State *state, uint64_t exits[JIT_EXIT_KINDS]) {
+  const Jit_State *j = (const Jit_State *)state;
+  if (!g_hot_profile || !j) return false;
+  memcpy(exits, j->region_exits, sizeof(j->region_exits));
+  return true;
+}
+
 void jit_print_hot_regions(uint32_t top) {
   const Jit_Entry *g_cache = g_main_thread.cache; /* the first core's (the CLI runs one) */
   static bool printed[JIT_CACHE_ENTRIES];

@@ -1814,6 +1814,15 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
       log_warn("[threads]   %llu region entries (%.1f cycles each), %llu translation-cache misses",
                (unsigned long long)region_entries, (double)th->cycles_run / (double)region_entries,
                (unsigned long long)misses);
+    uint64_t exits[JIT_EXIT_KINDS];
+    if (region_entries && jit_region_exits(th->thread.cpu_state, exits)) {
+      char line[256];
+      int n = 0;
+      for (uint32_t k = 0; k < JIT_EXIT_KINDS && n >= 0 && (size_t)n < sizeof(line); k++)
+        n += snprintf(line + n, sizeof(line) - (size_t)n, " %s %llu", jit_exit_kind_names[k],
+                      (unsigned long long)exits[k]);
+      log_warn("[threads]   exits:%s", line);
+    }
 #endif
     if (th->state == THREAD_STATE_WAITING) {
       uint32_t word = 0;

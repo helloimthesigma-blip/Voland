@@ -168,6 +168,7 @@ _Static_assert(OFF_SP == OFF_X(31), "spill/reload move x30 and SP as one pair");
 #define OFF_BUDGET STATE_OFFSET(cycle_budget)
 #define OFF_REGION_ENTRIES STATE_OFFSET(region_entries)
 #define OFF_TLB_MISSES STATE_OFFSET(tlb_misses)
+#define OFF_REGION_EXITS STATE_OFFSET(region_exits)
 #define OFF_SCRATCH STATE_OFFSET(scratch)
 #define OFF_THREAD_CACHE STATE_OFFSET(thread_cache)
 #define OFF_TLB_GENERATION STATE_OFFSET(tlb_generation)
@@ -661,12 +662,14 @@ static void leave_via_interpreter(Ctx *c) {
   lset(c, L_HINSN);
   i64c(c, c->block_len - c->index);
   lset(c, L_HREST);
+  if (c->link->count_entries) state_count(c, OFF_REGION_EXITS + JIT_EXIT_INTERPRETER * sizeof(uint64_t));
   br(c, LEVEL_LEAVE);
 }
 
 /* Leave the function for the PC on the stack (computed targets, calls). */
-static void exit_to_stack(Ctx *c) {
+static void exit_to_stack(Ctx *c, Jit_Exit_Kind kind) {
   lset(c, L_NPC);
+  if (c->link->count_entries) state_count(c, OFF_REGION_EXITS + kind * sizeof(uint64_t));
   flags_observed(c);
   emit_materialize(c);
   br(c, LEVEL_EXIT);
@@ -789,7 +792,7 @@ static void branch_to(Ctx *c, uint64_t target) {
   const int32_t m = c->discover ? -1 : find_block(c, target);
   if (m < 0) {
     i64c(c, target);
-    exit_to_stack(c);
+    exit_to_stack(c, JIT_EXIT_BRANCH);
     return;
   }
   const uint32_t length = c->blocks[m].length;
@@ -802,7 +805,7 @@ static void branch_to(Ctx *c, uint64_t target) {
   hint(c, false);
   open_if(c, WASM_BLOCK_VOID); /* does not fit: out, the dispatcher interprets it */
   i64c(c, target);
-  exit_to_stack(c);
+  exit_to_stack(c, JIT_EXIT_BUDGET);
   end_(c);
   lget(c, L_T0);
   lset(c, L_CYC);
@@ -5686,7 +5689,7 @@ static Outcome c_branch_system(Ctx *c, uint32_t insn) {
       set_x(c, CPU_REG_X30);
       if (!c->link->span_calls || (c->discover && find_block(c, target) < 0 && !small_callee(c, target))) {
         i64c(c, target);
-        exit_to_stack(c);
+        exit_to_stack(c, JIT_EXIT_CALL);
         return OUTCOME_END;
       }
       if (c->discover && add_block(c, target) && add_block(c, back)) c->blocks[find_block(c, back)].return_site = true;
@@ -5748,7 +5751,7 @@ static Outcome c_branch_system(Ctx *c, uint32_t insn) {
       end_(c);
     }
     lget(c, L_NPC);
-    exit_to_stack(c);
+    exit_to_stack(c, opc == 2 ? JIT_EXIT_RETURN : JIT_EXIT_INDIRECT);
     return OUTCOME_END;
   }
   return OUTCOME_END_HELPER; /* SVC, BRK, undefined */
@@ -6096,7 +6099,7 @@ static void emit_function(Ctx *c) {
     i64c(c, 0);
     lset(c, L_CYC);
     lget(c, L_HNEXT);
-    exit_to_stack(c);
+    exit_to_stack(c, JIT_EXIT_BUDGET);
     end_(c);
     lget(c, L_HNEXTLEN);
     lset(c, L_CYC);

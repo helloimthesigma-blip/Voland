@@ -470,8 +470,11 @@ from 8.0-8.3 to 8.6-9.1 fps; Silksong's title is unchanged (40-45 fps).
 interpreted block starts it logs the most interpreted block PCs and
 instruction encodings, then resets them. `VOLAND_JIT_ENTRIES=1` counts,
 per guest thread, the regions entered (dispatcher and chained exits) and
-the translation-cache misses; the `[threads]` dump prints both under each
-thread. Hollow Knight's busiest thread in a fight: 22.8 G instructions,
+the translation-cache misses, and the regions' exits by kind (a direct
+branch out, a block that did not fit the budget, a call to a callee
+outside the region, a return, an indirect branch, an instruction left to
+the interpreter); the `[threads]` dump prints them under each thread.
+Hollow Knight's busiest thread in a fight: 22.8 G instructions,
 820 M region entries (one per ~28 instructions) and 2.29 G misses (one
 per ~10).
 

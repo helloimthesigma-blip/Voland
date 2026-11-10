@@ -81,6 +81,18 @@ void jit_print_hot_regions(uint32_t top);
 /* ...and per guest thread: regions entered and translation-cache misses
  * so far (false while not counting). */
 bool jit_region_counts(const CPU_State *state, uint64_t *entries, uint64_t *misses);
+/* ...and why its regions left (to another region or the dispatcher). */
+typedef enum {
+  JIT_EXIT_BRANCH,        /* a direct branch or fall-through out of the region */
+  JIT_EXIT_BUDGET,        /* an in-region block that did not fit the budget */
+  JIT_EXIT_CALL,          /* BL to a callee that is a region of its own */
+  JIT_EXIT_RETURN,        /* RET (A32: a return) not to an in-region return site */
+  JIT_EXIT_INDIRECT,      /* BR, BLR, A32 BX/LDR PC */
+  JIT_EXIT_INTERPRETER,   /* an instruction the dispatcher interprets */
+  JIT_EXIT_KINDS
+} Jit_Exit_Kind;
+extern const char *const jit_exit_kind_names[JIT_EXIT_KINDS];
+bool jit_region_exits(const CPU_State *state, uint64_t exits[JIT_EXIT_KINDS]);
 
 /* Diagnostics: run every thread on the interpreter from now on (a JIT run
  * reaches a scene fast; this checks the JIT there - voland-cli's snapshot

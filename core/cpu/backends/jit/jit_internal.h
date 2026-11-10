@@ -22,6 +22,7 @@
 #include <stdint.h>
 
 #include "cpu/backends/interpreter/interp_internal.h"
+#include "cpu/backends/jit/jit.h"
 
 #define JIT_BLOCK_CONTINUE 0u
 #define JIT_BLOCK_STOP 1u
@@ -50,8 +51,10 @@ typedef struct Jit_State {
   uint64_t tlb_sbase, tlb_sdelta; /* SP-based accesses (read-write pages) */
   uint32_t isa; /* JIT_ISA_*: what the state's code is (an A32 state is cpu/backends/a32's A32_State) */
   /* Diagnostics (jit_set_hot_profile): regions entered, by the dispatcher
-   * or a chained exit, and translation-cache misses (walks). */
+   * or a chained exit, translation-cache misses (walks), and exits by
+   * Jit_Exit_Kind. */
   uint64_t region_entries, tlb_misses;
+  uint64_t region_exits[JIT_EXIT_KINDS];
 } Jit_State;
 
 #define JIT_ISA_A64 0u
