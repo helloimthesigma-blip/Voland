@@ -16,10 +16,10 @@ were measured.
 | Game | What has been played | Gameplay fps | Title / menus fps | Known problems |
 |---|---|---|---|---|
 | Celeste | title, file select, levels | ~59 | ~59 | none known |
-| Hollow Knight | new game through the intro into King's Pass; saved games | ~50-55 (Crossroads: walking, a fight, standing) | ~60 | none known |
-| Hollow Knight: Silksong | boot to gameplay, saves, video cutscenes | ~57-59 (Bone Bottom) | ~58 | none known |
+| Hollow Knight | new game through the intro into King's Pass; saved games | ~51-57 (Crossroads: ~51 walking, ~54 in a fight, ~57 standing) | ~60 | none known |
+| Hollow Knight: Silksong | boot to gameplay, saves, video cutscenes | ~59 (Bone Bottom) | ~58 | none known |
 | Super Mario Odyssey | opening, Cap Kingdom | 35-46 by scene | 37-40 (cutscenes) | the camera tutorial needs the right stick pushed up |
-| Nine Sols | title, opening cinematic, gameplay, dialogue | ~44 (the first cave) | ~52 | |
+| Nine Sols | title, opening cinematic, gameplay, dialogue | ~45 (the first cave) | ~52 | |
 | Super Smash Bros. Ultimate | matches, opening movie | 22-27 in a fight (Oct.) | ~60 | |
 | Mario Kart 8 Deluxe (32-bit) | whole races | ~18 in a race | ~60 | |
 | Animal Crossing: New Horizons | opening through arrival on the island | ~8 on the island (Oct.) | ~55 (intro) | none known (the black sea and the dark blotches were fixed on 2026-10-30) |
