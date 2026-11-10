@@ -207,7 +207,8 @@ _Static_assert(OFF_SP == OFF_X(31), "spill/reload move x30 and SP as one pair");
 
 /* Regions: the entry block plus blocks in the same page it reaches by
  * direct branches, in one function (docs/JIT.md). */
-#define JIT_MAX_REGION_BLOCKS 32u
+#define JIT_MAX_REGION_BLOCKS 64u
+#define REGION_BLOCKS_DEFAULT 32u /* region_blocks_max() */
 
 typedef struct Region_Block {
   uint64_t pc;
@@ -6449,13 +6450,14 @@ static bool emit_branch_hints(Wasm_Buf *b, const Ctx *c, uint32_t code_section) 
   return true;
 }
 
-/* JIT_MAX_REGION_BLOCKS=N in the environment: regions of at most N blocks
- * (A/B runs; at most JIT_MAX_REGION_BLOCKS). */
+/* Regions of at most REGION_BLOCKS_DEFAULT blocks; JIT_MAX_REGION_BLOCKS=N
+ * in the environment sets another limit up to JIT_MAX_REGION_BLOCKS (A/B
+ * runs). */
 static uint32_t region_blocks_max(void) {
   static int max = -1;
   if (max < 0) {
     const char *v = getenv("JIT_MAX_REGION_BLOCKS");
-    max = v && atoi(v) > 0 && (uint32_t)atoi(v) < JIT_MAX_REGION_BLOCKS ? atoi(v) : (int)JIT_MAX_REGION_BLOCKS;
+    max = v && atoi(v) > 0 && (uint32_t)atoi(v) <= JIT_MAX_REGION_BLOCKS ? atoi(v) : (int)REGION_BLOCKS_DEFAULT;
   }
   return (uint32_t)max;
 }

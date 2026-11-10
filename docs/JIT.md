@@ -143,8 +143,11 @@ slightly faster at 8 in every case.
 What did not help (each tried in the browser and reverted, 2026-11-10):
 a page-indexed translation array behind the one-entry caches (it took
 ~95% of the page-table walks away but cost ~7% fps), calls that return
-(below), and lowering the hot threshold (below). Code added to a region
-costs more than the events it saves.
+(below), lowering the hot threshold (below), smaller regions (16 or 8
+blocks: fewer transitions saved matter more than smaller functions), the
+probe as a shared module function (neutral), and acyclic regions without
+the dispatch loop (fight 40.9-48.1 vs 49.0-53.2 fps). Code added to a
+region costs more than the events it saves.
 
 **Lazy flags.** After ADDS, SUBS, ANDS and similar, only the operands
 and the result are kept. A reader right after them (CMP + B.cond)
@@ -398,8 +401,10 @@ What joins a region:
   is read from the GOT at compile time. The prediction is guarded, so a
   stale GOT only costs an exit, never correctness.
 
-Limits: 32 blocks per region (`JIT_MAX_REGION_BLOCKS`; the environment
-variable of that name lowers it for A/B runs), 128 instructions per block
+Limits: 32 blocks per region (the environment variable
+`JIT_MAX_REGION_BLOCKS` sets 1-64 for A/B runs; 64 was no clear gain,
+16 and 8 were slower: Hollow Knight's fight 50.2 and 45.2-45.9 fps against
+51.0-52.4 at 32), 128 instructions per block
 (`JIT_MAX_BLOCK_INSNS`), and four code pages (`JIT_MAX_REGION_PAGES`),
 each validated by its own range hash.
 `voland-cli --jit-no-calls` turns call spanning off.
@@ -468,7 +473,10 @@ ran about 8% slower in the browser (three runs each: fight 41-46 fps vs
 47-50, every phase lower). The caller reloads every register its whole
 region uses after each return (a small return-site region loads only its
 own), each calling region carries the handler and its return-site
-blocks, and 42 M calls never came back to their caller. Reverted.
+blocks, and 42 M calls never came back to their caller. Reverted. Tried
+again on top of register residency (0.5.6, which makes the caller's
+reload at most 8 registers): still 6-7% slower (fight 48.9-49.7 vs
+51.0-55.0 fps, three runs each).
 
 **Node is not the browser here.** Node 24 (V8 13.6) bounds-checks every
 memory64 access explicitly (about five instructions each); Chromium 149

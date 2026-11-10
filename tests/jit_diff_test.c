@@ -793,6 +793,10 @@ int main(int argc, char **argv) {
          iterations, (unsigned long long)g_rng, (unsigned long long)stats->blocks_compiled,
          (unsigned long long)stats->block_entries, (unsigned long long)stats->interpreted_blocks,
          (unsigned long long)stats->module_bytes);
+  uint64_t exits[JIT_EXIT_KINDS];
+  if (jit_region_exits(g_jit, exits)) /* VOLAND_JIT_ENTRIES=1 */
+    printf("[jit_diff_test] region exits: calls %llu, returns %llu\n", (unsigned long long)exits[JIT_EXIT_CALL],
+           (unsigned long long)exits[JIT_EXIT_RETURN]);
   g_ref_cpu->destroy(g_ref);
   g_jit_cpu->destroy(g_jit);
   vmm_destroy(g_vmm);
