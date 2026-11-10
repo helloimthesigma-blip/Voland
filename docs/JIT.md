@@ -113,9 +113,38 @@ real code, with loads and stores of exactly those registers. Only locals
 the first pass saw used are declared: engines zero every declared local
 on each call, and small regions are called millions of times.
 
-**Guest registers in locals.** Inside a region, X0–X30, SP and NZCV live
-in wasm locals. They are written back at every exit, before every
-interpreter call, and wherever the state must be complete.
+**Guest registers.** Inside a region, NZCV and the busiest guest
+registers live in wasm locals: at most 8 of X0–X30 and SP, each used at
+least twice in the region (the analysis pass counts). The others are
+loaded from and stored to the state where the code uses them. Locals are
+written back at every exit, before every interpreter call, and wherever
+the state must be complete; the others need nothing there.
+
+Until 0.5.6 every register a region touched lived in a local. Each local
+is live across the region's dispatch loop, so with 31 registers, SP, the
+translation caches and the temporaries V8 ran out of machine registers
+and spilled, and every region entry and exit moved every one of them.
+Hollow Knight's main thread enters a region every ~27 instructions.
+`JIT_LOCAL_REGS=N` sets the count (32 restores the old behaviour); in the
+browser (2026-11-10, two runs each):
+
+| JIT_LOCAL_REGS | Hollow Knight walk / fight / standing fps | Silksong bench / walk / end fps |
+|---|---|---|
+| 32 (before) | 46.2-48.1 / 49.0-50.8 / 52.8 | 56.3-57.0 / 55.0-55.3 / 57.3-57.8 |
+| 12 | 48.6-48.7 / 50.2-51.5 / 53.0-54.3 | |
+| 8 | 49.0-50.2 / 50.9-52.4 / 54.0-55.1 | 58.8 / 57.1-57.2 / 59.3 |
+| 4 | 49.5-50.0 / 51.8-52.9 / 55.1-55.9 | |
+| 0 | 49.9-50.0 / 51.5-52.6 / 54.9-55.4 | |
+
+Below 8 it is flat for Hollow Knight; 8 leaves a tight loop its hot
+registers. `tests/jit_bench.c` in a Chromium worker was the same or
+slightly faster at 8 in every case.
+
+What did not help (each tried in the browser and reverted, 2026-11-10):
+a page-indexed translation array behind the one-entry caches (it took
+~95% of the page-table walks away but cost ~7% fps), calls that return
+(below), and lowering the hot threshold (below). Code added to a region
+costs more than the events it saves.
 
 **Lazy flags.** After ADDS, SUBS, ANDS and similar, only the operands
 and the result are kept. A reader right after them (CMP + B.cond)
@@ -150,6 +179,7 @@ entry's read-and-write walk is the same code.
   - The four busiest other base registers of a region get slots of their
     own (`JIT_TLB_SLOTS`), which start each call from the shared entry
     and refill it on a miss: a loop reading two buffers keeps both pages.
+    `JIT_TLB_SLOTS_MAX=N` in the environment allows fewer (A/B runs).
   - A region loads and stores only the carried entries it uses.
   - The cache goes from region to region through the state
     (`Jit_State.tlb_*`). A region's prologue takes it only if the
@@ -495,6 +525,11 @@ same wall time): 4096 got 19% further than 256 with 59% fewer modules and
 no evictions at the live cap; 16384 got no further than 4096. In the
 browser its gloom scene went from ~2.2 to ~3.7 fps and the 150 s average
 from 8.0-8.3 to 8.6-9.1 fps; Silksong's title is unchanged (40-45 fps).
+Hollow Knight's gameplay, where much of the main thread's per-frame code
+stays under the threshold for minutes, still did best at 8192
+(2026-11-10, browser, two runs each: walk 47.3/46.7 fps at 8192,
+44.7/44.3 at 1024, 39.9/37.3 at 256; the fight 49.6/48.3, 47.0/46.2,
+46.0/45.5) - compiled code cost more than interpreting it.
 `VOLAND_JIT_THRESHOLD=N` overrides it (in the browser through
 `?env=VOLAND_JIT_THRESHOLD=N`), for A/B runs without a rebuild.
 `VOLAND_JIT_FALLBACKS=N` is the browser's `--jit-fallbacks`: every N
@@ -793,6 +828,10 @@ shows it next to the backend name.
   call cost Hollow Knight's busiest fight ~3 fps. `JIT_SHARED_WALK=1`
   restores the call. `VOLAND_JIT_ENTRIES=1` counts region entries and
   cache misses per guest thread.
+- **0.5.6** (2026-11-10) - register residency: at most 8 guest registers
+  (the region's busiest) live in locals, the rest in the state. Hollow
+  Knight's fight +4-5%, Silksong +3-4% in the browser.
+  `JIT_LOCAL_REGS=32` restores 0.5.5.
 
 ## What a region costs on V8
 

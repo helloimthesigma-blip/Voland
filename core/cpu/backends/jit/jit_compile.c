@@ -81,7 +81,8 @@ enum {
   L_TLB_SBASE = 57, /* the same for SP-based accesses (pages both readable and writable) */
   L_TLB_SDELTA = 58,
   L_TLB_SLOT = 59, /* JIT_TLB_SLOTS more (base, delta) pairs: one per busy (base register, permission) */
-  L_LAST_I64 = L_TLB_SLOT + 2 * JIT_TLB_SLOTS - 1,
+  L_REGVAL = L_TLB_SLOT + 2 * JIT_TLB_SLOTS, /* set_x's value on its way to a register kept in the state */
+  L_LAST_I64 = L_REGVAL,
   L_NZCV,
   L_STATUS,
   L_IDX,    /* the region target to dispatch to */
@@ -297,6 +298,12 @@ typedef struct Ctx {
   uint32_t body_start, hint_count;
   uint32_t hint_offset[JIT_MAX_HINTS];
   uint8_t hint_likely[JIT_MAX_HINTS];
+  /* Register residency: the analysis pass counts each register's reads
+   * and writes (31 = SP); the final pass keeps the busiest in locals
+   * (bit r of `in_local`, MASK_SP for SP) and the rest in the state,
+   * read and written there directly (reg_in_local). */
+  uint32_t reg_uses[32];
+  uint64_t in_local;
   uint32_t tlb_uses[2][31];
   uint8_t tlb_slot[2][31];
   bool a32;               /* the code is A32 (jit_compile_a32.inc) */
@@ -452,13 +459,42 @@ static uint64_t width_mask_of(bool sf) { return sf ? ~(uint64_t)0 : MASK32; }
 /* Guest registers. Field value 31 is XZR or SP by instruction context. */
 /* ------------------------------------------------------------------ */
 
+/* Register r (31 = SP) lives in its local in this region (always in the
+ * analysis pass, which counts uses for the choice). */
+static bool reg_in_local(const Ctx *c, uint32_t r) {
+  return c->discover || (c->in_local & (r == REG_ZR ? MASK_SP : (uint64_t)1 << r)) != 0;
+}
+static uint64_t reg_offset(uint32_t r) { return r == REG_ZR ? OFF_SP : OFF_X(r); }
+static void reg_get(Ctx *c, uint32_t r) {
+  if (c->discover && c->reg_uses[r] < UINT32_MAX) c->reg_uses[r]++;
+  if (reg_in_local(c, r)) {
+    lget(c, r == REG_ZR ? L_SP : L_X0 + r);
+    return;
+  }
+  state_load64(c, reg_offset(r));
+}
+/* Pops the value into register r (31 = SP). */
+static void reg_set(Ctx *c, uint32_t r) {
+  if (c->discover && c->reg_uses[r] < UINT32_MAX) c->reg_uses[r]++;
+  if (reg_in_local(c, r)) {
+    lset(c, r == REG_ZR ? L_SP : L_X0 + r);
+    return;
+  }
+  lset(c, L_REGVAL);
+  state_store64_local(c, reg_offset(r), L_REGVAL);
+}
+/* Register r's value into the state (where it may be stale: a local). */
+static void reg_to_state(Ctx *c, uint32_t r) {
+  if (reg_in_local(c, r)) state_store64_local(c, reg_offset(r), r == REG_ZR ? L_SP : L_X0 + r);
+}
+
 static void get_x(Ctx *c, uint32_t r) {
   if (r == REG_ZR) {
     i64c(c, 0);
     return;
   }
   c->used |= (uint64_t)1 << r;
-  lget(c, L_X0 + r);
+  reg_get(c, r);
 }
 static void get_xsp(Ctx *c, uint32_t r) {
   if (r != REG_ZR) {
@@ -466,7 +502,7 @@ static void get_xsp(Ctx *c, uint32_t r) {
     return;
   }
   c->used |= MASK_SP;
-  lget(c, L_SP);
+  reg_get(c, REG_ZR);
 }
 static void get_xw(Ctx *c, uint32_t r, bool sf) {
   get_x(c, r);
@@ -482,7 +518,7 @@ static void set_x(Ctx *c, uint32_t r) {
   c->predicted_mask &= ~(1u << r);
   c->used |= (uint64_t)1 << r;
   c->written |= (uint64_t)1 << r;
-  lset(c, L_X0 + r);
+  reg_set(c, r);
 }
 static void set_xsp(Ctx *c, uint32_t r) {
   if (r != REG_ZR) {
@@ -491,7 +527,7 @@ static void set_xsp(Ctx *c, uint32_t r) {
   }
   c->used |= MASK_SP;
   c->written |= MASK_SP;
-  lset(c, L_SP);
+  reg_set(c, REG_ZR);
 }
 static void flags_observed(Ctx *c) {
   if (c->flag_event == FLAG_EVENT_NONE) c->flag_event = FLAG_EVENT_READ;
@@ -535,10 +571,11 @@ static bool reg_in(uint64_t mask, uint32_t r) { return r == REG_ZR ? (mask & MAS
 static void spill(Ctx *c) {
   for (uint32_t k = 0; k < REG_PAIRS; k++) {
     const uint32_t a = 2u * k, b = a + 1u;
-    const bool wa = reg_in(c->all_written, a), wb = reg_in(c->all_written, b);
+    const bool la = reg_in_local(c, a), lb = reg_in_local(c, b);
+    const bool wa = la && reg_in(c->all_written, a), wb = lb && reg_in(c->all_written, b);
     if (!wa && !wb) continue;
     /* A partner that is only read still holds the state's value: storing it back is harmless. */
-    if ((wa || reg_in(c->all_used, a)) && (wb || reg_in(c->all_used, b))) {
+    if ((wa || (la && reg_in(c->all_used, a))) && (wb || (lb && reg_in(c->all_used, b)))) {
       lget(c, L_STATE);
       lget(c, pair_local(a));
       simd(c, WASM_SIMD_I64X2_SPLAT);
@@ -563,7 +600,7 @@ static void spill(Ctx *c) {
 static void reload(Ctx *c) {
   for (uint32_t k = 0; k < REG_PAIRS; k++) {
     const uint32_t a = 2u * k, b = a + 1u;
-    const bool ua = reg_in(c->all_used, a), ub = reg_in(c->all_used, b);
+    const bool ua = reg_in_local(c, a) && reg_in(c->all_used, a), ub = reg_in_local(c, b) && reg_in(c->all_used, b);
     if (ua && ub) {
       lget(c, L_STATE);
       simd(c, WASM_SIMD_V128_LOAD);
@@ -2386,12 +2423,12 @@ static void emit_direct_call_writing(Ctx *c, const Sync *sync, uint32_t writes, 
   for (uint32_t r = 0; r < REG_ZR; r++) {
     if (sync->regs & ((uint64_t)1 << r)) {
       c->used |= (uint64_t)1 << r;
-      state_store64_local(c, OFF_X(r), L_X0 + r);
+      reg_to_state(c, r);
     }
   }
   if (sync->regs & MASK_SP) {
     c->used |= MASK_SP;
-    state_store64_local(c, OFF_SP, L_SP);
+    reg_to_state(c, REG_ZR);
   }
   if (sync->nzcv) {
     lget(c, L_STATE);
@@ -5993,13 +6030,52 @@ static void emit_tlb_store(Ctx *c) {
   }
 }
 
+/* Register residency (docs/JIT.md "Guest registers"): only a region's
+ * busiest registers (at least LOCAL_REG_MIN_USES uses, at most
+ * LOCAL_REGS_DEFAULT of them) live in locals; the others are read and
+ * written in the state where the code uses them. Keeping all of them in
+ * locals - live across the region's dispatch loop - asked V8 for far more
+ * registers than it has, and every region entry and exit moved them all.
+ * JIT_LOCAL_REGS=N in the environment changes the count (A/B runs; 32 is
+ * every register, the behaviour before 0.5.6). */
+#define LOCAL_REG_MIN_USES 2u
+#define LOCAL_REGS_DEFAULT 8u
+static uint32_t local_regs_max(void) {
+  static int max = -1;
+  if (max < 0) max = getenv("JIT_LOCAL_REGS") ? atoi(getenv("JIT_LOCAL_REGS")) : (int)LOCAL_REGS_DEFAULT;
+  return (uint32_t)max;
+}
+static void choose_local_registers(Ctx *c, const Ctx *analysis) {
+  const uint32_t max = local_regs_max();
+  uint32_t taken[32] = {0};
+  c->in_local = 0;
+  for (uint32_t n = 0; n < max && n < 32u; n++) {
+    uint32_t best = 32u;
+    for (uint32_t r = 0; r < 32u; r++) {
+      if (taken[r] || analysis->reg_uses[r] < (max >= 32u ? 1u : LOCAL_REG_MIN_USES)) continue;
+      if (best == 32u || analysis->reg_uses[r] > analysis->reg_uses[best]) best = r;
+    }
+    if (best == 32u) break;
+    taken[best] = 1;
+    c->in_local |= best == REG_ZR ? MASK_SP : (uint64_t)1 << best;
+  }
+}
+
 /* The analysis pass's busiest (permission, base register) pairs get the
  * slots; an access made once per call gains nothing over the shared
  * cache it would start from. */
 #define TLB_SLOT_MIN_USES 2u
+/* JIT_TLB_SLOTS_MAX=N in the environment: at most N slots (A/B runs;
+ * each slot is two more locals live across the region). */
+static uint32_t tlb_slots_max(void) {
+  static int max = -1;
+  if (max < 0) max = getenv("JIT_TLB_SLOTS_MAX") ? atoi(getenv("JIT_TLB_SLOTS_MAX")) : (int)JIT_TLB_SLOTS;
+  return (uint32_t)max < JIT_TLB_SLOTS ? (uint32_t)max : JIT_TLB_SLOTS;
+}
+
 static void assign_tlb_slots(Ctx *c, const Ctx *analysis) {
   memset(c->tlb_slot, 0, sizeof(c->tlb_slot));
-  for (uint32_t slot = 0; slot < JIT_TLB_SLOTS; slot++) {
+  for (uint32_t slot = 0; slot < tlb_slots_max(); slot++) {
     uint32_t best_uses = TLB_SLOT_MIN_USES - 1u, best_write = 0, best_reg = 0;
     for (uint32_t write = 0; write < 2u; write++) {
       for (uint32_t r = 0; r < REG_SP_BASE; r++) {
@@ -6345,6 +6421,8 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     c.uses_tlb = analysis.uses_tlb;
     c.tlb_carried = analysis.tlb_carried;
     assign_tlb_slots(&c, &analysis);
+    choose_local_registers(&c, &analysis);
+    if (c.declared_local < L_REGVAL) c.declared_local = L_REGVAL; /* reg_set's, final pass only */
     c.all_used = analysis.used | analysis.written;
     c.all_written = analysis.written;
     /* reload's paired loads go through L_VA, which the analysis pass (it
