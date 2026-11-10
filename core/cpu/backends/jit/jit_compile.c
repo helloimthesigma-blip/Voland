@@ -5687,7 +5687,9 @@ static Outcome c_branch_system(Ctx *c, uint32_t insn) {
       const uint64_t target = branch_target(c, insn, 25, 0), back = c->pc + INSN_BYTES;
       i64c(c, back);
       set_x(c, CPU_REG_X30);
-      if (!c->link->span_calls || (c->discover && find_block(c, target) < 0 && !small_callee(c, target))) {
+      /* (The final pass knows from the blocks: a callee discovery left out.) */
+      if (!c->link->span_calls ||
+          (c->discover ? find_block(c, target) < 0 && !small_callee(c, target) : find_block(c, target) < 0)) {
         i64c(c, target);
         exit_to_stack(c, JIT_EXIT_CALL);
         return OUTCOME_END;

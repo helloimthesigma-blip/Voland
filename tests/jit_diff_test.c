@@ -30,6 +30,11 @@
 
 #define CODE_GVA 0x100000ull
 #define CODE2_GVA 0x101000ull /* a second code page: callees and a PLT-style stub */
+/* Large callees in it (words): see code2. */
+#define BIG_LEAF 32u
+#define BIG_LEAF_ADDS 50u
+#define BIG_CALLER 96u
+#define BIG_ELSEWHERE 112u
 #define CODE2_PA 0x1000ull
 #define DATA_GVA 0x200000ull
 #define CODE_PA 0x0ull
@@ -577,9 +582,9 @@ static void run_case(uint32_t iteration) {
       code[i] = 0x1E202800u | (fp_vreg() << 16) | (fp_vreg() << 5) | fp_vreg();
       continue;
     }
-    if (pick(10) == 0) { /* BL into the second page: a leaf function, the PLT stub or the shim (code2 below) */
-      static const uint32_t targets[4] = {0, 4, 8, 12};
-      const uint64_t target = CODE2_GVA + 4u * targets[pick(4)];
+    if (pick(10) == 0) { /* BL into the second page: a leaf function, the PLT stub, the shim or a large callee (code2 below) */
+      static const uint32_t targets[] = {0, 4, 8, 12, BIG_LEAF, BIG_CALLER, BIG_ELSEWHERE};
+      const uint64_t target = CODE2_GVA + 4u * targets[pick(sizeof(targets) / sizeof(targets[0]))];
       code[i] = (0x25u << 26) | (uint32_t)(((target - (CODE_GVA + 4u * i)) >> 2) & 0x3FFFFFFu);
       continue;
     }
@@ -616,6 +621,20 @@ static void run_case(uint32_t iteration) {
   code2[13] = 0x14000007u; /* b +7 words: w20 */
   code2[20] = 0x8B030042u; /* add x2, x2, x3 */
   code2[21] = 0x14000000u | ((uint32_t)-17 & 0x3FFFFFFu); /* b -17 words: f4 */
+  /* Callees too large to join a region (calls and returns between
+   * regions): a leaf of BIG_LEAF_ADDS adds; a function that saves its
+   * frame and calls that leaf (nested calls); one that points x30 at the
+   * BR target, then runs into the leaf (its RET goes elsewhere than the
+   * call's return site). */
+  for (uint32_t i = 0; i < BIG_LEAF_ADDS; i++) code2[BIG_LEAF + i] = 0x910004A5u; /* add x5, x5, #1 */
+  code2[BIG_LEAF + BIG_LEAF_ADDS] = 0xD65F03C0u;
+  code2[BIG_CALLER] = 0xA9BF7BFDu; /* stp x29, x30, [sp, #-16]! */
+  code2[BIG_CALLER + 1] = 0x94000000u | ((uint32_t)(BIG_LEAF - (BIG_CALLER + 1)) & 0x3FFFFFFu);
+  code2[BIG_CALLER + 2] = 0xA8C17BFDu; /* ldp x29, x30, [sp], #16 */
+  code2[BIG_CALLER + 3] = 0x8B0500C6u; /* add x6, x6, x5 */
+  code2[BIG_CALLER + 4] = 0xD65F03C0u;
+  code2[BIG_ELSEWHERE] = 0xAA1C03FEu; /* mov x30, x28 */
+  code2[BIG_ELSEWHERE + 1] = 0x14000000u | ((uint32_t)(BIG_LEAF - (BIG_ELSEWHERE + 1)) & 0x3FFFFFFu);
   CHECK_OK(vmm_write_physical(g_vmm, CODE2_PA, code2, sizeof(code2)));
   g_jit_cpu->clear_cache(g_jit);
 

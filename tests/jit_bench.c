@@ -61,6 +61,9 @@ static double bench_once(VMM_Context *vmm, const uint32_t *code, uint32_t words,
   return elapsed * 1e9 / (double)instructions;
 }
 
+#define LARGE_CALLEE_AT 64u   /* words */
+#define LARGE_CALLEE_ADDS 50u /* past the 48 instructions a spanned callee may have */
+
 /* The best of BENCH_REPEATS runs (the machine is shared). */
 static double bench(VMM_Context *vmm, const char *name, const uint32_t *code, uint32_t words, uint64_t x0) {
   double best = 0;
@@ -137,6 +140,19 @@ int main(int argc, char **argv) {
   call[16] = 0x91000421u;      /* add x1, x1, #1 */
   call[17] = 0xD65F03C0u;      /* ret */
   bench(vmm, "call loop (bl/ret)", call, 64, n);
+
+  /* 3b. The same loop into a callee too large to join the caller's
+   *     region (LARGE_CALLEE_ADDS adds, then ret): a call and a return
+   *     between regions per iteration. */
+  uint32_t large[LARGE_CALLEE_AT + LARGE_CALLEE_ADDS + 1u];
+  for (uint32_t i = 0; i < sizeof(large) / 4; i++) large[i] = 0xD4000001u;
+  large[0] = 0x94000000u | LARGE_CALLEE_AT; /* bl */
+  large[1] = 0xF1000400u;
+  large[2] = 0x54FFFFC1u;
+  large[3] = 0xD4000001u;
+  for (uint32_t i = 0; i < LARGE_CALLEE_ADDS; i++) large[LARGE_CALLEE_AT + i] = 0x91000421u;
+  large[LARGE_CALLEE_AT + LARGE_CALLEE_ADDS] = 0xD65F03C0u;
+  bench(vmm, "call loop, large callee", large, sizeof(large) / 4, n / 8u);
 
   /* 4. Call through a PLT-style stub: bl stub; stub: adrp-free form
    *    ldr x17, [x16]; br x17 ... with [x16] = &f. */

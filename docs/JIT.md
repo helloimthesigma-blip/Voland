@@ -416,6 +416,37 @@ CPU time on one development machine):
 Spanning every callee copied large functions into every caller, which
 doubled the bytes to compile and lost in load time.
 
+**Where the transitions come from** (`VOLAND_JIT_ENTRIES=1`, browser,
+2026-11-10). Hollow Knight's main thread in a fight: 789 M exits, of
+which 387 M returns (49%), 285 M direct branches and calls out of the
+region, 117 M indirect branches (BR/BLR), next to nothing for the budget
+or the interpreter. Silksong's busiest thread: 380 M of 796 M returns
+(48%), 241 M branches and calls, 175 M indirect.
+
+**Tried: calls that return.** A BL to a callee outside the region made a
+wasm call (not a tail call) through a shared handler, with the return
+address pushed on a small stack in `Jit_State`; a RET to the top of that
+stack left with a "returned" status, and the caller reloaded its
+registers and went on at the return site as a block of its own region.
+It took Hollow Knight's main thread from 820 M to 634 M region entries
+(178 M returns went back into their caller) and a large-callee loop in
+`tests/jit_bench.c` from 0.41 to 0.25 ns per instruction - but the fight
+ran about 8% slower in the browser (three runs each: fight 41-46 fps vs
+47-50, every phase lower). The caller reloads every register its whole
+region uses after each return (a small return-site region loads only its
+own), each calling region carries the handler and its return-site
+blocks, and 42 M calls never came back to their caller. Reverted.
+
+**Node is not the browser here.** Node 24 (V8 13.6) bounds-checks every
+memory64 access explicitly (about five instructions each); Chromium 149
+uses guard regions and checks none, the 5.25 GB shared memory included
+(same function: 104 vs 64 bytes of machine code). Under Node a load/store
+loop takes 1.09 ns per instruction, in a Chromium worker 0.32; a region
+transition costs about 14 ns in both, so in the browser transitions
+weigh even more against straight-line code, and work that only saves
+state loads and stores barely shows. Measure JIT changes in the browser
+(perf.mjs), or run `tests/jit_bench.c` in a Chromium worker.
+
 ## The region cache
 
 Each host thread has a region cache of 2^17 entries
