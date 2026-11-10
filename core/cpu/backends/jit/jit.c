@@ -233,6 +233,14 @@ static bool g_span_calls = true;
 void jit_set_span_calls(bool enabled) { g_span_calls = enabled; }
 void jit_set_hot_profile(bool enabled) { g_hot_profile = enabled; }
 
+bool jit_region_counts(const CPU_State *state, uint64_t *entries, uint64_t *misses) {
+  const Jit_State *j = (const Jit_State *)state;
+  if (!g_hot_profile || !j) return false;
+  *entries = j->region_entries;
+  *misses = j->tlb_misses;
+  return true;
+}
+
 void jit_print_hot_regions(uint32_t top) {
   const Jit_Entry *g_cache = g_main_thread.cache; /* the first core's (the CLI runs one) */
   static bool printed[JIT_CACHE_ENTRIES];
@@ -1035,6 +1043,7 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
     if (e) {
       if (s->cycles_consumed + e->length <= cycle_budget) {
         t->stats.block_entries++;
+        if (g_hot_profile) j->region_entries++;
         note_block(t, pc | JIT_RECENT_COMPILED);
         const Jit_Block_Fn fn = (Jit_Block_Fn)(uintptr_t)e->function;
         if (fn(j) == JIT_BLOCK_STOP) {
@@ -1093,6 +1102,9 @@ static CPU_State *jit_create(VMM_Context *vmm, void *userdata) {
     g_fallback_report_every = strtoull(fallbacks, NULL, 0);
     jit_set_fallback_profile(true);
   }
+  /* VOLAND_JIT_ENTRIES=1 (diagnostics): count region entries and
+   * translation-cache misses per guest thread (the [threads] dump). */
+  if (getenv("VOLAND_JIT_ENTRIES")) jit_set_hot_profile(true);
   Jit_State *j = (Jit_State *)calloc(1, sizeof(Jit_State));
   if (!j) return NULL;
   j->interp.vmm = vmm;

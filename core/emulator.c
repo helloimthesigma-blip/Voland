@@ -1808,6 +1808,13 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
              th->on_core ? " on core" : "", th->held ? " held" : "", module, (unsigned long long)offset, th->last_core,
              th->thread.preferred_core, (unsigned long long)th->core_mask, (unsigned long long)th->last_run,
              (unsigned long long)th->cycles_run, (unsigned long long)(th->run_ns / EMULATOR_NS_PER_MS));
+#ifdef SWITCH_CPU_BACKEND_JIT
+    uint64_t region_entries = 0, misses = 0;
+    if (jit_region_counts(th->thread.cpu_state, &region_entries, &misses) && region_entries)
+      log_warn("[threads]   %llu region entries (%.1f cycles each), %llu translation-cache misses",
+               (unsigned long long)region_entries, (double)th->cycles_run / (double)region_entries,
+               (unsigned long long)misses);
+#endif
     if (th->state == THREAD_STATE_WAITING) {
       uint32_t word = 0;
       (void)vmm_read32(emulator->vmm, th->wait_address, &word);

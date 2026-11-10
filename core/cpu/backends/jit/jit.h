@@ -78,6 +78,9 @@ void jit_print_fallback_profile(uint32_t top);
  * times entry-block length (PC, entries, instructions in the region). */
 void jit_set_hot_profile(bool enabled);
 void jit_print_hot_regions(uint32_t top);
+/* ...and per guest thread: regions entered and translation-cache misses
+ * so far (false while not counting). */
+bool jit_region_counts(const CPU_State *state, uint64_t *entries, uint64_t *misses);
 
 /* Diagnostics: run every thread on the interpreter from now on (a JIT run
  * reaches a scene fast; this checks the JIT there - voland-cli's snapshot

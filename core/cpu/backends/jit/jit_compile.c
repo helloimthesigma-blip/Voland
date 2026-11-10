@@ -166,6 +166,8 @@ _Static_assert(OFF_SP == OFF_X(31), "spill/reload move x30 and SP as one pair");
 #define OFF_TOTAL_CYCLES STATE_OFFSET(interp.total_cycles)
 #define OFF_L1 STATE_OFFSET(interp.l1)
 #define OFF_BUDGET STATE_OFFSET(cycle_budget)
+#define OFF_REGION_ENTRIES STATE_OFFSET(region_entries)
+#define OFF_TLB_MISSES STATE_OFFSET(tlb_misses)
 #define OFF_SCRATCH STATE_OFFSET(scratch)
 #define OFF_THREAD_CACHE STATE_OFFSET(thread_cache)
 #define OFF_TLB_GENERATION STATE_OFFSET(tlb_generation)
@@ -423,6 +425,15 @@ static void state_load64(Ctx *c, uint64_t offset) {
 static void state_store64_local(Ctx *c, uint64_t offset, uint32_t local) {
   lget(c, L_STATE);
   lget(c, local);
+  mem(c, WASM_OP_I64_STORE, ALIGN_8, offset);
+}
+
+/* Diagnostics: one more in the state's counter at `offset`. */
+static void state_count(Ctx *c, uint64_t offset) {
+  lget(c, L_STATE);
+  state_load64(c, offset);
+  i64c(c, 1);
+  op(c, WASM_OP_I64_ADD);
   mem(c, WASM_OP_I64_STORE, ALIGN_8, offset);
 }
 
@@ -1985,6 +1996,7 @@ static void emit_walk(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) {
   op(c, WASM_OP_I64_ADD);
   lset(c, L_HOST);
   else_(c);
+  if (c->link->count_entries) state_count(c, OFF_TLB_MISSES);
   emit_walk_full(c, size, base == L_TLB_SBASE ? VMM_PERM_RW : perm, slow);
   lget(c, L_ADDR);
   i64c(c, ~(uint64_t)VMM_PAGE_OFFSET_MASK);
@@ -5877,6 +5889,7 @@ static void emit_chain(Ctx *c) {
       i64c(c, 1);
       op(c, WASM_OP_I64_ADD);
       mem(c, WASM_OP_I64_STORE, ALIGN_8, at + ENTRY_OFFSET(entries));
+      state_count(c, OFF_REGION_ENTRIES);
     }
     lget(c, L_STATE);
     lget(c, L_ADDR);

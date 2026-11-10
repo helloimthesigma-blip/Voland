@@ -49,6 +49,9 @@ typedef struct Jit_State {
   uint64_t tlb_rbase, tlb_rdelta, tlb_wbase, tlb_wdelta;
   uint64_t tlb_sbase, tlb_sdelta; /* SP-based accesses (read-write pages) */
   uint32_t isa; /* JIT_ISA_*: what the state's code is (an A32 state is cpu/backends/a32's A32_State) */
+  /* Diagnostics (jit_set_hot_profile): regions entered, by the dispatcher
+   * or a chained exit, and translation-cache misses (walks). */
+  uint64_t region_entries, tlb_misses;
 } Jit_State;
 
 #define JIT_ISA_A64 0u
