@@ -484,9 +484,13 @@ static void compiler_unlock(void) { pthread_mutex_unlock(&g_compiler); }
 static _Thread_local Jit_Thread *t_jit;
 static bool g_main_claimed;
 
-/* Every live thread's state, for jit_stats() (under g_compiler). */
+/* Every live thread's state, for jit_stats() (under g_compiler), and
+ * the counts of threads that have exited (a state load restarts the core
+ * threads; the totals must not go backwards). */
 #define JIT_MAX_THREADS 16u
+#define JIT_STATS_WORDS (sizeof(Jit_Stats) / sizeof(uint64_t))
 static Jit_Thread *g_threads[JIT_MAX_THREADS];
+static uint64_t g_retired[JIT_STATS_WORDS];
 
 static void register_thread(Jit_Thread *t, bool add) {
   compiler_lock();
@@ -496,14 +500,19 @@ static void register_thread(Jit_Thread *t, bool add) {
       break;
     }
   }
+  if (!add) {
+    uint64_t words[JIT_STATS_WORDS];
+    memcpy(words, &t->stats, sizeof(words));
+    for (uint32_t w = 0; w < JIT_STATS_WORDS; w++) g_retired[w] += words[w];
+  }
   compiler_unlock();
 }
 
-#define JIT_STATS_WORDS (sizeof(Jit_Stats) / sizeof(uint64_t))
 const Jit_Stats *jit_stats(void) {
   static Jit_Stats total;
-  uint64_t sum[JIT_STATS_WORDS] = {0};
+  uint64_t sum[JIT_STATS_WORDS];
   compiler_lock();
+  memcpy(sum, g_retired, sizeof(sum));
   for (uint32_t i = 0; i < JIT_MAX_THREADS; i++) {
     if (!g_threads[i]) continue;
     uint64_t words[JIT_STATS_WORDS];
