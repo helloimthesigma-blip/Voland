@@ -11,6 +11,7 @@
 #include "gpu/block_linear.h"
 #include "gpu/framebuffer.h"
 #include "hle/kernel/handle_table.h"
+#include "hwopus_vectors.h"
 #include "ipc_fixtures.h"
 
 #include <string.h>
@@ -798,6 +799,47 @@ static void close_handle(uint32_t handle) {
   CHECK((uint32_t)regs->x[0] == 0);
 }
 
+/* hwopus: one DecodeInterleaved* call (`command`) of `packet` behind its
+ * 8-byte header; the PCM is read back into `pcm`. Samples per channel, or
+ * 0 if the call failed. */
+static uint32_t hwopus_test_decode(uint32_t decoder, uint32_t command, const uint8_t *packet, uint32_t bytes,
+                                   int16_t *pcm, uint32_t pcm_bytes) {
+  uint8_t in[8 + 1275];
+  memset(in, 0, 8);
+  in[2] = (uint8_t)(bytes >> 8);
+  in[3] = (uint8_t)bytes;
+  memcpy(in + 8, packet, bytes);
+  CHECK_OK(vmm_write_block(g_emu.vmm, SCRATCH(0x2C000), in, 8u + bytes));
+  Test_Ipc_Message d;
+  memset(&d, 0, sizeof(d));
+  d.sends[0] = (Test_Ipc_Buffer){SCRATCH(0x2C000), 8u + bytes, 0};
+  d.send_count = 1;
+  d.receives[0] = (Test_Ipc_Buffer){SCRATCH(0x2D000), pcm_bytes, 0};
+  d.receive_count = 1;
+  const uint32_t no_reset = 0;
+  const Test_Ipc_Reply r = call(decoder, command, &no_reset, sizeof(no_reset), &d);
+  if (r.result != 0 || test_le32(r.data) != 8u + bytes) return 0;
+  const uint32_t samples = test_le32(r.data + 4);
+  CHECK_OK(vmm_read_block(g_emu.vmm, SCRATCH(0x2D000), pcm, pcm_bytes));
+  return samples;
+}
+
+/* The decoded 20 ms block is the 1 kHz test tone: loud (RMS well above
+ * noise) and crossing zero about 40 times on the first channel. */
+static bool hwopus_test_is_tone(const int16_t *pcm, uint32_t channels) {
+  const uint32_t frame = 960u, expected_crossings = 40u, slack = 4u;
+  const double min_rms = 2000.0;
+  double energy = 0.0;
+  uint32_t crossings = 0;
+  for (uint32_t i = 0; i < frame; i++) {
+    const double v = pcm[i * channels];
+    energy += v * v;
+    if (i > 0 && (pcm[(i - 1u) * channels] < 0) != (pcm[i * channels] < 0)) crossings++;
+  }
+  return energy / frame > min_rms * min_rms && crossings + slack >= expected_crossings &&
+         crossings <= expected_crossings + slack;
+}
+
 static void test_thread_reclaim(void) {
   const uint32_t live = create_thread();
   Sched_Thread *keeper = (Sched_Thread *)handle_table_get(&g_emu.process.handles, live, KERNEL_OBJECT_THREAD);
@@ -942,7 +984,9 @@ static void test_sdk_startup_services(void) {
     const uint32_t mii_index = 0;
     Test_Ipc_Reply built = call(mii, 7, &mii_index, sizeof(mii_index), NULL);
     CHECK(built.data[0] != 0 && built.data[0x10] == 'M' && built.data[0x12] == 'i');
-    /* hwopus: packets decode to the right count of silent samples. */
+    /* hwopus: libopus decodes real packets (a 1 kHz tone) through every
+     * open form; with the pool full a decoder still gives the right count
+     * of silent samples (the TOC count). */
     {
       const uint8_t celt_20ms = (uint8_t)(31u << 3); /* CELT FB 20 ms, one frame */
       CHECK(hwopus_packet_samples(&celt_20ms, 1, 48000) == 960);
@@ -950,22 +994,53 @@ static void test_sdk_startup_services(void) {
       CHECK(hwopus_packet_samples(silk_two_10ms, 2, 48000) == 960);
       const uint8_t celt_code3[2] = {(uint8_t)((16u << 3) | 3u), 4}; /* 2.5 ms x4 */
       CHECK(hwopus_packet_samples(celt_code3, 2, 24000) == 240);
+      const uint32_t hwopus = service("hwopus");
       const uint32_t open_params[2] = {48000, 2};
-      const uint32_t decoder = object(service("hwopus"), 0, open_params, sizeof(open_params));
-      const uint8_t packet[8 + 3] = {0, 0, 0, 3, 0, 0, 0, 0, celt_20ms, 0xAA, 0xBB};
-      CHECK_OK(vmm_write_block(g_emu.vmm, SCRATCH(0x2C000), packet, sizeof(packet)));
-      CHECK_OK(vmm_write32(g_emu.vmm, SCRATCH(0x2D000), 0x1234));
-      Test_Ipc_Message d;
-      memset(&d, 0, sizeof(d));
-      d.sends[0] = (Test_Ipc_Buffer){SCRATCH(0x2C000), sizeof(packet), 0};
-      d.send_count = 1;
-      d.receives[0] = (Test_Ipc_Buffer){SCRATCH(0x2D000), 960 * 2 * 2, 0};
-      d.receive_count = 1;
-      Test_Ipc_Reply decoded = call(decoder, 0, NULL, 0, &d);
-      CHECK(test_le32(decoded.data) == sizeof(packet) && test_le32(decoded.data + 4) == 960);
-      uint32_t pcm = 1;
-      CHECK_OK(vmm_read32(g_emu.vmm, SCRATCH(0x2D000), &pcm));
-      CHECK(pcm == 0);
+      const uint32_t decoder = object(hwopus, 0, open_params, sizeof(open_params));
+      static int16_t pcm[960 * 2];
+      CHECK(hwopus_test_decode(decoder, 0, k_tone_0, sizeof(k_tone_0), pcm, sizeof(pcm)) == 960);
+      CHECK(hwopus_test_decode(decoder, 8, k_tone_1, sizeof(k_tone_1), pcm, sizeof(pcm)) == 960);
+      CHECK(hwopus_test_decode(decoder, 0, k_tone_2, sizeof(k_tone_2), pcm, sizeof(pcm)) == 960);
+      CHECK(hwopus_test_is_tone(pcm, 2));
+      /* Multistream: two mono streams onto two channels. */
+      static uint32_t ms_params[4 + 64];
+      memset(ms_params, 0, sizeof(ms_params));
+      ms_params[0] = 48000;
+      ms_params[1] = 2;
+      ms_params[2] = 2;
+      ms_params[3] = 0;
+      ms_params[4] = 0x0100u; /* mapping {0, 1} */
+      Test_Ipc_Message o;
+      memset(&o, 0, sizeof(o));
+      CHECK_OK(vmm_write_block(g_emu.vmm, SCRATCH(0x2E000), ms_params, sizeof(ms_params)));
+      o.sends[0] = (Test_Ipc_Buffer){SCRATCH(0x2E000), sizeof(ms_params), 0};
+      o.send_count = 1;
+      const Test_Ipc_Reply opened = call(hwopus, 2, NULL, 0, &o);
+      CHECK(opened.move_count == 1);
+      const uint32_t ms = opened.move_handles[0];
+      CHECK(hwopus_test_decode(ms, 9, k_ms_tone_0, sizeof(k_ms_tone_0), pcm, sizeof(pcm)) == 960);
+      CHECK(hwopus_test_decode(ms, 2, k_ms_tone_1, sizeof(k_ms_tone_1), pcm, sizeof(pcm)) == 960);
+      CHECK(hwopus_test_is_tone(pcm, 2));
+      /* Fill the pool: the extra decoder falls back to silence; closing
+       * one returns its slot to the next open. */
+      uint32_t extra[HWOPUS_SLOTS];
+      for (uint32_t i = 0; i < HWOPUS_SLOTS; i++) extra[i] = object(hwopus, 0, open_params, sizeof(open_params));
+      const uint32_t silent = extra[HWOPUS_SLOTS - 1u];
+      CHECK(hwopus_test_decode(silent, 0, k_tone_0, sizeof(k_tone_0), pcm, sizeof(pcm)) == 960);
+      bool all_zero = true;
+      for (uint32_t i = 0; i < 960u * 2u; i++) all_zero = all_zero && pcm[i] == 0;
+      CHECK(all_zero);
+      close_handle(extra[0]);
+      const uint32_t reopened = object(hwopus, 0, open_params, sizeof(open_params));
+      CHECK(hwopus_test_decode(reopened, 0, k_tone_0, sizeof(k_tone_0), pcm, sizeof(pcm)) == 960);
+      CHECK(hwopus_test_decode(reopened, 0, k_tone_1, sizeof(k_tone_1), pcm, sizeof(pcm)) == 960);
+      CHECK(hwopus_test_decode(reopened, 0, k_tone_2, sizeof(k_tone_2), pcm, sizeof(pcm)) == 960);
+      CHECK(hwopus_test_is_tone(pcm, 2));
+      close_handle(reopened);
+      for (uint32_t i = 1; i < HWOPUS_SLOTS; i++) close_handle(extra[i]);
+      close_handle(ms);
+      close_handle(decoder);
+      for (uint32_t i = 0; i < HWOPUS_SLOTS; i++) CHECK(!g_emu.hwopus.slot_used[i]);
     }
     /* fatal:u stops the process as crashed. */
     const uint32_t fatal_result = 0x1234u;

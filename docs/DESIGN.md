@@ -258,10 +258,13 @@ voland/
       ## No webaudio backend directory: on web, the AudioWorkletProcessor
       ## reads the ring directly (§14); the C side only writes the ring.
     third_party/
-      lz4/                   # THE ONLY third-party code in core/: upstream
-                             # lz4.{c,h} + LICENSE (BSD-2), pinned to a release
-                             # tag, built with allocation entry points compiled
-                             # out (§12, §26)
+      lz4/                   # upstream lz4.{c,h} + LICENSE (BSD-2), pinned to
+                             # a release tag, built with allocation entry
+                             # points compiled out (§12, §26)
+      opus/                  # libopus 1.5.2 (BSD-3) for hwopus (§14): only the
+                             # decoder files it links, fixed point; unmodified
+      opus_config/           # custom_support.h: libopus's heap allocators
+                             # compiled to NULL (decoders live in Voland storage)
     common/
       arena.{h,c}            # arena allocator, no malloc in hot paths
       ring_buffer.{h,c}      # SPSC ring buffer (audio ring, GPU command ring)
@@ -1155,7 +1158,7 @@ Dozens of services × dozens of commands makes this the prime candidate for the 
 
 ### Process bootstrap — what "load a game" actually does
 
-1. Parse decrypted NCA → ExeFS. ExeFS contains **NSO** executables (`rtld`, `main`, `subsdk*`, `sdk`): per-segment **LZ4-compressed** .text/.rodata/.data plus bss. The loader tree gains `nso.{h,c}` and `nro.{h,c}` (NRO is the homebrew format — required for the Phase 2 goal, not optional). LZ4 (single-file, BSD) joins the core dependency list; it is the only third-party code in `core/`.
+1. Parse decrypted NCA → ExeFS. ExeFS contains **NSO** executables (`rtld`, `main`, `subsdk*`, `sdk`): per-segment **LZ4-compressed** .text/.rodata/.data plus bss. The loader tree gains `nso.{h,c}` and `nro.{h,c}` (NRO is the homebrew format — required for the Phase 2 goal, not optional). LZ4 (single-file, BSD) joins the core dependency list. (Deviation: it was planned as the only third-party code in `core/`; the libopus decoder joined it for hwopus, §14 - an Opus decoder is a codec, not emulator code, and writing one is out of scope.)
 2. `npdm` supplies address-space type, main-thread priority/core/stack size, and the kernel capability list.
 3. Map NSOs at an ASLR'd base inside the 39-bit space; carve heap/alias/stack regions per the Horizon layout; vmm answers the `GetInfo` region queries from this same layout — one source of truth.
 4. Allocate the main thread: TLS block, stack, and the Horizon entry ABI — **X0 = 0, X1 = main thread handle**, PC = rtld entry. From here the scheduler runs it like any other guest thread.
@@ -2648,7 +2651,7 @@ The format of this register is "what could go wrong," not "what will go wrong." 
   - `lm` decodes log packets: a title's own messages, with file, line and function, appear in Voland's log.
   - The shared font gains U+25A1 □ and U+25A0 ■ (`tools/fonts/add-fallback-glyphs.py`, drawn by Voland; Noto Sans is OFL, so modification is allowed). SSBU's font engine (`nn::fontll::ScalableFontEngine`) asks for □ as its fallback glyph and dereferences the result. The fs service logs the path of every missing file at debug level.
   - **BC7 textures decode** (`gpu/bc7.c`, from the Khronos Data Format Specification; tables extracted from it). They used to show magenta. Verified identical to Pillow's independent decoder on 4096 random blocks covering all modes; `bc7_test` keeps 64 of them.
-  - **`hwopus`**: Opus packets "decode" to the right count of silent samples (RFC 6716 TOC). Titles keep running, without that stream's sound, until a real decoder lands.
+  - **`hwopus`**: Opus packets decode through the vendored libopus 1.5.2 (decoder only, fixed point, `core/third_party/opus`). **Deviation:** the plan allowed no third-party code in `core/` besides LZ4; an Opus decoder is a large, well-specified codec (RFC 6716) and the reference decoder is the right tool. It is built without its allocators: each decoder object takes a run of slots in a fixed pool inside `Hwopus_State` (16 x 44 KiB, so decoders are part of the Emulator and of save states, and nothing is allocated per packet). Single-stream (1-2 channels) and multistream (up to 8 channels) layouts decode; a larger layout, or an open with the pool full, falls back to the right count of silent samples (RFC 6716 TOC) so the title keeps running without that stream's sound. The `...AndReset` / `DecodeInterleaved` forms reset the decoder when their flag is set.
   - Status: skipping the opening movie with A reaches SSBU's **title screen** ("PRESS ANY BUTTON"), then the "How to Play" attract video.
   - Status: SSBU now loads a 9 MB runtime NRO through `ldr:ro` (nn::ro links it) and starts drawing, and with the font fix runs past 600k slices: it loads six more modules, then plays its opening movie, which is VP9 (NVDEC application 9). Only H.264 was decoded then, so the movie showed black; since 2026-10-23 VP9 decodes (§13) and the movie plays in the browser.
 - **§12, `ldr:ro` LoadModule:** `MapManualLoadModuleMemory` maps an NRO and its .bss buffer at a free 2 MB-aligned address past the TLS/IO region (.text RX, .rodata R, .data/.bss RW; the buffers are inaccessible while mapped). The guest's nn::ro links the module. QueryMemory reports module code static or mutable. Unmap undoes it. SSBU loads fighters this way.

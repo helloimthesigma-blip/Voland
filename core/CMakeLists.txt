@@ -103,22 +103,43 @@ set(SWITCH_CORE_SOURCES
 )
 
 #
-# The ONLY third-party code in core/: single-file LZ4 (BSD-2) for NSO
-# segment decompression (docs/DESIGN.md �12, �26). Built with every
-# allocating entry point compiled out, so the object contains no
-# malloc/calloc/free - the loader uses LZ4_decompress_safe over arena
-# storage and tests use the stack-state LZ4_compress_default.
+# Third-party code in core/ (docs/DESIGN.md §12, §26):
 #
-set(SWITCH_CORE_THIRD_PARTY_SOURCES
+# - single-file LZ4 (BSD-2) for NSO segment decompression. Built with every
+#   allocating entry point compiled out, so the object contains no
+#   malloc/calloc/free - the loader uses LZ4_decompress_safe over arena
+#   storage and tests use the stack-state LZ4_compress_default.
+# - libopus 1.5.2 (BSD-3), decoder only, fixed point, for hwopus (§14).
+#   Only the files the decoder links are vendored; custom_support.h
+#   compiles its heap allocators to NULL, and Voland initialises decoders
+#   in storage it owns (opus_*_get_size / opus_*_init). OPUS_WILL_BE_SLOW
+#   only silences its "built without optimisation" note in debug builds.
+#   Its include directories are set per file, so its silk/celt headers
+#   ("main.h", "structs.h", ...) never shadow core headers.
+#
+set(SWITCH_CORE_LZ4_SOURCES
   third_party/lz4/lz4.c
 )
 # Upstream lz4.c defines one non-static helper without a prototype
 # (LZ4_loadDict_internal); relax -Wmissing-prototypes for that file only.
 # Every other project warning stays on and lz4.c is clean under them.
-set_source_files_properties(${SWITCH_CORE_THIRD_PARTY_SOURCES} PROPERTIES
+set_source_files_properties(${SWITCH_CORE_LZ4_SOURCES} PROPERTIES
   COMPILE_DEFINITIONS "LZ4_STATIC_LINKING_ONLY_DISABLE_MEMORY_ALLOCATION;LZ4_HEAPMODE=0"
   COMPILE_OPTIONS "$<$<C_COMPILER_ID:GNU,Clang>:-Wno-missing-prototypes>"
 )
+
+file(GLOB SWITCH_CORE_OPUS_SOURCES CONFIGURE_DEPENDS
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/opus/src/*.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/opus/celt/*.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/opus/silk/*.c
+)
+set(SWITCH_CORE_OPUS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/third_party/opus)
+set_source_files_properties(${SWITCH_CORE_OPUS_SOURCES} PROPERTIES
+  COMPILE_DEFINITIONS "OPUS_BUILD;FIXED_POINT;DISABLE_FLOAT_API;VAR_ARRAYS;HAVE_LRINT;HAVE_LRINTF;CUSTOM_SUPPORT;OPUS_WILL_BE_SLOW"
+  INCLUDE_DIRECTORIES "${CMAKE_CURRENT_SOURCE_DIR}/third_party/opus_config;${SWITCH_CORE_OPUS_DIR}/include;${SWITCH_CORE_OPUS_DIR}/celt;${SWITCH_CORE_OPUS_DIR}/silk;${SWITCH_CORE_OPUS_DIR}/silk/fixed;${SWITCH_CORE_OPUS_DIR}/src"
+)
+
+set(SWITCH_CORE_THIRD_PARTY_SOURCES ${SWITCH_CORE_LZ4_SOURCES} ${SWITCH_CORE_OPUS_SOURCES})
 
 set(SWITCH_CORE_PUBLIC_HEADERS
   common/log.h
