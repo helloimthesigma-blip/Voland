@@ -4,7 +4,7 @@ A Nintendo Switch emulator that runs in your browser. A C11 core compiled to
 WebAssembly, its own ARM64 → WebAssembly JIT, and a WebGPU renderer. Nothing
 to install, no keys, and most games need no firmware.
 
-> **Status:** Phase 4 (First Boot). Hollow Knight, Silksong and Celeste play from boot into gameplay; six more games boot and play in places but run slower or have known faults (table below). Opus audio now decodes but is not yet checked in a game, and the heavier games are still slow. Per-game details are in [NEW_GAMES.md](docs/NEW_GAMES.md), the full task list in [DESIGN.md §25](docs/DESIGN.md#25-development-phases).
+> **Status:** Phase 4 (First Boot). Hollow Knight, Silksong and Celeste play from boot into gameplay; six more games boot and play in places but run slower or have known faults (table below). Opus audio (voices and music some games stream) now decodes, checked in Tears of the Kingdom; the heavier games are still slow. Per-game details are in [NEW_GAMES.md](docs/NEW_GAMES.md), the full task list in [DESIGN.md §25](docs/DESIGN.md#25-development-phases).
 
 ### Where each game stands
 
