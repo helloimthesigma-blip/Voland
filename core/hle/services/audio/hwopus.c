@@ -5,7 +5,9 @@
 #include "third_party/opus/include/opus.h"
 #include "third_party/opus/include/opus_multistream.h"
 
+#include <math.h>
 #include <stddef.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define OPUS_MAX_PACKET_BYTES 1275u
@@ -225,6 +227,34 @@ static int run_decoder(Hwopus_State *s, uint64_t state, bool reset, const uint8_
   return opus_decode((OpusDecoder *)dec, packet, (opus_int32)size, pcm, (int)frame_samples, 0);
 }
 
+/* VOLAND_OPUS_STATS (diagnostics, also ?env= on the web): every
+ * OPUS_STATS_PACKETS decoded packets, one line with their peak and RMS
+ * level - whether a title's Opus streams really produce sound. */
+#define OPUS_STATS_PACKETS 500u
+static int g_opus_stats = -1;
+static struct {
+  uint32_t packets;
+  uint64_t samples;
+  double energy;
+  int32_t peak;
+} g_opus_level;
+
+static void opus_stats_note(const int16_t *pcm, uint64_t count) {
+  if (g_opus_stats < 0) g_opus_stats = getenv("VOLAND_OPUS_STATS") ? 1 : 0;
+  if (!g_opus_stats) return;
+  for (uint64_t i = 0; i < count; i++) {
+    const int32_t v = pcm[i];
+    g_opus_level.energy += (double)v * v;
+    if (v > g_opus_level.peak) g_opus_level.peak = v;
+    if (-v > g_opus_level.peak) g_opus_level.peak = -v;
+  }
+  g_opus_level.samples += count;
+  if (++g_opus_level.packets < OPUS_STATS_PACKETS) return;
+  log_info("[hwopus] %u packets decoded: peak %d, RMS %.0f", g_opus_level.packets, g_opus_level.peak,
+           sqrt(g_opus_level.energy / (double)(g_opus_level.samples ? g_opus_level.samples : 1u)));
+  memset(&g_opus_level, 0, sizeof(g_opus_level));
+}
+
 static HLE_ServiceResult decode(HLE_Context *c, Service_Object *self, const IPC_Request *req, IPC_Response *res,
                                 bool with_perf, bool takes_reset) {
   const uint64_t state = self->state;
@@ -247,6 +277,7 @@ static HLE_ServiceResult decode(HLE_Context *c, Service_Object *self, const IPC_
     const int n = run_decoder(state_of(self), state, (reset_word & 0xFFu) != 0, body, size, pcm, frame);
     if (n <= 0) return HWOPUS_RESULT_INVALID_PACKET;
     samples = (uint32_t)n;
+    opus_stats_note(pcm, (uint64_t)samples * channels);
     if (!error_is_ok(vmm_write_block(c->vmm, out->gva, pcm, (uint64_t)samples * channels * sizeof(int16_t))))
       return HLE_RESULT_INVALID_POINTER;
   } else {
