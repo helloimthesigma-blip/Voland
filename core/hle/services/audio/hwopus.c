@@ -102,33 +102,41 @@ static void decoder_closed(void *service_state, uint64_t object_state) {
   release_slots((Hwopus_State *)service_state, object_state);
 }
 
+/* An object without a decoder: it still works and decodes to silence.
+ * Opens are rare, so each one is reported. */
+static uint64_t silent_decoder(uint64_t base, const char *why) {
+  log_warn("[hwopus] %u-channel %u Hz decoder plays silence: %s", state_channels(base), state_rate(base), why);
+  return base;
+}
+
 /* A libopus decoder for `channels` at `rate` in pool slots, as state bits
  * on top of decoder_state(); without one (pool full, unsupported layout)
- * the object still works and decodes to silence. */
+ * the object decodes to silence. */
 static uint64_t open_single(Hwopus_State *s, uint32_t rate, uint32_t channels) {
   const uint64_t base = decoder_state(rate, channels);
-  if (channels > 2u) return base;
+  if (channels > 2u) return silent_decoder(base, "more than 2 channels in one stream");
   const int bytes = opus_decoder_get_size((int)channels);
   const uint64_t slots = bytes > 0 ? claim_slots(s, (uint64_t)bytes) : 0;
-  if (!slots) return base;
+  if (!slots) return silent_decoder(base, "decoder pool full");
   if (opus_decoder_init((OpusDecoder *)slot_memory(s, slots), (opus_int32)rate, (int)channels) != OPUS_OK) {
     release_slots(s, slots);
-    return base;
+    return silent_decoder(base, "libopus refused the layout");
   }
   return base | slots;
 }
 
 static uint64_t open_multistream(Hwopus_State *s, const Opus_Multistream_Params *p) {
   const uint64_t base = decoder_state(p->sample_rate, p->channels);
-  if (p->channels > HWOPUS_MAX_CHANNELS || p->streams == 0 || p->stereo_streams > p->streams) return base;
+  if (p->channels > HWOPUS_MAX_CHANNELS) return silent_decoder(base, "too many channels");
+  if (p->streams == 0 || p->stereo_streams > p->streams) return silent_decoder(base, "bad stream counts");
   const int bytes = opus_multistream_decoder_get_size((int)p->streams, (int)p->stereo_streams);
   const uint64_t slots = bytes > 0 ? claim_slots(s, (uint64_t)bytes) : 0;
-  if (!slots) return base;
+  if (!slots) return silent_decoder(base, "decoder pool full");
   if (opus_multistream_decoder_init((OpusMSDecoder *)slot_memory(s, slots), (opus_int32)p->sample_rate,
                                     (int)p->channels, (int)p->streams, (int)p->stereo_streams,
                                     p->mapping) != OPUS_OK) {
     release_slots(s, slots);
-    return base;
+    return silent_decoder(base, "libopus refused the layout");
   }
   return base | slots | STATE_MULTISTREAM_BIT;
 }
