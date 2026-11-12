@@ -201,6 +201,10 @@ typedef struct Wgsl_Program_Desc {
   uint16_t block[3];
   uint32_t shared_bytes;
   uint32_t window_count;
+  /* Compute: the device runs 32-lane subgroups (WebGPU "subgroups"), so
+   * warp shuffles and votes translate - in programs whose control flow
+   * never diverges, where a subgroup is one warp at every instruction. */
+  bool subgroups;
 } Wgsl_Program_Desc;
 
 /* The storage buffers a vertex program's LDGs read: each LDG's 64-bit

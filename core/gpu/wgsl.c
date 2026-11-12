@@ -81,6 +81,8 @@ typedef struct Tr {
   bool vertex;        /* a vertex program (desc->stage == SM_STAGE_VERTEX) */
   bool compute;       /* a compute program (desc->stage == SM_STAGE_COMPUTE) */
   bool uses_shared;   /* compute: LDS/STS */
+  bool uses_atomics;  /* compute: ATOM/RED - the windows are atomic<u32> */
+  bool uses_subgroups; /* compute: SHFL/VOTE through WGSL subgroups (desc->subgroups) */
   uint32_t cbt;       /* the draw-constant word of this stage's constant-buffer table */
   Wgsl_Globals globals; /* a vertex program's storage buffers (LDG) */
   bool uses_globals;
@@ -91,6 +93,9 @@ typedef struct Tr {
 static bool is_texture_op(uint16_t op);
 static void emit_ldg(Tr *t, const Sm_Insn *in, uint32_t pc);
 static void emit_gmem(Tr *t, const Sm_Insn *in);
+static void emit_atom(Tr *t, const Sm_Insn *in);
+static void emit_shfl_subgroup(Tr *t, const Sm_Insn *in);
+static void emit_vote_subgroup(Tr *t, const Sm_Insn *in);
 
 static void out_add(Out *o, const char *fmt, ...) {
   if (o->overflow) return;
@@ -1222,6 +1227,71 @@ static void emit_shared(Tr *t, const Sm_Insn *in) {
  * plus the offset, looked up in the bound windows (gfind); a miss reads 0
  * and writes nothing. Words only: Maxwell needs natural alignment, and
  * sub-word stores would race with neighbouring lanes. */
+/* ATOM / RED on global memory (compute; maxwell_shader.c's fields): the
+ * window word's new value from gatomic's compare-exchange loop (atom_new
+ * is sm_atomic for 32-bit words). Rd takes the old value; outside every
+ * window nothing changes, as the interpreter's failed read. */
+static void emit_atom(Tr *t, const Sm_Insn *in) {
+  const uint64_t w = in->raw;
+  const bool red = in->op == SM_OP_RED;
+  const uint32_t ra = REG_A(w), rv = red ? REG_D(w) : BITS(w, 20, 8), rd = REG_D(w);
+  const uint32_t size = red ? BITS(w, 20, 3) : BITS(w, 49, 3), op = red ? BITS(w, 23, 3) : BITS(w, 52, 4);
+  const int32_t off = (int32_t)(BITS(w, 28, 20) << 12) >> 12;
+  if ((size != SM_ATOM_U32 && size != SM_ATOM_S32 && !(size == SM_ATOM_F32 && op == SM_ATOM_ADD)) || op > SM_ATOM_EXCH) {
+    fail(t, "%s size %u op %u", sm_op_name((Sm_Op)in->op), size, op);
+    return;
+  }
+  t->uses_globals = true;
+  t->uses_atomics = true;
+  char addr_lo[48], addr_hi[48], value[48];
+  snprintf(addr_lo, sizeof(addr_lo), "%s", ra == SM_RZ ? "0u" : reg(t, ra).s);
+  snprintf(addr_hi, sizeof(addr_hi), "%s", BIT(w, 48) && ra != SM_RZ ? reg(t, (ra + 1u) & 0xffu).s : "0u");
+  snprintf(value, sizeof(value), "%s", rv == SM_RZ ? "0u" : reg(t, rv).s);
+  EMIT("{ let a0 = %s; let ga = a0 + 0x%xu; let gh = %s %s; ", addr_lo, (uint32_t)off, addr_hi,
+       off >= 0 ? "+ select(0u, 1u, ga < a0)" : "- select(0u, 1u, ga > a0)");
+  EMIT("let gw = gfind(ga, gh, 4u); let old = gatomic(gw, %uu, %uu, %s); ", op, size, value);
+  if (!red && rd != SM_RZ) EMIT("if (gw.x != 0xffffffffu) { %s = old; } ", reg_dst(t, rd).s);
+  EMIT("} ");
+}
+
+/* SHFL in a compute program (desc->subgroups): the subgroup is the warp,
+ * lane = subgroup_invocation_id; lane j as maxwell_shader.c computes it,
+ * an out-of-range j reads the lane's own value and clears the predicate. */
+static void emit_shfl_subgroup(Tr *t, const Sm_Insn *in) {
+  const uint64_t w = in->raw;
+  const uint32_t mode = BITS(w, 30, 2), pd = BITS(w, 48, 3);
+  t->uses_subgroups = true;
+  char b[48], c[48], a[48];
+  if (BIT(w, 28)) snprintf(b, sizeof(b), "%uu", BITS(w, 20, 5));
+  else snprintf(b, sizeof(b), "%s", reg(t, REG_B(w)).s);
+  if (BIT(w, 29)) snprintf(c, sizeof(c), "%uu", BITS(w, 34, 13));
+  else snprintf(c, sizeof(c), "%s", reg(t, BITS(w, 39, 8)).s);
+  snprintf(a, sizeof(a), "%s", reg(t, REG_A(w)).s);
+  EMIT("{ let bv = (%s) & 31u; let cv = %s; let sm = (cv >> 8u) & 31u; let mx = (sgl & sm) | (cv & 31u & ~sm); ", b, c);
+  switch (mode) {
+  case 0: EMIT("let j = i32((sgl & sm) | (bv & ~sm)); let ok = u32(j) <= mx; "); break;
+  case 1: EMIT("let j = i32(sgl) - i32(bv); let ok = j >= i32(mx); "); break;
+  case 2: EMIT("let j = i32(sgl + bv); let ok = u32(j) <= mx; "); break;
+  default: EMIT("let j = i32(sgl ^ bv); let ok = u32(j) <= mx; "); break;
+  }
+  EMIT("let inr = ok && j >= 0 && j < 32; let sv = subgroupShuffle(%s, select(sgl, u32(j), inr)); ", a);
+  if (pd < SM_PT) EMIT("p%u = inr; ", pd);
+  EMIT("%s = sv; } ", reg_dst(t, REG_D(w)).s);
+}
+
+/* VOTE in a compute program (desc->subgroups): Rd = the ballot, the
+ * predicate ALL / ANY / EQ over the subgroup. */
+static void emit_vote_subgroup(Tr *t, const Sm_Insn *in) {
+  const uint64_t w = in->raw;
+  const uint32_t mode = BITS(w, 48, 2);
+  t->uses_subgroups = true;
+  const Ex v = pred(BITS(w, 39, 3), BIT(w, 42));
+  EMIT("{ let v = %s; let al = subgroupAll(v); let an = subgroupAny(v); %s = subgroupBallot(v).x; ", v.s,
+       reg_dst(t, REG_D(w)).s);
+  set_pred(t, BITS(w, 45, 3), mode == 0u ? "al" : mode == 1u ? "an" : "(al || !an)");
+  EMIT("} ");
+}
+
 static void emit_gmem(Tr *t, const Sm_Insn *in) {
   const uint64_t w = in->raw;
   const uint32_t size = BITS(w, 48, 3), n = access_bytes(size);
@@ -1779,13 +1849,20 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
     return;
   }
   case SM_OP_VOTE: {
+    if (t->compute) {
+      emit_vote_subgroup(t, in);
+      return;
+    }
     const Ex v = pred(BITS(w, 39, 3), BIT(w, 42));
     EMIT("{ let v = %s; %s = select(0u, 1u << ql, v); ", v.s, reg_dst(t, REG_D(w)).s);
     set_pred(t, BITS(w, 45, 3), BITS(w, 48, 2) <= 1u ? "v" : "true");
     EMIT("} ");
     return;
   }
-  case SM_OP_SHFL: emit_shfl(t, in); return;
+  case SM_OP_SHFL:
+    if (t->compute) emit_shfl_subgroup(t, in);
+    else emit_shfl(t, in);
+    return;
   case SM_OP_IPA: emit_ipa(t, in); return;
   case SM_OP_LDC: EMIT("{ "); emit_ldc(t, in); EMIT("} "); return;
   case SM_OP_LDL:
@@ -1815,9 +1892,9 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
     return;
   case SM_OP_ATOM:
   case SM_OP_RED:
-    /* Compute: the CPU path runs them. Graphics stages have no global
-     * memory here; the update is dropped, as before they decoded. */
-    if (t->compute) fail(t, "global atomic (%s)", sm_op_name((Sm_Op)in->op));
+    /* Graphics stages have no global memory here; the update is dropped,
+     * as before they decoded. */
+    if (t->compute) emit_atom(t, in);
     return;
   case SM_OP_STG:
     /* A pixel program's global stores are dropped, as its ATOM / RED:
@@ -2583,7 +2660,8 @@ static void emit_outputs(Tr *t, Out *o) {
 static void emit_compute_head(const Tr *t, Out *o) {
   const Wgsl_Program_Desc *d = t->d;
   for (uint32_t k = 0; k < d->window_count; k++)
-    out_add(o, "@group(0) @binding(%u) var<storage, read_write> G%u: array<u32>;\n", WGSL_CS_WINDOW_BINDING_BASE + k, k);
+    out_add(o, "@group(0) @binding(%u) var<storage, read_write> G%u: array<%s>;\n", WGSL_CS_WINDOW_BINDING_BASE + k, k,
+            t->uses_atomics ? "atomic<u32>" : "u32");
   if (t->uses_globals) {
     /* (window, byte offset) of an n-byte access at hi:lo, or window ~0. */
     out_add(o, "fn gfind(lo: u32, hi: u32, n: u32) -> vec2<u32> {\n");
@@ -2596,18 +2674,41 @@ static void emit_compute_head(const Tr *t, Out *o) {
     out_add(o, "  return vec2<u32>(0xffffffffu, 0u);\n}\n");
     out_add(o, "fn gld(a: vec2<u32>) -> u32 {\n  let i = a.y >> 2u;\n  switch (a.x) {\n");
     for (uint32_t k = 0; k < d->window_count; k++)
-      out_add(o, "    case %uu: { if (i < arrayLength(&G%u)) { return G%u[i]; } }\n", k, k, k);
+      out_add(o, t->uses_atomics ? "    case %uu: { if (i < arrayLength(&G%u)) { return atomicLoad(&G%u[i]); } }\n"
+                                 : "    case %uu: { if (i < arrayLength(&G%u)) { return G%u[i]; } }\n", k, k, k);
     out_add(o, "    default: {}\n  }\n  return 0u;\n}\n");
     out_add(o, "fn gst(a: vec2<u32>, v: u32) {\n  let i = a.y >> 2u;\n  switch (a.x) {\n");
     for (uint32_t k = 0; k < d->window_count; k++)
-      out_add(o, "    case %uu: { if (i < arrayLength(&G%u)) { G%u[i] = v; } }\n", k, k, k);
+      out_add(o, t->uses_atomics ? "    case %uu: { if (i < arrayLength(&G%u)) { atomicStore(&G%u[i], v); } }\n"
+                                 : "    case %uu: { if (i < arrayLength(&G%u)) { G%u[i] = v; } }\n", k, k, k);
     out_add(o, "    default: {}\n  }\n}\n");
+    if (t->uses_atomics) {
+      /* sm_atomic for a 32-bit word (size: SM_ATOM_U32 / S32 / F32). */
+      out_add(o, "fn atom_new(op: u32, size: u32, old: u32, v: u32) -> u32 {\n"
+                 "  let sg = size == %uu;\n  switch (op) {\n"
+                 "    case %uu: { if (size == %uu) { return U(F(old) + F(v)); } return old + v; }\n"
+                 "    case %uu: { if (sg) { return select(v, old, bitcast<i32>(old) < bitcast<i32>(v)); } return min(old, v); }\n"
+                 "    case %uu: { if (sg) { return select(v, old, bitcast<i32>(old) > bitcast<i32>(v)); } return max(old, v); }\n"
+                 "    case %uu: { return select(old + 1u, 0u, old >= v); }\n"
+                 "    case %uu: { return select(old - 1u, v, old == 0u || old > v); }\n"
+                 "    case %uu: { return old & v; }\n    case %uu: { return old | v; }\n    case %uu: { return old ^ v; }\n"
+                 "    case %uu: { return v; }\n    default: { return old; }\n  }\n}\n",
+              SM_ATOM_S32, SM_ATOM_ADD, SM_ATOM_F32, SM_ATOM_MIN, SM_ATOM_MAX, SM_ATOM_INC, SM_ATOM_DEC, SM_ATOM_AND,
+              SM_ATOM_OR, SM_ATOM_XOR, SM_ATOM_EXCH);
+      /* The old word; a compare-exchange loop (each round one lane wins). */
+      out_add(o, "fn gatomic(a: vec2<u32>, op: u32, size: u32, v: u32) -> u32 {\n  let i = a.y >> 2u;\n  switch (a.x) {\n");
+      for (uint32_t k = 0; k < d->window_count; k++)
+        out_add(o, "    case %uu: { if (i < arrayLength(&G%u)) { loop { let o = atomicLoad(&G%u[i]); "
+                   "if (atomicCompareExchangeWeak(&G%u[i], o, atom_new(op, size, o, v)).exchanged) { return o; } } } }\n",
+                k, k, k, k);
+      out_add(o, "    default: {}\n  }\n  return 0u;\n}\n");
+    }
   }
   if (t->uses_shared) out_add(o, "var<workgroup> sh: array<u32, %u>;\n", d->shared_bytes / 4u);
   out_add(o, "var<workgroup> cs_wait: atomic<u32>;\nvar<workgroup> cs_count: u32;\n");
   out_add(o, "@compute @workgroup_size(%u, %u, %u)\nfn cs(@builtin(local_invocation_id) lid: vec3<u32>, "
-             "@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lidx: u32) {\n",
-          d->block[0], d->block[1], d->block[2]);
+             "@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_index) lidx: u32%s) {\n",
+          d->block[0], d->block[1], d->block[2], t->uses_subgroups ? ", @builtin(subgroup_invocation_id) sgl: u32" : "");
 }
 
 Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *desc, char *buffer, size_t capacity) {
@@ -2643,10 +2744,23 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
     if (desc->shared_bytes > WGSL_CS_MAX_SHARED_BYTES) fail(t, "%u bytes of shared memory", desc->shared_bytes);
     for (uint32_t pc = 0; pc < program->word_count && t->ok; pc++) {
       const uint16_t op = program->insns[pc].op;
-      if (op == SM_OP_KIL || op == SM_OP_IPA || op == SM_OP_SHFL || op == SM_OP_FSWZADD || op == SM_OP_VOTE ||
-          op == SM_OP_ALD || op == SM_OP_AST || op == SM_OP_OUT || op == SM_OP_LD || op == SM_OP_ST ||
-          op == SM_OP_TEX_B || op == SM_OP_TMML) /* textures sample level 0, as a vertex stage's */
+      if (op == SM_OP_KIL || op == SM_OP_IPA || op == SM_OP_FSWZADD || op == SM_OP_ALD || op == SM_OP_AST ||
+          op == SM_OP_OUT || op == SM_OP_LD || op == SM_OP_ST || op == SM_OP_TEX_B ||
+          op == SM_OP_TMML) /* textures sample level 0, as a vertex stage's */
         fail(t, "%s in a compute program", sm_op_name((Sm_Op)op));
+      /* Warp shuffles and votes: through subgroups, unpredicated, where no
+       * control transfer is conditional - every lane then reaches each one
+       * in the same dispatch-loop round, and the subgroup is the warp. */
+      if (op == SM_OP_SHFL || op == SM_OP_VOTE) {
+        if (!desc->subgroups) fail(t, "%s without subgroups", sm_op_name((Sm_Op)op));
+        else if ((program->insns[pc].pred & 7u) != SM_PT || (program->insns[pc].pred & 8u))
+          fail(t, "predicated %s", sm_op_name((Sm_Op)op));
+        for (uint32_t f = 0; f < program->word_count && t->ok; f++) {
+          const Sm_Insn *fi = &program->insns[f];
+          if (fi->op == SM_OP_BRX || (is_flow(fi->op) && ((fi->pred & 7u) != SM_PT || (fi->pred & 8u))))
+            fail(t, "%s with divergent control flow (%s at %u)", sm_op_name((Sm_Op)op), sm_op_name((Sm_Op)fi->op), f);
+        }
+      }
     }
   }
   if (t->vertex && desc->input_count + 1u > (desc->vertex_pull ? WGSL_VSI_MAX : 16u))
@@ -2698,6 +2812,10 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
     buffer[0] = '\0';
     return res;
   }
+  /* Directives first: subgroup operations, which run where every lane
+   * follows the same path (the compute check) - beyond what WGSL's
+   * uniformity analysis can see through the dispatch loop. */
+  if (t->uses_subgroups) out_add(&head, "enable subgroups;\ndiagnostic(off, subgroup_uniformity);\n");
   for (size_t i = 0; i < sizeof(k_prelude) / sizeof(k_prelude[0]); i++)
     out_add(&head, k_prelude[i], t->cbt, t->cbt, cbuf_array(t), t->cbt);
   if (!t->compute) out_add(&head, "@group(0) @binding(%u) var<storage, read> P: array<u32>;\n", WGSL_POOL_BINDING);
@@ -2899,6 +3017,7 @@ uint64_t wgsl_desc_hash(const Wgsl_Program_Desc *desc, const Sm_Program *program
     MIX(&desc->window_count, sizeof(desc->window_count));
     MIX(desc->block, sizeof(desc->block));
     MIX(&desc->shared_bytes, sizeof(desc->shared_bytes));
+    MIX(&desc->subgroups, sizeof(desc->subgroups));
   }
 #undef MIX
   h ^= h >> 33; /* avalanche (murmur3's finalizer) */

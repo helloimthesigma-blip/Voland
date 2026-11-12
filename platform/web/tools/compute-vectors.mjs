@@ -41,7 +41,7 @@ try {
       if (!adapter) throw new Error("no WebGPU adapter");
       /* Captured textures arrive as RGBA32 layers; sampling them as "float" needs the feature. */
       const device = await adapter.requestDevice({
-        requiredFeatures: adapter.features.has("float32-filterable") ? ["float32-filterable"] : [],
+        requiredFeatures: ["float32-filterable", "subgroups"].filter((f) => adapter.features.has(f)),
       });
       device.pushErrorScope("validation");
       const module = device.createShaderModule({ code: v.code });

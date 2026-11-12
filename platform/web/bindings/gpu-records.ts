@@ -17,6 +17,11 @@ export const OFF_READ = 32;
 export const OFF_WRITE_SIGNAL = 40;
 export const OFF_READ_SIGNAL = 44;
 export const OFF_PRESENTS = 48;
+/* Device support (gpu_records.h GPU_COMPRESSION_*, GPU_DEVICE_SUBGROUPS):
+ * the mask the GPU worker reports and raster3d_set_gpu_compression takes. */
+export const COMPRESSION_BC = 1;
+export const COMPRESSION_ASTC = 2;
+export const DEVICE_SUBGROUPS = 4;
 
 export const REC_PAD = 0;
 export const REC_TEXTURE_CREATE = 1;

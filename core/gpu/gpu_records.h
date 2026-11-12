@@ -111,9 +111,12 @@ enum {
 };
 #define GPU_ASTC_FOOTPRINTS 14u
 
-/* Device support for the compressed formats (raster3d_set_gpu_compression). */
+/* Device support for the compressed formats (raster3d_set_gpu_compression),
+ * and 32-lane subgroups (WebGPU "subgroups" with a subgroup size of 32:
+ * compute programs' warp shuffles and votes run on the GPU). */
 #define GPU_COMPRESSION_BC 1u
 #define GPU_COMPRESSION_ASTC 2u
+#define GPU_DEVICE_SUBGROUPS 4u
 
 #define GPU_USAGE_SAMPLED 1u
 #define GPU_USAGE_RENDER 2u /* render attachment (also copy source / destination) */

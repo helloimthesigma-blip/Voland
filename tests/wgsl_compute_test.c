@@ -76,6 +76,25 @@ static uint64_t FMUL_R(uint32_t d, uint32_t a, uint32_t b) {
 static uint64_t BAR_SYNC(void) { return (0xf0a8ull << 48) | GUARD; }
 static uint64_t DEPBAR(void) { return 0xf0f0000034170000ull; }
 static uint64_t EXIT(void) { return (0xe300ull << 48) | GUARD | 0xfull; }
+/* RED.E (op, size) [Ra + offset], Rv; SHFL.BFLY Rd, Ra, lane (whole warp:
+ * clamp 31, no segments); VOTE.ANY Rd (ballot), P0; ISETP.LT.S32 P0, Ra, RZ;
+ * IMNMX.S32 max. */
+static uint64_t RED_E(uint32_t op, uint32_t size, uint32_t v, uint32_t a, uint32_t offset) {
+  return (0xebf8ull << 48) | (1ull << 48) | GUARD | ((uint64_t)(offset & 0xfffffu) << 28) | ((uint64_t)op << 23) |
+         ((uint64_t)size << 20) | ((uint64_t)a << 8) | v;
+}
+#define SHFL_WARP 0x1fu
+static uint64_t SHFL_BFLY(uint32_t d, uint32_t a, uint32_t lane) {
+  return (0xef10ull << 48) | (7ull << 48) | GUARD | (3ull << 30) | (1ull << 29) | (1ull << 28) |
+         ((uint64_t)SHFL_WARP << 34) | ((uint64_t)lane << 20) | ((uint64_t)a << 8) | d;
+}
+static uint64_t VOTE_ANY_P0(uint32_t d) { return (0x50d8ull << 48) | (1ull << 48) | GUARD | (7ull << 45) | d; }
+static uint64_t ISETP_LT0(uint32_t a) {
+  return (0x5b60ull << 48) | (1ull << 48) | (1ull << 49) | GUARD | (7ull << 39) | (RZ << 20) | ((uint64_t)a << 8) | 7u;
+}
+static uint64_t IMNMX_MAX_S(uint32_t d, uint32_t a, uint32_t b) {
+  return (0x5c20ull << 48) | (1ull << 48) | GUARD | (1ull << 42) | (7ull << 39) | ((uint64_t)b << 20) | ((uint64_t)a << 8) | d;
+}
 
 /* ---- programs ------------------------------------------------------ */
 
@@ -302,11 +321,14 @@ static void write_words(FILE *f, const uint8_t *bytes, uint32_t n) {
   fprintf(f, "]");
 }
 
+static bool g_subgroups; /* the next vector's desc.subgroups (32-lane WebGPU subgroups) */
+
 static void finish(const char *name, const uint32_t block[3], const uint32_t grid[3], uint32_t shared_bytes,
                    uint32_t ulps) {
   Wgsl_Program_Desc desc;
   wgsl_default_desc(&g_prog, &desc);
   desc.stage = SM_STAGE_COMPUTE;
+  desc.subgroups = g_subgroups;
   for (uint32_t i = 0; i < 3u; i++) desc.block[i] = (uint16_t)block[i];
   desc.shared_bytes = shared_bytes;
   desc.window_count = g_windows;
@@ -483,6 +505,56 @@ static void vector_shared_barrier(void) {
   build(code, sizeof(code) / sizeof(code[0]));
   const uint32_t block[3] = {threads, 1, 1}, grid[3] = {1, 1, 1};
   finish("cs_shared_barrier", block, grid, threads * 4u, 0);
+}
+
+/* Every thread of two blocks folds its input word into window 1 with
+ * RED: a count (ADD), signed MIN and MAX, XOR - the same result in any
+ * order, so the GPU's atomics must match the interpreter's exactly. */
+static void vector_atomic(void) {
+  reset_inputs(5);
+  const uint64_t code[] = {
+      S2R(0, SR_TID_X), S2R(1, SR_CTAID_X), SHL_I(1, 1, 6), IADD_R(0, 0, 1), SHL_I(2, 0, 2),
+      IADD_C_CC(4, 2, 0, SSBO_DESC), IADD_C_X(5, 0, SSBO_DESC + 4u), LDG_E(LDST_32, 8, 4, 0), /* r8 = in[g] */
+      IADD_C_CC(6, (uint32_t)RZ, 0, SSBO_DESC + SSBO_DESC_BYTES), IADD_C_X(7, 0, SSBO_DESC + SSBO_DESC_BYTES + 4u),
+      MOV32I(9, 1), RED_E(SM_ATOM_ADD, SM_ATOM_U32, 9, 6, 0), RED_E(SM_ATOM_MIN, SM_ATOM_S32, 8, 6, 4),
+      RED_E(SM_ATOM_MAX, SM_ATOM_S32, 8, 6, 8), RED_E(SM_ATOM_XOR, SM_ATOM_U32, 8, 6, 12), EXIT()};
+  build(code, sizeof(code) / sizeof(code[0]));
+  const uint32_t block[3] = {64, 1, 1}, grid[3] = {2, 1, 1};
+  finish("cs_atomic", block, grid, 0, 0);
+}
+
+/* A warp-wide signed max through SHFL.BFLY 16..1 (each lane ends with its
+ * warp's maximum), and VOTE.ANY's ballot of in[g] < 0: out[g], out[256 + g]. */
+static void vector_subgroup(void) {
+  reset_inputs(6);
+  const uint64_t code[] = {
+      S2R(0, SR_TID_X), S2R(1, SR_CTAID_X), SHL_I(1, 1, 6), IADD_R(0, 0, 1), SHL_I(2, 0, 2),
+      IADD_C_CC(4, 2, 0, SSBO_DESC), IADD_C_X(5, 0, SSBO_DESC + 4u), LDG_E(LDST_32, 8, 4, 0),
+      SHFL_BFLY(9, 8, 16), IMNMX_MAX_S(8, 8, 9), SHFL_BFLY(9, 8, 8), IMNMX_MAX_S(8, 8, 9),
+      SHFL_BFLY(9, 8, 4), IMNMX_MAX_S(8, 8, 9), SHFL_BFLY(9, 8, 2), IMNMX_MAX_S(8, 8, 9),
+      SHFL_BFLY(9, 8, 1), IMNMX_MAX_S(8, 8, 9),
+      LDG_E(LDST_32, 10, 4, 0), ISETP_LT0(10), VOTE_ANY_P0(11),
+      IADD_C_CC(6, 2, 0, SSBO_DESC + SSBO_DESC_BYTES), IADD_C_X(7, 0, SSBO_DESC + SSBO_DESC_BYTES + 4u),
+      STG_E(LDST_32, 8, 6, 0), STG_E(LDST_32, 11, 6, 0x400), EXIT()};
+  build(code, sizeof(code) / sizeof(code[0]));
+  const uint32_t block[3] = {64, 1, 1}, grid[3] = {2, 1, 1};
+  g_subgroups = true;
+  finish("cs_subgroup", block, grid, 0, 0);
+  g_subgroups = false;
+  /* Without subgroups, or behind a conditional branch, it stays untranslated. */
+  Wgsl_Program_Desc desc;
+  wgsl_default_desc(&g_prog, &desc);
+  desc.stage = SM_STAGE_COMPUTE;
+  desc.block[0] = 64;
+  desc.block[1] = desc.block[2] = 1;
+  desc.window_count = WINDOWS;
+  CHECK(!wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text)).ok);
+  desc.subgroups = true;
+  CHECK(wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text)).ok);
+  const uint64_t branchy[] = {S2R(0, SR_TID_X), ISETP_LT0(0), (0xe240ull << 48) | (0ull << 16) | (8ull << 20) | 0xfull,
+                              SHFL_BFLY(9, 0, 1), EXIT()};
+  build(branchy, sizeof(branchy) / sizeof(branchy[0]));
+  CHECK(!wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text)).ok); /* @P0 BRA: divergent */
 }
 
 static void structural(void) {
@@ -700,6 +772,8 @@ int main(int argc, char **argv) {
   vector_global();
   vector_wide();
   vector_shared_barrier();
+  vector_atomic();
+  vector_subgroup();
   for (int i = 2; i + 1 < argc && !strcmp(argv[i], "capture"); i += 2) capture_vector(argv[i + 1], (uint32_t)(i - 2) / 2u);
   for (int i = 2; i + 2 < argc && strcmp(argv[i], "capture"); i += 4) {
     const uint32_t shared_bytes = i + 3 < argc ? (uint32_t)atoi(argv[i + 3]) : 0u;

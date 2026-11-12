@@ -16,6 +16,9 @@ import {
   newestFrame,
 } from "@bindings/framebuffer";
 import {
+  COMPRESSION_ASTC,
+  COMPRESSION_BC,
+  DEVICE_SUBGROUPS,
   GPU_STREAM_MAGIC,
   OFF_CAPACITY,
   OFF_MAGIC,
@@ -74,9 +77,8 @@ const OPTIONAL_FEATURES: readonly GPUFeatureName[] = [
   "rg11b10ufloat-renderable", "depth32float-stencil8", "float32-filterable", "float32-blendable",
   "texture-compression-bc", "texture-compression-astc",
 ];
-/* GPU_COMPRESSION_* (core/gpu/gpu_records.h). */
-const COMPRESSION_BC = 1;
-const COMPRESSION_ASTC = 2;
+/* Compute warp shuffles and votes need subgroups exactly a warp wide. */
+const WARP_LANES = 32;
 
 type WaitAsync = (a: Int32Array, i: number, v: number) => { async: boolean; value: Promise<string> | string };
 const waitAsync = (Atomics as unknown as { waitAsync?: WaitAsync }).waitAsync;
@@ -268,7 +270,13 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
     self.postMessage(err);
     return;
   }
-  const requiredFeatures = OPTIONAL_FEATURES.filter((f) => adapter.features.has(f));
+  const adapterInfo = (adapter as unknown as { info?: { subgroupMinSize?: number; subgroupMaxSize?: number } }).info;
+  const warpSubgroups = adapter.features.has("subgroups") && adapterInfo?.subgroupMinSize === WARP_LANES &&
+    adapterInfo.subgroupMaxSize === WARP_LANES;
+  const requiredFeatures: GPUFeatureName[] = [
+    ...OPTIONAL_FEATURES.filter((f) => adapter.features.has(f)),
+    ...(warpSubgroups ? ["subgroups" as GPUFeatureName] : []),
+  ];
   // Wider G-buffers than the default 32 bytes per sample: MK8DX binds six
   // RG11B10 targets (48 bytes). Take what the adapter offers.
   const requiredLimits: Record<string, number> = {
@@ -320,7 +328,8 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
     adapterName: ((adapter as unknown as { info?: { vendor?: string } }).info?.vendor) ?? null,
     streamRenderer: true,
     textureCompression: (device.features.has("texture-compression-bc") ? COMPRESSION_BC : 0) |
-      (device.features.has("texture-compression-astc") ? COMPRESSION_ASTC : 0),
+      (device.features.has("texture-compression-astc") ? COMPRESSION_ASTC : 0) |
+      (warpSubgroups && device.features.has("subgroups" as GPUFeatureName) ? DEVICE_SUBGROUPS : 0),
   };
   self.postMessage(ready);
 

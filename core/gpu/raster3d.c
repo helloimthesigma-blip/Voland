@@ -1405,6 +1405,10 @@ static bool gpu_texture_native(Raster3d *r, Raster3d_Texture *t, const Tex_Heade
  * copies once uploaded; this decodes again where needed). GPU mode uploads
  * block-compressed textures the device samples as they are, undecoded
  * (gpu_texture_native), unless `texels`. */
+/* The compute program running on the CPU while its textures load (0: a
+ * draw's work) - names the reader in texture_load's stale-copy warning. */
+static uint32_t g_cpu_compute_hash;
+
 static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const Gpu_Memory *mem, bool texels) {
   Raster3d_Texture *view = surface_view(r, tic);
   if (view) return view;
@@ -1554,6 +1558,25 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
   t->valid = true;
   if (!indexed) texture_index_add(r, (uint32_t)(t - r->textures));
   if (r->on_texture_decoded && t->image.texels) r->on_texture_decoded(r->on_texture_user, &t->image, h.address);
+  /* The CPU samples what the GPU drew (CPU compute, CPU vertices, probes):
+   * GPU surfaces never reach guest memory, so it reads a stale copy
+   * (diagnostics; Tears of the Kingdom's unlit scenes). */
+  if (r->gpu && texels) {
+    static uint32_t logged;
+    for (uint32_t i = 0; i < RASTER_GPU_SURFACES && logged < STALE_LOG_LIMIT; i++) {
+      const Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
+      if (!s->in_use || s->address >= h.address + raw_bytes || h.address >= s->address + s->guest_bytes) continue;
+      logged++;
+      if (g_cpu_compute_hash)
+        log_warn("[gpu] the CPU samples %ux%u fmt 0x%02x @%llx, drawn on the GPU (%ux%u fmt 0x%02x): a stale guest copy "
+                 "(compute program %08x)", h.width, h.height, h.format, (unsigned long long)h.address, s->width,
+                 s->height, s->format, g_cpu_compute_hash);
+      else
+        log_warn("[gpu] the CPU samples %ux%u fmt 0x%02x @%llx, drawn on the GPU (%ux%u fmt 0x%02x): a stale guest copy "
+                 "(a draw)", h.width, h.height, h.format, (unsigned long long)h.address, s->width, s->height, s->format);
+      break;
+    }
+  }
   return t;
 }
 
@@ -3301,9 +3324,12 @@ static void assemble_end(Raster_State *rs, Vertex_Cache *cache, Assembler *as) {
 #define GPU_VERTEX_HEADER_BYTES (GPU_VERTEX_HEADER_WORDS * 4u)
 
 void raster3d_set_gpu_compression(Raster3d *r, uint32_t mask) {
-  if (r->gpu_compression != mask)
+  const uint32_t compression = mask & (GPU_COMPRESSION_BC | GPU_COMPRESSION_ASTC);
+  if (r->gpu_compression != mask) {
     log_info("[gpu] compressed textures upload as they are: %s%s", (mask & GPU_COMPRESSION_BC) ? "BCn " : "",
-             (mask & GPU_COMPRESSION_ASTC) ? "ASTC" : mask ? "" : "none");
+             (mask & GPU_COMPRESSION_ASTC) ? "ASTC" : compression ? "" : "none");
+    if (mask & GPU_DEVICE_SUBGROUPS) log_info("[gpu] 32-lane subgroups: compute shuffles and votes run on the GPU");
+  }
   r->gpu_compression = mask;
 }
 
@@ -5947,16 +5973,14 @@ static bool compute_write_unlocked(void *user, uint64_t va, const void *src, uin
 
 /* What keeps a compute program off the GPU among its instructions, or NULL. */
 static const char *program_cpu_only_reason(const Sm_Program *program) {
-  bool tex = false, sust = false, atom = false, bindless = false;
+  bool tex = false, sust = false, bindless = false;
   for (uint32_t i = 0; i < program->word_count; i++) {
     const uint32_t op = program->insns[i].op;
     if (op >= SM_OP_TEX && op <= SM_OP_TXD) tex = true;
     if (op == SM_OP_TEX_B) bindless = true;
     if (op == SM_OP_SUST) sust = true;
-    if (op == SM_OP_ATOM || op == SM_OP_RED) atom = true;
   }
   if (sust) return "it stores to surfaces (SUST)";
-  if (atom) return "it uses global atomics (ATOM/RED)";
   if (bindless) return "it samples bindless textures (TEX.B)";
   (void)tex; /* plain sampling binds the textures (compute_on_gpu) */
   return NULL;
@@ -6250,6 +6274,7 @@ static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute
   for (uint32_t i = 0; i < 3u; i++) desc.block[i] = (uint16_t)launch->block[i];
   desc.shared_bytes = launch->shared_bytes;
   desc.window_count = mirrors;
+  desc.subgroups = (r->gpu_compression & GPU_DEVICE_SUBGROUPS) != 0;
   /* The data: texture parameters, the window table (each window as its
    * whole mirror, so the WGSL's offsets index the bound buffer), then the
    * constant buffers. */
@@ -6616,6 +6641,7 @@ void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t 
   }
   Compute_Job job = {program, launch, env, &r->workers, threads, group_count, blocks, 0};
   bool faulted = false;
+  g_cpu_compute_hash = program->hash;
   if (r->workers.count > 1u && blocks > 1u && group_count <= COMPUTE_WORKER_GROUPS && !program_samples_textures(program)) {
     for (uint32_t i = 0; i < WORKERS_MAX; i++) g_compute_workers[i].used = false;
     workers_run(&r->workers, blocks < r->workers.count ? blocks : r->workers.count, compute_task, &job);
@@ -6630,6 +6656,7 @@ void raster3d_compute(Raster3d *r, const Compute_Launch *launch, const uint32_t 
   } else {
     for (uint32_t b = 0; b < blocks && !faulted; b++) faulted = !compute_block(&job, env, b, groups, states);
   }
+  g_cpu_compute_hash = 0;
   if (profiling) {
     g_read_windows = NULL;
     if (atomic_load(&g_read_outside)) prof->reads_outside = true;
