@@ -21,6 +21,7 @@ import { memoryUseOf, memoryWarning } from "../memory-guard";
 import { setCurrentGame } from "../game-settings";
 import { titleNames } from "../saves";
 import FilesPanel from "./FilesPanel";
+import GettingStarted from "./GettingStarted";
 import {
   type LibraryGame, canKeepFiles, canKeepFolders, forgetGame, listGames, markPlayed, openGameFile, pickGameFile,
   pickGameFolder, rememberGame,
@@ -473,6 +474,7 @@ function LoadPanel(props: LoadPanelProps) {
           }}
         </Match>
       </Switch>
+      <GettingStarted />
       <GameLibrary
         games={games()}
         busy={state().kind === "loading"}
