@@ -2244,6 +2244,43 @@ static int32_t last_def_pred(const Sm_Program *p, const bool *targeted, uint32_t
   return -1;
 }
 
+/* The latest write to register r before `pc`, when every path to pc runs
+ * it: unpredicated, and each control transfer into (write, pc] comes from
+ * inside [write, pc) - branches and SSY/PBK reconvergence points (their
+ * SYNC/BRK lie between the push and the target). Loop heads (PCNT: CONT
+ * may come from anywhere), calls and indirect branches give -1. Tears of
+ * the Kingdom's deferred lighting loads one descriptor, then reads it
+ * across several branches. */
+static int32_t dominating_def(const Sm_Program *p, uint32_t pc, uint32_t r) {
+  int32_t def = -1;
+  for (uint32_t at = 0; at < pc; at++) {
+    const Sm_Insn *in = &p->insns[at];
+    if (in->op == SM_OP_SCHED || in->op == SM_OP_NOP || is_flow(in->op)) continue;
+    if (in->op == SM_OP_STG || in->op == SM_OP_ST || in->op == SM_OP_STL || in->op == SM_OP_AST) continue;
+    const uint32_t d = REG_D(in->raw);
+    uint32_t span = 1;
+    if (in->op == SM_OP_LDG || in->op == SM_OP_LDC || in->op == SM_OP_LDL || in->op == SM_OP_LD)
+      span = (access_bytes(BITS(in->raw, 48, 3)) + 3u) / 4u;
+    else if (in->op == SM_OP_ALD)
+      span = BITS(in->raw, 47, 2) + 1u;
+    else if (is_texture_op(in->op))
+      span = 4;
+    if (r >= d && r < d + span) def = span == 1u ? (int32_t)at : -2;
+  }
+  if (def < 0) return -1;
+  const Sm_Insn *w = &p->insns[def];
+  if ((w->pred & 7u) != SM_PT || (w->pred & 8u)) return -1;
+  for (uint32_t at = 0; at < p->word_count; at++) {
+    const Sm_Insn *in = &p->insns[at];
+    if (in->op == SM_OP_BRX || in->op == SM_OP_CAL) return -1;
+    if (in->target < 0) continue;
+    const uint32_t target = (uint32_t)in->target;
+    if (target <= (uint32_t)def || target > pc) continue;
+    if (in->op == SM_OP_PCNT || at < (uint32_t)def || at >= pc) return -1;
+  }
+  return def;
+}
+
 /* The program's only write to register r (or the first of several
  * identical ones), or -1 when there are none, differing ones, or one is
  * predicated: then any read of r after it sees that value, wherever
@@ -2356,6 +2393,8 @@ static bool find_globals(const Sm_Program *program, bool allow_stg, Wgsl_Globals
             hi_at = last_def_pred(program, targeted, pc, (ra + 1u) & 0xffu, in->pred);
     if (lo_at < 0) lo_at = sole_def(program, ra);
     if (hi_at < 0) hi_at = sole_def(program, (ra + 1u) & 0xffu);
+    if (lo_at < 0) lo_at = dominating_def(program, pc, ra);
+    if (hi_at < 0) hi_at = dominating_def(program, pc, (ra + 1u) & 0xffu);
     if ((lo_at < 0 || hi_at < 0) && candidate_buffers(program, pc, ra, out)) continue;
     if (lo_at < 0 || hi_at < 0)
       GLOBALS_FAIL("LDG at %u: R%u/R%u not defined in the same block (%d, %d)", pc, ra, (ra + 1u) & 0xffu, lo_at, hi_at);

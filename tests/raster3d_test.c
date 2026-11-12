@@ -42,6 +42,8 @@ static int g_failures;
 #define PS_LDG_OFFSET 0x2800u /* a pixel program that reads (and writes) a storage buffer */
 #define PS_LDG_MOV_OFFSET 0x2c00u /* the same, its address moved straight from c[0] */
 #define PS_LDG_TWO_OFFSET 0x3400u /* its address from one of two descriptors (predicated MOVs) */
+#define PS_LDG_BRANCH_OFFSET 0x3c00u /* its address loaded before a branch over other code */
+#define PS_LDG_ENTRY_OFFSET 0x3e00u  /* ... but a branch from before the load reaches the LDG */
 #define SSBO_DESC 0x110u      /* the storage buffer's descriptor in c[0] (NVN) */
 #define SSBO (GPU_BASE + 0xC000u)
 #define VERTICES (GPU_BASE + 0x4000u)
@@ -110,6 +112,12 @@ static uint64_t LDG_E128(uint32_t d, uint32_t a) {
   return (0xeed0ull << 48) | (6ull << 48) | (1ull << 45) | GUARD | ((uint64_t)a << 8) | d;
 }
 static uint64_t EXIT(void) { return (0xe300ull << 48) | GUARD | 0xfull; }
+/* @P0 BRA forward by `words` instruction words (past the next one). */
+static uint64_t BRA_P0(uint32_t words) {
+  return ((0xe240ull << 48) | GUARD | ((uint64_t)(words * 8u) << 20) | 0xfull) & ~(7ull << 16);
+}
+/* The word write_program puts code[i] at (a scheduling word before each three). */
+static uint32_t code_word(uint32_t i) { return i + i / 3u + 1u; }
 static uint64_t MOV32I(uint32_t d, uint32_t imm) { return (0x0100ull << 48) | GUARD | ((uint64_t)imm << 20) | (0xfull << 12) | d; }
 /* SHFL.BFLY within a quad (segment mask 0x1c, clamp 3), and FSWZADD. */
 static uint64_t SHFL_BFLY(uint32_t d, uint32_t a, uint32_t lane) {
@@ -194,6 +202,17 @@ static void build_programs(void) {
   const uint64_t mov_hi2 = ((0x4c98ull << 48) | (0xfull << 39) | GUARD | ((uint64_t)((SSBO_DESC + 0x24u) / 4u) << 20) | 5u) & p0;
   const uint64_t ps2[] = {mov_lo, mov_hi, mov_lo2, mov_hi2, LDG_E128(0, 4), EXIT()};
   write_program(PS_LDG_TWO_OFFSET, ps_sph, ps2, 6);
+  /* R4/R5 written before (so neither the block nor a sole write traces
+   * them), then the descriptor, then @P0 BRA over a MOV to the LDG: every
+   * path to the LDG runs the descriptor load. */
+  const uint64_t ps_b[] = {MOV32I(4, 0x1234u), MOV32I(5, 0), mov_lo, mov_hi, BRA_P0(code_word(6) - code_word(4) - 1u),
+                           MOV32I(1, 0), LDG_E128(0, 4), EXIT()};
+  write_program(PS_LDG_BRANCH_OFFSET, ps_sph, ps_b, 8);
+  /* The branch comes from before the descriptor load: R4/R5 may still
+   * hold 0x1234 / 0 at the LDG, so it stays untranslated. */
+  const uint64_t ps_e[] = {MOV32I(4, 0x1234u), MOV32I(5, 0), BRA_P0(code_word(6) - code_word(2) - 1u), mov_lo, mov_hi,
+                           MOV32I(1, 0), LDG_E128(0, 4), EXIT()};
+  write_program(PS_LDG_ENTRY_OFFSET, ps_sph, ps_e, 8);
 }
 
 /* ---- register state ----------------------------------------------- */
@@ -1415,6 +1434,15 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   CHECK(ps_two.count == 1 && ps_two.last.shader_id != 0 && gdesc[0] == (uint32_t)SSBO && gdesc2[0] == (uint32_t)SSBO,
         "two-descriptor storage-buffer pixel program on the GPU: %u draws, shader %u, buffers 0x%x 0x%x", ps_two.count,
         ps_two.last.shader_id, gdesc[0], gdesc2[0]);
+  /* The descriptor loaded before a branch: traced across it. */
+  g_ps_override = PS_LDG_BRANCH_OFFSET;
+  const Seen_Draw ps_branch = gpu_draw_once(r, FRONT_CW_REG);
+  memcpy(gdesc, g_seen_data + 4u * WGSL_DRAW_PS_GLOBALS, sizeof(gdesc));
+  CHECK(ps_branch.count == 1 && ps_branch.last.shader_id != 0 && gdesc[0] == (uint32_t)SSBO,
+        "storage-buffer address across a branch on the GPU: %u draws, shader %u", ps_branch.count, ps_branch.last.shader_id);
+  g_ps_override = PS_LDG_ENTRY_OFFSET;
+  const Seen_Draw ps_entry = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(ps_entry.count == 0, "a branch into the LDG past the descriptor load: untranslated (%u draws)", ps_entry.count);
   g_ps_override = 0;
   g_gpu_textured = false;
 }
