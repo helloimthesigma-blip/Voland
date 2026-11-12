@@ -363,10 +363,12 @@ write is read back as vertex streams (269 of 276 MB in a fight).
     (its WGSL with unpulled inputs, the constant buffers it reads, and
     per vertex the inputs and the interpreter's position and generic
     outputs). `tools/vertex-vectors.mjs DIR` runs each WGSL body in a
-    compute shader and compares (relative 1e-3, absolute 1e-5). Programs
-    that sample textures or read global memory are listed as skipped.
-    Tears of the Kingdom's opening (196 programs to 900k slices): every
-    one of the 116 it runs matches.
+    compute shader and compares (relative 1e-3, absolute 1e-5). Global
+    buffers traced to a constant buffer come in the pool, as a draw's do;
+    programs that sample textures or read untraced global memory are
+    listed as skipped. (TOTK's subtitle program reads global memory and
+    jumps through a table (BRX) to bundle starts, which the WGSL treated
+    as faults until 2026-11-11; `wgsl_test`'s brx_bundle covers it.)
   - `raster3d_test` profiles a program, runs it on the GPU and pulls a
     draw from its mirror.
 

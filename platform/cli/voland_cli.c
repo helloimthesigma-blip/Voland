@@ -1407,11 +1407,14 @@ static void compute_capture(void *user, const Compute_Launch *launch, uint64_t a
  * the draw data D), and per vertex the inputs and the interpreter's
  * position and generic outputs. platform/web/tools/vertex-vectors.mjs runs
  * the WGSL on WebGPU and compares (differential test of the vertex
- * translation on a title's own programs). Programs that sample textures
- * or read global memory are listed as skipped. */
+ * translation on a title's own programs). Global buffers traced to a
+ * constant buffer (wgsl_find_globals) are copied into the pool as a draw's
+ * are; programs that sample textures, or read global memory through
+ * untraced addresses, are listed as skipped. */
 #define VS_CAPTURE_PROGRAMS 2048u
 #define VS_CAPTURE_WGSL_BYTES (1u << 20)
 #define VS_CAPTURE_CBUF_BYTES 0x10000u /* a constant buffer at most */
+#define VS_CAPTURE_GLOBAL_BYTES (1u << 20) /* the global buffers' copies at most */
 typedef struct Vs_Capture_State {
   const char *dir;
   uint32_t hash[VS_CAPTURE_PROGRAMS];
@@ -1433,7 +1436,10 @@ static void vertex_capture(void *user, const Sm_Program *program, const Sm_Env *
   wgsl_default_desc(program, &desc);
   const char *skip = NULL;
   if (desc.texture_count) skip = "samples textures";
-  else if (wgsl_reads_globals(program)) skip = "reads global memory";
+  static Wgsl_Globals globals;
+  globals.count = 0;
+  if (!skip && wgsl_reads_globals(program) && !wgsl_find_globals(program, &globals))
+    skip = "reads global memory through untraced addresses";
   else if (program->uses_bindless_textures) skip = "bindless textures";
   static char wgsl[VS_CAPTURE_WGSL_BYTES];
   Wgsl_Result res = {0};
@@ -1452,7 +1458,7 @@ static void vertex_capture(void *user, const Sm_Program *program, const Sm_Env *
     return;
   }
   /* D: the vertex stage's constant-buffer table; P: the buffers it reads. */
-  static uint32_t pool[SM_CBUF_SLOTS * (VS_CAPTURE_CBUF_BYTES / 4u)];
+  static uint32_t pool[(SM_CBUF_SLOTS * VS_CAPTURE_CBUF_BYTES + VS_CAPTURE_GLOBAL_BYTES) / 4u];
   uint32_t table[2u * SM_CBUF_SLOTS] = {0}, used = 0;
   for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++) {
     if (!((res.cbuf_slots >> s) & 1u) || !env->cbuf[s]) continue;
@@ -1464,6 +1470,37 @@ static void vertex_capture(void *user, const Sm_Program *program, const Sm_Env *
     table[2u * s + 1u] = n;
     used += n;
   }
+  /* Each global buffer: its descriptor {base, size} from the constant
+   * buffer, its bytes and a word of slack (gpu_copy_globals). */
+  uint32_t global_table[WGSL_GLOBAL_WORDS * WGSL_MAX_GLOBALS] = {0};
+  uint32_t global_bytes = 0;
+  for (uint32_t k = 0; k < globals.count && !skip; k++) {
+    const uint32_t slot = globals.slot[k], at = globals.offset[k];
+    uint32_t d[3] = {0};
+    if (env->cbuf[slot] && at + sizeof(d) <= env->cbuf_size[slot]) memcpy(d, env->cbuf[slot] + at, sizeof(d));
+    const uint32_t n = (d[2] + 3u) / 4u + 1u;
+    global_bytes += n * 4u;
+    if (!d[2] || global_bytes > VS_CAPTURE_GLOBAL_BYTES || !env->global_read) {
+      skip = "global buffer not captured";
+      break;
+    }
+    memset(pool + used, 0, (size_t)n * 4u);
+    (void)env->global_read(env->user, (uint64_t)d[0] | (uint64_t)d[1] << 32, pool + used, d[2]);
+    uint32_t *e = global_table + WGSL_GLOBAL_WORDS * k;
+    e[0] = d[0];
+    e[1] = d[1];
+    e[2] = d[2];
+    e[3] = used * 4u;
+    used += n;
+  }
+  if (skip) {
+    fprintf(f, ",\"skip\":\"%s\"}\n", skip);
+    fclose(f);
+    return;
+  }
+  fprintf(f, ",\"globals_table\":%u,\"globals\":[", WGSL_DRAW_GLOBALS);
+  json_words(f, global_table, WGSL_GLOBAL_WORDS * globals.count);
+  fprintf(f, "]");
   fprintf(f, ",\"d_words\":%u,\"cbuf_table\":%u,\"table\":[", WGSL_DRAW_CONSTANT_WORDS, WGSL_DRAW_VS_CBUF_TABLE);
   json_words(f, table, 2u * SM_CBUF_SLOTS);
   fprintf(f, "],\"pool\":[");

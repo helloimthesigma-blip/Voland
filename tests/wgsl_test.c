@@ -79,6 +79,7 @@ static uint64_t SYNC(void) { return op_top(0xf0f8) | GUARD | 0xfull; }
 static uint64_t PBK(int32_t off) { return op_top(0xe2a0) | branch(off); }
 static uint64_t BRK(uint32_t p, bool negate) { return op_top(0xe340) | ((uint64_t)p << 16) | ((uint64_t)negate << 19) | 0xfull; }
 static uint64_t EXIT(void) { return op_top(0xe300) | GUARD | 0xfull; }
+static uint64_t BRX(uint32_t a, int32_t off) { return op_top(0xe250) | GUARD | branch(off) | ra(a) | 0xfull; }
 static uint64_t KIL_P(uint32_t p) { return op_top(0xe330) | ((uint64_t)p << 16) | 0xfull; }
 static uint64_t ALD(uint32_t d, uint32_t addr, uint32_t n) { return op_top(0xefd8) | GUARD | ((uint64_t)(n - 1u) << 47) | rc(RZ) | ((uint64_t)addr << 20) | ra(RZ) | rd(d); }
 static uint64_t IPA(uint32_t d, uint32_t addr, uint32_t mode, uint32_t mul) {
@@ -561,6 +562,30 @@ static void vector_ldc(void) {
   finish(&b, "ldc", false);
 }
 
+/* BRX to a bundle start: jump tables hold the scheduling word's address
+ * (TOTK's subtitle vertex program), and the bundle's first instruction
+ * runs next - the WGSL used to fault there (2026-11-11). */
+static void vector_brx_bundle(void) {
+  Builder b;
+  begin(&b);
+  emit(&b, MOV32I(1, 0x44));
+  emit(&b, MOV32I(2, 0x55));
+  emit(&b, MOV32I(3, 7));
+  const uint32_t mov = next_index(&b);
+  emit(&b, MOV32I(4, 0)); /* patched: the target's offset */
+  const uint32_t brx = next_index(&b);
+  emit(&b, BRX(4, 0));
+  do emit(&b, MOV32I(0, 0x11)); /* skipped */
+  while (b.words % 4u != 0);
+  const uint32_t bundle = b.words; /* the scheduling word emit writes next */
+  emit(&b, MOV32I(0, 0x22));
+  emit(&b, EXIT());
+  const uint64_t w = MOV32I(4, (uint32_t)offset_to(brx, bundle));
+  memcpy(b.bytes + SM_SPH_BYTES + 8u * mov, &w, 8);
+  finish(&b, "brx_bundle", false);
+  CHECK(g_thread.r[0][0] == 0x22u); /* the bundle's first instruction ran, the skipped MOV did not */
+}
+
 /* ---- structural ---------------------------------------------------- */
 
 static void structural(void) {
@@ -787,6 +812,7 @@ int main(int argc, char **argv) {
   vector_shfl();
   vector_kill();
   vector_ldc();
+  vector_brx_bundle();
   printf("[wgsl_test] passed (%u vectors%s%s)\n", g_vectors, g_dir ? " written to " : "", g_dir ? g_dir : "");
   return 0;
 }

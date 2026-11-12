@@ -1940,12 +1940,15 @@ static void emit_control(Tr *t, const Sm_Insn *in) {
     EMIT("if (%s) { pc = %uu; } else { pc = %uu; } ", g.s, norm_pc((uint32_t)in->target), next);
     return;
   case SM_OP_BRX: {
-    /* word = this + 1 + (Ra + imm) / 8 (sm_brx_target); a target that is
-     * not an instruction word faults through the switch's default. */
+    /* word = this + 1 + (Ra + imm) / 8 (sm_brx_target). Jump tables point
+     * at bundle starts - the scheduling word, which the interpreter runs as
+     * a no-op - so such a target goes on to the bundle's first instruction
+     * (norm_pc); any other non-instruction word faults through the switch's
+     * default. */
     const uint32_t index = (uint32_t)(in - t->p->insns);
     const Ex a = reg(t, (uint32_t)(in->raw >> 8));
     EMIT("if (%s) { let bo = bitcast<i32>(%s) + %d; if ((bo & 7) != 0) { pc = %uu; } else { "
-         "pc = bitcast<u32>(%d + (bo >> 3)); } } else { pc = %uu; } ",
+         "let tw = bitcast<u32>(%d + (bo >> 3)); pc = select(tw, tw + 1u, (tw & 3u) == 0u); } } else { pc = %uu; } ",
          g.s, a.s, (int32_t)in->imm, PC_FAULT, (int32_t)index + 1, next);
     return;
   }

@@ -4,7 +4,8 @@
  * DIR/vs-<hash>.json per vertex program (its WGSL, the constant buffers
  * it read, and per vertex the inputs and the interpreter's outputs); this
  * runs each WGSL vertex body in a compute shader on WebGPU and compares
- * the position and generic outputs.
+ * the position and generic outputs (global buffers traced to a constant
+ * buffer come in the pool, as a draw's do).
  *
  *   VOLAND_VS_CAPTURE=DIR voland-cli run GAME ... && node tools/vertex-vectors.mjs DIR [hash...]
  *   (WGSL_VECTORS_GPU=metal runs on the host GPU instead of SwiftShader)
@@ -75,6 +76,7 @@ try {
     }
     const d = new Array(v.d_words).fill(0);
     v.table.forEach((w, i) => { d[v.cbuf_table + i] = w; });
+    (v.globals ?? []).forEach((w, i) => { d[v.globals_table + i] = w; });
     const inWords = v.lanes.flatMap((l) => [l.ids[0], l.ids[1], ...l.in]);
     const got = await page.evaluate(async ({ code, d, pool, inWords, lanes, poolBinding, attributeWords }) => {
       const adapter = await navigator.gpu.requestAdapter();
@@ -152,5 +154,5 @@ try {
 } finally {
   await browser.close();
 }
-console.log(`[vertex-vectors] ${passed} passed, ${failed} failed, ${skipped} skipped (textures / globals / untranslated)`);
+console.log(`[vertex-vectors] ${passed} passed, ${failed} failed, ${skipped} skipped (textures / untraced globals / untranslated)`);
 process.exit(failed ? 1 : 0);
