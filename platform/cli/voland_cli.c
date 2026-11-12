@@ -1401,6 +1401,103 @@ static void compute_capture(void *user, const Compute_Launch *launch, uint64_t a
 }
 
 
+/* VOLAND_VS_CAPTURE=DIR: the first CPU-shaded draw of every distinct
+ * vertex program as DIR/vs-<hash>.json - its WGSL translation (unpulled
+ * inputs), the constant buffers it reads (the pool P with their table in
+ * the draw data D), and per vertex the inputs and the interpreter's
+ * position and generic outputs. platform/web/tools/vertex-vectors.mjs runs
+ * the WGSL on WebGPU and compares (differential test of the vertex
+ * translation on a title's own programs). Programs that sample textures
+ * or read global memory are listed as skipped. */
+#define VS_CAPTURE_PROGRAMS 2048u
+#define VS_CAPTURE_WGSL_BYTES (1u << 20)
+#define VS_CAPTURE_CBUF_BYTES 0x10000u /* a constant buffer at most */
+typedef struct Vs_Capture_State {
+  const char *dir;
+  uint32_t hash[VS_CAPTURE_PROGRAMS];
+  uint32_t count;
+} Vs_Capture_State;
+static Vs_Capture_State g_vs_capture;
+
+static void json_words(FILE *f, const uint32_t *w, uint32_t n) {
+  for (uint32_t i = 0; i < n; i++) fprintf(f, "%s%u", i ? "," : "", w[i]);
+}
+
+static void vertex_capture(void *user, const Sm_Program *program, const Sm_Env *env, const Sm_Thread *t) {
+  Vs_Capture_State *c = (Vs_Capture_State *)user;
+  for (uint32_t i = 0; i < c->count; i++)
+    if (c->hash[i] == program->hash) return;
+  if (c->count >= VS_CAPTURE_PROGRAMS) return;
+  c->hash[c->count++] = program->hash;
+  static Wgsl_Program_Desc desc;
+  wgsl_default_desc(program, &desc);
+  const char *skip = NULL;
+  if (desc.texture_count) skip = "samples textures";
+  else if (wgsl_reads_globals(program)) skip = "reads global memory";
+  else if (program->uses_bindless_textures) skip = "bindless textures";
+  static char wgsl[VS_CAPTURE_WGSL_BYTES];
+  Wgsl_Result res = {0};
+  if (!skip) {
+    res = wgsl_translate(program, &desc, wgsl, sizeof(wgsl));
+    if (!res.ok) skip = res.reason;
+  }
+  char path[1024];
+  snprintf(path, sizeof(path), "%s/vs-%08x.json", c->dir, program->hash);
+  FILE *f = fopen(path, "w");
+  if (!f) return;
+  fprintf(f, "{\"hash\":\"%08x\",\"address\":\"%llx\"", program->hash, (unsigned long long)program->address);
+  if (skip) {
+    fprintf(f, ",\"skip\":\"%s\"}\n", skip);
+    fclose(f);
+    return;
+  }
+  /* D: the vertex stage's constant-buffer table; P: the buffers it reads. */
+  static uint32_t pool[SM_CBUF_SLOTS * (VS_CAPTURE_CBUF_BYTES / 4u)];
+  uint32_t table[2u * SM_CBUF_SLOTS] = {0}, used = 0;
+  for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++) {
+    if (!((res.cbuf_slots >> s) & 1u) || !env->cbuf[s]) continue;
+    const uint32_t extent = program->cbuf_extent[s] < env->cbuf_size[s] ? program->cbuf_extent[s] : env->cbuf_size[s];
+    const uint32_t n = (extent + 3u) / 4u;
+    memset(pool + used, 0, (size_t)n * 4u);
+    memcpy(pool + used, env->cbuf[s], extent);
+    table[2u * s] = used;
+    table[2u * s + 1u] = n;
+    used += n;
+  }
+  fprintf(f, ",\"d_words\":%u,\"cbuf_table\":%u,\"table\":[", WGSL_DRAW_CONSTANT_WORDS, WGSL_DRAW_VS_CBUF_TABLE);
+  json_words(f, table, 2u * SM_CBUF_SLOTS);
+  fprintf(f, "],\"pool\":[");
+  json_words(f, pool, used);
+  /* Compared: the position and every generic output the header declares. */
+  uint32_t words[SM_ATTRIBUTE_WORDS], nw = 0;
+  for (uint32_t c4 = 0; c4 < 4u; c4++) words[nw++] = SM_ATTR_POSITION / 4u + c4;
+  for (uint32_t b = 0; b < 4u * SM_ATTR_GENERIC_COUNT; b++)
+    if ((program->header.output_generic[b / 32u] >> (b % 32u)) & 1u) words[nw++] = SM_ATTR_GENERIC / 4u + b;
+  fprintf(f, "],\"inputs\":%u,\"words\":[", desc.input_count);
+  json_words(f, words, nw);
+  fprintf(f, "],\"lanes\":[");
+  uint8_t vector_of[SM_ATTR_GENERIC_COUNT];
+  for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++)
+    if (desc.input_location[v] < desc.input_count) vector_of[desc.input_location[v]] = (uint8_t)v;
+  for (uint32_t l = 0; l < t->lanes; l++) {
+    fprintf(f, "%s{\"ids\":[%u,%u],\"in\":[", l ? "," : "", t->vertex_id[l], t->instance_id[l]);
+    for (uint32_t i = 0; i < desc.input_count; i++)
+      for (uint32_t c4 = 0; c4 < 4u; c4++)
+        fprintf(f, "%s%u", i || c4 ? "," : "", t->attr_in[SM_ATTR_GENERIC / 4u + 4u * vector_of[i] + c4][l]);
+    fprintf(f, "],\"out\":[");
+    for (uint32_t i = 0; i < nw; i++) fprintf(f, "%s%u", i ? "," : "", t->attr_out[words[i]][l]);
+    fprintf(f, "]}");
+  }
+  fprintf(f, "],\"wgsl\":\"");
+  for (const char *p = wgsl; *p; p++) {
+    if (*p == '\n') fputs("\\n", f);
+    else if (*p == '"' || *p == '\\') fprintf(f, "\\%c", *p);
+    else fputc(*p, f);
+  }
+  fprintf(f, "\"}\n");
+  fclose(f);
+}
+
 /* VOLAND_PC_LOG_DUMP (interpreter.h): every thread's state at that PC. */
 static Emulator *g_dump_emu;
 static void dump_threads_at_pc(void) { emulator_dump_threads(g_dump_emu, false); }
@@ -1639,6 +1736,11 @@ static int run(int argc, char **argv) {
     wav = fopen(audio_path, "wb");
     if (!wav) fprintf(stderr, "voland-cli: cannot write %s\n", audio_path);
     else write_wav_header(wav, 0);
+  }
+  if (getenv("VOLAND_VS_CAPTURE")) {
+    g_vs_capture.dir = getenv("VOLAND_VS_CAPTURE");
+    emu.renderer.vertex_capture = vertex_capture;
+    emu.renderer.vertex_capture_user = &g_vs_capture;
   }
   if (g_dump_shaders_dir || g_dump_wgsl_dir || getenv("VOLAND_DUMP_SHADERS") || getenv("VOLAND_DUMP_WGSL")) {
     emu.renderer.on_program_decoded = program_decoded;

@@ -1989,6 +1989,7 @@ static bool shade_vertices(Draw_Context *ctx, const uint32_t *indices, uint32_t 
     ctx->r->stats.shader_faults++;
     return false;
   }
+  if (ctx->r->vertex_capture) ctx->r->vertex_capture(ctx->r->vertex_capture_user, ctx->vs, &ctx->env[0], t);
   const uint32_t swizzle = ctx->regs[REG_VIEWPORT_SWIZZLE];
   for (uint32_t l = 0; l < n; l++) {
     for (uint32_t c = 0; c < 4; c++) out[l]->pos[c] = f32(t->attr_out[SM_ATTR_POSITION / 4u + c][l]);

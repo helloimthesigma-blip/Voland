@@ -295,6 +295,11 @@ typedef struct Raster3d {
   /* Diagnostics: called with every newly decoded shader program (may be NULL). */
   void (*on_program_decoded)(void *user, const Sm_Program *program);
   void *on_program_user;
+  /* Diagnostics (voland-cli VOLAND_VS_CAPTURE): called after the CPU
+   * shades vertices, with the vertex program, its environment and the
+   * thread whose lanes hold each vertex's inputs and outputs (may be NULL). */
+  void (*vertex_capture)(void *user, const Sm_Program *program, const struct Sm_Env *env, const Sm_Thread *thread);
+  void *vertex_capture_user;
   /* Diagnostics: called at every frame end (raster3d_end_frame), before
    * the epoch advances (may be NULL). */
   void (*on_frame_end)(void *user, const struct Raster3d *r);

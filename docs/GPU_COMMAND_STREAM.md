@@ -358,6 +358,15 @@ write is read back as vertex streams (269 of 276 MB in a fight).
   - `tools/compute-vectors.mjs` runs the vectors on WebGPU and compares
     every window word with the interpreter's result.
   - `tools/vertex-pull-vectors.mjs` decodes every case from D and from R.
+  - Vertex programs from a title: `voland-cli` with `VOLAND_VS_CAPTURE=DIR`
+    writes the first CPU-shaded draw of each distinct vertex program
+    (its WGSL with unpulled inputs, the constant buffers it reads, and
+    per vertex the inputs and the interpreter's position and generic
+    outputs). `tools/vertex-vectors.mjs DIR` runs each WGSL body in a
+    compute shader and compares (relative 1e-3, absolute 1e-5). Programs
+    that sample textures or read global memory are listed as skipped.
+    Tears of the Kingdom's opening (196 programs to 900k slices): every
+    one of the 116 it runs matches.
   - `raster3d_test` profiles a program, runs it on the GPU and pulls a
     draw from its mirror.
 
