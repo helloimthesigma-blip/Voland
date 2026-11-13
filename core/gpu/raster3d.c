@@ -2473,14 +2473,18 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
     rs->varyings.interp[rs->varyings.count] = ph->input_interp[i];
     rs->varyings.count++;
   }
-  /* Output registers: colour components in target order, then depth. */
+  /* Output registers: colour components in target order, then the sample
+   * mask's register - reserved whether or not the program writes it - then
+   * depth (as nouveau's nvc0 lays them out: depth is the last colour
+   * register + 2). Tears of the Kingdom's light-tile depth pass, no colour
+   * output, computes its depth in R1. */
   uint32_t reg = 0;
   memset(rs->color_reg, 0xff, sizeof(rs->color_reg));
   for (uint32_t t = 0; t < MAX_TARGETS; t++)
     for (uint32_t c = 0; c < 4; c++)
       if ((ph->omap_target >> (4u * t + c)) & 1u) rs->color_reg[t][c] = (uint8_t)reg++;
-  rs->depth_reg = ph->omap_depth ? reg : 0xffu;
-  rs->out_regs = reg + (ph->omap_depth ? 1u : 0u);
+  rs->depth_reg = ph->omap_depth ? reg + SM_DEPTH_OUTPUT_SKIP : 0xffu;
+  rs->out_regs = reg + (ph->omap_depth ? SM_DEPTH_OUTPUT_SKIP + 1u : 0u);
   return true;
 }
 

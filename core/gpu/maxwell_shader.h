@@ -145,6 +145,10 @@ typedef struct Sm_Insn {
   int32_t target;   /* branch / stack target word index, -1 none */
 } Sm_Insn;
 
+/* A pixel program's depth output follows its colour outputs and the
+ * sample mask's register, which is reserved even when unused. */
+#define SM_DEPTH_OUTPUT_SKIP 1u
+
 typedef struct Sm_Header {
   uint32_t words[SM_SPH_WORDS];
   Sm_Stage stage;

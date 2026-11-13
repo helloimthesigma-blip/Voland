@@ -46,6 +46,7 @@ static int g_failures;
 #define PS_LDG_BRANCH_OFFSET 0x3c00u /* its address loaded before a branch over other code */
 #define PS_LDG_ENTRY_OFFSET 0x3e00u  /* ... but a branch from before the load reaches the LDG */
 #define PS_STORE_OFFSET 0x1c00u /* a pixel program whose only output is a store to the storage buffer */
+#define PS_DEPTH_OUT_OFFSET 0x1d00u /* a pixel program writing depth only: 0.75 in R1 (0.25 in R0) */
 #define STORED_WORD 0x5a5a5a5au
 #define SSBO_DESC 0x110u      /* the storage buffer's descriptor in c[0] (NVN) */
 #define SSBO (GPU_BASE + 0xC000u)
@@ -223,6 +224,14 @@ static void build_programs(void) {
   const uint64_t pss[] = {MOV32I(12, 0), IADD_C_CC(4, 12, SSBO_DESC), IADD_C_X(5, SSBO_DESC + 4u), MOV32I(0, STORED_WORD),
                           stg_e32, EXIT()};
   write_program(PS_STORE_OFFSET, ps_sph, pss, 6);
+  /* Depth only: no colour output; depth follows the sample mask's
+   * reserved register, so R1 - R0 holds a decoy. */
+  uint8_t pd_sph[SM_SPH_BYTES];
+  memcpy(pd_sph, ps_sph, sizeof(pd_sph));
+  pd_sph[0x48] = 0;    /* no colour components */
+  pd_sph[0x4c] = 0x02; /* depth */
+  const uint64_t psz[] = {MOV32I(0, 0x3e800000u), MOV32I(1, 0x3f400000u), EXIT()};
+  write_program(PS_DEPTH_OUT_OFFSET, pd_sph, psz, 3);
 }
 
 /* ---- register state ----------------------------------------------- */
@@ -719,6 +728,48 @@ static uint32_t depth24_at(uint32_t x, uint32_t y) {
   const uint8_t *zt = g_gpu + (ZT - GPU_BASE);
   const uint32_t at = (uint32_t)block_linear_offset(x * 4u, y, RT_SIZE * 4u, 0);
   return (uint32_t)zt[at + 1u] | (uint32_t)zt[at + 2u] << 8 | (uint32_t)zt[at + 3u] << 16;
+}
+
+/* A pixel program's depth output register: past its colour outputs and the
+ * sample mask's reserved register - R1 with no colour (Tears of the
+ * Kingdom's light-tile depth). In both renderers. */
+static void test_depth_output(Raster3d *r) {
+  base_state(RT, false, PS_DEPTH_OUT_OFFSET);
+  g_regs[0x680] = 0; /* no colour written */
+  g_regs[0x3f8] = (uint32_t)(ZT >> 32);
+  g_regs[0x3f9] = (uint32_t)ZT;
+  g_regs[0x3fa] = ZT_Z24S8;
+  g_regs[0x3fb] = 0;
+  g_regs[0x48a] = RT_SIZE;
+  g_regs[0x48b] = RT_SIZE;
+  g_regs[0x54e] = 1;
+  raster3d_begin_submission(r);
+  memcpy(&g_regs[0x364], &(float){1.0f}, 4);
+  raster3d_clear(r, g_regs, &k_mem, 1u);
+  vertex(0, -1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(1, 1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(2, -1.0f, 1.0f, 1, 0, 0, 1);
+  vertex(3, 1.0f, 1.0f, 1, 0, 0, 1);
+  g_regs[0x4b3] = 1;
+  g_regs[0x4ba] = 1;
+  g_regs[0x4c3] = FUNC_ALWAYS;
+  draw_arrays(r, 5, 4);
+  raster3d_flush(r, &k_mem);
+  const uint32_t z = depth24_at(20, 20), want = (uint32_t)(0.75 * 0xffffff);
+  CHECK(z + 2u >= want && z <= want + 2u, "depth output from R1: 0x%06x (0x%06x wanted)", z, want);
+  g_regs[0x4b3] = 0;
+  g_regs[0x4ba] = 0;
+  g_regs[0x54e] = 0;
+  /* The WGSL writes frag_depth from R1 too. */
+  static Sm_Program prog;
+  const uint32_t bytes = SM_SPH_BYTES + 8u * 8u;
+  sm_program_decode(g_gpu + (PROGRAM_REGION - GPU_BASE) + PS_DEPTH_OUT_OFFSET, bytes, PROGRAM_REGION + PS_DEPTH_OUT_OFFSET,
+                    &prog);
+  Wgsl_Program_Desc desc;
+  wgsl_default_desc(&prog, &desc);
+  static char text[1 << 18];
+  const Wgsl_Result res = wgsl_translate(&prog, &desc, text, sizeof(text));
+  CHECK(res.ok && strstr(text, "fo.depth = F(r1)") != NULL, "WGSL depth output from R1 (%s)", res.ok ? "translated" : res.reason);
 }
 
 static void test_depth_bias(Raster3d *r) {
@@ -1771,6 +1822,7 @@ int main(void) {
   test_stencil(&r);
   test_depth_write_needs_test(&r);
   test_depth_bias(&r);
+  test_depth_output(&r);
   test_derivatives(&r);
   test_worker_count_invariance(&r);
   test_gpu_vertex_stage(&r);

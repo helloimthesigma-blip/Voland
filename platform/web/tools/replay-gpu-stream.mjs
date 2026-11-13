@@ -25,7 +25,9 @@
  * and depth state; NO_SHADOW_COMPARE=1 makes every depth compare pass;
  * DISCARD_SHADERS=id,... makes those pixel shaders write nothing;
  * DEPTH_OFF_SHADERS=id,... draws those shaders without the depth test;
- * TRACE_PIXEL=x,y adds that texel of TRACE_TARGET to each draw's line;
+ * DEPTH_CMP=id:cmp,... gives those shaders that depth compare (COMPARES index);
+ * TRACE_PIXEL=x,y adds that texel of TRACE_TARGET to each draw's line (a depth
+ * target's: its depth, and the target's min and max);
  * TRACE_WRITES=id,... lists every draw into those targets; CB_DUMP=shader,slot,words
  * prints a constant buffer (from the pool) for that shader's draws.
  */
@@ -109,6 +111,7 @@ if (process.env.CB_DUMP) await page.evaluate((t) => { globalThis.CB_DUMP = { sha
 if (process.env.CB_TABLE) await page.evaluate((n) => { globalThis.CB_TABLE = n; }, Number(process.env.CB_TABLE));
 if (process.env.TRACE_WRITES) await page.evaluate((t) => { globalThis.TRACE_WRITES = t; }, process.env.TRACE_WRITES.split(",").map(Number));
 if (process.env.TRACE_SIZES) await page.evaluate(() => { globalThis.TRACE_SIZES = true; });
+if (process.env.DEPTH_CMP) await page.evaluate((t) => { globalThis.DEPTH_CMP = Object.fromEntries(t.split(",").map((e) => e.split(":").map(Number))); }, process.env.DEPTH_CMP);
 if (process.env.NO_DEPTH) await page.evaluate(() => { globalThis.NO_DEPTH = true; });
 if (process.env.SKIP_TYPES) await page.evaluate((t) => { globalThis.SKIP_TYPES = t; }, process.env.SKIP_TYPES.split(",").map(Number));
 const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
@@ -335,6 +338,15 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
           at += 16 + (kind === 1 ? dv.getUint32(at + 8, true) : 0);
         }
         console.log(`shape ${records} shader ${dv.getUint32(0, true)} vs ${dv.getUint32(8 + 36 * 8 + 4 * 13 + 4 * 4 + 4 * 4 + 4 * 4 + 4 * 4, true)} targets ${ids.join(",")} depth ${dv.getUint32(296, true)} test ${dv.getUint32(300, true)} write ${dv.getUint32(304, true)} cmp ${dv.getUint32(308, true)} tex ${tex.join(",")} vtx ${dv.getUint32(404, true)} vsid ${dv.getUint32(408, true)} inputs ${dv.getUint32(412, true)} cull ${dv.getUint32(416, true)} idx ${dv.getUint32(424, true)} flags ${dv.getUint32(428, true).toString(16)} scissor ${[0, 1, 2, 3].map((k) => dv.getInt32(376 + 4 * k, true)).join(",")}`);
+        /* Transformed vertices (no vertex stage): the first ones' x, y (NDC), z and 1/w after the bindings. */
+        if (dv.getUint32(408, true) === 0 && dv.getUint32(404, true) > 0) {
+          let vat = 432;
+          for (let k = 0; k < dv.getUint32(400, true); k++) vat += 16 + (dv.getUint32(vat, true) === 1 ? dv.getUint32(vat + 8, true) : 0);
+          const stride = 16 + 16 * dv.getUint32(392, true), first = [];
+          for (let k = 0; k < 3 && k < dv.getUint32(404, true) && vat + (k + 1) * stride <= payload.byteLength; k++)
+            first.push([0, 4, 8, 12].map((o) => dv.getFloat32(vat + k * stride + o, true).toFixed(3)).join(","));
+          console.log(`  vertices ${first.join(" | ")}`);
+        }
       }
       if (globalThis.DRAW_TRACE && type === 6 && presents + 1 === globalThis.DRAW_TRACE) {
         /* Diagnostics: each RGBA8 target's channel sums after every draw of one present
@@ -344,8 +356,9 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
         const only = globalThis.TRACE_TARGET;
         if (only) {
           const t = ex.textures.get(only);
-          const isDepth = t && (t.format === "depth32float" || t.format === "depth32float-stencil8");
-          const texel = t ? (isDepth ? 4 : TEXEL_BYTES[t.format]) : 0;
+          const depth16 = t?.format === "depth16unorm";
+          const isDepth = t && (t.format === "depth32float" || t.format === "depth32float-stencil8" || depth16);
+          const texel = t ? (isDepth ? (depth16 ? 2 : 4) : TEXEL_BYTES[t.format]) : 0;
           if (t && texel) {
             const bytesPerRow = Math.ceil((t.width * texel) / 256) * 256;
             const buffer = device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
@@ -355,11 +368,17 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
             await buffer.mapAsync(GPUMapMode.READ);
             const dv2 = new DataView(buffer.getMappedRange());
             const sum = [0, 0, 0]; /* per channel (depth: the first) */
+            let dmin = Infinity, dmax = -Infinity; /* depth: the extremes */
             for (let y = 0; y < t.height; y += 4)
               for (let x = 0; x < t.width; x += 4) {
                 const at = y * bytesPerRow + x * texel;
                 let c;
-                if (isDepth) c = [1 - dv2.getFloat32(at, true), 0, 0];
+                if (isDepth) {
+                  const d = depth16 ? dv2.getUint16(at, true) / 65535 : dv2.getFloat32(at, true);
+                  dmin = Math.min(dmin, d);
+                  dmax = Math.max(dmax, d);
+                  c = [1 - d, 0, 0];
+                }
                 else if (t.format === "rgba16float") c = [0, 2, 4].map((k) => half(dv2.getUint16(at + k, true)));
                 else if (t.format === "r16float") c = [half(dv2.getUint16(at, true)), 0, 0];
                 else if (t.format === "rg11b10ufloat") { const w = dv2.getUint32(at, true); c = [small(w & 2047, 6), small((w >> 11) & 2047, 6), small(w >>> 22, 5)]; }
@@ -368,7 +387,10 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
               }
             /* TRACE_PIXEL=x,y: that texel's channels too. */
             let pixel = "";
-            if (globalThis.TRACE_PIXEL && !isDepth) {
+            if (globalThis.TRACE_PIXEL && isDepth) {
+              const [px, py] = globalThis.TRACE_PIXEL, at = py * bytesPerRow + px * texel;
+              pixel = ` depth ${(depth16 ? dv2.getUint16(at, true) / 65535 : dv2.getFloat32(at, true)).toFixed(5)} min ${dmin.toFixed(5)} max ${dmax.toFixed(5)}`;
+            } else if (globalThis.TRACE_PIXEL) {
               const [px, py] = globalThis.TRACE_PIXEL, at = py * bytesPerRow + px * texel;
               const w = dv2.getUint32(at, true);
               pixel = t.format === "rg11b10ufloat" ? ` pixel ${[small(w & 2047, 6), small((w >> 11) & 2047, 6), small(w >>> 22, 5)].map((v) => v.toFixed(4)).join(" ")}`

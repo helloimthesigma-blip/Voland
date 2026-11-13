@@ -1083,7 +1083,8 @@ export class GpuExecutor {
         blend: t.blend ? [t.colorOp, t.colorSrc, t.colorDst, t.alphaOp, t.alphaSrc, t.alphaDst] : null,
       })),
       depth: depth ? {
-        format: depth.format, compare: d.depthCompare, write: d.depthWrite,
+        format: depth.format, compare: (globalThis as { DEPTH_CMP?: Readonly<Record<number, number>> }).DEPTH_CMP?.[d.shaderId] ?? d.depthCompare,
+        write: d.depthWrite,
         test: (globalThis as { DEPTH_OFF_SHADERS?: number[] }).DEPTH_OFF_SHADERS?.includes(d.shaderId) ? false : d.depthTest,
         stencil: d.stencil ? {
           front: [d.stencilFront.compare, d.stencilFront.fail, d.stencilFront.depthFail, d.stencilFront.pass],

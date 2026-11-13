@@ -2768,7 +2768,7 @@ static void emit_outputs(Tr *t, Out *o) {
   for (uint32_t tg = 0; tg < WGSL_MAX_TARGETS; tg++)
     for (uint32_t c = 0; c < 4; c++)
       if ((h->omap_target >> (4u * tg + c)) & 1u) color_reg[tg][c] = (uint8_t)r++;
-  const uint32_t depth_reg = r;
+  const uint32_t depth_reg = r + SM_DEPTH_OUTPUT_SKIP; /* past the sample mask's register (raster3d.c setup_state) */
   /* Alpha test against target 0's alpha (output_pixel). */
   const uint8_t ar = color_reg[0][3];
   out_add(o, "  if (D[%uu] != 0u && !tcmp(D[%uu] - 1u, %s, F(D[%uu]))) { discard; }\n", WGSL_DRAW_ALPHA_FUNC,
