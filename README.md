@@ -21,9 +21,9 @@ were measured.
 | Super Mario Odyssey | opening, Cap Kingdom | 35-46 by scene | 37-40 (cutscenes) | the camera tutorial needs the right stick pushed up |
 | Nine Sols | title, opening cinematic, gameplay, dialogue | ~45 (the first cave) | ~52 | |
 | Super Smash Bros. Ultimate | matches, opening movie | 22-27 in a fight (Oct.) | ~60 | |
-| Mario Kart 8 Deluxe (32-bit) | whole races | ~18 in a race | ~60 | |
+| Mario Kart 8 Deluxe (32-bit) | whole races | ~44 at the race start | ~60 | |
 | Animal Crossing: New Horizons | opening through arrival on the island | ~8 on the island (Oct.) | ~55 (intro) | none known (the black sea and the dark blotches were fixed on 2026-10-30) |
-| Tears of the Kingdom | the opening descent | ~8 | - | slow; occasional crashes on three cores |
+| Tears of the Kingdom | the opening descent | ~7 | - | slow; the scene is unlit (the bottom third of the picture is black); occasional crashes on three cores |
 
 "(Oct.)" marks numbers measured in October 2026, before later speed work, and not
 re-measured since. On an M1 Mac, Silksong gameplay runs at about 33 fps.
