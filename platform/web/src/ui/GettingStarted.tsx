@@ -1,9 +1,8 @@
 /**
  * "How to use Voland": the steps from an empty page to playing, for
  * someone who just opened the site. Open until the player closes it once
- * (remembered per browser); the steps name the buttons and panels they
- * point at, so keep them in step with LoadPanel, FilesPanel and the side
- * panels' headings.
+ * (remembered per browser); the steps name the buttons and tabs they
+ * point at, so keep them in step with LoadPanel, FilesPanel and App's tabs.
  */
 import { DUMPING_GUIDE_URL } from "./load-failure-copy";
 
@@ -42,18 +41,18 @@ function GettingStarted() {
           screen; the frame counter shows it is working.
         </li>
         <li>
-          <strong>Play.</strong> Use the keyboard or a gamepad; <em>Controls</em> lists every button and lets you
-          change them. <em>Fullscreen</em> sits under the screen once a game runs.
+          <strong>Play.</strong> Use the keyboard or a gamepad; the <em>Controls</em> tab lists every button and lets
+          you change them. <em>Fullscreen</em> sits under the screen once a game runs.
         </li>
         <li>
           <strong>Your progress.</strong> The game's own saves are kept in this browser automatically (back them
-          up from <em>Save data</em>). <em>Save states</em> freeze the game anywhere, and <em>Continue</em> on a
+          up from the <em>Saves</em> tab). <em>Save states</em> freeze the game anywhere, and <em>Continue</em> on a
           game's tile takes you back to where you were.
         </li>
       </ol>
       <p class="voland-load-note">
-        Optional: choose a <em>Voland folder</em> under <em>Your files</em> to keep games, system files and mods in
-        one place; some games need <em>System files</em> from your own console; <em>Mods</em> adds mods you have.
+        Optional: choose a <em>Voland folder</em> (below) to keep games, system files and mods in one place and
+        have them found by themselves; the <em>Mods</em> tab adds mods you have.
         Just curious? <em>Run the demo</em> starts a tiny built-in program. Chrome or Edge on a computer works best.
       </p>
     </details>

@@ -79,13 +79,13 @@
 
 .voland-main {
   flex: 1;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 400px;
+  display: flex;
   min-height: 0;
 }
 
-/* Left: the screen, the running game, the library. Scrolls on its own. */
+/* The one column: the screen, the running game, the tabs. Scrolls on its own. */
 .voland-hero {
+  flex: 1;
   overflow-y: auto;
   min-height: 0;
   padding: 28px 36px 48px;
@@ -104,20 +104,37 @@
   line-height: 1.55;
 }
 
-/* Right: set-up-once panels and the event log. */
-.voland-side {
-  overflow-y: auto;
-  min-height: 0;
-  padding: 16px;
+/* One row of tabs under the game; only the chosen pane shows. */
+.voland-tabs {
   display: flex;
-  flex-direction: column;
-  gap: 12px;
-  border-left: 1px solid #1c1c28;
-  background: rgba(0, 0, 0, 0.3);
+  flex-wrap: wrap;
+  gap: 4px;
+  border-bottom: 1px solid #23232f;
+  margin-top: 6px;
 }
 
-.voland-tools { display: flex; flex-direction: column; gap: 12px; }
-.voland-tools > div { display: contents; } /* the Portal's wrapper */
+.voland-tabs button {
+  appearance: none;
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  padding: 10px 16px;
+  color: #9a9aa8;
+  font: 600 14px/1 ui-sans-serif, system-ui, sans-serif;
+  cursor: pointer;
+}
+
+.voland-tabs button:hover { color: #e6e6ea; }
+.voland-tabs button.active { color: #e6e6ea; border-bottom-color: #8fa8ff; }
+.voland-tabs button:focus-visible { outline: 2px solid #8fa8ff; outline-offset: -2px; }
+
+.voland-tab-pane[hidden] { display: none; }
+.voland-tab-stack { display: flex; flex-direction: column; gap: 14px; }
+.voland-tab-stack > div:not([class]) { display: contents; } /* a Portal's wrapper */
+
+.voland-advanced > summary { font-size: 13px; }
+.voland-advanced[open] > summary { margin-bottom: 12px; }
 
 .voland-panel {
   border: 1px solid #1f1f2b;
@@ -164,13 +181,9 @@
 .voland-log-scroll .log-debug { color: #8d8d99; }
 .voland-log-scroll .log-trace { color: #5a5a66; }
 
-/* Narrow windows: one column, the side panels after the game. */
+/* Narrow windows: tighter padding. */
 @media (max-width: 1000px) {
-  .voland-shell { overflow-y: auto; }
-  .voland-main { display: block; }
-  .voland-hero, .voland-side { overflow: visible; }
   .voland-hero { padding: 18px 16px; }
-  .voland-side { border-left: 0; border-top: 1px solid #1c1c28; }
 }
 
 .voland-load {

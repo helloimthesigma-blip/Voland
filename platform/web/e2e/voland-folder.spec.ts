@@ -7,6 +7,7 @@ import { expect, test } from "@playwright/test";
 
 import { writeSaveArchive } from "../bindings/save-archive.ts";
 import { tarNameOfSave, writeTar } from "../workers/save-store.ts";
+import { openTab } from "./tabs.ts";
 
 /**
  * The Voland folder ("Your files"): one folder with games/, firmware/ and
@@ -69,7 +70,7 @@ test("a kept folder is read again at load, backs saves up and follows its mods",
   await page.goto("/");
   await expect(page.getByTestId("files-panel")).toBeVisible({ timeout: 20_000 });
   const tar = writeTar(new Map([[tarNameOfSave(SAVE_NAME), writeSaveArchive(new Map([["/user1.dat", new Uint8Array(8)]]))]]));
-  await page.getByTestId("saves").locator("summary").click();
+  await openTab(page, "saves");
   await page.getByTestId("saves-import-input").setInputFiles({ name: "backup.tar", mimeType: "application/x-tar", buffer: Buffer.from(tar) });
   await expect(page.getByTestId("saves-note")).toContainText("Imported 1 save", { timeout: 30_000 });
 

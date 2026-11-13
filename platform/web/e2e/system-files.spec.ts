@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { expect, test } from "@playwright/test";
+import { openAdvanced } from "./tabs.ts";
 
 /**
  * "System files" (§1.6): the user's own dumps of system archives are
@@ -28,6 +29,7 @@ const octets = "application/octet-stream";
 test("a system file is stored, listed and kept", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("load-panel")).toBeVisible({ timeout: 20_000 });
+  await openAdvanced(page);
   const mii = page.getByTestId("system-file-0100000000000802");
   await expect(mii).toBeVisible();
 
@@ -43,6 +45,7 @@ test("a system file is stored, listed and kept", async ({ page }) => {
   await expect(page.getByTestId("sd-result")).toContainText("emptied");
   await page.reload();
   await expect(page.getByTestId("load-panel")).toBeVisible({ timeout: 20_000 });
+  await openAdvanced(page);
   await expect(page.getByTestId("system-file-0100000000000802")).not.toContainText("not added");
 });
 
@@ -50,6 +53,7 @@ test("a decrypted firmware folder keeps only what games need", async ({ page }) 
   test.skip(!existsSync(MII_NCA) || !existsSync(PROGRAM_NCA), "fixtures not built: run ctest --preset native-noop");
   await page.goto("/");
   await expect(page.getByTestId("load-panel")).toBeVisible({ timeout: 20_000 });
+  await openAdvanced(page);
   const folder = mkdtempSync(join(tmpdir(), "voland-firmware-"));
   writeFileSync(join(folder, "0a1b2c3d4e5f60718293a4b5c6d7e8f9.nca"), readFileSync(MII_NCA));
   writeFileSync(join(folder, "11223344556677889900aabbccddeeff.nca"), readFileSync(PROGRAM_NCA));

@@ -1,4 +1,5 @@
 import { expect, test } from "@playwright/test";
+import { openTab } from "./tabs.ts";
 
 /**
  * The controls panel lists the bindings and remaps them (kept across a
@@ -7,9 +8,8 @@ import { expect, test } from "@playwright/test";
  */
 test("controls panel remaps a key and keeps it across a reload", async ({ page }) => {
   await page.goto("/");
-  const panel = page.getByTestId("controls");
-  await expect(panel).toBeVisible({ timeout: 20_000 });
-  await panel.locator("summary").click();
+  await openTab(page, "controls");
+  await expect(page.getByTestId("controls")).toBeVisible({ timeout: 20_000 });
   await expect(page.getByTestId("bind-key-A")).toHaveText("Z");
   await expect(page.getByTestId("bind-key-LStickUp")).toHaveText("W");
   await expect(page.getByTestId("bind-pad-A")).toHaveText("Right face");
@@ -25,7 +25,7 @@ test("controls panel remaps a key and keeps it across a reload", async ({ page }
   await expect(page.getByTestId("bind-key-B")).toHaveText("—");
 
   await page.reload();
-  await page.getByTestId("controls").locator("summary").click();
+  await openTab(page, "controls");
   await expect(page.getByTestId("bind-key-A")).toHaveText("X");
   await page.getByTestId("bindings-reset").click();
   await expect(page.getByTestId("bind-key-A")).toHaveText("Z");

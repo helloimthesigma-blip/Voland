@@ -5,7 +5,7 @@
  * at once: the save is rewritten (src/saves.ts -> the CPU worker loads it
  * into the core and stores it), so the game sees it the next time it reads.
  */
-import { For, Show, createSignal, onMount } from "solid-js";
+import { For, Show, createEffect, createSignal, onMount } from "solid-js";
 import type { StoredSave } from "@bindings/protocol";
 import {
   type SaveTree, addSaveDirectory, describeSaveName, normalizeSavePath, parseSaveArchive,
@@ -264,7 +264,8 @@ function SaveBrowser(props: { readonly save: SaveView; readonly onChanged: () =>
   );
 }
 
-function SavesPanel() {
+/** `shown`: true while the Saves tab is on screen; each time it comes up the list is read again. */
+function SavesPanel(props: { readonly shown: () => boolean }) {
   const [note, setNote] = createSignal<string | null>(null);
   const [saves, setSaves] = createSignal<readonly SaveView[]>([]);
   const [open, setOpen] = createSignal<string | null>(null);
@@ -275,6 +276,7 @@ function SavesPanel() {
     setSaves((await listSaves()).map((save) => toView(save, names)));
   }
   onMount(() => void refresh());
+  createEffect(() => { if (props.shown()) void refresh(); });
 
   async function onExport(): Promise<void> {
     const result = await exportSaves();
@@ -298,8 +300,7 @@ function SavesPanel() {
   }
 
   return (
-    <details class="voland-saves" data-testid="saves" onToggle={(e) => { if (e.currentTarget.open) void refresh(); }}>
-      <summary>Save data (each game's user save directory)</summary>
+    <div class="voland-saves" data-testid="saves">
       <p class="voland-load-note">
         Saves are kept in this browser automatically each time a game saves. Open one to see its files, download or
         replace them, or drag files and folders in. Edit saves before starting the game (a running game may have them
@@ -330,7 +331,7 @@ function SavesPanel() {
           </div>
         )}
       </For>
-    </details>
+    </div>
   );
 }
 

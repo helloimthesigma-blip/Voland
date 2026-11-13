@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { expect, test } from "@playwright/test";
+import { openAdvanced } from "./tabs.ts";
 
 /**
  * The emulated SD card persists in the browser (§15, OPFS): a file added
@@ -14,6 +15,7 @@ test.skip(!existsSync(CORE_JS), "core not staged: run `cmake --build --preset we
 test("SD card files survive a reload until emptied", async ({ page }) => {
   await page.goto("/");
   await expect(page.getByTestId("load-panel")).toBeVisible({ timeout: 20_000 });
+  await openAdvanced(page);
   await page.getByTestId("sd-clear").click();
   await expect(page.getByTestId("sd-result")).toContainText("emptied");
 
@@ -23,11 +25,13 @@ test("SD card files survive a reload until emptied", async ({ page }) => {
 
   await page.reload();
   await expect(page.getByTestId("load-panel")).toBeVisible({ timeout: 20_000 });
+  await openAdvanced(page);
   await expect(page.locator("body")).toContainText("SD card: restored 1 file(s)");
 
   await page.getByTestId("sd-clear").click();
   await expect(page.getByTestId("sd-result")).toContainText("emptied");
   await page.reload();
   await expect(page.getByTestId("load-panel")).toBeVisible({ timeout: 20_000 });
+  await openAdvanced(page);
   await expect(page.locator("body")).not.toContainText("SD card: restored");
 });

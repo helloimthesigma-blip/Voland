@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import { expect, test } from "@playwright/test";
+import { openTab } from "./tabs.ts";
 
 /**
  * The Mods panel (§19): a zip installs as a mod for a game, can be turned
@@ -55,6 +56,7 @@ test.beforeEach(async ({ page }) => {
 
 test("a zip installs as a mod that can be disabled, reordered and deleted", async ({ page }) => {
   await page.goto("/");
+  await openTab(page, "mods");
   const panel = page.getByTestId("mods-panel");
   await expect(panel).toBeVisible({ timeout: 20_000 });
   await page.getByTestId("mods-add-zip").setInputFiles([
@@ -74,6 +76,7 @@ test("a zip installs as a mod that can be disabled, reordered and deleted", asyn
     return (await (await dir.getFileHandle(".voland-mods.json")).getFile()).text();
   }, TITLE)).toContain('"disabled":["Hard Mode"]');
   await page.reload();
+  await openTab(page, "mods");
   await expect(page.getByTestId("mods-panel").getByTestId("mod-row").nth(0)).toContainText("Hard Mode");
   await expect(page.getByTestId("mods-panel").getByTestId("mod-row").nth(0).locator('input[type="checkbox"]')).not.toBeChecked();
   page.once("dialog", (dialog) => void dialog.accept());
@@ -99,6 +102,7 @@ test("a repository offers a game's mods and installs one after its hash checks",
     route.fulfill({ status: 200, headers: { ...cors, "content-type": "application/zip" }, body: archive }));
 
   await page.goto("/");
+  await openTab(page, "mods");
   const panel = page.getByTestId("mods-panel");
   await expect(panel).toBeVisible({ timeout: 20_000 });
   await panel.getByTestId("mod-repos").locator("summary").click();

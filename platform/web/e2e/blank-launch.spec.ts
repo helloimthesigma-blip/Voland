@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 
 import { expect, test } from "@playwright/test";
+import { openAdvanced } from "./tabs.ts";
 
 /**
  * "Open in about:blank" (src/blank-launch.ts, DESIGN.md §16): the blank
@@ -13,6 +14,7 @@ import { expect, test } from "@playwright/test";
 test("Voland runs framed in an about:blank tab it opens", async ({ page, context }) => {
   await page.goto("/");
   const popupOpened = context.waitForEvent("page");
+  await openAdvanced(page);
   await page.getByTestId("open-blank").click({ timeout: 20_000 });
   const tab = await popupOpened;
   await expect.poll(() => page.url()).toBe("about:blank");

@@ -18,9 +18,8 @@ test("the main column scrolls in a short window", async ({ page }) => {
   await page.mouse.move(screen.x + screen.width / 2, screen.y + screen.height / 2);
   await page.mouse.wheel(0, 400);
   await expect.poll(() => hero.evaluate((el) => el.scrollTop)).toBeGreaterThan(0);
-  /* Scrolled down, the controls below the screen are reachable. */
+  /* Scrolled down, the tabs and the load buttons below the screen are reachable. */
   await hero.evaluate((el) => el.scrollTo({ top: el.scrollHeight }));
   await expect(page.getByTestId("load-input")).toBeAttached();
-  const legend = page.locator(".voland-facts");
-  await expect(legend).toBeInViewport();
+  await expect(page.getByTestId("load-folder")).toBeInViewport();
 });

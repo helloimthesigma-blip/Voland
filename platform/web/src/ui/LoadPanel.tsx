@@ -37,7 +37,10 @@ interface LoadPanelProps {
   readonly setPaused: (paused: boolean) => void;
   readonly gpuAdapter: string;
   /** Where the SD card and system-file tools go (the sidebar). */
-  readonly toolsMount: () => HTMLElement | undefined;
+  /** Where the library, the load buttons and the Voland folder go (the Games tab). */
+  readonly libraryMount: () => HTMLElement | undefined;
+  /** Where the SD card and system files go (Settings, under Advanced). */
+  readonly advancedMount: () => HTMLElement | undefined;
 }
 
 type LoadState =
@@ -319,7 +322,7 @@ function LoadPanel(props: LoadPanelProps) {
   }
 
   return (
-    <div class="voland-load" data-testid="load-panel">
+    <div class="voland-load" data-testid="load-status">
       <input
         ref={input}
         type="file"
@@ -474,6 +477,10 @@ function LoadPanel(props: LoadPanelProps) {
           }}
         </Match>
       </Switch>
+      <Show when={props.libraryMount()}>
+        {(mount) => (
+          <Portal mount={mount()}>
+           <div class="voland-load" data-testid="load-panel">
       <GettingStarted />
       <GameLibrary
         games={games()}
@@ -517,11 +524,15 @@ function LoadPanel(props: LoadPanelProps) {
         A decrypted Program NCA or a homebrew NRO, or the folder of your decrypted game's NCAs (it brings the
         game's name and icon, and any update or DLC in it). Games you load once stay in the library above.
       </p>
-      <Show when={props.toolsMount()}>
-        {(mount) => (
-          <Portal mount={mount()}>
             <FilesPanel systemFiles={props.systemFiles} systemIds={systemIds} onSystemFilesChanged={refreshSystemFiles}
                         games={games} onScan={onFolderScan} />
+           </div>
+          </Portal>
+        )}
+      </Show>
+      <Show when={props.advancedMount()}>
+        {(mount) => (
+          <Portal mount={mount()}>
             <section class="voland-panel" data-testid="sd-card">
               <h4>SD card</h4>
               <p class="voland-load-note">Homebrew you add appears in a homebrew menu such as hbmenu.</p>

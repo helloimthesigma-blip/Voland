@@ -93,8 +93,7 @@ function ControlsLegend() {
   };
 
   return (
-    <details class="voland-controls" data-testid="controls">
-      <summary>Controls (keyboard and gamepad; click any key to change it)</summary>
+    <div class="voland-controls" data-testid="controls">
       <p class="voland-controls-hint" data-testid="controls-hint">
         Click a key or gamepad button below, then press the one you want. Esc cancels, Backspace
         removes it. A key moves off any other control it was on. Changes apply at once, even mid-game,
@@ -146,7 +145,7 @@ function ControlsLegend() {
           Reset to defaults
         </button>
       </div>
-    </details>
+    </div>
   );
 }
 

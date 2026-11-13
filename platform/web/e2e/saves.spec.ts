@@ -5,6 +5,7 @@ import { expect, test } from "@playwright/test";
 
 import { writeSaveArchive } from "../bindings/save-archive.ts";
 import { tarNameOfSave, writeTar } from "../workers/save-store.ts";
+import { openTab } from "./tabs.ts";
 
 /**
  * The save browser (§15): a restored backup shows up per game with its
@@ -26,7 +27,7 @@ test("save browser lists, edits and keeps a game's save files", async ({ page })
   ]));
   const tar = writeTar(new Map([[tarNameOfSave(NAME), archive]]));
   const saves = page.getByTestId("saves");
-  await saves.locator("summary").click();
+  await openTab(page, "saves");
   await page.getByTestId("saves-import-input").setInputFiles({ name: "backup.tar", mimeType: "application/x-tar", buffer: Buffer.from(tar) });
   /* The CPU worker may still be starting (a cold dev server compiles it). */
   await expect(page.getByTestId("saves-note")).toContainText("Imported 1 save", { timeout: 30_000 });
@@ -46,7 +47,7 @@ test("save browser lists, edits and keeps a game's save files", async ({ page })
 
   await page.reload();
   await expect(page.getByTestId("load-panel")).toBeVisible({ timeout: 20_000 });
-  await page.getByTestId("saves").locator("summary").click();
+  await openTab(page, "saves");
   await expect(page.locator(`[data-save="${NAME}"]`)).toContainText("3 files");
   await page.locator(`[data-save="${NAME}"] .voland-save-head`).click();
   await page.locator('[data-path="/user2.dat"] [data-testid="save-delete-path"]').click();
