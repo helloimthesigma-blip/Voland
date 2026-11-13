@@ -1,4 +1,4 @@
-# GPU command stream (version 13)
+# GPU command stream (version 14)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -300,6 +300,30 @@ Gathers, cube or 3D, copy again only when a source target was drawn into
 or re-created since. Version 11 copies have no level word and parse as
 level 0. A copy into a level above 0 must be a plain texture copy (same
 format and size); other copies draw into level 0.
+
+### Draws on GPU mirrors (version 14)
+
+A draw's global memory (the storage buffers `wgsl_find_globals` traces)
+is normally copied into the pool. Two cases bind the buffers' GPU
+mirrors instead (`Wgsl_Program_Desc.global_windows`, "window mode"):
+
+- a pixel program that only stores to memory (every colour channel
+  masked, no depth: Tears of the Kingdom builds its light-tile list this
+  way). It draws into its masked target with write mask 0 and its STGs
+  write the mirror, whose pages then become GPU-owned;
+- any vertex or pixel program reading a buffer with GPU-owned pages: the
+  guest copy is stale, so it reads the mirror.
+
+Buffer k of the vertex / pixel program is a BUFFER binding at
+`WGSL_VS_WINDOW_BINDING_BASE` / `WGSL_PS_WINDOW_BINDING_BASE` + k
+(`core/gpu/wgsl.h`), with `GPU_BIND_WRITABLE` in its `bytes` word when the
+pixel program writes it (read-write storage; else read-only). Its table
+words (`WGSL_DRAW_GLOBALS` / `_PS_GLOBALS` + 4 k) hold the buffer's base,
+size and byte offset in the mirror. The executor ends the render pass
+before a draw that would read a buffer the pass writes, or the reverse:
+one pass is one usage scope. A stores-only draw whose buffers cannot be
+mirrored (over `GPU_MIRROR_MAX_BYTES`, or an STG not traced) is shaded on
+the CPU, reading stale copies of what the GPU drew.
 
 ### Compute and storage buffers (version 6)
 

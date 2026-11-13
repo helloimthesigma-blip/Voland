@@ -132,6 +132,7 @@ typedef struct Raster3d_Program {
   uint8_t global_count;
   uint8_t global_slot[RASTER_PROGRAM_GLOBALS];
   uint16_t global_offset[RASTER_PROGRAM_GLOBALS];
+  bool stores_traced; /* a pixel program's every STG address traced to a buffer (window mode can store) */
   Sm_Program program;
 } Raster3d_Program;
 
@@ -217,6 +218,7 @@ typedef struct Raster3d_Gpu_Stats {
   uint64_t draw_data_bytes, pulled_bytes, vertex_bytes, index_bytes;
   uint64_t pool_bytes, pool_reused_bytes; /* chunks written to the pool / found there unchanged */
   uint64_t probe_runs;   /* draws whose pixel program ran once on the CPU to find its textures */
+  uint64_t cpu_store_draws; /* stores-only draws shaded on the CPU (their buffers cannot be mirrored) */
   uint64_t bulk_triangles; /* pulled list triangles that skipped the assembler */
   /* Draw inputs a compute dispatch wrote (diagnostics: where compute output goes) */
   uint64_t compute_fed_streams, compute_fed_stream_bytes, compute_fed_cbufs;

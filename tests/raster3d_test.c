@@ -11,6 +11,7 @@
 
 #include "gpu/block_linear.h"
 #include "gpu/gpu_channel.h"
+#include "gpu/gpu_mirror.h"
 #include "gpu/gpu_records.h"
 #include "gpu/gpu_stream.h"
 #include "gpu/raster3d.h"
@@ -856,6 +857,7 @@ typedef struct Seen_Draw {
   bool compute_shader;
   uint32_t computes, buffer_creates, buffer_writes;
   uint32_t resident_binding;    /* the last draw's BUFFER binding (its buffer id), 0: none */
+  uint32_t buffer_slot, buffer_flags; /* ... its binding number and flags (stream version 14) */
   /* Stream version 8: compressed textures uploaded as they are. */
   uint32_t last_texture_format, level_writes;
   uint32_t last_texture_width, last_texture_height;
@@ -958,7 +960,11 @@ static void stream_drain(Seen_Draw *seen) {
       for (uint32_t i = 1; i < seen->last.binding_count; i++, b += sizeof(Gpu_Rec_Binding)) {
         Gpu_Rec_Binding other;
         memcpy(&other, b, sizeof(other));
-        if (other.kind == GPU_BIND_BUFFER) seen->resident_binding = other.texture_id;
+        if (other.kind == GPU_BIND_BUFFER) {
+          seen->resident_binding = other.texture_id;
+          seen->buffer_slot = other.binding;
+          seen->buffer_flags = other.bytes;
+        }
         if (other.kind == GPU_BIND_SAMPLER) seen->samplers++;
       }
       /* Bindings: the data binding's bytes follow it; vertices come last. */
@@ -994,6 +1000,7 @@ static uint32_t g_ps_override; /* gpu_draw_topology: this pixel program instead 
 static bool g_draw_twice;      /* gpu_draw_topology: the same draw again */
 static bool g_twice_resubmit;  /* ... in a new submission */
 static uint64_t g_twice_poke;  /* ... after this guest address took 7.0f (0: none) */
+static uint32_t g_twice_ps;    /* ... with this pixel program, every channel written (0: the same draw) */
 static bool g_gpu_rt_bl;       /* gpu_draw_topology: into RT_BL (block linear) instead of RT */
 static uint64_t g_gpu_rt_offset; /* ... this far past RT_BL */
 static uint32_t g_base_instance; /* gpu_draw_topology: REG_BASE_INSTANCE */
@@ -1024,6 +1031,10 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
   if (g_draw_twice) {
     if (g_twice_resubmit) raster3d_begin_submission(r);
     if (g_twice_poke) putf(g_twice_poke, 7.0f);
+    if (g_twice_ps) {
+      g_regs[0x801 + 16u * 5u] = g_twice_ps;
+      g_regs[0x680] = 0x1111;
+    }
     draw_arrays(r, topology, count);
   }
   raster3d_flush(r, &k_mem);
@@ -1494,17 +1505,40 @@ static void test_stores_only(Raster3d *r) {
   CHECK(ssbo_word() == STORED_WORD && r->stats.stores_only_draws == before + 1u,
         "a store-only pixel program runs with every channel masked (0x%x)", ssbo_word());
   CHECK(rgba_is(pixel(RT, false, 10, 10), 0, 0, 255, 255), "... and draws nothing");
-  /* GPU mode: no draw record; the store reaches guest memory. */
+  /* GPU mode: drawn on the GPU into the masked target, the buffer bound as
+   * a writable mirror (stream version 14); guest memory is not written. */
   put32(SSBO, 0);
   g_masked_targets = true;
   g_gpu_textured = true;
   g_ps_override = PS_STORE_OFFSET;
   const Seen_Draw gpu = gpu_draw_once(r, FRONT_CW_REG);
+  uint32_t gdesc[WGSL_GLOBAL_WORDS];
+  memcpy(gdesc, g_seen_data + 4u * WGSL_DRAW_PS_GLOBALS, sizeof(gdesc));
+  CHECK(gpu.count == 1 && gpu.last.target_count == 1u && gpu.last.targets[0].write_mask == 0u &&
+            gpu.buffer_slot == WGSL_PS_WINDOW_BINDING_BASE && gpu.buffer_flags == GPU_BIND_WRITABLE &&
+            gdesc[0] == (uint32_t)SSBO && gdesc[2] == 16u && ssbo_word() == 0u,
+        "GPU mode: a GPU draw storing to its mirror (%u draws, %u targets, mask %u, binding %u flags %u, buffer 0x%x)",
+        gpu.count, gpu.last.target_count, gpu.last.targets[0].write_mask, gpu.buffer_slot, gpu.buffer_flags, gdesc[0]);
+  /* A draw reading that buffer after it: the mirror, read-only (window mode). */
+  g_draw_twice = true;
+  g_twice_ps = PS_LDG_MOV_OFFSET; /* loads only */
+  const Seen_Draw reader = gpu_draw_once(r, FRONT_CW_REG);
+  g_twice_ps = 0;
+  g_draw_twice = false;
+  CHECK(reader.count == 2u && reader.buffer_slot == WGSL_PS_WINDOW_BINDING_BASE && reader.buffer_flags == 0u &&
+            reader.resident_binding != 0u,
+        "a reader of the stored buffer binds its mirror read-only (binding %u flags %u, buffer %u)", reader.buffer_slot,
+        reader.buffer_flags, reader.resident_binding);
+  /* A buffer too large to mirror: shaded on the CPU instead. */
+  put32(CBUF + SSBO_DESC + 8u, GPU_MIRROR_MAX_BYTES + 4u);
+  const uint64_t cpu_before = r->gpu_stats.cpu_store_draws;
+  const Seen_Draw cpu = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(cpu.count == 0 && ssbo_word() == STORED_WORD && r->gpu_stats.cpu_store_draws == cpu_before + 1u,
+        "GPU mode, no mirror: shaded on the CPU (%u GPU draws, 0x%x)", cpu.count, ssbo_word());
+  put32(CBUF + SSBO_DESC + 8u, 16u);
   g_ps_override = 0;
   g_gpu_textured = false;
   g_masked_targets = false;
-  CHECK(gpu.count == 0 && ssbo_word() == STORED_WORD, "GPU mode: shaded on the CPU (%u GPU draws, 0x%x)", gpu.count,
-        ssbo_word());
 }
 
 /* A triangle in front of the near plane (z -0.5, depth range [0, 1]) is

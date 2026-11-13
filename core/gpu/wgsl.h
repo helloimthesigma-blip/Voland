@@ -124,6 +124,10 @@
  * as `P` - the constant-buffer table's offsets and WGSL_GLOBAL_WORDS' copy
  * offsets index this pool, not the data. Compute keeps them in the data. */
 #define WGSL_POOL_BINDING (WGSL_VS_RESIDENT_BINDING + 1u)
+/* Draws whose global memory is GPU mirrors (desc->global_windows, stream
+ * version 14): buffer k of the vertex / pixel program bound here + k. */
+#define WGSL_VS_WINDOW_BINDING_BASE (WGSL_POOL_BINDING + 1u)
+#define WGSL_PS_WINDOW_BINDING_BASE (WGSL_VS_WINDOW_BINDING_BASE + WGSL_MAX_GLOBALS)
 #define WGSL_CS_MAX_INVOCATIONS 256u   /* WebGPU's default maxComputeInvocationsPerWorkgroup */
 #define WGSL_CS_MAX_SHARED_BYTES 16384u /* its default maxComputeWorkgroupStorageSize */
 #define WGSL_VERTEX_ID_LOCATION 0u /* vertex input: vec4<u32>(vertex id, instance id, 0, 0) */
@@ -205,6 +209,12 @@ typedef struct Wgsl_Program_Desc {
    * warp shuffles and votes translate - in programs whose control flow
    * never diverges, where a subgroup is one warp at every instruction. */
   bool subgroups;
+  /* Draws: the program's global memory (wgsl_find_globals' buffers) is GPU
+   * mirrors bound at WGSL_VS_ / WGSL_PS_WINDOW_BINDING_BASE + k, not copies
+   * in the pool: buffer k's words at WGSL_DRAW_GLOBALS / _PS_GLOBALS + 4 k
+   * hold its base (low, high), size and byte offset in its mirror. A pixel
+   * program's STGs then store there (read-write); else they are dropped. */
+  bool global_windows;
 } Wgsl_Program_Desc;
 
 /* The storage buffers a vertex program's LDGs read: each LDG's 64-bit
@@ -226,11 +236,15 @@ typedef struct Wgsl_Globals {
   char why[80]; /* when false: which LDG did not follow the pattern, and how */
 } Wgsl_Globals;
 bool wgsl_find_globals(const Sm_Program *program, Wgsl_Globals *out);
-/* Pixel programs: as wgsl_find_globals, but STG is allowed - a pixel
- * program's global stores are dropped in WGSL (like its ATOM / RED), so
- * the draw renders; generic LD / ST still refuse. */
+/* Pixel programs: as wgsl_find_globals, but STG is allowed - its address
+ * traced like an LDG's where it can be (buffer_of; stores to an untraced
+ * address keep a window-mode translation on the CPU), dropped in pool mode
+ * (like ATOM / RED) so the draw renders; generic LD / ST still refuse. */
 bool wgsl_find_pixel_globals(const Sm_Program *program, Wgsl_Globals *out);
 bool wgsl_reads_globals(const Sm_Program *program);
+/* Whether `program` translated with `desc` stores to its windows: a pixel
+ * program with STG in window mode (its mirrors bind read-write). */
+bool wgsl_window_writes(const Sm_Program *program, const Wgsl_Program_Desc *desc);
 
 /* The vertex-pulling decoder's WGSL (vword, vconv, vfetch over a global
  * `D: array<u32>`), as pulled vertex programs include it - for tests. */

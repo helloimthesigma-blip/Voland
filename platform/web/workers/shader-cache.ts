@@ -81,6 +81,8 @@ export interface PipelineSpec {
   readonly depth: DepthSpec | null;
   /** Depth clamped, not clipped, at the near and far planes. Absent: clipped. */
   readonly unclippedDepth?: boolean;
+  /** GPU mirrors bound as global memory (version 14): binding number, "w" when written. Absent: none. */
+  readonly windows?: readonly string[];
 }
 
 /* Significant bits kept of a draw's slope-scaled depth bias. The bias is

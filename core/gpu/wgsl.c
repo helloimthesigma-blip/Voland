@@ -86,6 +86,7 @@ typedef struct Tr {
   uint32_t cbt;       /* the draw-constant word of this stage's constant-buffer table */
   Wgsl_Globals globals; /* a vertex program's storage buffers (LDG) */
   bool uses_globals;
+  bool windows;       /* draws: global memory in GPU mirrors W<k> (desc->global_windows) */
   bool leader[SM_MAX_WORDS];
   bool reached[SM_MAX_WORDS];
 } Tr;
@@ -94,6 +95,7 @@ static bool is_texture_op(uint16_t op);
 static void emit_ldg(Tr *t, const Sm_Insn *in, uint32_t pc);
 static void emit_gmem(Tr *t, const Sm_Insn *in);
 static void emit_atom(Tr *t, const Sm_Insn *in);
+static void emit_window_atom(Tr *t, const Sm_Insn *in);
 static void emit_shfl_subgroup(Tr *t, const Sm_Insn *in);
 static void emit_vote_subgroup(Tr *t, const Sm_Insn *in);
 
@@ -1892,15 +1894,19 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
     return;
   case SM_OP_ATOM:
   case SM_OP_RED:
-    /* Graphics stages have no global memory here; the update is dropped,
-     * as before they decoded. */
+    /* A pixel program in window mode updates its mirrors; other graphics
+     * programs have no global memory here: the update is dropped, as
+     * before they decoded. */
     if (t->compute) emit_atom(t, in);
+    else if (t->windows && !t->vertex) emit_window_atom(t, in);
     return;
   case SM_OP_STG:
-    /* A pixel program's global stores are dropped, as its ATOM / RED:
-     * the draw renders (wgsl_find_pixel_globals). */
+    /* A pixel program's global stores go to its mirrors in window mode;
+     * else they are dropped, as its ATOM / RED: the draw renders
+     * (wgsl_find_pixel_globals). */
     if (t->compute) emit_gmem(t, in);
     else if (t->vertex) fail(t, "global memory (STG)");
+    else if (t->windows) emit_ldg(t, in, pc);
     return;
   case SM_OP_LD:
   case SM_OP_ST:
@@ -2285,6 +2291,16 @@ static bool writes_predicate(uint16_t op) {
          op == SM_OP_CSETP || op == SM_OP_R2P || op == SM_OP_LEA || op == SM_OP_SHFL || op == SM_OP_VOTE;
 }
 
+/* Instructions whose destination field is no register: predicate setters
+ * (ISETP etc. name predicates there), stores and barriers. The def
+ * searches skip them - TOTK's light-tile pass sets a predicate with an
+ * FSETP whose field reads R7 between R7's load and the LDG using it. */
+static bool writes_no_register(uint16_t op) {
+  return op == SM_OP_ISETP || op == SM_OP_FSETP || op == SM_OP_HSETP2 || op == SM_OP_PSETP || op == SM_OP_CSETP ||
+         op == SM_OP_R2P || op == SM_OP_STG || op == SM_OP_ST || op == SM_OP_STL || op == SM_OP_AST ||
+         op == SM_OP_RED || op == SM_OP_SUST || op == SM_OP_BARRIER;
+}
+
 /* The latest instruction before `pc` writing register r, or -1 when it is
  * not certain: a control transfer or a branch target lies in between (another
  * path may join), the write is predicated - unless the consumer is
@@ -2302,6 +2318,10 @@ static int32_t last_def_pred(const Sm_Program *p, const bool *targeted, uint32_t
         in->op == SM_OP_PCNT)
       continue;
     if (is_flow(in->op)) return -1;
+    if (writes_no_register(in->op)) {
+      if (writes_predicate(in->op)) predicate_written = true;
+      continue;
+    }
     const uint32_t d = REG_D(in->raw);
     uint32_t span = 1;
     if (in->op == SM_OP_LDG || in->op == SM_OP_LDC || in->op == SM_OP_LDL || in->op == SM_OP_LD)
@@ -2332,8 +2352,7 @@ static int32_t dominating_def(const Sm_Program *p, uint32_t pc, uint32_t r) {
   int32_t def = -1;
   for (uint32_t at = 0; at < pc; at++) {
     const Sm_Insn *in = &p->insns[at];
-    if (in->op == SM_OP_SCHED || in->op == SM_OP_NOP || is_flow(in->op)) continue;
-    if (in->op == SM_OP_STG || in->op == SM_OP_ST || in->op == SM_OP_STL || in->op == SM_OP_AST) continue;
+    if (in->op == SM_OP_SCHED || in->op == SM_OP_NOP || is_flow(in->op) || writes_no_register(in->op)) continue;
     const uint32_t d = REG_D(in->raw);
     uint32_t span = 1;
     if (in->op == SM_OP_LDG || in->op == SM_OP_LDC || in->op == SM_OP_LDL || in->op == SM_OP_LD)
@@ -2375,7 +2394,7 @@ static int32_t sole_def(const Sm_Program *p, uint32_t r) {
       span = BITS(in->raw, 47, 2) + 1u;
     else if (is_texture_op(in->op))
       span = 4;
-    if (in->op == SM_OP_STG || in->op == SM_OP_ST || in->op == SM_OP_STL || in->op == SM_OP_AST) continue;
+    if (writes_no_register(in->op)) continue;
     if (r < d || r >= d + span) continue;
     if (span > 1u || (in->pred & 7u) != SM_PT || (in->pred & 8u)) return -1;
     /* Several writes are as good as one when they are the same
@@ -2387,6 +2406,14 @@ static int32_t sole_def(const Sm_Program *p, uint32_t r) {
     if (found < 0) found = (int32_t)at;
   }
   return found;
+}
+
+bool wgsl_window_writes(const Sm_Program *program, const Wgsl_Program_Desc *desc) {
+  if (!desc->global_windows || desc->stage != SM_STAGE_PIXEL) return false;
+  for (uint32_t pc = 0; pc < program->word_count; pc++)
+    if (program->insns[pc].op == SM_OP_STG || program->insns[pc].op == SM_OP_ATOM || program->insns[pc].op == SM_OP_RED)
+      return true;
+  return false;
 }
 
 bool wgsl_reads_globals(const Sm_Program *program) {
@@ -2457,12 +2484,22 @@ static bool find_globals(const Sm_Program *program, bool allow_stg, Wgsl_Globals
     const int32_t target = program->insns[pc].target;
     if (target >= 0 && (uint32_t)target < SM_MAX_WORDS) targeted[target] = true;
   }
-#define GLOBALS_FAIL(...) do { snprintf(out->why, sizeof(out->why), __VA_ARGS__); return false; } while (0)
+  /* A store whose address does not follow the pattern is left untraced
+   * (buffer_of 0xff), not a failure: pool mode drops it anyway. */
+  bool store = false;
+#define GLOBALS_FAIL(...)                                    \
+  do {                                                       \
+    if (store) goto next;                                    \
+    snprintf(out->why, sizeof(out->why), __VA_ARGS__);       \
+    return false;                                            \
+  } while (0)
   for (uint32_t pc = 0; pc < program->word_count; pc++) {
     const Sm_Insn *in = &program->insns[pc];
+    store = false;
     if ((in->op == SM_OP_STG && !allow_stg) || in->op == SM_OP_LD || in->op == SM_OP_ST)
       GLOBALS_FAIL("%s at %u", sm_op_name((Sm_Op)in->op), pc);
-    if (in->op != SM_OP_LDG) continue;
+    store = in->op == SM_OP_STG;
+    if (in->op != SM_OP_LDG && !store) continue;
     const uint64_t w = in->raw;
     const uint32_t ra = REG_A(w);
     if (!BIT(w, LDG_WIDE_BIT) || ra == SM_RZ) GLOBALS_FAIL("LDG at %u: a 32-bit address (R%u)", pc, ra);
@@ -2505,25 +2542,71 @@ static bool find_globals(const Sm_Program *program, bool allow_stg, Wgsl_Globals
       out->count++;
     }
     out->buffer_of[pc] = (uint8_t)k;
+  next:;
   }
 #undef GLOBALS_FAIL
   return true;
 }
 
+/* sm_atomic for a 32-bit word (size: SM_ATOM_U32 / S32 / F32). */
+static void emit_atom_new(Out *o) {
+  out_add(o, "fn atom_new(op: u32, size: u32, old: u32, v: u32) -> u32 {\n"
+             "  let sg = size == %uu;\n  switch (op) {\n"
+             "    case %uu: { if (size == %uu) { return U(F(old) + F(v)); } return old + v; }\n"
+             "    case %uu: { if (sg) { return select(v, old, bitcast<i32>(old) < bitcast<i32>(v)); } return min(old, v); }\n"
+             "    case %uu: { if (sg) { return select(v, old, bitcast<i32>(old) > bitcast<i32>(v)); } return max(old, v); }\n"
+             "    case %uu: { return select(old + 1u, 0u, old >= v); }\n"
+             "    case %uu: { return select(old - 1u, v, old == 0u || old > v); }\n"
+             "    case %uu: { return old & v; }\n    case %uu: { return old | v; }\n    case %uu: { return old ^ v; }\n"
+             "    case %uu: { return v; }\n    default: { return old; }\n  }\n}\n",
+          SM_ATOM_S32, SM_ATOM_ADD, SM_ATOM_F32, SM_ATOM_MIN, SM_ATOM_MAX, SM_ATOM_INC, SM_ATOM_DEC, SM_ATOM_AND,
+          SM_ATOM_OR, SM_ATOM_XOR, SM_ATOM_EXCH);
+}
+
+/* ATOM / RED in a pixel program's window mode: the address looked up in
+ * its windows at run time (wfind), the word updated by a compare-exchange
+ * loop (watomic); outside every window nothing happens. */
+static void emit_window_atom(Tr *t, const Sm_Insn *in) {
+  const uint64_t w = in->raw;
+  const bool red = in->op == SM_OP_RED;
+  const uint32_t ra = REG_A(w), rv = red ? REG_D(w) : BITS(w, 20, 8), rd = REG_D(w);
+  const uint32_t size = red ? BITS(w, 20, 3) : BITS(w, 49, 3), op = red ? BITS(w, 23, 3) : BITS(w, 52, 4);
+  const int32_t off = (int32_t)(BITS(w, 28, 20) << 12) >> 12;
+  if ((size != SM_ATOM_U32 && size != SM_ATOM_S32 && !(size == SM_ATOM_F32 && op == SM_ATOM_ADD)) || op > SM_ATOM_EXCH) {
+    fail(t, "%s size %u op %u", sm_op_name((Sm_Op)in->op), size, op);
+    return;
+  }
+  t->uses_globals = true;
+  t->uses_atomics = true;
+  EMIT("{ let a0 = %s; let ga = a0 + 0x%xu; let gh = %s %s; ", ra == SM_RZ ? "0u" : reg(t, ra).s, (uint32_t)off,
+       BIT(w, 48) && ra != SM_RZ ? reg(t, (ra + 1u) & 0xffu).s : "0u",
+       off >= 0 ? "+ select(0u, 1u, ga < a0)" : "- select(0u, 1u, ga > a0)");
+  EMIT("let gw = wfind(ga, gh); let old = watomic(gw, %uu, %uu, %s); ", op, size, rv == SM_RZ ? "0u" : reg(t, rv).s);
+  if (!red && rd != SM_RZ) EMIT("if (gw.x != 0xffffffffu) { %s = old; } ", reg_dst(t, rd).s);
+  EMIT("} ");
+}
+
 /* LDG from buffer k: the 64-bit address relative to its base, in range,
- * read from its copy in the pool P; zeros outside (wgsl_find_globals). */
+ * read from its copy in the pool P, or with t->windows from its mirror
+ * W<k>; zeros outside (wgsl_find_globals). In window mode a pixel
+ * program's STG stores the same way (nothing outside). */
 static void emit_ldg(Tr *t, const Sm_Insn *in, uint32_t pc) {
   const uint64_t w = in->raw;
+  const bool store = in->op == SM_OP_STG;
   const uint32_t k = t->globals.buffer_of[pc];
   if (k == 0xffu) {
-    fail(t, "global memory (LDG): %s", t->globals.why[0] ? t->globals.why : "not traced");
+    fail(t, "global memory (%s): %s", store ? "STG" : "LDG", t->globals.why[0] ? t->globals.why : "not traced");
     return;
   }
   t->uses_globals = true;
   const uint32_t size = BITS(w, 48, 3), n = access_bytes(size), table = t->vertex ? WGSL_DRAW_GLOBALS : WGSL_DRAW_PS_GLOBALS;
+  if (store && n < 4u) {
+    fail(t, "sub-word STG");
+    return;
+  }
   const int32_t off = (int32_t)(BITS(w, 20, 24) << 8) >> 8;
   const uint32_t ra = REG_A(w), dr = REG_D(w);
-  EMIT("{ let a0 = %s; let ga = a0 + 0x%xu; let gh = %s %s; var gok = false; var gat = 0u; ", reg(t, ra).s,
+  EMIT("{ let a0 = %s; let ga = a0 + 0x%xu; let gh = %s %s; var gok = false; var gat = 0u; var gk = 0u; ", reg(t, ra).s,
        (uint32_t)off, reg(t, (ra + 1u) & 0xffu).s, off >= 0 ? "+ select(0u, 1u, ga < a0)" : "- select(0u, 1u, ga > a0)");
   /* The buffer the address falls in: the traced one, then any candidates. */
   const uint32_t candidates = (1u << k) | t->globals.also[pc];
@@ -2531,22 +2614,73 @@ static void emit_ldg(Tr *t, const Sm_Insn *in, uint32_t pc) {
     if (!(candidates & (1u << c))) continue;
     const uint32_t gb = table + WGSL_GLOBAL_WORDS * c;
     EMIT("{ let rel = ga - D[%uu]; let rh = gh - D[%uu] - select(0u, 1u, ga < D[%uu]); ", gb, gb + 1u, gb);
-    EMIT("if (!gok && rh == 0u && rel <= D[%uu] && D[%uu] - rel >= %uu) { gok = true; gat = D[%uu] + rel; } } ", gb + 2u,
-         gb + 2u, n, gb + 3u);
+    EMIT("if (!gok && rh == 0u && rel <= D[%uu] && D[%uu] - rel >= %uu) { gok = true; gat = D[%uu] + rel; gk = %uu; } } ",
+         gb + 2u, gb + 2u, n, gb + 3u, c);
   }
+  if (store) {
+    for (uint32_t i = 0; i < n / 4u; i++)
+      EMIT("if (gok) { wst(gk, gat + %uu, %s); } ", 4u * i,
+           dr == SM_RZ || ((dr + i) & 0xffu) == SM_RZ ? "0u" : reg(t, dr + i).s);
+    EMIT("} ");
+    return;
+  }
+  const char *word = t->windows ? "wword(gk, " : "gword(";
   if (n < 4u) {
     if (dr != SM_RZ) {
       const Ex d = reg_dst(t, dr);
-      EMIT("%s = select(0u, gword(gat) & 0x%xu, gok); ", d.s, n == 1u ? 0xffu : 0xffffu);
+      EMIT("%s = select(0u, %sgat) & 0x%xu, gok); ", d.s, word, n == 1u ? 0xffu : 0xffffu);
       sign_extend_small(t, size, &d);
     }
   } else {
     for (uint32_t i = 0; i < n / 4u; i++) {
       if (dr == SM_RZ || ((dr + i) & 0xffu) == SM_RZ) continue;
-      EMIT("%s = select(0u, gword(gat + %uu), gok); ", reg_dst(t, dr + i).s, 4u * i);
+      EMIT("%s = select(0u, %sgat + %uu), gok); ", reg_dst(t, dr + i).s, word, 4u * i);
     }
   }
   EMIT("} ");
+}
+
+/* Window mode's reads and writes of mirror k at byte b (unaligned reads
+ * as gword's; a store's word is b's). */
+static void emit_window_head(const Tr *t, Out *o) {
+  const uint32_t base = t->vertex ? WGSL_VS_WINDOW_BINDING_BASE : WGSL_PS_WINDOW_BINDING_BASE;
+  const uint32_t table = t->vertex ? WGSL_DRAW_GLOBALS : WGSL_DRAW_PS_GLOBALS;
+  const bool write = wgsl_window_writes(t->p, t->d), atomic = t->uses_atomics;
+  for (uint32_t k = 0; k < t->globals.count; k++)
+    out_add(o, "@group(0) @binding(%u) var<storage, %s> W%u: array<%s>;\n", base + k, write ? "read_write" : "read", k,
+            atomic ? "atomic<u32>" : "u32");
+  out_add(o, "fn wload(k: u32, i: u32) -> u32 {\n  switch (k) {\n");
+  for (uint32_t k = 0; k < t->globals.count; k++)
+    out_add(o, atomic ? "    case %uu: { if (i < arrayLength(&W%u)) { return atomicLoad(&W%u[i]); } }\n"
+                      : "    case %uu: { if (i < arrayLength(&W%u)) { return W%u[i]; } }\n", k, k, k);
+  out_add(o, "    default: {}\n  }\n  return 0u;\n}\n");
+  out_add(o, "fn wword(k: u32, b: u32) -> u32 {\n"
+             "  let s = (b & 3u) * 8u; let lo = wload(k, b >> 2u);\n"
+             "  if (s == 0u) { return lo; }\n"
+             "  return (lo >> s) | (wload(k, (b >> 2u) + 1u) << (32u - s));\n}\n");
+  if (!write) return;
+  out_add(o, "fn wst(k: u32, b: u32, v: u32) {\n  let i = b >> 2u;\n  switch (k) {\n");
+  for (uint32_t k = 0; k < t->globals.count; k++)
+    out_add(o, atomic ? "    case %uu: { if (i < arrayLength(&W%u)) { atomicStore(&W%u[i], v); } }\n"
+                      : "    case %uu: { if (i < arrayLength(&W%u)) { W%u[i] = v; } }\n", k, k, k);
+  out_add(o, "    default: {}\n  }\n}\n");
+  if (!atomic) return;
+  /* (window, byte offset in its mirror) of the word at hi:lo, or window ~0. */
+  out_add(o, "fn wfind(lo: u32, hi: u32) -> vec2<u32> {\n");
+  for (uint32_t k = 0; k < t->globals.count; k++) {
+    const uint32_t b = table + WGSL_GLOBAL_WORDS * k;
+    out_add(o, "  { let rel = lo - D[%uu]; let rh = hi - D[%uu] - select(0u, 1u, lo < D[%uu]);\n"
+               "    if (rh == 0u && rel <= D[%uu] && D[%uu] - rel >= 4u) { return vec2<u32>(%uu, D[%uu] + rel); } }\n",
+            b, b + 1u, b, b + 2u, b + 2u, k, b + 3u);
+  }
+  out_add(o, "  return vec2<u32>(0xffffffffu, 0u);\n}\n");
+  emit_atom_new(o);
+  out_add(o, "fn watomic(a: vec2<u32>, op: u32, size: u32, v: u32) -> u32 {\n  let i = a.y >> 2u;\n  switch (a.x) {\n");
+  for (uint32_t k = 0; k < t->globals.count; k++)
+    out_add(o, "    case %uu: { if (i < arrayLength(&W%u)) { loop { let o = atomicLoad(&W%u[i]); "
+               "if (atomicCompareExchangeWeak(&W%u[i], o, atom_new(op, size, o, v)).exchanged) { return o; } } } }\n",
+            k, k, k, k);
+  out_add(o, "    default: {}\n  }\n  return 0u;\n}\n");
 }
 
 static const char k_gword[] =
@@ -2683,18 +2817,7 @@ static void emit_compute_head(const Tr *t, Out *o) {
                                  : "    case %uu: { if (i < arrayLength(&G%u)) { G%u[i] = v; } }\n", k, k, k);
     out_add(o, "    default: {}\n  }\n}\n");
     if (t->uses_atomics) {
-      /* sm_atomic for a 32-bit word (size: SM_ATOM_U32 / S32 / F32). */
-      out_add(o, "fn atom_new(op: u32, size: u32, old: u32, v: u32) -> u32 {\n"
-                 "  let sg = size == %uu;\n  switch (op) {\n"
-                 "    case %uu: { if (size == %uu) { return U(F(old) + F(v)); } return old + v; }\n"
-                 "    case %uu: { if (sg) { return select(v, old, bitcast<i32>(old) < bitcast<i32>(v)); } return min(old, v); }\n"
-                 "    case %uu: { if (sg) { return select(v, old, bitcast<i32>(old) > bitcast<i32>(v)); } return max(old, v); }\n"
-                 "    case %uu: { return select(old + 1u, 0u, old >= v); }\n"
-                 "    case %uu: { return select(old - 1u, v, old == 0u || old > v); }\n"
-                 "    case %uu: { return old & v; }\n    case %uu: { return old | v; }\n    case %uu: { return old ^ v; }\n"
-                 "    case %uu: { return v; }\n    default: { return old; }\n  }\n}\n",
-              SM_ATOM_S32, SM_ATOM_ADD, SM_ATOM_F32, SM_ATOM_MIN, SM_ATOM_MAX, SM_ATOM_INC, SM_ATOM_DEC, SM_ATOM_AND,
-              SM_ATOM_OR, SM_ATOM_XOR, SM_ATOM_EXCH);
+      emit_atom_new(o);
       /* The old word; a compare-exchange loop (each round one lane wins). */
       out_add(o, "fn gatomic(a: vec2<u32>, op: u32, size: u32, v: u32) -> u32 {\n  let i = a.y >> 2u;\n  switch (a.x) {\n");
       for (uint32_t k = 0; k < d->window_count; k++)
@@ -2725,6 +2848,7 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   t->vertex = desc->stage == SM_STAGE_VERTEX;
   t->compute = desc->stage == SM_STAGE_COMPUTE;
   t->cbt = t->vertex ? WGSL_DRAW_VS_CBUF_TABLE : WGSL_DRAW_CBUF_TABLE;
+  t->windows = desc->global_windows && !t->compute;
   memset(t->globals.buffer_of, 0xff, sizeof(t->globals.buffer_of));
   if (t->vertex && wgsl_reads_globals(program) && !wgsl_find_globals(program, &t->globals))
     memset(t->globals.buffer_of, 0xff, sizeof(t->globals.buffer_of)); /* its LDGs stay untranslated */
@@ -2820,7 +2944,8 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
     out_add(&head, k_prelude[i], t->cbt, t->cbt, cbuf_array(t), t->cbt);
   if (!t->compute) out_add(&head, "@group(0) @binding(%u) var<storage, read> P: array<u32>;\n", WGSL_POOL_BINDING);
   if (!t->vertex && !t->compute) out_add(&head, "%s", k_quad);
-  if (t->uses_globals && !t->compute) out_add(&head, "%s", k_gword);
+  if (t->uses_globals && !t->compute && !t->windows) out_add(&head, "%s", k_gword);
+  if (t->uses_globals && t->windows) emit_window_head(t, &head);
   for (uint32_t i = 0; i < desc->texture_count && i < WGSL_MAX_TEXTURES; i++)
     if ((t->textures_used >> i) & 1u)
       emit_texture_helpers(&head, i, desc->sample_type[i],
@@ -3019,6 +3144,7 @@ uint64_t wgsl_desc_hash(const Wgsl_Program_Desc *desc, const Sm_Program *program
     MIX(&desc->shared_bytes, sizeof(desc->shared_bytes));
     MIX(&desc->subgroups, sizeof(desc->subgroups));
   }
+  if (desc->stage != SM_STAGE_COMPUTE) MIX(&desc->global_windows, sizeof(desc->global_windows));
 #undef MIX
   h ^= h >> 33; /* avalanche (murmur3's finalizer) */
   h *= 0xff51afd7ed558ccdull;

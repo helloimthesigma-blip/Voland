@@ -1413,6 +1413,7 @@ static bool gpu_texture_native(Raster3d *r, Raster3d_Texture *t, const Tex_Heade
 /* The compute program running on the CPU while its textures load (0: a
  * draw's work) - names the reader in texture_load's stale-copy warning. */
 static uint32_t g_cpu_compute_hash;
+static uint64_t g_draw_programs[2]; /* the draw being prepared: vertex, pixel program (diagnostics) */
 
 static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const Gpu_Memory *mem, bool texels) {
   Raster3d_Texture *view = surface_view(r, tic);
@@ -1578,7 +1579,9 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
                  s->height, s->format, g_cpu_compute_hash);
       else
         log_warn("[gpu] the CPU samples %ux%u fmt 0x%02x @%llx, drawn on the GPU (%ux%u fmt 0x%02x): a stale guest copy "
-                 "(a draw)", h.width, h.height, h.format, (unsigned long long)h.address, s->width, s->height, s->format);
+                 "(a draw: vertex program %llx, pixel program %llx)", h.width, h.height, h.format,
+                 (unsigned long long)h.address, s->width, s->height, s->format, (unsigned long long)g_draw_programs[0],
+                 (unsigned long long)g_draw_programs[1]);
       break;
     }
   }
@@ -2089,6 +2092,7 @@ typedef struct Raster_State {
   /* No target or depth to write, but the pixel program stores to memory:
    * shaded on the CPU in GPU mode too (setup_state). */
   bool stores_only;
+  bool stores_cpu; /* GPU mode: a stores-only draw its mirrors cannot take, shaded on the CPU */
   Raster3d_Surface *depth;
   bool depth_test, depth_write;
   uint32_t depth_func;
@@ -2309,6 +2313,7 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
   const bool per_target = (regs[REG_BLEND_PER_TARGET] & 1u) != 0;
   int32_t width = 0x7fffffff, height = 0x7fffffff;
   int32_t masked_width = 0x7fffffff, masked_height = 0x7fffffff; /* targets with every channel masked */
+  uint32_t masked_count = 0; /* through the first of them */
   for (uint32_t i = 0; i < count && i < MAX_TARGETS; i++) {
     const uint32_t target = (select >> (4u + 3u * i)) & 7u;
     Surface_Desc d;
@@ -2316,6 +2321,7 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
     if (!color_target_desc(regs, target, &d)) continue;
     if ((int32_t)d.width < masked_width) masked_width = (int32_t)d.width;
     if ((int32_t)d.height < masked_height) masked_height = (int32_t)d.height;
+    if (!masked_count) masked_count = i + 1u;
     t->format = color_format(d.format);
     const uint32_t write = (regs[REG_SINGLE_CT_WRITE] & 1u) ? regs[REG_CT_WRITE] : regs[REG_CT_WRITE + i];
     for (uint32_t c = 0; c < 4; c++)
@@ -2391,6 +2397,7 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
     rs->stores_only = true;
     width = masked_width;
     height = masked_height;
+    rs->target_count = masked_count; /* attached, every channel masked: GPU mode needs an attachment */
   }
   rs->alpha_test = (regs[REG_ALPHA_TEST] & 1u) != 0;
   rs->alpha_func = regs[REG_ALPHA_FUNC];
@@ -3091,7 +3098,7 @@ static uint64_t triangle_extent(const Raster_State *rs, const Vertex *const v[3]
 static void gpu_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking);
 
 static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
-  if (rs->ctx->r->gpu && !rs->stores_only) {
+  if (rs->ctx->r->gpu && !rs->stores_cpu) {
     gpu_triangle(rs, a, b, c, provoking);
     return;
   }
@@ -3362,12 +3369,15 @@ void raster3d_set_gpu_compression(Raster3d *r, uint32_t mask) {
   r->gpu_compression = mask;
 }
 
+static bool g_stale_reads;
+
 void raster3d_set_gpu(Raster3d *r, Gpu_Stream *stream) {
   if (!r->ready) return;
   r->gpu = stream;
   gpu_mirror_reset(NULL); /* the old stream's buffers went with it */
   vpool_reset();
   r->gpu_pool_used = GPU_POOL_WORDS; /* the next draw starts a new epoch */
+  g_stale_reads = stream && getenv("VOLAND_STALE_READS");
   if (stream) log_info("[gpu] WebGPU renderer: draws stream to the GPU worker");
 }
 
@@ -4287,6 +4297,12 @@ typedef struct Gpu_Draw {
   uint32_t ps_global_count;
   uint64_t ps_global_base[WGSL_MAX_GLOBALS];
   uint32_t ps_global_size[WGSL_MAX_GLOBALS];
+  /* Window mode (desc.global_windows): a stage's global memory is its
+   * buffers' GPU mirrors - when a draw or dispatch on the GPU wrote them,
+   * or the pixel program stores (stores-only draws). window_id[stage][k]:
+   * buffer k's mirror; the pixel program's STGs write its own. */
+  bool vs_windows, ps_windows, ps_window_writes;
+  uint32_t window_id[2][WGSL_MAX_GLOBALS];
   Wgsl_Program_Desc desc;
   Wgsl_Program_Desc vs_desc;
 } Gpu_Draw;
@@ -4450,6 +4466,9 @@ static const Raster3d_Program *program_globals(const Sm_Program *program) {
                                                               : wgsl_find_globals(program, &found);
       p->globals_state = ok ? RASTER_GLOBALS_FOUND : RASTER_GLOBALS_REFUSED;
       p->global_count = ok ? (uint8_t)found.count : 0u;
+      p->stores_traced = ok;
+      for (uint32_t pc = 0; pc < program->word_count; pc++)
+        if (program->insns[pc].op == SM_OP_STG && found.buffer_of[pc] == 0xffu) p->stores_traced = false;
       for (uint32_t k = 0; k < p->global_count; k++) {
         p->global_slot[k] = found.slot[k];
         p->global_offset[k] = found.offset[k];
@@ -4462,6 +4481,16 @@ static const Raster3d_Program *program_globals(const Sm_Program *program) {
 /* Each storage buffer the vertex program reads: NVN's descriptor in the
  * constant buffer is {address low, address high, size}. Too large or
  * unbound buffers keep the vertices on the CPU (env_global_read). */
+/* Whether a buffer of `count` has pages a GPU draw or dispatch wrote (the
+ * guest copy is stale): its program reads the mirrors (window mode). */
+static bool globals_resident(uint32_t count, const uint64_t *base, const uint32_t *size) {
+  for (uint32_t k = 0; k < count; k++) {
+    uint32_t id = 0, offset = 0;
+    if (gpu_mirror_resident(base[k], size[k], &id, &offset)) return true;
+  }
+  return false;
+}
+
 static uint64_t g_vs_cpu_globals;
 
 static bool gpu_plan_globals(Draw_Context *ctx, Gpu_Draw *g, uint64_t *words) {
@@ -4484,17 +4513,23 @@ static bool gpu_plan_globals(Draw_Context *ctx, Gpu_Draw *g, uint64_t *words) {
     if (!at || !ctx->mem->read(ctx->mem->user, at + found->global_offset[k], desc, sizeof(desc))) return false;
     g->global_base[k] = (uint64_t)desc[0] | (uint64_t)desc[1] << 32;
     g->global_size[k] = desc[2];
-    total += ((uint64_t)desc[2] + 7u) & ~(uint64_t)3u;
-    if (!g->global_base[k] || !desc[2] || total > GPU_GLOBAL_BYTES) {
+  }
+  /* GPU-written memory: read from its mirrors, nothing copied. */
+  g->vs_windows = globals_resident(found->global_count, g->global_base, g->global_size);
+  for (uint32_t k = 0; k < found->global_count; k++) {
+    const uint32_t size = g->global_size[k];
+    total += ((uint64_t)size + 7u) & ~(uint64_t)3u;
+    if (!g->global_base[k] || !size || (g->vs_windows ? size > GPU_MIRROR_MAX_BYTES : total > GPU_GLOBAL_BYTES)) {
+      g->vs_windows = false;
       if (!g_vs_cpu_globals++)
         log_warn("[gpu] vertices on the CPU: program %llx: global buffer of %u bytes at 0x%llx (c%u[0x%x])",
-                 (unsigned long long)ctx->vs->address, desc[2], (unsigned long long)g->global_base[k],
+                 (unsigned long long)ctx->vs->address, size, (unsigned long long)g->global_base[k],
                  found->global_slot[k], found->global_offset[k]);
       return false;
     }
   }
   g->global_count = found->global_count;
-  *words += total / 4u;
+  if (!g->vs_windows) *words += total / 4u;
   return true;
 }
 
@@ -4503,29 +4538,64 @@ static bool gpu_plan_globals(Draw_Context *ctx, Gpu_Draw *g, uint64_t *words) {
  * untranslated (the reason is logged once per program). */
 static uint64_t g_ps_globals_refused;
 
-static bool gpu_plan_pixel_globals(Draw_Context *ctx, Gpu_Draw *g) {
+static bool gpu_plan_pixel_globals(Draw_Context *ctx, Gpu_Draw *g, bool stores) {
   g->ps_global_count = 0;
+  g->ps_windows = false;
   const Raster3d_Program *found = program_globals(ctx->ps);
-  if (!found || found->globals_state != RASTER_GLOBALS_FOUND) return true; /* the translation reports it */
+  if (!found || found->globals_state != RASTER_GLOBALS_FOUND) return !stores; /* the translation reports it */
   uint64_t total = 0;
-  for (uint32_t k = 0; k < g->global_count; k++) total += ((uint64_t)g->global_size[k] + 7u) & ~(uint64_t)3u;
+  if (!g->vs_windows)
+    for (uint32_t k = 0; k < g->global_count; k++) total += ((uint64_t)g->global_size[k] + 7u) & ~(uint64_t)3u;
   for (uint32_t k = 0; k < found->global_count; k++) {
     const uint64_t at = ctx->cbuf_address[1][found->global_slot[k]];
     uint32_t desc[3];
     if (!at || !ctx->mem->read(ctx->mem->user, at + found->global_offset[k], desc, sizeof(desc))) return false;
     g->ps_global_base[k] = (uint64_t)desc[0] | (uint64_t)desc[1] << 32;
     g->ps_global_size[k] = desc[2];
-    total += ((uint64_t)desc[2] + 7u) & ~(uint64_t)3u;
-    if (!g->ps_global_base[k] || !desc[2] || total > GPU_GLOBAL_BYTES) {
+  }
+  /* Stores, or GPU-written memory: its mirrors (window mode). */
+  const bool windows = stores || globals_resident(found->global_count, g->ps_global_base, g->ps_global_size);
+  for (uint32_t k = 0; k < found->global_count; k++) {
+    const uint32_t size = g->ps_global_size[k];
+    total += ((uint64_t)size + 7u) & ~(uint64_t)3u;
+    if (!g->ps_global_base[k] || !size || (windows ? size > GPU_MIRROR_MAX_BYTES : total > GPU_GLOBAL_BYTES)) {
       if (!g_ps_globals_refused++)
         log_warn("[gpu] pixel program %llx not drawn: its global buffer of %u bytes at 0x%llx (c%u[0x%x]) does not fit",
-                 (unsigned long long)ctx->ps->address, desc[2], (unsigned long long)g->ps_global_base[k],
+                 (unsigned long long)ctx->ps->address, size, (unsigned long long)g->ps_global_base[k],
                  found->global_slot[k], found->global_offset[k]);
-      g->ps_global_count = 0;
       return false;
     }
   }
   g->ps_global_count = found->global_count;
+  g->ps_windows = windows;
+  return true;
+}
+
+/* Whether a stores-only draw's pixel program can store on the GPU: every
+ * STG traced to a buffer, each buffer bound and small enough to mirror. */
+static uint64_t g_stores_cpu_logged;
+static uint64_t g_vs_window_shared; /* draws whose vertex stage lost its mirrors to the pixel program's writes */
+
+static bool gpu_stores_fit(Draw_Context *ctx) {
+  const Raster3d_Program *found = program_globals(ctx->ps);
+  if (!found || found->globals_state != RASTER_GLOBALS_FOUND || !found->stores_traced) {
+    if (!g_stores_cpu_logged++)
+      log_warn("[gpu] stores-only pixel program %llx shaded on the CPU: its stores are not all traced to a buffer",
+               (unsigned long long)ctx->ps->address);
+    return false;
+  }
+  for (uint32_t k = 0; k < found->global_count; k++) {
+    const uint64_t at = ctx->cbuf_address[1][found->global_slot[k]];
+    uint32_t desc[3] = {0, 0, 0};
+    if (!at || !ctx->mem->read(ctx->mem->user, at + found->global_offset[k], desc, sizeof(desc))) return false;
+    if (!(desc[0] | desc[1]) || !desc[2] || desc[2] > GPU_MIRROR_MAX_BYTES) {
+      if (!g_stores_cpu_logged++)
+        log_warn("[gpu] stores-only pixel program %llx shaded on the CPU: buffer c%u[0x%x] of %u bytes at 0x%llx",
+                 (unsigned long long)ctx->ps->address, found->global_slot[k], found->global_offset[k], desc[2],
+                 (unsigned long long)((uint64_t)desc[0] | (uint64_t)desc[1] << 32));
+      return false;
+    }
+  }
   return true;
 }
 
@@ -4563,6 +4633,36 @@ static void gpu_copy_globals(Draw_Context *ctx, uint32_t *data, uint32_t *scratc
       memset(scratch, 0, (size_t)n * 4u); /* unreadable: the loads read zeros */
     at[3] = gpu_pool_put(ctx->r, key + k, scratch, n) * 4u;
   }
+}
+
+/* Window mode's table words: each buffer's base, size and byte offset in
+ * its mirror (created and synced as needed; g->window_id). A later buffer's
+ * mirror may replace an earlier overlapping one, so every buffer of both
+ * stages is placed first and the ids taken after. False: one cannot be
+ * mirrored. */
+static bool gpu_window_globals(Raster3d *r, const Gpu_Memory *mem, Gpu_Draw *g, uint32_t *data) {
+  for (uint32_t pass = 0; pass < 2u; pass++) {
+    for (uint32_t stage = 0; stage < 2u; stage++) {
+      const bool on = stage ? g->ps_windows : g->vs_mode && g->vs_windows;
+      const uint32_t count = stage ? g->ps_global_count : g->global_count;
+      const uint64_t *base = stage ? g->ps_global_base : g->global_base;
+      const uint32_t *size = stage ? g->ps_global_size : g->global_size;
+      const uint32_t table = stage ? WGSL_DRAW_PS_GLOBALS : WGSL_DRAW_GLOBALS;
+      for (uint32_t k = 0; on && k < count; k++) {
+        uint32_t offset = 0;
+        const uint32_t id = gpu_mirror_window(r->gpu, mem, base[k], size[k], r->submission, &offset);
+        if (!id) return false;
+        if (!pass) continue;
+        uint32_t *at = data + table + WGSL_GLOBAL_WORDS * k;
+        at[0] = (uint32_t)base[k];
+        at[1] = (uint32_t)(base[k] >> 32);
+        at[2] = size[k];
+        at[3] = offset;
+        g->window_id[stage][k] = id;
+      }
+    }
+  }
+  return true;
 }
 
 /* A vertex program whose constants (or global memory) are large costs a
@@ -4618,7 +4718,11 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
     if (ctx->env[0].cbuf[s]) vs_words += cbuf_words_read(ctx->vs, &ctx->env[0], s);
   for (uint32_t k = 0; k < g->global_count; k++) vs_words += g->global_size[k] / 4u;
   const uint64_t per_vertex = gpu_vs_bytes_per_vertex();
-  if (per_vertex && vs_words * 4u > (uint64_t)vertex_count * per_vertex) {
+  /* Not for a program sampling textures or reading GPU-written memory: on
+   * the CPU it would read stale guest copies of what the GPU drew (Tears
+   * of the Kingdom's light-tile quads sample its 320x180 depth bounds). */
+  const bool reads_gpu = ctx->vs->texture_pc_count > 0 || g->vs_windows;
+  if (per_vertex && !reads_gpu && vs_words * 4u > (uint64_t)vertex_count * per_vertex) {
     st->cpu_vs_small++;
     if (!g_vs_cpu_small++)
       log_warn("[gpu] vertices on the CPU: %u vertices, %llu bytes of vertex constants", vertex_count,
@@ -4654,6 +4758,7 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
   g->input_count = d->input_count;
   for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++)
     if (d->input_location[v] < d->input_count) g->input_vector[d->input_location[v]] = (uint8_t)v;
+  d->global_windows = g->vs_windows;
   uint32_t id = GPU_SHADER_FAILED;
   if (!ctx->r->no_vertex_pull && gpu_pull_plan(ctx, g)) {
     d->vertex_pull = true;
@@ -4685,7 +4790,7 @@ static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs, uint32_t topolog
   const uint32_t *regs = ctx->regs;
   const uint32_t select = regs[REG_CT_SELECT];
   for (uint32_t i = 0; i < rs->target_count; i++) {
-    if (!rs->targets[i].surface) continue;
+    if (!rs->targets[i].surface && !rs->stores_only) continue;
     Surface_Desc d;
     if (!color_target_desc(regs, (select >> (4u + 3u * i)) & 7u, &d)) continue;
     if (g->width && (d.width != g->width || d.height != g->height)) {
@@ -5014,10 +5119,31 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
   }
   desc->mrt = rs->mrt;
   /* Its global memory, copied with the draw's data. */
-  if (!gpu_plan_pixel_globals(ctx, g)) return false;
+  if (!gpu_plan_pixel_globals(ctx, g, rs->stores_only)) return false;
   /* The shader. */
+  desc->global_windows = g->ps_windows;
+  g->ps_window_writes = wgsl_window_writes(ctx->ps, desc);
   g->shader_id = gpu_shader_for(r, ctx->ps, desc);
   if (g->shader_id == GPU_SHADER_FAILED) return false;
+  /* A mirror the pixel program writes cannot be read by the vertex stage
+   * in the same draw (WebGPU: a writable usage excludes any other in one
+   * pass, and vertex stages cannot write): that vertex program reads a
+   * pool copy instead - the guest's, stale where the GPU wrote. */
+  if (g->vs_mode && g->vs_windows && g->ps_window_writes) {
+    if (!gpu_window_globals(r, ctx->mem, g, r->gpu_data)) return false;
+    bool shared = false;
+    for (uint32_t i = 0; i < g->global_count; i++)
+      for (uint32_t k = 0; k < g->ps_global_count; k++) shared |= g->window_id[0][i] == g->window_id[1][k];
+    if (shared) {
+      if (!g_vs_window_shared++)
+        log_warn("[gpu] vertex program %llx reads a buffer its pixel program %llx writes: it reads the guest copy",
+                 (unsigned long long)ctx->vs->address, (unsigned long long)ctx->ps->address);
+      g->vs_windows = false;
+      g->vs_desc.global_windows = false;
+      g->vs_shader_id = gpu_shader_for(r, ctx->vs, &g->vs_desc);
+      if (g->vs_shader_id == GPU_SHADER_FAILED) return false;
+    }
+  }
   /* Draw constants and the constant buffers the program reads. */
   data[WGSL_DRAW_SURFACE_HEIGHT] = u32f((float)rs->surface_height);
   data[WGSL_DRAW_FLAGS] = rs->lower_left ? WGSL_DRAW_LOWER_LEFT : 0u;
@@ -5046,8 +5172,9 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
           gpu_pool_put(r, GPU_POOL_KEY_VS_CBUF + s, (const uint32_t *)(const void *)venv->cbuf[s], n);
       data[WGSL_DRAW_VS_CBUF_TABLE + 2u * s + 1u] = n;
     }
-    gpu_copy_globals(ctx, data, scratch, WGSL_DRAW_GLOBALS, GPU_POOL_KEY_VS_GLOBALS, g->global_count, g->global_base,
-                     g->global_size);
+    if (!g->vs_windows)
+      gpu_copy_globals(ctx, data, scratch, WGSL_DRAW_GLOBALS, GPU_POOL_KEY_VS_GLOBALS, g->global_count, g->global_base,
+                       g->global_size);
     uint32_t *vp = data + WGSL_DRAW_VIEWPORT;
     for (uint32_t c = 0; c < 3u; c++) {
       vp[WGSL_VP_SCALE + c] = u32f(rs->vp_scale[c]);
@@ -5062,8 +5189,12 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
      * pulled draw's - every instance of an instanced draw at one place. */
     data[WGSL_DRAW_VS_INSTANCE] = shader_instance_id(ctx);
   }
-  gpu_copy_globals(ctx, data, scratch, WGSL_DRAW_PS_GLOBALS, GPU_POOL_KEY_PS_GLOBALS, g->ps_global_count,
-                   g->ps_global_base, g->ps_global_size);
+  if (!g->ps_windows)
+    gpu_copy_globals(ctx, data, scratch, WGSL_DRAW_PS_GLOBALS, GPU_POOL_KEY_PS_GLOBALS, g->ps_global_count,
+                     g->ps_global_base, g->ps_global_size);
+  if ((g->vs_mode && g->vs_windows) || g->ps_windows) {
+    if (!gpu_window_globals(r, ctx->mem, g, data)) return false;
+  }
   if (words & 1u) data[words++] = 0; /* records stay 8-aligned */
   g->data_words = words;
   return true;
@@ -5120,6 +5251,9 @@ static void gpu_emit_draw(Raster_State *rs) {
     if (g->data_words & 1u) pull_bytes += 4u; /* the data stays a multiple of 8 bytes */
   }
   if (resident_id) bindings++;
+  const uint32_t vs_windows = g->vs_mode && g->vs_windows ? g->global_count : 0u;
+  const uint32_t ps_windows = g->ps_windows ? g->ps_global_count : 0u;
+  bindings += vs_windows + ps_windows;
   const uint64_t data_bytes = (uint64_t)g->data_words * 4u + pull_bytes;
   const uint64_t bytes = sizeof(Gpu_Rec_Draw) + sizeof(Gpu_Rec_Binding) * bindings + data_bytes + g->vertex_bytes +
                          (uint64_t)g->index_count * sizeof(uint32_t);
@@ -5235,6 +5369,14 @@ static void gpu_emit_draw(Raster_State *rs) {
     memcpy(p, &rb, sizeof(rb));
     p += sizeof(rb);
   }
+  for (uint32_t k = 0; k < vs_windows + ps_windows; k++) { /* window mode's mirrors */
+    const bool ps = k >= vs_windows;
+    const uint32_t i = ps ? k - vs_windows : k;
+    const Gpu_Rec_Binding wb = {GPU_BIND_BUFFER, (ps ? WGSL_PS_WINDOW_BINDING_BASE : WGSL_VS_WINDOW_BINDING_BASE) + i,
+                                ps && g->ps_window_writes ? GPU_BIND_WRITABLE : 0u, g->window_id[ps ? 1 : 0][i]};
+    memcpy(p, &wb, sizeof(wb));
+    p += sizeof(wb);
+  }
   for (uint32_t i = 0; i < g->texture_count; i++) {
     const bool hw = (g->desc.hw_sample_mask >> i) & 1u;
     const Gpu_Rec_Binding tb = {GPU_BIND_TEXTURE, WGSL_TEXTURE_BINDING_BASE + i, hw ? GPU_BIND_FILTERED : 0u,
@@ -5250,6 +5392,9 @@ static void gpu_emit_draw(Raster_State *rs) {
   p += g->vertex_bytes;
   memcpy(p, g_gpu_indices, (size_t)g->index_count * sizeof(uint32_t));
   gpu_stream_end(r->gpu);
+  /* What the pixel program stored is the GPU's now: readers bind the mirrors. */
+  for (uint32_t k = 0; g->ps_window_writes && k < ps_windows; k++)
+    gpu_mirror_take(rs->ctx->mem, g->ps_global_base[k], g->ps_global_size[k]);
   r->gpu_stats.draws++;
   r->gpu_stats.draw_data_bytes += (uint64_t)g->data_words * 4u;
   r->gpu_stats.pulled_bytes += pull_bytes;
@@ -5698,6 +5843,8 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
   }
   env_setup(ctx, 0, ctx->vs, bindings, vs_group);
   env_setup(ctx, 1, ctx->ps, bindings, ps_group);
+  g_draw_programs[0] = ctx->vs->address;
+  g_draw_programs[1] = ctx->ps->address;
   static Raster_State rs;
   if (!setup_state(ctx, &rs)) {
     /* Each pixel program's first skipped draw (up to SKIP_LOG_PROGRAMS):
@@ -5725,10 +5872,18 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     return;
   }
   if (rs.stores_only) r->stats.stores_only_draws++;
-  if (r->gpu && !rs.stores_only && !gpu_draw_begin(ctx, &rs, draw->topology, draw->count)) {
-    r->stats.skipped_draws++;
-    return;
+  /* GPU mode: a stores-only draw stores into its buffers' mirrors on the
+   * GPU (what it samples was drawn there); one they cannot take is shaded
+   * on the CPU, its texture reads perhaps stale. */
+  rs.stores_cpu = r->gpu && rs.stores_only && !gpu_stores_fit(ctx);
+  if (r->gpu && !rs.stores_cpu && !gpu_draw_begin(ctx, &rs, draw->topology, draw->count)) {
+    if (!rs.stores_only) {
+      r->stats.skipped_draws++;
+      return;
+    }
+    rs.stores_cpu = true;
   }
+  if (rs.stores_cpu) r->gpu_stats.cpu_store_draws++;
   rs.span_ok = span_state_ok(&rs);
   rs.row_begin = INT64_MIN;
   rs.row_end = INT64_MAX;
@@ -6250,7 +6405,20 @@ static const Compute_Window *g_read_windows;
 static uint32_t g_read_window_count;
 static atomic_bool g_read_outside;
 
+/* VOLAND_STALE_READS (diagnostics, GPU mode): the CPU side's reads of
+ * memory a GPU draw or dispatch wrote - a stale guest copy - logged with
+ * the program reading it. */
+static atomic_uint g_stale_reads_logged;
+
 static void compute_note_read(uint64_t va, uint32_t size) {
+  if (g_stale_reads && atomic_load(&g_stale_reads_logged) < STALE_LOG_LIMIT) {
+    uint32_t id = 0, offset = 0;
+    if (gpu_mirror_resident(va, size, &id, &offset) && atomic_fetch_add(&g_stale_reads_logged, 1u) < STALE_LOG_LIMIT)
+      log_warn("[gpu] the CPU reads 0x%llx (%u bytes), written on the GPU: a stale guest copy (%s %08x, vertex "
+               "program %llx, pixel program %llx)", (unsigned long long)va, size,
+               g_cpu_compute_hash ? "compute program" : "no compute", g_cpu_compute_hash,
+               (unsigned long long)g_draw_programs[0], (unsigned long long)g_draw_programs[1]);
+  }
   const Compute_Window *w = g_read_windows;
   if (!w) return;
   for (uint32_t k = 0; k < g_read_window_count; k++)

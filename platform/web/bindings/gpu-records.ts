@@ -5,7 +5,7 @@
  */
 
 export const GPU_STREAM_MAGIC = 0x55504756;
-export const GPU_STREAM_VERSION = 13;
+export const GPU_STREAM_VERSION = 14;
 export const GPU_STREAM_HEADER_BYTES = 56;
 export const GPU_STREAM_RECORD_HEADER_BYTES = 8;
 export const OFF_MAGIC = 0;
@@ -155,7 +155,14 @@ export const BIND_BUFFER = 4; /* read-write storage buffer: texture_id = a BUFFE
 export const VS_RESIDENT_BINDING = 39;
 /* core/gpu/wgsl.h WGSL_POOL_BINDING: the pool P every draw binds (version 9). */
 export const POOL_BINDING = 40;
+/* core/gpu/wgsl.h WGSL_VS_ / WGSL_PS_WINDOW_BINDING_BASE (version 14): a
+ * draw's global memory as GPU mirrors, buffer k at the base + k. */
+export const VS_WINDOW_BINDING_BASE = 41;
+export const PS_WINDOW_BINDING_BASE = 45;
+export const MAX_WINDOW_BINDINGS = 4;
 export const BIND_FILTERED = 1;
+/* A BUFFER binding's bytes word: the shader writes it (read-write storage). */
+export const BIND_WRITABLE = 1;
 export const SAMPLER_LINEAR = 1;
 export const SAMPLER_MIN_LINEAR = 1 << 7;
 export const SAMPLER_MIP_LINEAR = 1 << 8;

@@ -249,6 +249,9 @@ _Static_assert(sizeof(Gpu_Rec_Draw) % 8u == 0u, "a draw's tail data starts align
 #define GPU_BIND_SAMPLER 3u /* filtering sampler; `texture_id` = GPU_SAMPLER_* state */
 #define GPU_BIND_BUFFER 4u  /* read-write storage buffer: `texture_id` = a BUFFER_CREATE id, whole (version 6) */
 #define GPU_BIND_FILTERED 1u
+/* A BUFFER binding (stream version 14) the shader writes: read-write
+ * storage (else read-only). */
+#define GPU_BIND_WRITABLE 1u
 /* Sampler state: bit 0 magnification linear (else nearest), then 2 bits per
  * axis u, v, w: 0 repeat, 1 mirror-repeat, 2 clamp-to-edge; bit 7
  * minification linear, bit 8 linear between mip levels (version 2). */

@@ -2094,6 +2094,9 @@ static int run(int argc, char **argv) {
             (unsigned long long)gs->gpu_dispatches, (unsigned long long)gs->resident_streams,
             (unsigned long long)ms->created, (unsigned long long)ms->pages_hashed, (unsigned long long)ms->pages_uploaded,
             (unsigned long long)ms->pages_taken, (unsigned long long)ms->pages_returned);
+    fprintf(stderr, "voland-cli: stores-only draws: %llu on the GPU's mirrors, %llu shaded on the CPU\n",
+            (unsigned long long)(emu.renderer.stats.stores_only_draws - gs->cpu_store_draws),
+            (unsigned long long)gs->cpu_store_draws);
   }
   if (g_watch_count) {
     fprintf(stderr, "voland-cli: %llu time shared memory reads; the last ones (offset size bytes @ pc):\n",

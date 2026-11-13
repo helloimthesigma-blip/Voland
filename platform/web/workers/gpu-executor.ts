@@ -28,6 +28,8 @@ import {
   BIND_DATA,
   BIND_FILTERED,
   BIND_BUFFER,
+  BIND_WRITABLE,
+  PS_WINDOW_BINDING_BASE,
   VS_RESIDENT_BINDING,
   POOL_BINDING,
   POOL_BYTES,
@@ -177,6 +179,13 @@ interface Tex {
   readonly sampleView: GPUTextureView; /* 2d-array, depth aspect for depth formats */
   readonly renderView: GPUTextureView | null;
   readonly fallback: boolean;          /* not the format the producer asked for: its uploads do not fit */
+}
+
+/** A draw's global memory as a GPU mirror (stream version 14). */
+interface DrawWindow {
+  readonly binding: number;
+  readonly buffer: GPUBuffer;
+  readonly writable: boolean;
 }
 
 interface CachedPipeline {
@@ -363,6 +372,9 @@ export class GpuExecutor {
   /** Diagnostics: log each draw of the frame after a target dump, up to its present. */
   private traceFrame = false;
   private passKey = "";
+  /* Buffers the open render pass binds as storage: true once written. A
+   * buffer cannot be written and read in one pass (one usage scope). */
+  private readonly passBuffers = new Map<GPUBuffer, boolean>();
   private passSize: readonly [number, number] = [0, 0];
   private pendingDestroy: GPUTexture[] = [];
   private readonly mipsStale = new Set<GPUTexture>(); /* level 0 written since the chain was built */
@@ -958,6 +970,7 @@ export class GpuExecutor {
     if (depth) desc.depthStencilAttachment = depth;
     this.pass = this.ensureEncoder().beginRenderPass(desc);
     this.passKey = key;
+    this.passBuffers.clear();
     this.passSize = size;
     this.stats.passes++;
     return this.pass;
@@ -1053,7 +1066,8 @@ export class GpuExecutor {
 
   /** The spec (cache identity) of draw `d`'s pipeline. */
   private drawSpec(d: Draw, textures: readonly Tex[], filtered: readonly boolean[],
-                   colorFormats: readonly (GPUTextureFormat | null)[], depth: Tex | undefined): PipelineSpec {
+                   colorFormats: readonly (GPUTextureFormat | null)[], depth: Tex | undefined,
+                   windows: readonly DrawWindow[]): PipelineSpec {
     return {
       wgsl: this.shaderHashes.get(d.shaderId) ?? `id${d.shaderId}`,
       vs: d.vsShaderId ? {
@@ -1080,12 +1094,14 @@ export class GpuExecutor {
           ? { bias: [d.depthBias, roundBiasSlope(d.depthBiasSlope), d.depthBiasClamp] } : {}),
       } : null,
       ...((d.flags & DRAW_UNCLIPPED_DEPTH) !== 0 && this.device.features.has("depth-clip-control") ? { unclippedDepth: true } : {}),
+      ...(windows.length ? { windows: windows.map((w) => `${w.binding}${w.writable ? "w" : ""}`) } : {}),
     };
   }
 
   private drawPipeline(d: Draw, module: GPUShaderModule, textures: readonly Tex[], filtered: readonly boolean[],
-                       colorFormats: readonly (GPUTextureFormat | null)[], depth: Tex | undefined): CachedPipeline {
-    const spec = this.drawSpec(d, textures, filtered, colorFormats, depth);
+                       colorFormats: readonly (GPUTextureFormat | null)[], depth: Tex | undefined,
+                       windows: readonly DrawWindow[]): CachedPipeline {
+    const spec = this.drawSpec(d, textures, filtered, colorFormats, depth, windows);
     return this.cached(specKey(spec), () => {
       const vsModule = d.vsShaderId ? this.shaders.get(d.vsShaderId) : module;
       if (!vsModule) throw new Error(`draw uses unknown vertex shader ${d.vsShaderId}`);
@@ -1117,6 +1133,14 @@ export class GpuExecutor {
     /* A pulled vertex stage's second source (stream version 6). */
     if (spec.vs?.pull) entries.push({ binding: VS_RESIDENT_BINDING, visibility: GPUShaderStage.VERTEX, buffer: { type: "read-only-storage" } });
     entries.push({ binding: POOL_BINDING, visibility: dataVisibility, buffer: { type: "read-only-storage" } });
+    /* Global memory in GPU mirrors (version 14): the vertex or the pixel stage's. */
+    for (const w of spec.windows ?? []) {
+      const binding = Number.parseInt(w, 10);
+      entries.push({
+        binding, visibility: binding >= PS_WINDOW_BINDING_BASE ? GPUShaderStage.FRAGMENT : GPUShaderStage.VERTEX,
+        buffer: { type: w.endsWith("w") ? "storage" : "read-only-storage" },
+      });
+    }
     const layout = this.device.createBindGroupLayout({ entries });
     /* Transformed vertices (position, 1/w, varyings) or, for a GPU vertex
      * stage, the ids and input vectors - every one a vec4<u32>. */
@@ -1271,6 +1295,7 @@ export class GpuExecutor {
     const filtered: boolean[] = [];
     const samplerStates = new Map<number, number>();
     let resident: GPUBuffer | undefined;
+    const windows: DrawWindow[] = [];
     for (let i = 0; i < d.bindingCount; i++) {
       const kind = v.getUint32(at, true);
       const binding = v.getUint32(at + 4, true);
@@ -1286,8 +1311,10 @@ export class GpuExecutor {
       } else if (kind === BIND_SAMPLER) {
         samplerStates.set(binding, texture);
       } else if (kind === BIND_BUFFER) {
-        resident = this.buffers.get(texture);
-        if (!resident) this.warnOnce(`buffer ${texture}`, `draw binds unknown buffer ${texture}`);
+        const buffer = this.buffers.get(texture);
+        if (!buffer) this.warnOnce(`buffer ${texture}`, `draw binds unknown buffer ${texture}`);
+        if (binding === VS_RESIDENT_BINDING) resident = buffer;
+        else windows.push({ binding, buffer: buffer ?? this.emptyStorage(), writable: (bytes & BIND_WRITABLE) !== 0 });
       }
     }
     if (this.traceFrame) {
@@ -1297,6 +1324,7 @@ export class GpuExecutor {
     const pulled = d.vsShaderId !== 0 && (d.flags & DRAW_VERTEX_PULL) !== 0;
     const second = pulled ? resident ?? this.emptyStorage() : null;
     if (resident) this.touchedBuffers.add(resident);
+    for (const w of windows) this.touchedBuffers.add(w.buffer);
     const stride = d.vsShaderId ? 16 * (d.vertexInputCount + 1) : VERTEX_HEADER_BYTES + 16 * d.varyingCount;
     const vertices = payload.subarray(at, at + stride * d.vertexCount);
     const indexStart = at + stride * d.vertexCount;
@@ -1320,7 +1348,8 @@ export class GpuExecutor {
       textures.push(attached.has(id) ? this.shadowOf(id, t) : t);
     }
     const colorFormats = colorIds.map((id) => (id ? this.textures.get(id)?.format ?? null : null));
-    const { pipeline, layout } = this.drawPipeline(d, module, textures, filtered, colorFormats, depthId ? depthTex : undefined);
+    const { pipeline, layout } = this.drawPipeline(d, module, textures, filtered, colorFormats, depthId ? depthTex : undefined,
+      windows);
     /* Vertices and data (a flush may happen in between: stage both first). */
     if (this.vertexUsed + stride + Math.ceil(vertices.byteLength / 16) * 16 + indexBytes > VERTEX_BUFFER_BYTES ||
         Math.ceil(this.dataUsed / DATA_ALIGN) * DATA_ALIGN + Math.max(data?.byteLength ?? 0, DATA_WINDOW_BYTES) > DATA_BUFFER_BYTES) {
@@ -1337,12 +1366,28 @@ export class GpuExecutor {
     const indexOffset = this.vertexUsed;
     if (indices) this.vertexStaging.set(indices, indexOffset);
     this.vertexUsed += indexBytes;
+    /* Storage this draw writes that the open pass reads, or reads that it
+     * writes: a new pass. */
+    const uses: readonly (readonly [GPUBuffer, boolean])[] = [
+      ...windows.map((w) => [w.buffer, w.writable] as const), ...(second ? [[second, false] as const] : []),
+    ];
+    /* One buffer both read and written by this draw: WebGPU refuses it (and
+     * the whole command buffer with it). */
+    if (uses.some(([b, w]) => uses.some(([o, ow]) => o === b && ow !== w))) {
+      this.warnOnce(`storage ${d.shaderId}`, `draw with shader ${d.shaderId} reads and writes one buffer: skipped`);
+      return;
+    }
+    if (this.pass && uses.some(([b, w]) => { const used = this.passBuffers.get(b); return used !== undefined && used !== w; })) {
+      this.endPass();
+    }
     const pass = this.passFor(colorIds, depthId);
     if (!pass) return;
+    for (const [b, w] of uses) this.passBuffers.set(b, w || (this.passBuffers.get(b) ?? false));
     if (!this.scissor(pass, d.scissor)) return;
     const samplers = [...samplerStates].map(([binding, state]) => ({ binding, resource: this.sampler(state) }));
     const key = [this.idOf(layout), this.set, ...textures.map((t) => this.idOf(t.sampleView)),
-      ...samplers.map((e) => `${e.binding}:${this.idOf(e.resource)}`), second ? `r${this.idOf(second)}` : ""].join(",");
+      ...samplers.map((e) => `${e.binding}:${this.idOf(e.resource)}`), second ? `r${this.idOf(second)}` : "",
+      ...windows.map((w) => `w${w.binding}:${this.idOf(w.buffer)}`)].join(",");
     let group = this.bindGroups.get(key);
     if (!group) {
       if (this.bindGroups.size >= BIND_GROUP_CACHE_LIMIT) this.bindGroups.clear();
@@ -1354,6 +1399,7 @@ export class GpuExecutor {
           ...samplers,
           ...(second ? [{ binding: VS_RESIDENT_BINDING, resource: { buffer: second } }] : []),
           { binding: POOL_BINDING, resource: { buffer: this.pool } },
+          ...windows.map((w) => ({ binding: w.binding, resource: { buffer: w.buffer } })),
         ],
       });
       this.bindGroups.set(key, group);
