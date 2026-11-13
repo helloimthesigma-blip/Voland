@@ -8,6 +8,11 @@
  *               its game is matched to it by program id)
  *   firmware/   the decrypted firmware NCAs (only the system files games
  *               need are kept - LoadPanel's "System files")
+ *
+ * None of that layout is required: every .nca outside mods/ is read by its
+ * header wherever it sits, so a folder of dumps in any shape works. System
+ * titles are firmware, everything else is grouped into games by program id
+ * (a subfolder of games/ is still one game with all its NCAs).
  *   mods/<game>/<mod>   a mod folder, .zip / .7z or update / DLC .nca;
  *               <game> is the game's title id or its name in the library
  *   saves/      backups of every save (one .tar a day), if turned on
@@ -34,6 +39,10 @@ export const FOLDER_SOURCE = "voland-folder";
 const UPDATE_ID_OFFSET = 0x800n;
 const ADDON_BASE_OFFSET = 0x1000n;
 const ADDON_ID_MASK = 0xfffn;
+/** Program ids below this are the console's own system titles (firmware). */
+const SYSTEM_TITLE_LIMIT = 0x0100000000001000n;
+/** A dump tool's file name: the NCA's 32-hex-digit content id. */
+const CONTENT_ID_NAME = /^[0-9a-f]{32}(\.cnmt)?\.nca$/i;
 /** Bytes of an NCA header classifyNcaHeader reads. */
 const NCA_PROBE_BYTES = 0x218;
 /** How deep the walk goes (mods keep their romfs/ trees). */
@@ -83,13 +92,11 @@ export interface FolderScan {
   readonly mods: readonly FolderMod[];
   /** Which of games/, firmware/, mods/ are missing. */
   readonly missingDirs: readonly string[];
-  /** Still-encrypted NCAs under games/, by path. */
+  /** Still-encrypted NCAs (outside firmware/ and mods/), by path. */
   readonly encrypted: readonly string[];
-  /** Decrypted NCAs under games/ that belong to no game found there
-   * (an update or DLC whose game is missing). */
+  /** Decrypted NCAs that belong to no game found in the folder (an update
+   * or DLC whose game is missing). */
   readonly orphans: readonly string[];
-  /** .nca files outside games/, firmware/ and mods/ (likely misplaced). */
-  readonly stray: readonly string[];
 }
 
 /** Whether `id` is the base game `base` itself, its update, or its DLC
@@ -134,6 +141,15 @@ function folderId(dir: string, file: File): string {
   return `folder:${dir}/${looseId(file)}`;
 }
 
+/** A loose game's name: its file's, or for a dump tool's content-id file
+ * name its folder's (below the chosen folder or games/). Pure. */
+function looseName(entry: FolderFile): string {
+  const parent = entry.path.length > 1 ? entry.path[entry.path.length - 2] ?? "" : "";
+  const useParent = CONTENT_ID_NAME.test(entry.file.name) && parent !== "" &&
+    !(entry.path.length === 2 && parent.toLowerCase() === GAMES_DIR);
+  return useParent ? parent : entry.file.name.replace(/\.nca$/i, "");
+}
+
 interface Classified {
   readonly entry: FolderFile;
   readonly info: NcaInfo;
@@ -155,7 +171,7 @@ function groupGames(ncas: readonly Classified[], dir: string | null): { games: F
     for (const extra of extras) claimed.add(extra);
     games.push({
       id: dir === null ? looseId(program.entry.file) : folderId(dir, program.entry.file),
-      name: dir ?? program.entry.file.name.replace(/\.nca$/i, ""),
+      name: dir ?? looseName(program.entry),
       programId: base,
       program: program.entry,
       extras: extras.map((c) => c.entry),
@@ -169,29 +185,37 @@ function groupGames(ncas: readonly Classified[], dir: string | null): { games: F
 }
 
 /** Sorts the folder's files (from walkFolder or a folder input) into
- * games, firmware and mods. Reads the header of each .nca under games/. */
+ * games, firmware and mods. Reads the header of every .nca outside mods/:
+ * system titles anywhere are firmware, a subfolder of games/ is one game,
+ * and every other decrypted NCA (in games/ or anywhere else) is grouped by
+ * program id. */
 export async function scanFolder(files: readonly FolderFile[], dirs: readonly string[]): Promise<FolderScan> {
   const top = new Set(dirs.filter((d) => !d.includes("/")).map((d) => d.toLowerCase()));
   for (const f of files) if (f.path.length > 1 && f.path[0]) top.add(f.path[0].toLowerCase());
-  const under = (dir: string): FolderFile[] => files.filter((f) => f.path.length > 1 && f.path[0]?.toLowerCase() === dir);
+  const topDir = (f: FolderFile): string => f.path.length > 1 ? (f.path[0] ?? "").toLowerCase() : "";
+  const under = (dir: string): FolderFile[] => files.filter((f) => topDir(f) === dir);
 
-  const gameNcas = await Promise.all(under(GAMES_DIR).filter((f) => isNca(f.file.name)).map(async (entry) => ({
+  const ncas: Classified[] = await Promise.all(files.filter((f) => isNca(f.file.name) && topDir(f) !== MODS_DIR &&
+    topDir(f) !== FIRMWARE_DIR).map(async (entry) => ({
     entry, info: classifyNcaHeader(new Uint8Array(await entry.file.slice(0, NCA_PROBE_BYTES).arrayBuffer())),
   })));
+  const isSystem = (c: Classified): boolean => c.info.kind !== "encrypted" && c.info.programId < SYSTEM_TITLE_LIMIT;
+  const gameNcas = ncas.filter((c) => !isSystem(c));
+  const inGameDir = (c: Classified): boolean => topDir(c.entry) === GAMES_DIR && c.entry.path.length > 2;
+
   const games: FolderGame[] = [];
   const orphans: string[] = [];
-  const loose = gameNcas.filter((c) => c.entry.path.length === 2);
-  const looseGroup = groupGames(loose, null);
+  const looseGroup = groupGames(gameNcas.filter((c) => !inGameDir(c)), null);
   games.push(...looseGroup.games);
   orphans.push(...looseGroup.orphans);
-  const subdirs = [...new Set(gameNcas.filter((c) => c.entry.path.length > 2).map((c) => c.entry.path[1] ?? ""))].sort();
+  const subdirs = [...new Set(gameNcas.filter(inGameDir).map((c) => c.entry.path[1] ?? ""))].sort();
   for (const dir of subdirs) {
-    const group = groupGames(gameNcas.filter((c) => c.entry.path.length > 2 && c.entry.path[1] === dir), dir);
+    const group = groupGames(gameNcas.filter((c) => inGameDir(c) && c.entry.path[1] === dir), dir);
     games.push(...group.games);
     orphans.push(...group.orphans);
   }
 
-  const firmware = under(FIRMWARE_DIR);
+  const firmware = [...under(FIRMWARE_DIR), ...ncas.filter(isSystem).map((c) => c.entry)];
   const mods: FolderMod[] = [];
   const byMod = new Map<string, FolderFile[]>();
   for (const f of under(MODS_DIR)) {
@@ -216,11 +240,8 @@ export async function scanFolder(files: readonly FolderFile[], dirs: readonly st
     firmwareFingerprint: fingerprintOf(firmware),
     mods,
     missingDirs: [GAMES_DIR, FIRMWARE_DIR, MODS_DIR].filter((d) => !top.has(d)),
-    encrypted: gameNcas.filter((c) => c.info.kind === "encrypted").map((c) => joined(c.entry.path)),
+    encrypted: ncas.filter((c) => c.info.kind === "encrypted").map((c) => joined(c.entry.path)),
     orphans,
-    stray: files.filter((f) => isNca(f.file.name) &&
-      ![GAMES_DIR, FIRMWARE_DIR, MODS_DIR].includes(f.path.length > 1 ? (f.path[0] ?? "").toLowerCase() : ""))
-      .map((f) => joined(f.path)),
   };
 }
 

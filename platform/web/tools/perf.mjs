@@ -452,7 +452,7 @@ async function main() {
     await page.goto(pageUrl);
     await page.getByTestId("load-panel").waitFor({ timeout: 30_000 });
     if (opts.restoreSaves) {
-      await page.getByTestId("saves").locator("summary").click(); /* the panel starts collapsed */
+      await page.getByTestId("tab-saves").click(); /* the Saves tab */
       await page.getByTestId("saves-import-input").setInputFiles(opts.restoreSaves);
       const note = page.getByTestId("saves-note");
       await note.waitFor({ timeout: 30_000 });
@@ -719,8 +719,7 @@ async function main() {
           await page.getByTestId(arg).first().click();
         } else if (cmd === "export-saves") {
           /* The Saves panel's backup, written to FILE (to edit or restore later). */
-          const panel = page.getByTestId("saves");
-          if (!(await panel.evaluate((d) => d.open))) await panel.locator("summary").click();
+          await page.getByTestId("tab-saves").click();
           const [download] = await Promise.all([page.waitForEvent("download"), page.getByTestId("saves-export").click()]);
           await download.saveAs(arg);
           note = arg;

@@ -49,7 +49,7 @@ test("one folder brings the game, its system files and its mods", async ({ page 
   await expect(page.getByTestId("files-games")).toContainText("1 game(s)");
   await expect(page.getByTestId("files-games")).toContainText("Fixture");
   await expect(page.getByTestId("files-encrypted")).toContainText("games/Fixture/00112233445566778899aabbccddeeff.nca");
-  await expect(page.getByTestId("files-stray")).toContainText("lost.nca");
+  await expect(page.getByTestId("files-encrypted")).toContainText("lost.nca"); /* outside games/ it is still read */
   await expect(page.getByTestId("files-mods")).toContainText("installed Fixture/Test Mod", { timeout: 20_000 });
   await expect(page.getByTestId("system-file-0100000000000802")).not.toContainText("not added");
 

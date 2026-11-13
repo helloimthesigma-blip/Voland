@@ -69,7 +69,7 @@ test("games/: subfolders and loose NCAs, matched by program id", async () => {
   assert.deepEqual(scan.missingDirs, []);
 });
 
-test("firmware/, mods/, stray NCAs and missing folders", async () => {
+test("firmware/, mods/ and missing folders", async () => {
   const scan = await scanFolder([
     at("Firmware/a.nca", ncaBytes(DATA, 0x0100000000000802n)),
     at("Firmware/sub/b.nca", "x"),
@@ -78,17 +78,38 @@ test("firmware/, mods/, stray NCAs and missing folders", async () => {
     at("mods/0100AAAA00000000/pack.zip", "zip"),
     at("mods/0100AAAA00000000/update.nca", "nca"),
     at("mods/0100AAAA00000000/readme.txt", "ignored"),
-    at("stray.nca", "x"),
   ], ["Firmware", "Firmware/sub", "mods"]);
   assert.deepEqual(scan.missingDirs, ["games"]);
   assert.deepEqual(scan.firmware.map((f) => f.file.name), ["a.nca", "b.nca"]);
-  assert.deepEqual(scan.stray, ["stray.nca"]);
+  assert.deepEqual(scan.games, []);
   assert.deepEqual(scan.mods.map((m) => [m.key, m.name, m.archive, m.files.map((f) => f.path.join("/"))]), [
     ["0100AAAA00000000", "pack.zip", true, ["pack.zip"]],
     ["0100AAAA00000000", "update.nca", false, ["update.nca"]],
     ["Celeste", "Big Mod", false, ["romfs/a.bin", "romfs/b/c.bin"]],
   ]);
   assert.match(scan.mods[2]?.fingerprint ?? "", /^2:3:/);
+});
+
+test("NCAs in any layout: games by program id, system titles as firmware", async () => {
+  const scan = await scanFolder([
+    at("Switch dumps/Smash/0123456789abcdef0123456789abcdef.nca", ncaBytes(PROGRAM, BASE, "NCA3", 4096)),
+    at("Switch dumps/Smash/fedcba9876543210fedcba9876543210.nca", ncaBytes(CONTROL, BASE)),
+    at("Switch dumps/Smash update/11111111111111111111111111111111.nca", ncaBytes(PROGRAM, BASE + 0x800n)),
+    at("celeste.nca", ncaBytes(PROGRAM, OTHER)),
+    at("decrypted-firmware/22222222222222222222222222222222.nca", ncaBytes(DATA, 0x0100000000000802n)),
+    at("decrypted-firmware/33333333333333333333333333333333.nca", ncaBytes(PROGRAM, 0x0100000000000809n)),
+    at("old/locked.nca", ncaBytes(PROGRAM, OTHER, "XXXX")),
+  ], ["Switch dumps", "Switch dumps/Smash", "Switch dumps/Smash update", "decrypted-firmware", "old"]);
+  assert.deepEqual(scan.games.map((g) => g.name), ["celeste", "Smash"]);
+  const [, smash] = scan.games;
+  assert.equal(smash?.programId, BASE);
+  assert.equal(smash?.hasUpdate, true);
+  assert.equal(smash?.extras.length, 2);
+  assert.deepEqual(scan.firmware.map((f) => f.path.join("/")).sort(), [
+    "decrypted-firmware/22222222222222222222222222222222.nca", "decrypted-firmware/33333333333333333333333333333333.nca",
+  ]);
+  assert.deepEqual(scan.encrypted, ["old/locked.nca"]);
+  assert.deepEqual(scan.orphans, []);
 });
 
 test("a mods/<key> folder finds its game by title id or name", () => {

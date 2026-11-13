@@ -261,8 +261,9 @@ function FilesPanel(props: FilesPanelProps) {
       />
       <Show when={state().kind === "none"}>
         <p class="voland-load-note">
-          Keep everything in one folder: <code>games/</code>, <code>firmware/</code> and <code>mods/</code>. Choose it
-          once and Voland finds your games, their updates and DLC, the system files and your mods by itself.
+          Pick the folder your decrypted games are in, once. Voland reads every <code>.nca</code> in it, in any
+          layout, and sorts them out itself: each game with its update and DLC, and the firmware system files. Mods go
+          in <code>mods/&lt;game name&gt;/</code>.
         </p>
         <div class="voland-load-actions">
           <button type="button" class="voland-load-button" data-testid="voland-folder-choose" onClick={() => { void choose(); }}>
@@ -291,9 +292,10 @@ function FilesPanel(props: FilesPanelProps) {
               <strong>{r().name}</strong>
               <span class="voland-ok"> connected</span>
             </p>
-            <Show when={r().scan.missingDirs.length > 0}>
+            <Show when={r().scan.missingDirs.length > 0 && r().scan.games.length === 0 && r().scan.firmware.length === 0}>
               <p class="voland-missing" data-testid="voland-folder-missing-dirs">
-                Missing: {r().scan.missingDirs.map((d) => `${d}/`).join(", ")}.
+                Nothing found yet. Voland can make games/, firmware/ and mods/ folders here to keep things tidy (optional:
+                files anywhere in the folder are found too).
               </p>
               <Show when={r().handle}>
                 {(handle) => (
@@ -306,7 +308,7 @@ function FilesPanel(props: FilesPanelProps) {
             </Show>
             <ul class="voland-checklist">
               <li data-testid="files-games">
-                <Show when={r().scan.games.length > 0} fallback={<span class="voland-missing">No games in games/ yet.</span>}>
+                <Show when={r().scan.games.length > 0} fallback={<span class="voland-missing">No games found yet: put your decrypted game's .nca files anywhere in this folder.</span>}>
                   <span class="voland-ok">{r().scan.games.length} game(s)</span>
                   <ul>
                     <For each={r().scan.games}>
@@ -331,7 +333,7 @@ function FilesPanel(props: FilesPanelProps) {
                   )}
                 </For>
                 <Show when={r().scan.firmware.length === 0 && SYSTEM_FILES.some((f) => !props.systemIds().includes(f.id))}>
-                  <small> - put your decrypted firmware NCAs in firmware/ (only Mario Kart 8, Smash and Animal Crossing need them).</small>
+                  <small> - add your decrypted firmware NCAs anywhere in the folder (only Mario Kart 8, Smash and Animal Crossing need them).</small>
                 </Show>
               </li>
               <li data-testid="files-mods">
@@ -370,12 +372,7 @@ function FilesPanel(props: FilesPanelProps) {
               </Show>
               <Show when={r().scan.orphans.length > 0}>
                 <li class="voland-missing" data-testid="files-orphans">
-                  No game for: {r().scan.orphans.join(", ")} (an update or DLC needs its game in games/ beside it).
-                </li>
-              </Show>
-              <Show when={r().scan.stray.length > 0}>
-                <li class="voland-missing" data-testid="files-stray">
-                  Not in games/, firmware/ or mods/, so not used: {r().scan.stray.join(", ")}
+                  No game for: {r().scan.orphans.join(", ")} (an update or DLC needs its game somewhere in the folder).
                 </li>
               </Show>
             </ul>
