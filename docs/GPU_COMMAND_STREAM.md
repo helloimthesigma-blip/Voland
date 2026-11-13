@@ -1,4 +1,4 @@
-# GPU command stream (version 12)
+# GPU command stream (version 13)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -191,6 +191,16 @@ The WebGPU consumer rounds the slope factor to 4 significant bits
 shadow passes' slope from the camera, so exact values built a new pipeline
 every few frames (1519 pipelines after ten minutes; 354 rounded). The
 stream itself carries the exact value.
+
+### Unclipped depth (version 13)
+
+`GPU_DRAW_UNCLIPPED_DEPTH` in `Gpu_Rec_Draw.flags`: the game set
+SET_VIEW_VOLUME_CLIP_CONTROL to clamp depth at the near or far plane
+instead of clipping there. The pipeline takes `unclippedDepth` (the
+`depth-clip-control` feature; without it the draw is clipped as before).
+WebGPU has one switch for both planes, so a clamp at either plane lifts
+both. Tears of the Kingdom draws its light tiles' depth as quads at
+z = -1 this way; clipped, its lights failed their depth test.
 
 ### Vertex pulling (version 5)
 

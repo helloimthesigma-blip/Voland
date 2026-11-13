@@ -60,6 +60,9 @@ static int g_failures;
 #define REG_CULL_ENABLE_TEST 0x646u
 #define REG_FRONT_FACE_TEST 0x647u
 #define REG_CULL_FACE_TEST 0x648u
+#define REG_VIEW_VOLUME_CLIP_CONTROL_TEST 0x64fu
+#define CLIP_CONTROL_CLAMP_NEAR_TEST (1u << 3)
+#define REG_DEPTH_MODE_TEST 0x35fu /* bit 0: z in [0, 1] */
 #define CULL_BACK_REG 0x405u
 #define FRONT_CW_REG 0x900u
 #define FRONT_CCW_REG 0x901u
@@ -995,6 +998,7 @@ static bool g_gpu_rt_bl;       /* gpu_draw_topology: into RT_BL (block linear) i
 static uint64_t g_gpu_rt_offset; /* ... this far past RT_BL */
 static uint32_t g_base_instance; /* gpu_draw_topology: REG_BASE_INSTANCE */
 static bool g_masked_targets;    /* gpu_draw_topology: every colour channel masked (CT_WRITE 0) */
+static uint32_t g_clip_control;  /* gpu_draw_topology: SET_VIEW_VOLUME_CLIP_CONTROL */
 static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_t topology, uint32_t count) {
   static Gpu_Stream stream;
   Seen_Draw seen;
@@ -1006,6 +1010,7 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
   if (g_bc1_texture) texture_state_bc1();
   g_regs[REG_BASE_INSTANCE_TEST] = g_base_instance;
   if (g_masked_targets) g_regs[0x680] = 0;
+  g_regs[REG_VIEW_VOLUME_CLIP_CONTROL_TEST] = g_clip_control;
   g_regs[REG_CULL_ENABLE_TEST] = 1;
   g_regs[REG_CULL_FACE_TEST] = CULL_BACK_REG;
   g_regs[REG_FRONT_FACE_TEST] = front_face_reg;
@@ -1502,6 +1507,36 @@ static void test_stores_only(Raster3d *r) {
         ssbo_word());
 }
 
+/* A triangle in front of the near plane (z -0.5, depth range [0, 1]) is
+ * clipped away, unless SET_VIEW_VOLUME_CLIP_CONTROL clamps depth there:
+ * then it draws (Tears of the Kingdom's tile-depth quads at z -1). In GPU
+ * mode the draw asks for unclipped depth. */
+static void test_depth_clamp(Raster3d *r) {
+  base_state(RT, false, PS_OFFSET);
+  g_regs[REG_DEPTH_MODE_TEST] = 1;
+  raster3d_begin_submission(r);
+  clear_to(r, 0.0f, 0.0f, 1.0f, 1.0f);
+  vertex(0, -1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(1, 3.0f, -1.0f, 1, 0, 0, 1);
+  vertex(2, -1.0f, 3.0f, 1, 0, 0, 1);
+  for (uint32_t i = 0; i < 3u; i++) putf(VERTICES + 32u * i + 8u, -0.5f);
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  CHECK(rgba_is(pixel(RT, false, 10, 10), 0, 0, 255, 255), "in front of the near plane: clipped");
+  g_regs[REG_VIEW_VOLUME_CLIP_CONTROL_TEST] = CLIP_CONTROL_CLAMP_NEAR_TEST;
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  CHECK(rgba_is(pixel(RT, false, 10, 10), 255, 0, 0, 255), "depth clamped at the near plane: drawn");
+  for (uint32_t i = 0; i < 3u; i++) putf(VERTICES + 32u * i + 8u, 0.0f);
+  g_clip_control = CLIP_CONTROL_CLAMP_NEAR_TEST;
+  const Seen_Draw clamped = gpu_draw_once(r, FRONT_CW_REG);
+  g_clip_control = 0;
+  const Seen_Draw clipped = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(clamped.count == 1 && (clamped.last.flags & GPU_DRAW_UNCLIPPED_DEPTH) && clipped.count == 1 &&
+            !(clipped.last.flags & GPU_DRAW_UNCLIPPED_DEPTH),
+        "GPU mode: unclipped depth with the clamp (flags 0x%x / 0x%x)", clamped.last.flags, clipped.last.flags);
+}
+
 /* ---- compute: a block of two lane groups meeting at BAR.SYNC --------- */
 
 #define COMPUTE_CODE 0x2000u     /* program region offset of the (header-less) code */
@@ -1706,6 +1741,7 @@ int main(void) {
   test_worker_count_invariance(&r);
   test_gpu_vertex_stage(&r);
   test_stores_only(&r);
+  test_depth_clamp(&r);
   test_gpu_aliased_targets(&r);
   test_gpu_packed_upload(&r);
   test_gpu_compressed_upload(&r);

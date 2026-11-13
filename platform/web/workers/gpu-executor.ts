@@ -55,6 +55,7 @@ import {
   type Copy,
   CULL_FRONT,
   CULL_NONE,
+  DRAW_UNCLIPPED_DEPTH,
   DRAW_VERTEX_PULL,
   DRAW_BYTES,
   FRONT_CCW,
@@ -1078,6 +1079,7 @@ export class GpuExecutor {
         ...(d.depthBias || d.depthBiasSlope || d.depthBiasClamp
           ? { bias: [d.depthBias, roundBiasSlope(d.depthBiasSlope), d.depthBiasClamp] } : {}),
       } : null,
+      ...((d.flags & DRAW_UNCLIPPED_DEPTH) !== 0 && this.device.features.has("depth-clip-control") ? { unclippedDepth: true } : {}),
     };
   }
 
@@ -1164,6 +1166,7 @@ export class GpuExecutor {
         topology: "triangle-list",
         frontFace: spec.vs && spec.vs.front !== FRONT_CCW ? "cw" : "ccw",
         cullMode: !spec.vs || spec.vs.cull === CULL_NONE || (globalThis as { NO_CULL?: boolean }).NO_CULL ? "none" : spec.vs.cull === CULL_FRONT ? "front" : "back",
+        ...(spec.unclippedDepth ? { unclippedDepth: true } : {}),
       },
     };
     const depth = spec.depth;

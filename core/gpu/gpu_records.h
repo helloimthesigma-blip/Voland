@@ -233,6 +233,10 @@ typedef struct Gpu_Rec_Draw {
 _Static_assert(sizeof(Gpu_Rec_Draw) % 8u == 0u, "a draw's tail data starts aligned");
 
 #define GPU_DRAW_VERTEX_PULL 1u
+/* Version 13: depth is clamped at the near and far planes, not clipped
+ * there (SET_VIEW_VOLUME_CLIP_CONTROL's clamp bits): WebGPU's
+ * unclippedDepth. */
+#define GPU_DRAW_UNCLIPPED_DEPTH 2u
 
 #define GPU_CULL_NONE 0u
 #define GPU_CULL_FRONT 1u

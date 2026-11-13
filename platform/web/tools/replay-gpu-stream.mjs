@@ -116,7 +116,7 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
   const targetsAt = new Set(dumpTargets);
   const a = await navigator.gpu.requestAdapter();
   const features = ["rg11b10ufloat-renderable", "depth32float-stencil8", "float32-filterable", "float32-blendable",
-    "subgroups"].filter((f) => a.features.has(f));
+    "subgroups", "depth-clip-control"].filter((f) => a.features.has(f));
   const device = await a.requestDevice({
     requiredFeatures: features,
     requiredLimits: { // as gpu.worker.ts
@@ -285,7 +285,9 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
       if (globalThis.TRACE_SHAPES && type === 5 && presents + 1 === globalThis.TRACE_SHAPES) {
         /* Gpu_Rec_Clear: colour id, mask, colour (f32 bits), then the depth target. */
         const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-        console.log(`clear colour ${dv.getUint32(0, true)} mask ${dv.getUint32(4, true)} value ${[8, 12, 16, 20].map((o) => dv.getFloat32(o, true)).join(",")}`);
+        console.log(`clear colour ${dv.getUint32(0, true)} mask ${dv.getUint32(4, true)} value ${[8, 12, 16, 20].map((o) => dv.getFloat32(o, true)).join(",")}` +
+          ` depth ${dv.getUint32(24, true)} flags ${dv.getUint32(28, true)} z ${dv.getFloat32(32, true)}` +
+          ` rect ${[44, 48, 52, 56].map((o) => dv.getInt32(o, true)).join(",")}`);
       }
       if (globalThis.TRACE_SHAPES && type === 6 && presents + 1 === globalThis.TRACE_SHAPES) {
         /* Each draw's shader, colour targets and depth target (Gpu_Rec_Draw: targets of 36 bytes at 8, depth at 296). */

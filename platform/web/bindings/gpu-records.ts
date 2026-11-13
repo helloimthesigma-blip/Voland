@@ -5,7 +5,7 @@
  */
 
 export const GPU_STREAM_MAGIC = 0x55504756;
-export const GPU_STREAM_VERSION = 12;
+export const GPU_STREAM_VERSION = 13;
 export const GPU_STREAM_HEADER_BYTES = 56;
 export const GPU_STREAM_RECORD_HEADER_BYTES = 8;
 export const OFF_MAGIC = 0;
@@ -177,6 +177,8 @@ export const DRAW_BYTES = 4 + 4 + TARGET_BYTES * MAX_TARGETS + 16 + 4 + STENCIL_
 /* Draw flags: no vertices; the indices are guest vertex ids and the vertex
  * stage decodes its inputs from the data binding (core/gpu/gpu_records.h). */
 export const DRAW_VERTEX_PULL = 1;
+/* Version 13: depth clamped at the near and far planes, not clipped (unclippedDepth). */
+export const DRAW_UNCLIPPED_DEPTH = 2;
 export const CULL_NONE = 0;
 export const CULL_FRONT = 1;
 export const CULL_BACK = 2;
@@ -281,7 +283,7 @@ export interface Draw {
   /** With a vertex stage: indexCount u32 indices into the vertexCount
    * distinct vertices follow them (0: the vertices are the triangle list). */
   readonly indexCount: number;
-  /** DRAW_VERTEX_PULL. */
+  /** DRAW_VERTEX_PULL, DRAW_UNCLIPPED_DEPTH. */
   readonly flags: number;
   /** Version 10: polygon offset (all 0: none) - constant in depth units, slope factor, clamp. */
   readonly depthBias: number;

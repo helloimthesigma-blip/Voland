@@ -97,6 +97,11 @@
 #define REG_FRONT_FACE 0x647u
 #define REG_CULL_FACE 0x648u
 #define REG_VIEWPORT_SCALE_OFFSET 0x64bu
+/* SET_VIEW_VOLUME_CLIP_CONTROL: bits 3 / 4 clamp depth at the near / far
+ * plane instead of clipping there (nouveau's DEPTH_CLAMP_NEAR / _FAR). */
+#define REG_VIEW_VOLUME_CLIP_CONTROL 0x64fu
+#define CLIP_CONTROL_CLAMP_NEAR (1u << 3)
+#define CLIP_CONTROL_CLAMP_FAR (1u << 4)
 #define REG_CT_WRITE 0x680u
 #define REG_STREAM 0x700u           /* + 4j: format, address hi, lo, frequency */
 #define REG_BLEND_TARGET 0x780u     /* + 8j: separate, color op/src/dst, alpha op/src/dst */
@@ -2106,6 +2111,7 @@ typedef struct Raster_State {
   uint32_t viewport_swizzle;
   bool lower_left;
   bool z_zero_to_one;
+  bool clamp_near, clamp_far; /* depth clamped there, not clipped */
   bool cull;
   uint32_t cull_face;
   bool front_ccw;
@@ -2441,6 +2447,8 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
   rs->viewport_swizzle = regs[REG_VIEWPORT_SWIZZLE];
   rs->lower_left = (regs[REG_WINDOW_ORIGIN] & WINDOW_ORIGIN_LOWER_LEFT) != 0;
   rs->z_zero_to_one = (regs[REG_Z_CLIP_RANGE] & 1u) != 0;
+  rs->clamp_near = (regs[REG_VIEW_VOLUME_CLIP_CONTROL] & CLIP_CONTROL_CLAMP_NEAR) != 0;
+  rs->clamp_far = (regs[REG_VIEW_VOLUME_CLIP_CONTROL] & CLIP_CONTROL_CLAMP_FAR) != 0;
   rs->cull = (regs[REG_CULL_ENABLE] & 1u) != 0;
   rs->cull_face = regs[REG_CULL_FACE];
   /* Flip y swaps the facing when the y flip happens outside the viewport
@@ -3102,8 +3110,9 @@ static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, 
 static float plane_distance(const Raster_State *rs, const Vertex *v, uint32_t plane) {
   const float x = v->pos[0], y = v->pos[1], z = v->pos[2], w = v->pos[3];
   switch (plane) {
-  case 0: return rs->z_zero_to_one ? z : z + w;   /* near */
-  case 1: return w - z;                          /* far */
+  /* A clamped plane clips nothing: the pixels' depth is clamped. */
+  case 0: return rs->clamp_near ? w : (rs->z_zero_to_one ? z : z + w); /* near */
+  case 1: return rs->clamp_far ? w : w - z;                            /* far */
   case 2: return GUARD_BAND * w - x;
   case 3: return GUARD_BAND * w + x;
   case 4: return GUARD_BAND * w - y;
@@ -5184,6 +5193,7 @@ static void gpu_emit_draw(Raster_State *rs) {
     d.index_count = g->index_count;
     if (g->pull) d.flags = GPU_DRAW_VERTEX_PULL;
   }
+  if (rs->clamp_near || rs->clamp_far) d.flags |= GPU_DRAW_UNCLIPPED_DEPTH;
   memcpy(p, &d, sizeof(d));
   p += sizeof(d);
   Gpu_Rec_Binding b = {GPU_BIND_DATA, WGSL_DATA_BINDING, (uint32_t)data_bytes, 0};
@@ -5792,13 +5802,14 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
   if (r->trace_draws) {
     const Target *t0 = &rs.targets[0];
     log_info("[gpu] draw %llu: topo %u count %u vs %llx ps %llx | rt0 %llx fmt 0x%02x %ux%u targets %u mask %x | "
-             "blend %d op %u/%u src %u/%u dst %u/%u | depth %d/%d func %u | cull %d face 0x%x front 0x%x origin 0x%x vp-y %g | tris %llu px %llu",
+             "blend %d op %u/%u src %u/%u dst %u/%u | depth %d/%d func %u | cull %d face 0x%x front 0x%x origin 0x%x vp-y %g clip 0x%x | tris %llu px %llu",
              (unsigned long long)r->stats.draws, draw->topology, draw->count, (unsigned long long)ctx->vs->address,
              (unsigned long long)ctx->ps->address, (unsigned long long)(t0->surface ? t0->surface->address : 0),
              t0->surface ? t0->surface->format : 0u, t0->surface ? t0->surface->width : 0u,
              t0->surface ? t0->surface->height : 0u, rs.target_count, t0->write_mask, t0->blend, t0->color_op,
              t0->alpha_op, t0->color_src, t0->alpha_src, t0->color_dst, t0->alpha_dst, rs.depth_test, rs.depth_write,
              rs.depth_func, rs.cull, rs.cull_face, regs[REG_FRONT_FACE], regs[REG_WINDOW_ORIGIN], (double)rs.vp_scale[1],
+             regs[REG_VIEW_VOLUME_CLIP_CONTROL],
              (unsigned long long)(r->stats.triangles - triangles_before),
              (unsigned long long)(r->stats.pixels - pixels_before));
     log_info("[gpu]   zeta sel %u %llx %ux%u fmt 0x%x", regs[REG_ZT_SELECT] & 1u,

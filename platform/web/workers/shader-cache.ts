@@ -79,6 +79,8 @@ export interface PipelineSpec {
   readonly textures: readonly string[];
   readonly targets: readonly TargetSpec[];
   readonly depth: DepthSpec | null;
+  /** Depth clamped, not clipped, at the near and far planes. Absent: clipped. */
+  readonly unclippedDepth?: boolean;
 }
 
 /* Significant bits kept of a draw's slope-scaled depth bias. The bias is

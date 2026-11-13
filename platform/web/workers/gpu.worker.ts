@@ -75,7 +75,7 @@ const STREAM_IDLE_POLL_MS = 50;
 const STREAM_BUSY_YIELD_MS = 500;
 const OPTIONAL_FEATURES: readonly GPUFeatureName[] = [
   "rg11b10ufloat-renderable", "depth32float-stencil8", "float32-filterable", "float32-blendable",
-  "texture-compression-bc", "texture-compression-astc",
+  "texture-compression-bc", "texture-compression-astc", "depth-clip-control",
 ];
 /* Compute warp shuffles and votes need subgroups exactly a warp wide. */
 const WARP_LANES = 32;
