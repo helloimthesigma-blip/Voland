@@ -23,7 +23,7 @@ were measured.
 | Super Smash Bros. Ultimate | matches, opening movie | 22-27 in a fight (Oct.) | ~60 | |
 | Mario Kart 8 Deluxe (32-bit) | whole races | ~44 at the race start | ~60 | |
 | Animal Crossing: New Horizons | opening through arrival on the island | ~8 on the island (Oct.) | ~55 (intro) | none known (the black sea and the dark blotches were fixed on 2026-10-30) |
-| Tears of the Kingdom | the opening descent | ~7 | - | slow; the scene is unlit (the bottom third of the picture is black); occasional crashes on three cores |
+| Tears of the Kingdom | the opening descent | ~8 | - | slow; the picture is over-exposed; occasional crashes on three cores |
 
 "(Oct.)" marks numbers measured in October 2026, before later speed work, and not
 re-measured since. On an M1 Mac, Silksong gameplay runs at about 33 fps.
