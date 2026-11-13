@@ -129,3 +129,58 @@ test("a kept folder is read again at load, backs saves up and follows its mods",
   await page.getByTestId("voland-folder-rescan").click();
   await expect(page.getByTestId("files-mods")).toContainText("removed Fixture/Kept Mod", { timeout: 20_000 });
 });
+
+test("Tidy up moves loose games and firmware into their folders", async ({ page }) => {
+  test.skip(![PROGRAM_NCA, CONTROL_NCA, MII_NCA].every(existsSync), "fixtures not built: run ctest --preset native-noop");
+  await page.goto("/");
+  await expect(page.getByTestId("files-panel")).toBeVisible({ timeout: 20_000 });
+  await page.evaluate(async (files) => {
+    const root = await (await navigator.storage.getDirectory()).getDirectoryHandle("tidy-voland", { create: true });
+    for (const [path, bytes] of Object.entries(files)) {
+      const parts = path.split("/");
+      const leaf = parts.pop() ?? "";
+      let dir = root;
+      for (const part of parts) dir = await dir.getDirectoryHandle(part, { create: true });
+      const writable = await (await dir.getFileHandle(leaf, { create: true })).createWritable();
+      await writable.write(new Uint8Array(bytes));
+      await writable.close();
+    }
+    await new Promise<void>((resolve, reject) => {
+      const open = indexedDB.open("voland-folder", 1);
+      open.onupgradeneeded = (): void => { open.result.createObjectStore("handles"); };
+      open.onsuccess = (): void => {
+        const tx = open.result.transaction("handles", "readwrite");
+        tx.objectStore("handles").put(root, "root");
+        tx.oncomplete = (): void => resolve();
+        tx.onerror = (): void => reject(tx.error);
+      };
+      open.onerror = (): void => reject(open.error);
+    });
+  }, {
+    "dumps/Quest/fedcba9876543210fedcba9876543210.nca": [...readFileSync(PROGRAM_NCA)],
+    "dumps/Quest/0123456789abcdef0123456789abcdef.nca": [...readFileSync(CONTROL_NCA)],
+    "0a1b2c3d4e5f60718293a4b5c6d7e8f9.nca": [...readFileSync(MII_NCA)],
+  });
+  await page.reload();
+  await expect(page.getByTestId("files-games")).toContainText("Quest", { timeout: 20_000 });
+  await page.getByTestId("voland-folder-tidy").click();
+  await expect(page.getByTestId("files-note")).toContainText("Moved 3 file(s)", { timeout: 20_000 });
+  const layout = await page.evaluate(async () => {
+    const out: string[] = [];
+    const walk = async (dir: FileSystemDirectoryHandle, prefix: string): Promise<void> => {
+      for await (const [name, handle] of dir.entries()) {
+        if (handle.kind === "file") out.push(prefix + name);
+        else await walk(handle as FileSystemDirectoryHandle, `${prefix}${name}/`);
+      }
+    };
+    await walk(await (await navigator.storage.getDirectory()).getDirectoryHandle("tidy-voland"), "");
+    return out.sort();
+  });
+  expect(layout).toEqual([
+    "firmware/0a1b2c3d4e5f60718293a4b5c6d7e8f9.nca",
+    "games/Quest/0123456789abcdef0123456789abcdef.nca",
+    "games/Quest/fedcba9876543210fedcba9876543210.nca",
+  ]);
+  await expect(page.getByTestId("voland-folder-tidy")).toHaveCount(0);
+  await expect(page.getByTestId("library-game")).toHaveCount(1);
+});

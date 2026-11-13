@@ -11,11 +11,12 @@ import { For, Show, createSignal, onCleanup, onMount } from "solid-js";
 import { SYSTEM_FILES, systemFileName } from "@bindings/load";
 import type { SystemFilesApi } from "@bindings/load";
 import { archiveFiles, installMod, listMods, recordModSource, removeMod, safeModName } from "@workers/mod-store";
-import { type LibraryGame, canKeepFolders, shownNameOf } from "../library";
+import { type LibraryGame, canKeepFolders, forgetGame, shownNameOf } from "../library";
 import { exportFileName, exportSaves, titleNames } from "../saves";
 import {
   FOLDER_SOURCE, type FolderScan, MODS_DIR, askFolderPermission, folderPermission, inputFiles, keepFolder, keptFolder, modTitleId,
-  SAVES_DIR, contentHash, pickVolandFolder, scanFolder, setUpFolder, walkFolder, writeSaveBackup,
+  SAVES_DIR, applyTidy, canTidy, contentHash, pickVolandFolder, scanFolder, setUpFolder, tidyPlan, walkFolder,
+  writeSaveBackup,
 } from "../voland-folder";
 
 interface FilesPanelProps {
@@ -222,6 +223,20 @@ function FilesPanel(props: FilesPanelProps) {
     else setNote("The browser did not allow reading the folder.");
   }
 
+  /* "Tidy up": move loose games into games/<name>/ and firmware into
+   * firmware/, then forget the loose entries (the moved games come back
+   * from the new scan as folder games) and look again. */
+  async function tidy(handle: FileSystemDirectoryHandle, scan: FolderScan): Promise<void> {
+    const plan = tidyPlan(scan, titleNames());
+    setNote(`Moving ${plan.length} file(s)…`);
+    const result = await applyTidy(handle, plan);
+    for (const game of scan.games) if (game.dir === null && !result.failed.includes(game.program.path.join("/"))) await forgetGame(game.id);
+    await scanKept(handle);
+    setNote(result.failed.length === 0
+      ? `Moved ${result.moved} file(s) into games/ and firmware/.`
+      : `Moved ${result.moved} file(s); could not move ${result.failed.join(", ")}.`);
+  }
+
   async function onFolderInput(event: Event & { currentTarget: HTMLInputElement }): Promise<void> {
     const picked = inputFiles(Array.from(event.currentTarget.files ?? []));
     event.currentTarget.value = "";
@@ -305,6 +320,18 @@ function FilesPanel(props: FilesPanelProps) {
                   </button>
                 )}
               </Show>
+            </Show>
+            <Show when={r().handle && canTidy() && tidyPlan(r().scan, titleNames()).length > 0 ? r().handle : null}>
+              {(handle) => (
+                <div class="voland-setting">
+                  <button type="button" class="voland-load-button voland-load-secondary" data-testid="voland-folder-tidy"
+                          onClick={() => { void tidy(handle(), r().scan); }}>
+                    Tidy up: sort {tidyPlan(r().scan, titleNames()).length} file(s) into folders
+                  </button>
+                  <small> Each game goes in games/&lt;its name&gt;/ with its update and DLC, firmware in firmware/. Files are
+                    only moved, never deleted.</small>
+                </div>
+              )}
             </Show>
             <ul class="voland-checklist">
               <li data-testid="files-games">

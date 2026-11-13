@@ -307,20 +307,22 @@ export async function freshFiles(game: FolderGame): Promise<{ readonly file: Fil
 
 export const README_TEXT = `This is your Voland folder. Voland reads it in place; it never uploads or copies your games.
 
-games/      One subfolder per game with its decrypted .nca files (the game,
-            its control NCA for the name and icon, an update, DLC).
-            Loose .nca files work too.
+Put your decrypted .nca files anywhere in here: Voland reads each one and
+works out which game it belongs to (the game, its control NCA for the name
+and icon, an update, DLC) and which are firmware. "Tidy up" in Voland sorts
+them into the folders below for you (it only moves files, never deletes).
+
+games/      One subfolder per game with its decrypted .nca files.
 firmware/   Your console's decrypted firmware NCAs. Voland keeps only the
             system files some games need (the Mii model, NG word lists).
 mods/       One subfolder per game, named after the game (as the library
             shows it) or its title id, e.g. mods/Celeste/MyMod/romfs/...
             A mod can be a folder, a .zip / .7z, or an update / DLC .nca.
 saves/      If you turn on save backups, a copy of every save each day
-            (voland-saves-<date>.tar; restore one under Save data).
+            (voland-saves-<date>.tar; restore one in the Saves tab).
 
 Decrypt everything with your own tools first. Voland never decrypts and
-never asks for keys.
-`;
+never asks for keys.`;
 
 /* ---- keeping the folder (one IndexedDB entry: its handle) ---- */
 
@@ -436,4 +438,69 @@ export function contentHash(bytes: Uint8Array): number {
   let h = FNV_OFFSET;
   for (let i = 0; i < bytes.length; i++) h = Math.imul(h ^ (bytes[i] ?? 0), FNV_PRIME);
   return h >>> 0;
+}
+
+/** One file "Tidy up" moves: from its place to the folder `to` (path parts
+ * below the Voland folder), keeping its name. */
+export interface TidyMove {
+  readonly from: FolderFile;
+  readonly to: readonly string[];
+}
+
+/** A folder name made from a game's name (no path separators or
+ * characters Windows refuses). Pure. */
+function folderName(name: string): string {
+  const cleaned = name.replace(/[\/\\:*?"<>|\u0000-\u001f]/g, " ").replace(/\s+/g, " ").trim().replace(/\.+$/, "");
+  return cleaned.length > 0 ? cleaned.slice(0, 100) : "Game";
+}
+
+/** What "Tidy up" moves: each game not yet in a games/<name>/ folder goes
+ * to games/<its name>/ (the name the library knows for its title id, else
+ * the scan's), with its update, DLC and control NCAs; firmware NCAs outside
+ * firmware/ go to firmware/. Nothing else moves; names already taken by
+ * another game get its title id added. Pure. */
+export function tidyPlan(scan: FolderScan, names: Readonly<Record<string, string>>): readonly TidyMove[] {
+  const moves: TidyMove[] = [];
+  const taken = new Set(scan.games.filter((g) => g.dir !== null).map((g) => (g.dir ?? "").toLowerCase()));
+  for (const game of scan.games) {
+    if (game.dir !== null) continue;
+    const titleId = game.programId.toString(16).toUpperCase().padStart(16, "0");
+    let dir = folderName(names[titleId] ?? game.name);
+    if (taken.has(dir.toLowerCase())) dir = `${dir} (${titleId})`;
+    taken.add(dir.toLowerCase());
+    for (const file of [game.program, ...game.extras]) moves.push({ from: file, to: [GAMES_DIR, dir] });
+  }
+  for (const file of scan.firmware) {
+    if ((file.path[0] ?? "").toLowerCase() !== FIRMWARE_DIR) moves.push({ from: file, to: [FIRMWARE_DIR] });
+  }
+  return moves;
+}
+
+/** Whether this browser can move files inside a picked folder. */
+export function canTidy(): boolean {
+  return typeof FileSystemFileHandle !== "undefined" &&
+    typeof (FileSystemFileHandle.prototype as { move?: unknown }).move === "function";
+}
+
+/** Carries out `plan` below `root` (asks for write permission first). Each
+ * file is moved, never copied or deleted; a file that cannot move stays.
+ * Returns how many moved and the paths that did not. */
+export async function applyTidy(root: FileSystemDirectoryHandle, plan: readonly TidyMove[]):
+  Promise<{ readonly moved: number; readonly failed: readonly string[] }> {
+  if (!await askFolderPermission(root, "readwrite")) return { moved: 0, failed: plan.map((m) => joined(m.from.path)) };
+  let moved = 0;
+  const failed: string[] = [];
+  for (const move of plan) {
+    try {
+      const handle = move.from.handle;
+      if (!handle) throw new Error("no handle");
+      let dir = root;
+      for (const part of move.to) dir = await dir.getDirectoryHandle(part, { create: true });
+      await (handle as FileSystemFileHandle & { move: (to: FileSystemDirectoryHandle) => Promise<void> }).move(dir);
+      moved++;
+    } catch {
+      failed.push(joined(move.from.path));
+    }
+  }
+  return { moved, failed };
 }
