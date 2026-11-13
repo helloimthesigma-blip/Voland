@@ -13,11 +13,14 @@ export interface GuestConsoleState {
   readonly fps: number;
   /** Why the GPU stopped (out of memory, device lost); empty when it is fine. */
   readonly gpuTrouble: string;
+  /** Game time per real time while the game runs in slow motion (the
+   * audio worklet's measure, 0..1); 1 at full speed or when unknown. */
+  readonly speed: number;
 }
 
 const MAX_LINES = 1000;
 
-let state: GuestConsoleState = { lines: [], runState: "idle", detail: "", fps: 0, gpuTrouble: "" };
+let state: GuestConsoleState = { lines: [], runState: "idle", detail: "", fps: 0, gpuTrouble: "", speed: 1 };
 const subscribers = new Set<(next: GuestConsoleState) => void>();
 
 function publish(next: GuestConsoleState): void {
@@ -30,7 +33,7 @@ export function getGuestConsole(): GuestConsoleState {
 }
 
 export function resetGuestConsole(): void {
-  publish({ lines: [], runState: "idle", detail: "", fps: 0, gpuTrouble: "" });
+  publish({ lines: [], runState: "idle", detail: "", fps: 0, gpuTrouble: "", speed: 1 });
 }
 
 export function appendGuestOutput(text: string): void {
@@ -46,8 +49,8 @@ export function setGpuTrouble(gpuTrouble: string): void {
   publish({ ...state, gpuTrouble });
 }
 
-export function setGuestFps(fps: number): void {
-  if (fps !== state.fps) publish({ ...state, fps });
+export function setGuestFps(fps: number, speed = 1): void {
+  if (fps !== state.fps || speed !== state.speed) publish({ ...state, fps, speed });
 }
 
 export function subscribeGuestConsole(fn: (next: GuestConsoleState) => void): () => void {

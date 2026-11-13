@@ -387,7 +387,10 @@ function LoadPanel(props: LoadPanelProps) {
                   {RUN_STATE_LABELS[guest().runState]}
                 </span>
                 <Show when={guest().runState === "running" && guest().fps > 0}>
-                  <span class="voland-run-state" data-testid="fps">{guest().fps} fps</span>
+                  <span class="voland-run-state" data-testid="fps"
+                        title="Frames the game drew in the last second; below full speed the game also runs in slow motion">
+                    {guest().fps} fps{guest().speed < 1 ? ` · ${Math.round(guest().speed * 100)}% speed` : ""}
+                  </span>
                 </Show>
               </h3>
               <div class="voland-player-bar">

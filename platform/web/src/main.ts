@@ -495,6 +495,7 @@ async function boot(): Promise<BootResult | null> {
   /* Frame-rate meter: the framebuffer slots' publish counter, sampled once
    * a second straight from shared memory (no per-frame messages, §6). */
   let lastPublished = -1;
+  const SPEED_STEP = 0.05;
   setInterval(() => {
     const current = layout as MemoryLayout | null;
     if (!current) return;
@@ -504,7 +505,12 @@ async function boot(): Promise<BootResult | null> {
     const published = (Atomics.load(counters, PUBLISH_INDEX) + Atomics.load(stream, OFF_PRESENTS / 4)) | 0;
     const fps = lastPublished < 0 ? 0 : (published - lastPublished) | 0;
     lastPublished = published;
-    setGuestFps(fps);
+    /* Slow motion: the audio worklet stretches what the core produced and
+     * knows the game's speed; shown rounded to 5% so it does not flicker. */
+    const audio = window.__VOLAND_AUDIO__;
+    const speed = audio?.stretching === true && audio.speed !== undefined
+      ? Math.max(SPEED_STEP, Math.round(Math.min(1, audio.speed) / SPEED_STEP) * SPEED_STEP) : 1;
+    setGuestFps(fps, speed);
     window.__VOLAND_STATS__ = { fps, presents: published };
   }, 1000);
 
