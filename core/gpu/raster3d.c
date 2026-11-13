@@ -2081,6 +2081,9 @@ typedef struct Raster_State {
   Target targets[MAX_TARGETS];
   uint32_t target_count;
   bool mrt;
+  /* No target or depth to write, but the pixel program stores to memory:
+   * shaded on the CPU in GPU mode too (setup_state). */
+  bool stores_only;
   Raster3d_Surface *depth;
   bool depth_test, depth_write;
   uint32_t depth_func;
@@ -2280,6 +2283,11 @@ static void output_rgba8_blend(const Target *tg, const uint32_t color[4], uint8_
   for (uint32_t i2 = 0; i2 < 4u; i2++) p[i2] = tg->format->channel[i2] == CH_PAD ? 0xffu : to_unorm8(out[tg->format->channel[i2]]);
 }
 
+static bool stores_only_draws(void) {
+  const char *v = getenv("VOLAND_STORES_ONLY_DRAWS");
+  return !v || strcmp(v, "0") != 0;
+}
+
 static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
   Raster3d *r = ctx->r;
   const uint32_t *regs = ctx->regs;
@@ -2294,11 +2302,14 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
   rs->mrt = (regs[REG_CT_MRT_ENABLE] & 1u) != 0 || (ctx->ps && ctx->ps->header.mrt_enable);
   const bool per_target = (regs[REG_BLEND_PER_TARGET] & 1u) != 0;
   int32_t width = 0x7fffffff, height = 0x7fffffff;
+  int32_t masked_width = 0x7fffffff, masked_height = 0x7fffffff; /* targets with every channel masked */
   for (uint32_t i = 0; i < count && i < MAX_TARGETS; i++) {
     const uint32_t target = (select >> (4u + 3u * i)) & 7u;
     Surface_Desc d;
     Target *t = &rs->targets[i];
     if (!color_target_desc(regs, target, &d)) continue;
+    if ((int32_t)d.width < masked_width) masked_width = (int32_t)d.width;
+    if ((int32_t)d.height < masked_height) masked_height = (int32_t)d.height;
     t->format = color_format(d.format);
     const uint32_t write = (regs[REG_SINGLE_CT_WRITE] & 1u) ? regs[REG_CT_WRITE] : regs[REG_CT_WRITE + i];
     for (uint32_t c = 0; c < 4; c++)
@@ -2365,7 +2376,16 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
       if ((int32_t)zd.height < height) height = (int32_t)zd.height;
     }
   }
-  if (!rs->target_count && !rs->depth) return false;
+  if (!rs->target_count && !rs->depth) {
+    /* Every channel masked still runs the pixel program over the targets'
+     * area: its memory stores are the pass's whole output (Tears of the
+     * Kingdom's 320x180 passes that only store to memory).
+     * VOLAND_STORES_ONLY_DRAWS=0 skips them (A/B). */
+    if (!ctx->ps->stores_memory || masked_width == 0x7fffffff || !stores_only_draws()) return false;
+    rs->stores_only = true;
+    width = masked_width;
+    height = masked_height;
+  }
   rs->alpha_test = (regs[REG_ALPHA_TEST] & 1u) != 0;
   rs->alpha_func = regs[REG_ALPHA_FUNC];
   rs->alpha_ref = f32(regs[REG_ALPHA_REF]);
@@ -3063,7 +3083,7 @@ static uint64_t triangle_extent(const Raster_State *rs, const Vertex *const v[3]
 static void gpu_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking);
 
 static void raster_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
-  if (rs->ctx->r->gpu) {
+  if (rs->ctx->r->gpu && !rs->stores_only) {
     gpu_triangle(rs, a, b, c, provoking);
     return;
   }
@@ -5621,6 +5641,7 @@ bool raster3d_gpu_copy(Raster3d *r, const Gpu_Memory *mem, const Raster3d_Surfac
 /* ---- draws -------------------------------------------------------- */
 
 static Draw_Context g_draw_context; /* large (vertex windows); one draw at a time */
+#define SKIP_LOG_PROGRAMS 64u /* skipped draws: the pixel programs logged */
 
 void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *bindings, const Gpu_Memory *mem,
                    const Raster3d_Draw *draw) {
@@ -5669,6 +5690,19 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
   env_setup(ctx, 1, ctx->ps, bindings, ps_group);
   static Raster_State rs;
   if (!setup_state(ctx, &rs)) {
+    /* Each pixel program's first skipped draw (up to SKIP_LOG_PROGRAMS):
+     * an empty clip or no target drops what may be a full-screen pass. */
+    static uint64_t skip_logged[SKIP_LOG_PROGRAMS];
+    static uint32_t skip_logged_count;
+    bool seen = false;
+    for (uint32_t i = 0; i < skip_logged_count && !seen; i++) seen = skip_logged[i] == ctx->ps->address;
+    if (!seen && skip_logged_count < SKIP_LOG_PROGRAMS) {
+      skip_logged[skip_logged_count++] = ctx->ps->address;
+      if (r->stats.skipped_draws) /* (the first is logged below) */
+        log_warn("[gpu] draw skipped: pixel program %llx, %u targets, depth %s, clip %d,%d-%d,%d, CT_WRITE 0x%x",
+                 (unsigned long long)ctx->ps->address, rs.target_count, rs.depth ? "on" : "off", rs.clip.x0,
+                 rs.clip.y0, rs.clip.x1, rs.clip.y1, regs[REG_CT_WRITE]);
+    }
     if (!r->stats.skipped_draws) {
       Surface_Desc d;
       const bool has_rt = color_target_desc(regs, 0, &d);
@@ -5680,7 +5714,8 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     r->stats.skipped_draws++;
     return;
   }
-  if (r->gpu && !gpu_draw_begin(ctx, &rs, draw->topology, draw->count)) {
+  if (rs.stores_only) r->stats.stores_only_draws++;
+  if (r->gpu && !rs.stores_only && !gpu_draw_begin(ctx, &rs, draw->topology, draw->count)) {
     r->stats.skipped_draws++;
     return;
   }

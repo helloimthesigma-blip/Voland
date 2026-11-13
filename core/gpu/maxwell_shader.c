@@ -451,6 +451,7 @@ void sm_program_decode(const uint8_t *bytes, uint32_t size, uint64_t address, Sm
   out->reads_fragcoord_z = false;
   out->uses_quads = false;
   out->uses_bindless_textures = false;
+  out->stores_memory = false;
   out->texture_pc_count = 0;
   memset(out->cbuf_extent, 0, sizeof(out->cbuf_extent));
   uint32_t sph[SM_SPH_WORDS];
@@ -475,6 +476,7 @@ void sm_program_decode(const uint8_t *bytes, uint32_t size, uint64_t address, Sm
     if (in->op == SM_OP_LDC) note_cbuf(out, BITS(w, 36, 5), 0x10000u);
     if (in->op == SM_OP_FSWZADD || in->op == SM_OP_SHFL) out->uses_quads = true;
     if (in->op == SM_OP_TEX_B) out->uses_bindless_textures = true;
+    if (in->op == SM_OP_STG || in->op == SM_OP_ST || in->op == SM_OP_ATOM || in->op == SM_OP_RED) out->stores_memory = true;
     if (sm_is_texture_op(in->op)) {
       if (out->texture_pc_count < SM_MAX_TEXTURE_PCS) out->texture_pcs[out->texture_pc_count] = (uint16_t)i;
       out->texture_pc_count++;

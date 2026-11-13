@@ -46,7 +46,8 @@
  *                                    every N, trace S:L, log PATH, snapshot N DIR -
  *                                    a nested snapshot server, gpu_stream FILE -
  *                                    GPU mode recorded from here, dump_shaders DIR,
- *                                    interpret - the JIT's threads interpreted from here);
+ *                                    interpret - the JIT's threads interpreted from here,
+ *                                    env NAME=VALUE - an environment variable for the job);
  *                                    the result is
  *                                    DIR/job.done.<pid>. DIR/quit ends the server.
  *                                    Iterating on a late scene without replaying.
@@ -606,6 +607,13 @@ static bool read_job(const char *path, Snapshot_Job *job) {
     } else if (sscanf(line, "dump_shaders %511s", job->dump_shaders) == 1) {
     } else if (sscanf(line, "frame %511s", job->frame_path) == 1) {
     } else if (sscanf(line, "log %511s", log_path) == 1) {
+    } else if (strncmp(line, "env ", 4) == 0) { /* "env NAME=VALUE": set in the job's process */
+      char *eq = strchr(line + 4, '=');
+      if (eq) {
+        line[strcspn(line, "\r\n")] = '\0';
+        *eq = '\0';
+        setenv(line + 4, eq + 1, 1);
+      }
     }
   }
   fclose(f);
@@ -2323,10 +2331,10 @@ static int run(int argc, char **argv) {
     const Raster3d_Stats *g = &emu.renderer.stats;
     if (g->draws || g->clears)
       fprintf(stderr,
-              "voland-cli: gpu %llu clears, %llu draws (%llu skipped), %llu triangles, %llu pixels, "
+              "voland-cli: gpu %llu clears, %llu draws (%llu skipped, %llu memory stores only), %llu triangles, %llu pixels, "
               "%llu shader faults, %llu unknown ops, %llu texture misses\n",
               (unsigned long long)g->clears, (unsigned long long)g->draws, (unsigned long long)g->skipped_draws,
-              (unsigned long long)g->triangles, (unsigned long long)g->pixels, (unsigned long long)g->shader_faults,
+              (unsigned long long)g->stores_only_draws, (unsigned long long)g->triangles, (unsigned long long)g->pixels, (unsigned long long)g->shader_faults,
               (unsigned long long)g->unknown_ops, (unsigned long long)g->texture_misses);
     if (emu.nvdrv.mm_video.frames)
       fprintf(stderr, "voland-cli: video %llu pictures decoded, %llu VIC conversions\n",

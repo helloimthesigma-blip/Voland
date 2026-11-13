@@ -235,6 +235,7 @@ typedef struct Raster3d_Stats {
   uint64_t triangles;
   uint64_t pixels;
   uint64_t skipped_draws;   /* no programs / no targets / unsupported */
+  uint64_t stores_only_draws; /* no target written, the pixel program stores to memory (shaded on the CPU) */
   uint64_t shader_faults;
   uint64_t compute_dispatches; /* compute launches run (raster3d_compute) */
   uint64_t compute_threads;

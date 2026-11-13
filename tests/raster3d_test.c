@@ -44,6 +44,8 @@ static int g_failures;
 #define PS_LDG_TWO_OFFSET 0x3400u /* its address from one of two descriptors (predicated MOVs) */
 #define PS_LDG_BRANCH_OFFSET 0x3c00u /* its address loaded before a branch over other code */
 #define PS_LDG_ENTRY_OFFSET 0x3e00u  /* ... but a branch from before the load reaches the LDG */
+#define PS_STORE_OFFSET 0x1c00u /* a pixel program whose only output is a store to the storage buffer */
+#define STORED_WORD 0x5a5a5a5au
 #define SSBO_DESC 0x110u      /* the storage buffer's descriptor in c[0] (NVN) */
 #define SSBO (GPU_BASE + 0xC000u)
 #define VERTICES (GPU_BASE + 0x4000u)
@@ -213,6 +215,10 @@ static void build_programs(void) {
   const uint64_t ps_e[] = {MOV32I(4, 0x1234u), MOV32I(5, 0), BRA_P0(code_word(6) - code_word(2) - 1u), mov_lo, mov_hi,
                            MOV32I(1, 0), LDG_E128(0, 4), EXIT()};
   write_program(PS_LDG_ENTRY_OFFSET, ps_sph, ps_e, 8);
+  /* Stores STORED_WORD to the storage buffer's first word, and nothing else. */
+  const uint64_t pss[] = {MOV32I(12, 0), IADD_C_CC(4, 12, SSBO_DESC), IADD_C_X(5, SSBO_DESC + 4u), MOV32I(0, STORED_WORD),
+                          stg_e32, EXIT()};
+  write_program(PS_STORE_OFFSET, ps_sph, pss, 6);
 }
 
 /* ---- register state ----------------------------------------------- */
@@ -988,6 +994,7 @@ static uint64_t g_twice_poke;  /* ... after this guest address took 7.0f (0: non
 static bool g_gpu_rt_bl;       /* gpu_draw_topology: into RT_BL (block linear) instead of RT */
 static uint64_t g_gpu_rt_offset; /* ... this far past RT_BL */
 static uint32_t g_base_instance; /* gpu_draw_topology: REG_BASE_INSTANCE */
+static bool g_masked_targets;    /* gpu_draw_topology: every colour channel masked (CT_WRITE 0) */
 static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_t topology, uint32_t count) {
   static Gpu_Stream stream;
   Seen_Draw seen;
@@ -998,6 +1005,7 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
   if (g_gpu_textured) texture_state();
   if (g_bc1_texture) texture_state_bc1();
   g_regs[REG_BASE_INSTANCE_TEST] = g_base_instance;
+  if (g_masked_targets) g_regs[0x680] = 0;
   g_regs[REG_CULL_ENABLE_TEST] = 1;
   g_regs[REG_CULL_FACE_TEST] = CULL_BACK_REG;
   g_regs[REG_FRONT_FACE_TEST] = front_face_reg;
@@ -1447,6 +1455,53 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   g_gpu_textured = false;
 }
 
+/* A pixel program whose only effect is a store, every target channel
+ * masked (Tears of the Kingdom's 320x180 store passes): it still runs over
+ * the target's area - on the CPU in GPU mode too - and draws nothing.
+ * VOLAND_STORES_ONLY_DRAWS=0 skips it. */
+static uint32_t ssbo_word(void) {
+  uint32_t v = 0;
+  memcpy(&v, g_gpu + (SSBO - GPU_BASE), 4);
+  return v;
+}
+
+static void test_stores_only(Raster3d *r) {
+  put32(CBUF + SSBO_DESC, (uint32_t)SSBO);
+  put32(CBUF + SSBO_DESC + 4u, (uint32_t)(SSBO >> 32));
+  put32(CBUF + SSBO_DESC + 8u, 16u);
+  base_state(RT, false, PS_STORE_OFFSET);
+  texture_state(); /* binds c[0] */
+  raster3d_begin_submission(r);
+  clear_to(r, 0.0f, 0.0f, 1.0f, 1.0f);
+  g_regs[0x680] = 0;
+  vertex(0, -1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(1, 1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(2, -1.0f, 1.0f, 1, 0, 0, 1);
+  put32(SSBO, 0);
+  setenv("VOLAND_STORES_ONLY_DRAWS", "0", 1);
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  unsetenv("VOLAND_STORES_ONLY_DRAWS");
+  CHECK(ssbo_word() == 0, "VOLAND_STORES_ONLY_DRAWS=0 skips the store pass (0x%x)", ssbo_word());
+  const uint64_t before = r->stats.stores_only_draws;
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  CHECK(ssbo_word() == STORED_WORD && r->stats.stores_only_draws == before + 1u,
+        "a store-only pixel program runs with every channel masked (0x%x)", ssbo_word());
+  CHECK(rgba_is(pixel(RT, false, 10, 10), 0, 0, 255, 255), "... and draws nothing");
+  /* GPU mode: no draw record; the store reaches guest memory. */
+  put32(SSBO, 0);
+  g_masked_targets = true;
+  g_gpu_textured = true;
+  g_ps_override = PS_STORE_OFFSET;
+  const Seen_Draw gpu = gpu_draw_once(r, FRONT_CW_REG);
+  g_ps_override = 0;
+  g_gpu_textured = false;
+  g_masked_targets = false;
+  CHECK(gpu.count == 0 && ssbo_word() == STORED_WORD, "GPU mode: shaded on the CPU (%u GPU draws, 0x%x)", gpu.count,
+        ssbo_word());
+}
+
 /* ---- compute: a block of two lane groups meeting at BAR.SYNC --------- */
 
 #define COMPUTE_CODE 0x2000u     /* program region offset of the (header-less) code */
@@ -1650,6 +1705,7 @@ int main(void) {
   test_derivatives(&r);
   test_worker_count_invariance(&r);
   test_gpu_vertex_stage(&r);
+  test_stores_only(&r);
   test_gpu_aliased_targets(&r);
   test_gpu_packed_upload(&r);
   test_gpu_compressed_upload(&r);

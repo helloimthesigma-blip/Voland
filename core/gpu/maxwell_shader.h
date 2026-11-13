@@ -183,6 +183,9 @@ typedef struct Sm_Program {
   /* Has TEX.B: a texture handle comes from a register, not from the
    * texture constant buffer at an index the instruction names. */
   bool uses_bindless_textures;
+  /* Writes memory (STG, ST, ATOM, RED): a pixel program with no target to
+   * draw into still has an effect. */
+  bool stores_memory;
   /* Its texture instructions' words in order: per-draw setup visits these
    * rather than every instruction. texture_pc_count counts them all; above
    * SM_MAX_TEXTURE_PCS only the first are listed (sm_texture_pcs_complete). */
