@@ -186,6 +186,44 @@ export interface ModFileSource {
   readonly data: Blob;
 }
 
+/* A game's title id as a path component (atmosphere/contents/<id>/...,
+ * or a mod packed as <id>/romfs/...): 0100 then 12 hex digits. */
+const TITLE_ID_PART = /^0100[0-9a-f]{12}$/i;
+/** How many of an archive's first entries are looked at for a title id. */
+const TITLE_PEEK_ENTRIES = 64;
+
+/** The game title id a mod file's path names, or null. Pure. */
+export function titleIdInPath(path: string): string | null {
+  return safeParts(path).find((p) => TITLE_ID_PART.test(p))?.toUpperCase() ?? null;
+}
+
+/** The title id the first of `files` to name one names, looking at no
+ * more than TITLE_PEEK_ENTRIES of them, and every file again (the ones
+ * looked at first, then the rest) - so an archive is read only once. */
+export async function peekTitleId(files: AsyncIterable<ModFileSource> | Iterable<ModFileSource>):
+  Promise<{ readonly titleId: string | null; readonly files: AsyncIterable<ModFileSource> }> {
+  const iterator = (Symbol.asyncIterator in files ? files[Symbol.asyncIterator]() : (async function* () { yield* files; })());
+  const seen: ModFileSource[] = [];
+  let titleId: string | null = null;
+  let done = false;
+  while (titleId === null && seen.length < TITLE_PEEK_ENTRIES) {
+    const next = await iterator.next();
+    if (next.done) { done = true; break; }
+    seen.push(next.value);
+    titleId = titleIdInPath(next.value.path);
+  }
+  async function* all(): AsyncGenerator<ModFileSource> {
+    yield* seen;
+    if (done) return;
+    for (;;) {
+      const next = await iterator.next();
+      if (next.done) return;
+      yield next.value;
+    }
+  }
+  return { titleId, files: all() };
+}
+
 /** Installs (or replaces) mod `name` for the title from `files`. Returns
  * how many files were written. */
 export async function installMod(titleId: string, name: string, files: AsyncIterable<ModFileSource> | Iterable<ModFileSource>,

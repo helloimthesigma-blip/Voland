@@ -7,7 +7,8 @@ import { openTab } from "./tabs.ts";
 
 /**
  * The Mods panel (§19): a zip installs as a mod for a game, can be turned
- * off, reordered and deleted; a repository added by URL offers its mods
+ * off, reordered and deleted; a mod naming its game's title id in its
+ * paths installs for that game; a repository added by URL offers its mods
  * for the game and installs one after checking its SHA-256.
  */
 const CORE_JS = fileURLToPath(new URL("../public/core/switch_core.js", import.meta.url));
@@ -81,6 +82,19 @@ test("a zip installs as a mod that can be disabled, reordered and deleted", asyn
   await expect(page.getByTestId("mods-panel").getByTestId("mod-row").nth(0).locator('input[type="checkbox"]')).not.toBeChecked();
   page.once("dialog", (dialog) => void dialog.accept());
   await page.getByTestId("mods-panel").getByTestId("mod-row").nth(0).getByTitle("Delete this mod from the browser").click();
+  await expect(page.getByTestId("mods-panel").getByTestId("mod-row")).toHaveCount(1);
+});
+
+test("a mod packed for another game installs for that game", async ({ page }) => {
+  await page.goto("/");
+  await openTab(page, "mods");
+  await expect(page.getByTestId("mods-game")).toHaveValue(TITLE.toUpperCase(), { timeout: 20_000 });
+  const other = "0100EEEE00000000";
+  await page.getByTestId("mods-add-zip").setInputFiles([
+    { name: "Other Game Mod.zip", mimeType: "application/zip", buffer: zip({ [`atmosphere/contents/${other}/romfs/a.bin`]: "a" }) },
+  ]);
+  await expect(page.getByTestId("mods-note")).toContainText(`Installed Other Game Mod for ${other}`);
+  await expect(page.getByTestId("mods-game")).toHaveValue(other);
   await expect(page.getByTestId("mods-panel").getByTestId("mod-row")).toHaveCount(1);
 });
 

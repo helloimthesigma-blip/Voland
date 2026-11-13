@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { orderedNames, safeModName, safeParts, zipEntries, zipFiles } from "../../workers/mod-store.ts";
+import { orderedNames, peekTitleId, safeModName, safeParts, titleIdInPath, zipEntries, zipFiles } from "../../workers/mod-store.ts";
 
 test("saved order first, the rest by name", () => {
   assert.deepEqual(orderedNames(["b", "a", "c"], ["c", "gone"]), ["c", "a", "b"]);
@@ -81,4 +81,29 @@ test("zip entries: stored and deflate, directories skipped", async () => {
 
 test("not a zip is an error", async () => {
   await assert.rejects(zipEntries(new Blob([new Uint8Array(100)])), /not a zip/);
+});
+
+test("a mod's game is found from a title id in its paths", async () => {
+  assert.equal(titleIdInPath("atmosphere/contents/01006a800016e000/romfs/a.bin"), "01006A800016E000");
+  assert.equal(titleIdInPath("0100ABCDEF012345/exefs/main.npdm"), "0100ABCDEF012345");
+  assert.equal(titleIdInPath("romfs/0100/a.bin"), null);
+  assert.equal(titleIdInPath("romfs/01006a800016e000x/a.bin"), null);
+
+  const files = [
+    { path: "readme.txt", data: new Blob(["r"]) },
+    { path: "atmosphere/contents/01006A800016E000/romfs/a.bin", data: new Blob(["a"]) },
+    { path: "atmosphere/contents/01006A800016E000/romfs/b.bin", data: new Blob(["b"]) },
+  ];
+  async function* source(): AsyncGenerator<{ path: string; data: Blob }> { yield* files; }
+  const peeked = await peekTitleId(source());
+  assert.equal(peeked.titleId, "01006A800016E000");
+  const again: string[] = [];
+  for await (const f of peeked.files) again.push(f.path);
+  assert.deepEqual(again, files.map((f) => f.path));
+
+  const none = await peekTitleId([{ path: "romfs/a.bin", data: new Blob(["a"]) }]);
+  assert.equal(none.titleId, null);
+  let count = 0;
+  for await (const _ of none.files) count++;
+  assert.equal(count, 1);
 });

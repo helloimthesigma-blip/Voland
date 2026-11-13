@@ -6,6 +6,7 @@
  * hand-written homebrew (public/demo/hello.nro, from tests/guest/hello.s).
  */
 import { For, Match, Show, Switch, createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { registerRestart } from "../restart";
 import { Portal } from "solid-js/web";
 import { SYSTEM_FILES, systemFileName } from "@bindings/load";
 import type { GameLoadOutcome, LoadFailure, SdImportOutcome, SystemFilesApi } from "@bindings/load";
@@ -163,6 +164,8 @@ function LoadPanel(props: LoadPanelProps) {
       await markPlayed(gameId, outcome.titleId, outcome.title, outcome.icon);
       await refreshLibrary();
     }
+    const relaunch = outcome.success && gameId ? games().find((g) => g.id === gameId) ?? null : null;
+    registerRestart(relaunch && outcome.success ? { titleId: outcome.titleId, restart: () => launch(relaunch) } : null);
     setState(outcome.success
       ? { kind: "loaded", fileName: file.name, titleId: outcome.titleId, entryPoint: outcome.entryPoint }
       : { kind: "failed", fileName: file.name, failure: outcome.failure });
