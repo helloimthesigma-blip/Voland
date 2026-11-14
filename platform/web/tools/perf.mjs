@@ -745,6 +745,9 @@ async function main() {
           note = arg;
         } else if (cmd === "status") {
           note = (await page.getByTestId(arg).first().textContent().catch(() => "")) ?? "";
+        } else if (cmd === "eval") {
+          /* eval EXPR: a page expression's value (diagnostics, e.g. document.activeElement?.outerHTML). */
+          note = String(await page.evaluate((expr) => { try { return String((0, eval)(expr)); } catch (e) { return `throws ${e}`; } }, lines[done].slice(cmd.length).trim())).slice(0, 300);
         } else if (cmd === "dom") {
           writeFileSync(arg, await page.content());
         } else if (cmd === "pageshot") {

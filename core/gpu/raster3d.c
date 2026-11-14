@@ -4787,6 +4787,15 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
     st->cpu_vs_bindless++;
     return;
   }
+  /* A jump table (BRX): Animal Crossing's vertex program 6950030 renders
+   * its scene black through the WGSL once BRX reaches bundle starts
+   * (f18d216) while the interpreter draws it right; Tears of the Kingdom's
+   * subtitle program is right on the CPU too. Until the WGSL difference is
+   * found, such programs shade on the CPU. */
+  if (ctx->vs->uses_jump_table) {
+    st->cpu_vs_jump_table++;
+    return;
+  }
   if (!gpu_plan_globals(ctx, g, &words)) {
     st->cpu_vs_globals++;
     return;

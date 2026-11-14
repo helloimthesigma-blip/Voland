@@ -236,7 +236,7 @@ typedef struct Raster3d_Gpu_Stats {
   /* Draws whose vertices were shaded on the CPU, by reason: points or
    * lines, bindless textures in the vertex program, unplannable global
    * buffers, constants large for the vertex count, the data window. */
-  uint64_t cpu_vs_topology, cpu_vs_bindless, cpu_vs_globals, cpu_vs_small, cpu_vs_window;
+  uint64_t cpu_vs_topology, cpu_vs_bindless, cpu_vs_globals, cpu_vs_small, cpu_vs_window, cpu_vs_jump_table;
   uint64_t surface_drops, surface_carries; /* surfaces destroyed (evicted / re-described), diagnostics */
 } Raster3d_Gpu_Stats;
 

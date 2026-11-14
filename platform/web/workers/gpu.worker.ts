@@ -142,6 +142,7 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
     },
     presented: (width, height) => {
       if (++presented === 1) log("info", `first WebGPU frame presented: ${width}x${height}`);
+      webgpuPresents++;
     },
     log,
   });
@@ -229,6 +230,11 @@ function present(renderer: Renderer, buffer: ArrayBufferLike, regionBase: number
   device.queue.submit([encoder.finish()]);
 }
 
+/* WebGPU presents so far (consumeStream), and software frames logged after them. */
+let webgpuPresents = 0;
+let mixedLogged = 0;
+const MIXED_PRESENT_LOGS = 5;
+
 async function consumeFrames(renderer: Renderer, memory: WebAssembly.Memory, regionBase: number): Promise<void> {
   const counters = new Int32Array(memory.buffer, regionBase, 2);
   const header = new DataView(memory.buffer, regionBase, FRAMEBUFFER_HEADER_BYTES);
@@ -244,6 +250,12 @@ async function consumeFrames(renderer: Renderer, memory: WebAssembly.Memory, reg
       Atomics.store(counters, CONSUME_INDEX, published);
       Atomics.notify(counters, CONSUME_INDEX);
       if (++presented === 1 && frame) log("info", `first frame presented: ${frame.width}x${frame.height}`);
+      /* Both paths draw into one canvas: a software frame after WebGPU
+       * ones replaces the GPU's picture (diagnostics, a few times). */
+      if (frame && webgpuPresents > 0 && mixedLogged < MIXED_PRESENT_LOGS) {
+        mixedLogged++;
+        log("warn", `software frame presented after ${webgpuPresents} WebGPU frames: ${frame.width}x${frame.height}`);
+      }
     }
     if (waitAsync) {
       const waited = waitAsync(counters, PUBLISH_INDEX, published);
