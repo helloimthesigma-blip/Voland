@@ -390,7 +390,7 @@ export function parseDraw(v: DataView): Draw {
   return {
     shaderId: u32(v, 0), targets, depthId, depthTest, depthWrite, depthCompare, stencil, stencilFront, stencilBack,
     stencilReadMask: u32(v, at), stencilWriteMask: u32(v, at + 4), stencilRef: u32(v, at + 8),
-    blendConstant: Array.from({ length: 4 }, (_, i) => v.getFloat32(at + 12 + 4 * i, true)),
+    blendConstant: [v.getFloat32(at + 12, true), v.getFloat32(at + 16, true), v.getFloat32(at + 20, true), v.getFloat32(at + 24, true)],
     scissor: i32s(v, at + 28, 4), varyingCount: u32(v, at + 44), flatMask: u32(v, at + 48),
     bindingCount: u32(v, at + 52), vertexCount: u32(v, at + 56),
     vsShaderId: u32(v, at + 60), vertexInputCount: u32(v, at + 64), cullMode: u32(v, at + 68), frontFace: u32(v, at + 72),
