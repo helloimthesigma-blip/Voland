@@ -461,7 +461,8 @@ async function main() {
     for (const file of opts.systemFiles ?? []) { /* "System files": the user's own console dumps */
       await page.getByTestId("system-input").setInputFiles(file);
       const note = page.getByTestId("system-result");
-      await note.filter({ hasNotText: /Adding|Scanning/ }).waitFor({ timeout: 60_000 });
+      /* The note sits under Settings > Advanced (folded away): attached is enough. */
+      await note.filter({ hasNotText: /Adding|Scanning/ }).waitFor({ state: "attached", timeout: 60_000 });
       console.log(`system file: ${await note.textContent()}`);
     }
     if (opts.mods?.length) { /* §19: install mod folders into OPFS for the game's title (as the Mods panel does) */
