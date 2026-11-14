@@ -2099,7 +2099,7 @@ Error emulator_savestate_begin_restore(Emulator* emulator, Savestate_Plan* plan)
 /* The renderer is the session's, not the state's: its decoded textures
  * re-check their guest bytes (restored) before next use, render targets
  * reload from guest memory, GPU ones are re-uploaded. */
-static void savestate_revalidate_renderer(Raster3d *r) {
+static void savestate_revalidate_renderer(Raster3d *r, const Nvdrv_State *nvdrv) {
   for (uint32_t i = 0; i < RASTER_TEXTURES; i++) {
     Raster3d_Texture *t = &r->textures[i];
     t->validated = r->texture_epoch - 1u;
@@ -2110,8 +2110,16 @@ static void savestate_revalidate_renderer(Raster3d *r) {
     r->surfaces[i].loaded = false;
     r->surfaces[i].dirty = false;
   }
+  /* GPU ones: the state's GPU mappings may put their GPU addresses over
+   * other guest memory, which presents name them by. */
   for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
-    if (r->gpu_surfaces[i].in_use) r->gpu_surfaces[i].stale = true;
+    Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
+    if (!s->in_use) continue;
+    s->stale = true;
+    s->stale_lo = 0;
+    s->stale_hi = s->guest_bytes;
+    uint64_t contiguous = 0;
+    if (!nvdrv_gpu_translate(nvdrv, s->address, &s->cpu_address, &contiguous)) s->cpu_address = 0;
   }
 }
 
@@ -2152,10 +2160,16 @@ Error emulator_savestate_finish_restore(Emulator* emulator, bool applied) {
   memcpy(&emulator->renderer_arena, &before->renderer_arena, sizeof(Arena));
   memcpy(&emulator->gpu_stream, &before->gpu_stream, sizeof(Gpu_Stream));
   emulator->gpu_stream_ready = before->gpu_stream_ready;
+  emulator->gpu_thread = before->gpu_thread; /* the running host thread, not the saving session's */
+  /* Diagnostics count this session's stream and renderer. */
+  emulator->stream_report_frames = emulator->vi.frames_presented + EMULATOR_STREAM_REPORT_FRAMES; /* vi is the state's */
+  memcpy(emulator->stream_type_reported, before->stream_type_reported, sizeof(emulator->stream_type_reported));
+  emulator->stream_stats_reported = before->stream_stats_reported;
+  emulator->mirror_stats_reported = before->mirror_stats_reported;
   memcpy(&emulator->video, &before->video, sizeof(Video_Stream));
   emulator->video_ready = before->video_ready;
   if (emulator->gpu_stream_ready) raster3d_set_gpu(&emulator->renderer, &emulator->gpu_stream);
-  savestate_revalidate_renderer(&emulator->renderer);
+  savestate_revalidate_renderer(&emulator->renderer, &emulator->nvdrv);
 
   /* Every thread gets a live CPU state holding its saved registers: the
    * main thread's is the Emulator's; others reuse a state that still

@@ -107,7 +107,15 @@ const DATA_WINDOW_BYTES = 2 * 1024 * 1024;
 /** Room for buffer writes that land under pending commands (bufferWrite):
  * past it, the batch is submitted first. */
 const WRITE_STAGING_BYTES = 4 * 1024 * 1024;
+/** Pool chunks arrive back to back, a few hundred bytes each: they gather
+ * here and go up in one write per run (a write is a trip to the GPU
+ * process). A chunk larger than this goes up on its own. */
+const POOL_GATHER_BYTES = 1024 * 1024;
 const BIND_GROUP_CACHE_LIMIT = 4096;
+/** Cached pipelines built per turn of the event loop while a title starts (usePersistentCache). */
+const PREWARM_BATCH = 8;
+/** At most this many cached pipelines are prewarmed (the newest). */
+const PREWARM_MAX = 512;
 const MAX_TEXTURES = 16; /* core/gpu/wgsl.h WGSL_MAX_TEXTURES: samplers bind at 1 + MAX_TEXTURES + i */
 
 export interface PresentTarget {
@@ -400,12 +408,17 @@ export class GpuExecutor {
   private poolBytes = 0; /* ... pool chunks */
   private shaderBytes = 0; /* WGSL text of the modules created */
   private submits = 0;
+  private bufferWrites = 0; /* writeBuffer calls: each is a round trip to the GPU process */
   /* Pipelines and shader modules first built since the last present: the
    * GPU process compiles them, which can hold up the page's frames. */
   private newPipelines = 0;
   private newModules = 0;
   /* Draws' constant buffers and global memory (stream version 9). */
   private readonly pool: GPUBuffer;
+  /* Pool chunks not yet written: poolGather[0, poolGathered) for the pool at poolGatherAt. */
+  private readonly poolGather = new Uint8Array(POOL_GATHER_BYTES);
+  private poolGatherAt = 0;
+  private poolGathered = 0;
 
   constructor(private readonly device: GPUDevice, private readonly host: ExecutorHost) {
     for (let i = 0; i < BUFFER_SETS; i++) {
@@ -419,6 +432,12 @@ export class GpuExecutor {
     this.writeStaging = device.createBuffer({ size: WRITE_STAGING_BYTES, usage: GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST });
   }
 
+  /** queue.writeBuffer, counted (diagnostics: each call is a trip to the GPU process). */
+  private writeBuffer(buffer: GPUBuffer, offset: number, data: Uint8Array | Float32Array | Uint32Array, dataOffset: number, size: number): void {
+    this.bufferWrites++;
+    this.device.queue.writeBuffer(buffer, offset, data, dataOffset, size);
+  }
+
   /** A chunk appended to the pool. Unsubmitted commands never read where it
    * goes, except after a wrap: those are submitted first. */
   private poolWrite(v: DataView, payload: Uint8Array): void {
@@ -428,9 +447,26 @@ export class GpuExecutor {
       return;
     }
     if (flags & POOL_WRAP) this.flush();
-    this.device.queue.writeBuffer(this.pool, offset, payload, POOL_WRITE_BYTES, bytes);
+    if (this.poolGathered && (offset !== this.poolGatherAt + this.poolGathered || this.poolGathered + bytes > POOL_GATHER_BYTES)) {
+      this.writePoolGather();
+    }
+    if (bytes > POOL_GATHER_BYTES) {
+      this.writeBuffer(this.pool, offset, payload, POOL_WRITE_BYTES, bytes);
+    } else {
+      if (!this.poolGathered) this.poolGatherAt = offset;
+      this.poolGather.set(payload.subarray(POOL_WRITE_BYTES, POOL_WRITE_BYTES + bytes), this.poolGathered);
+      this.poolGathered += bytes;
+    }
     this.bufferBytes += bytes;
     this.poolBytes += bytes;
+  }
+
+  /** The gathered pool chunks, in one write. The queue orders it before
+   * any later submission, so it lands before the draws that read it. */
+  private writePoolGather(): void {
+    if (!this.poolGathered) return;
+    this.writeBuffer(this.pool, this.poolGatherAt, this.poolGather, 0, this.poolGathered);
+    this.poolGathered = 0;
   }
 
   /** One record (the payload after the 8-byte record header). */
@@ -497,10 +533,11 @@ export class GpuExecutor {
 
   flush(): void {
     this.endPass();
+    this.writePoolGather();
     if (!this.encoder) return;
     const t0 = performance.now();
-    if (this.vertexUsed) this.device.queue.writeBuffer(this.vertexBuffer, 0, this.vertexStaging, 0, this.vertexUsed);
-    if (this.dataUsed) this.device.queue.writeBuffer(this.dataBuffer, 0, this.dataStaging, 0, this.dataUsed);
+    if (this.vertexUsed) this.writeBuffer(this.vertexBuffer, 0, this.vertexStaging, 0, this.vertexUsed);
+    if (this.dataUsed) this.writeBuffer(this.dataBuffer, 0, this.dataStaging, 0, this.dataUsed);
     this.bufferBytes += this.vertexUsed + this.dataUsed;
     this.vertexBytes += this.vertexUsed;
     this.dataBytes += this.dataUsed;
@@ -695,7 +732,7 @@ export class GpuExecutor {
       if (this.encoder && this.writeStagingUsed + bytes <= WRITE_STAGING_BYTES &&
           !(globalThis as { NO_WRITE_STAGING?: boolean }).NO_WRITE_STAGING) {
         this.endPass();
-        this.device.queue.writeBuffer(this.writeStaging, this.writeStagingUsed, payload, BUFFER_WRITE_BYTES, bytes);
+        this.writeBuffer(this.writeStaging, this.writeStagingUsed, payload, BUFFER_WRITE_BYTES, bytes);
         this.encoder.copyBufferToBuffer(this.writeStaging, this.writeStagingUsed, b, offset, bytes);
         this.writeStagingUsed += bytes;
         this.bufferBytes += bytes;
@@ -703,7 +740,7 @@ export class GpuExecutor {
       }
       this.flush();
     }
-    this.device.queue.writeBuffer(b, offset, payload, BUFFER_WRITE_BYTES, bytes);
+    this.writeBuffer(b, offset, payload, BUFFER_WRITE_BYTES, bytes);
     this.bufferBytes += bytes;
   }
 
@@ -933,26 +970,44 @@ export class GpuExecutor {
    * they are ready before the title draws with them. */
   usePersistentCache(store: ShaderCacheStore, contents: CacheContents): Promise<void> {
     this.cacheStore = store;
-    for (const [hash, code] of contents.shaders) {
-      if (!this.modulesByHash.has(hash)) this.modulesByHash.set(hash, this.device.createShaderModule({ code }));
-    }
-    const builds = contents.pipelines.map(async (spec) => {
-      const key = specKey(spec);
-      const module = this.modulesByHash.get(spec.wgsl);
-      const vsModule = spec.vs ? this.modulesByHash.get(spec.vs.wgsl) : module;
-      if (!module || !vsModule || this.pipelines.has(key)) return;
-      const { desc, layout } = this.pipelineDescriptor(spec, module, vsModule);
-      try {
-        const pipeline = await this.device.createRenderPipelineAsync(desc);
-        if (!this.pipelines.has(key)) {
-          this.pipelines.set(key, { pipeline, layout });
-          this.stats.prewarmed++;
-        }
-      } catch {
-        /* not valid here (another adapter's formats): built on demand */
+    const moduleFor = (hash: string): GPUShaderModule | undefined => {
+      let module = this.modulesByHash.get(hash);
+      const code = module ? undefined : contents.shaders.get(hash);
+      if (code !== undefined) {
+        module = this.device.createShaderModule({ code });
+        this.modulesByHash.set(hash, module);
       }
-    });
-    return Promise.all(builds).then(() => undefined);
+      return module;
+    };
+    const build = (spec: CacheContents["pipelines"][number]): void => {
+      const key = specKey(spec);
+      if (this.pipelines.has(key)) return;
+      const module = moduleFor(spec.wgsl);
+      const vsModule = spec.vs ? moduleFor(spec.vs.wgsl) : module;
+      if (!module || !vsModule) return;
+      const { desc, layout } = this.pipelineDescriptor(spec, module, vsModule);
+      this.device.pushErrorScope("validation");
+      this.pipelines.set(key, { pipeline: this.device.createRenderPipeline(desc), layout });
+      this.stats.prewarmed++;
+      void this.device.popErrorScope().then((error) => {
+        if (error) this.pipelines.delete(key); /* not valid here (another adapter's formats): built on demand */
+      });
+    };
+    /* Synchronous creation, a batch per turn of the event loop so the
+     * stream keeps moving: createRenderPipelineAsync took Chrome's GPU
+     * process down (exit code 5) in about one SSBU boot in three with a
+     * full cache, all at once or four at a time. */
+    /* The newest only: Chrome's GPU process fell over near 1,900 live
+     * pipelines (and 2,000 modules), which a cache of every SSBU stage and
+     * menu ever seen reaches during boot. */
+    const wanted = contents.pipelines.slice(-PREWARM_MAX);
+    return (async (): Promise<void> => {
+      for (let next = 0; next < wanted.length;) {
+        const end = Math.min(next + PREWARM_BATCH, wanted.length);
+        for (; next < end; next++) build(wanted[next]!);
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
+    })();
   }
 
   /* ---- passes ---- */
@@ -1667,7 +1722,7 @@ export class GpuExecutor {
       `(${sampledCount}), storage buffers ${mb(buffers)} MB (${this.buffers.size}), shadows ${this.shadows.size}, ` +
       `${this.pipelines.size} pipelines, ${this.modulesByHash.size} shader modules (${mb(this.shaderBytes)} MB of WGSL); in the last ${MEMORY_REPORT_PRESENTS} ` +
       `presents ${mb(this.uploadedBytes)} MB texture uploads, ${mb(this.bufferBytes)} MB buffer uploads (vertices ${mb(this.vertexBytes)}, data ${mb(this.dataBytes)}, ` +
-      `pool ${mb(this.poolBytes)}), ${this.submits} ` +
+      `pool ${mb(this.poolBytes)}; ${this.bufferWrites} writes), ${this.submits} ` +
       `submits; textures by format: ` +
       [...byFormat].sort((a, b) => b[1] - a[1]).map(([f, n]) => `${f} ${mb(n)} MB`).join(", "));
     this.uploadedBytes = 0;
@@ -1676,5 +1731,6 @@ export class GpuExecutor {
     this.dataBytes = 0;
     this.poolBytes = 0;
     this.submits = 0;
+    this.bufferWrites = 0;
   }
 }

@@ -736,6 +736,7 @@ void raster3d_flush(Raster3d *r, const Gpu_Memory *mem) {
 }
 
 #define STALE_LOG_LIMIT 40u
+#define PRESENT_MISS_LOG_LIMIT 8u
 
 void raster3d_sync_range(Raster3d *r, const Gpu_Memory *mem, uint64_t address, uint64_t bytes, bool write) {
   if (!r || !r->ready || !bytes) return;
@@ -5810,7 +5811,23 @@ bool raster3d_gpu_present(Raster3d *r, uint64_t cpu_address, uint32_t width, uin
     Raster3d_Gpu_Surface *c = &r->gpu_surfaces[i];
     if (c->in_use && !c->depth && c->cpu_address == cpu_address && c->width >= width) s = c;
   }
-  if (!s) return false;
+  if (!s) {
+    static uint32_t missed; /* after the first GPU present: before it, guest memory is the picture */
+    if (r->gpu_stats.presents && missed++ < PRESENT_MISS_LOG_LIMIT) {
+      uint32_t live = 0, near = 0;
+      for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
+        const Raster3d_Gpu_Surface *c = &r->gpu_surfaces[i];
+        if (!c->in_use) continue;
+        live++;
+        if (c->cpu_address == cpu_address) near = i + 1u;
+      }
+      const Raster3d_Gpu_Surface *n = near ? &r->gpu_surfaces[near - 1u] : NULL;
+      log_warn("[gpu] present of 0x%llx (%ux%u): no render target there (%u live%s%ux%u%s)",
+               (unsigned long long)cpu_address, width, height, live, n ? "; one there is " : "",
+               n ? n->width : 0u, n ? n->height : 0u, n ? (n->depth ? " depth" : " colour") : "");
+    }
+    return false;
+  }
   gpu_surface_touch(r, s);
   Gpu_Rec_Present p;
   memset(&p, 0, sizeof(p));
