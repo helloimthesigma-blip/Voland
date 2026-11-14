@@ -47,10 +47,28 @@ function ControlsLegend() {
     } else if (event.code && !pad) finish(bindKey(bindings(), target.controlId, event.code));
   };
   window.addEventListener("keydown", onKeyDown, true);
+  /* Keys held right now (passive: the game still gets them), so a row
+   * lights while its key is down - a key that stays dark while others are
+   * held is one the keyboard cannot send in that combination (ghosting). */
+  const [heldKeys, setHeldKeys] = createSignal<ReadonlySet<string>>(new Set());
+  const onHeld = (event: KeyboardEvent): void => {
+    const next = new Set(heldKeys());
+    if (event.type === "keydown") next.add(event.code);
+    else next.delete(event.code);
+    setHeldKeys(next);
+  };
+  const onBlurKeys = (): void => { setHeldKeys(new Set<string>()); };
+  window.addEventListener("keydown", onHeld);
+  window.addEventListener("keyup", onHeld);
+  window.addEventListener("blur", onBlurKeys);
   onCleanup(() => {
     window.removeEventListener("keydown", onKeyDown, true);
+    window.removeEventListener("keydown", onHeld);
+    window.removeEventListener("keyup", onHeld);
+    window.removeEventListener("blur", onBlurKeys);
     cancelAnimationFrame(padFrame);
   });
+  const keyHeld = (control: Control): boolean => (bindings().keyboard[control.id] ?? []).some((code) => heldKeys().has(code));
 
   function finish(next: Bindings): void {
     setBindings(next);
@@ -99,6 +117,11 @@ function ControlsLegend() {
         removes it. A key moves off any other control it was on. Changes apply at once, even mid-game,
         and are kept in this browser. Game prompts show Switch buttons; this list maps them to yours.
       </p>
+      <p class="voland-controls-hint" data-testid="controls-held-hint">
+        Hold keys to test them: each one lights its row. If a key stays dark while you hold others, your keyboard
+        cannot send that combination (many cannot send 3-4 keys at once, often with the arrow keys) - pick other keys
+        for it, or use a gamepad.
+      </p>
       <div class="voland-bindings" role="table">
         <div class="voland-bindings-head" role="row">
           <span role="columnheader">Switch</span>
@@ -107,7 +130,7 @@ function ControlsLegend() {
         </div>
         <For each={CONTROLS}>
           {(control) => (
-            <div class="voland-bindings-row" role="row" data-control={control.id}>
+            <div class="voland-bindings-row" role="row" data-control={control.id} classList={{ held: keyHeld(control) }}>
               <span role="cell">{control.label}</span>
               <button
                 type="button"

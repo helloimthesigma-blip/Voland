@@ -24,6 +24,15 @@ test("controls panel remaps a key and keeps it across a reload", async ({ page }
   await expect(page.getByTestId("bind-key-A")).toHaveText("X");
   await expect(page.getByTestId("bind-key-B")).toHaveText("—");
 
+  /* Held keys light their rows (a keyboard-ghosting check for players). */
+  await page.keyboard.down("ArrowLeft");
+  await page.keyboard.down("ArrowDown");
+  await expect(page.locator('[data-control="DpadLeft"]')).toHaveClass(/held/);
+  await expect(page.locator('[data-control="DpadDown"]')).toHaveClass(/held/);
+  await page.keyboard.up("ArrowLeft");
+  await expect(page.locator('[data-control="DpadLeft"]')).not.toHaveClass(/held/);
+  await page.keyboard.up("ArrowDown");
+
   await page.reload();
   await openTab(page, "controls");
   await expect(page.getByTestId("bind-key-A")).toHaveText("X");
