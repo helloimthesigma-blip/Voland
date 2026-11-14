@@ -880,10 +880,16 @@ static uint32_t gpu_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint8_t *d) {
   }
 }
 
-/* VIC wrote into an nvmap buffer: textures over its GPU mappings are re-read. */
+/* VIC wrote into an nvmap buffer: textures over its GPU mappings are re-read.
+ * This runs on the guest thread that submitted to VIC, so the renderer is
+ * idled first: with the asynchronous GPU thread mid-frame, syncing beside
+ * it raced the renderer's surface and texture tables (SSBU's movie stayed
+ * black on three cores). The kernel lock is held, so no other core queues
+ * GPU work until the sync is done. */
 static void mm_written(void *user, uint32_t handle, uint64_t offset, uint64_t bytes) {
   Nvdrv_State *s = (Nvdrv_State *)user;
   if (!s->renderer) return;
+  if (s->gpu_thread) gpu_thread_drain(s->gpu_thread);
   const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate, gpu_extent};
   for (uint32_t i = 0; i < s->mapping_end; i++) {
     const Gpu_Mapping *m = &s->mappings[i];
