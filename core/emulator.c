@@ -1160,6 +1160,16 @@ static void report_stream(Emulator* emulator) {
            (unsigned long long)(emulator->renderer.gpu_surface_budget >> 20),
            (unsigned long long)emulator->renderer.gpu_stats.surfaces, (unsigned long long)emulator->renderer.gpu_stats.surface_drops,
            (unsigned long long)emulator->renderer.gpu_stats.surface_carries);
+  {
+    const Gpu_Mirror_Stats *m = gpu_mirror_stats(), *mw = &emulator->mirror_stats_reported;
+    log_info("[gpu] compute mirrors: %llu made, %llu destroyed; pages %llu hashed, %llu uploaded, %llu taken, %llu returned",
+             (unsigned long long)(m->created - mw->created), (unsigned long long)(m->destroyed - mw->destroyed),
+             (unsigned long long)(m->pages_hashed - mw->pages_hashed),
+             (unsigned long long)(m->pages_uploaded - mw->pages_uploaded),
+             (unsigned long long)(m->pages_taken - mw->pages_taken),
+             (unsigned long long)(m->pages_returned - mw->pages_returned));
+    emulator->mirror_stats_reported = *m;
+  }
   log_info("%s; frames queued %llu, dropped %llu, presented %llu", line,
            (unsigned long long)emulator->vi.frames_queued, (unsigned long long)emulator->vi.frames_dropped,
            (unsigned long long)emulator->vi.frames_presented);

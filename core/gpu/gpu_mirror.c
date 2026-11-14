@@ -33,16 +33,23 @@ static Gpu_Mirror_Stats g_stats;
 static uint8_t g_page[GPU_MIRROR_PAGE_BYTES];
 static uint8_t g_run[WRITE_RUN_BYTES];
 
-/* Change detection, not cryptographic: 64-bit multiply-xorshift over words. */
+/* Change detection, not cryptographic: 64-bit multiply-xorshift over
+ * words, in HASH_LANES independent lanes (one multiply chain would bound
+ * it by multiply latency; it runs over every mirrored page per submission). */
+#define HASH_LANES 4u
 static uint64_t page_hash(const uint8_t *p) {
-  uint64_t h = HASH_SEED;
-  for (uint32_t i = 0; i < GPU_MIRROR_PAGE_BYTES; i += 8u) {
-    uint64_t w;
-    memcpy(&w, p + i, 8);
-    h = (h ^ w) * HASH_MULTIPLIER;
-    h ^= h >> 29;
+  uint64_t h[HASH_LANES] = {HASH_SEED, HASH_SEED + 1u, HASH_SEED + 2u, HASH_SEED + 3u};
+  for (uint32_t i = 0; i < GPU_MIRROR_PAGE_BYTES; i += 8u * HASH_LANES) {
+    uint64_t w[HASH_LANES];
+    memcpy(w, p + i, sizeof(w));
+    for (uint32_t k = 0; k < HASH_LANES; k++) {
+      h[k] = (h[k] ^ w[k]) * HASH_MULTIPLIER;
+      h[k] ^= h[k] >> 29;
+    }
   }
-  return h;
+  uint64_t x = h[0];
+  for (uint32_t k = 1; k < HASH_LANES; k++) x = (x ^ h[k]) * HASH_MULTIPLIER;
+  return x ^ (x >> 29);
 }
 
 static void emit_u32s(Gpu_Stream *s, uint32_t type, const uint32_t *words, uint32_t count) {

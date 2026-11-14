@@ -15,6 +15,7 @@
 #include "cpu/cpu.h"
 #include "gpu/gpu_thread.h"
 #include "gpu/gpu_stream.h"
+#include "gpu/gpu_mirror.h"
 #include "video/video_stream.h"
 #include "hle/hle.h"
 #include "hle/kernel/page_allocator.h"
@@ -217,6 +218,7 @@ typedef struct Emulator
   uint64_t stream_report_frames;                        /* the next report_stream (diagnostics) */
   uint64_t stream_type_reported[GPU_STREAM_TYPE_STATS]; /* type_bytes at the last one */
   Raster3d_Gpu_Stats stream_stats_reported;             /* renderer stats at the last one */
+  Gpu_Mirror_Stats mirror_stats_reported;               /* compute mirrors at the last one */
   /* Video decode (§13): NVDEC requests and decoded frames, in the
    * layout's video region (video/video_stream.h). Set up once. */
   Video_Stream video;
