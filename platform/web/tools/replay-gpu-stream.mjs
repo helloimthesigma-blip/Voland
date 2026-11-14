@@ -30,7 +30,7 @@
  * target's: its depth, and the target's min and max);
  * TRACE_WRITES=id,... lists every draw into those targets; CB_DUMP=shader,slot,words
  * prints a constant buffer (from the pool) for that shader's draws (with
- * TRACE_SHAPES); TRACE_VERTEX_WORDS=1 prints the first six CPU-transformed
+ * TRACE_SHAPES; dispatches are listed too); TRACE_VERTEX_WORDS=1 prints the first six CPU-transformed
  * vertices whole and the raw binding list of draws without a vertex stage;
  * TEX_NAN=record:id,... counts NaN / Inf texels per layer and level of
  * those textures just before that record.
@@ -334,6 +334,18 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
         console.log(`clear colour ${dv.getUint32(0, true)} mask ${dv.getUint32(4, true)} value ${[8, 12, 16, 20].map((o) => dv.getFloat32(o, true)).join(",")}` +
           ` depth ${dv.getUint32(24, true)} flags ${dv.getUint32(28, true)} z ${dv.getFloat32(32, true)}` +
           ` rect ${[44, 48, 52, 56].map((o) => dv.getInt32(o, true)).join(",")}`);
+      }
+      if (globalThis.TRACE_SHAPES && type === 12 && presents + 1 === globalThis.TRACE_SHAPES) {
+        /* Gpu_Rec_Compute: shader, grid x/y/z, binding count, then bindings {kind, binding, bytes, id} (data inline). */
+        const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+        const bound = [];
+        for (let k = 0, at = 20; k < dv.getUint32(16, true) && at + 16 <= payload.byteLength; k++) {
+          const kind = dv.getUint32(at, true), binding = dv.getUint32(at + 4, true), bytes = dv.getUint32(at + 8, true), id = dv.getUint32(at + 12, true);
+          at += 16;
+          if (kind === 1) { at += bytes; continue; }
+          bound.push(`${["", "data", "tex", "smp", "buf"][kind] ?? kind}${id}@${binding}${kind === 4 && bytes & 1 ? "w" : ""}`);
+        }
+        console.log(`dispatch record ${records} shader ${dv.getUint32(0, true)} grid ${[4, 8, 12].map((o) => dv.getUint32(o, true)).join("x")} ${bound.join(" ")}`);
       }
       if (globalThis.TRACE_SHAPES && type === 6 && presents + 1 === globalThis.TRACE_SHAPES) {
         /* Each draw's shader, colour targets and depth target (Gpu_Rec_Draw: targets of 36 bytes at 8, depth at 296). */
