@@ -111,6 +111,7 @@ const TICKS_PER_SECOND = 19_200_000;
  * shaders can hold one off for well over Playwright's default 30 s. */
 const STALL_DUMP_MS = 60_000; /* frames stopped this long while warming up: dump threads once */
 const SHOT_TIMEOUT_MS = 180_000;
+const BROWSER_CLOSE_WAIT_MS = 10_000;
 const HARDWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"];
 const SOFTWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"];
 
@@ -538,6 +539,13 @@ async function main() {
       Object.defineProperty(WebAssembly, "Module", { value: ModuleProxy, configurable: true, writable: true });
       Object.defineProperty(WebAssembly, "Instance", { value: InstanceProxy, configurable: true, writable: true });
     });
+    /* Diagnostics: the worker this harness reads, and what happens if it goes. */
+    worker.on("close", () => {
+      console.log(`CPU worker target closed (${worker.url()}); workers now: ${page.workers().map((w) => w.url().replace(/^.*\//, "")).join(", ")}`);
+      void page.getByTestId("run-state").getAttribute("data-state").then((state) => console.log(`page run state: ${state}`),
+        (e) => console.log(`page unreachable: ${e instanceof Error ? e.message : String(e)}`));
+    });
+    page.on("crash", () => console.log("page crashed (renderer process)"));
     const sample = async () => ({
       at: Date.now(),
       cpuS: browserPid ? rendererCpuSeconds(browserPid) : 0,
@@ -934,7 +942,9 @@ async function main() {
     results.loadAvgEnd = loadAverage();
     if (opts.json) writeFileSync(opts.json, JSON.stringify(results, null, 2));
   } finally {
-    await browser.close();
+    /* A crashed browser can leave close() waiting forever (a run then sat
+     * until its time limit): give it a while, then go on. */
+    await Promise.race([browser.close().catch(() => undefined), sleep(BROWSER_CLOSE_WAIT_MS)]);
     preview.kill();
   }
 }
