@@ -881,23 +881,39 @@ static uint32_t gpu_ioctl(Nvdrv_State *s, Nv_Fd *f, uint32_t nr, uint8_t *d) {
 }
 
 /* VIC wrote into an nvmap buffer: textures over its GPU mappings are re-read.
- * This runs on the guest thread that submitted to VIC, so the renderer is
- * idled first: with the asynchronous GPU thread mid-frame, syncing beside
- * it raced the renderer's surface and texture tables (SSBU's movie stayed
- * black on three cores). The kernel lock is held, so no other core queues
- * GPU work until the sync is done. */
+ * The renderer runs on the GPU thread, so the ranges go there as an engine
+ * write (gpu_thread.h), in order behind the work already queued. Waiting
+ * for that thread to drain here instead deadlocked SSBU's movie at random:
+ * the GPU thread can be waiting on a syncpoint this very VIC job is about
+ * to complete. */
+#define MM_WRITTEN_MAX_RANGES 16u
+typedef struct Mm_Written_Range {
+  uint64_t gpu_va, bytes;
+} Mm_Written_Range;
+
+static void mm_written_run(void *user, const void *payload, uint32_t bytes) {
+  Nvdrv_State *s = (Nvdrv_State *)user;
+  const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate, gpu_extent};
+  const Mm_Written_Range *ranges = (const Mm_Written_Range *)payload;
+  for (uint32_t i = 0; i < bytes / sizeof(Mm_Written_Range); i++)
+    raster3d_sync_range(s->renderer, &memory, ranges[i].gpu_va, ranges[i].bytes, true);
+}
+
 static void mm_written(void *user, uint32_t handle, uint64_t offset, uint64_t bytes) {
   Nvdrv_State *s = (Nvdrv_State *)user;
   if (!s->renderer) return;
-  if (s->gpu_thread) gpu_thread_drain(s->gpu_thread);
-  const Gpu_Memory memory = {s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate, gpu_extent};
-  for (uint32_t i = 0; i < s->mapping_end; i++) {
+  Mm_Written_Range ranges[MM_WRITTEN_MAX_RANGES];
+  uint32_t count = 0;
+  for (uint32_t i = 0; i < s->mapping_end && count < MM_WRITTEN_MAX_RANGES; i++) {
     const Gpu_Mapping *m = &s->mappings[i];
     if (!m->in_use || m->nvmap_handle != handle) continue;
     const uint64_t start = offset > m->buffer_offset ? offset : m->buffer_offset;
     const uint64_t end = offset + bytes < m->buffer_offset + m->size ? offset + bytes : m->buffer_offset + m->size;
-    if (start < end) raster3d_sync_range(s->renderer, &memory, m->gpu_va + (start - m->buffer_offset), end - start, true);
+    if (start < end) ranges[count++] = (Mm_Written_Range){m->gpu_va + (start - m->buffer_offset), end - start};
   }
+  if (!count) return;
+  if (s->gpu_thread) gpu_thread_call(s->gpu_thread, mm_written_run, s, ranges, count * (uint32_t)sizeof(Mm_Written_Range));
+  else mm_written_run(s, ranges, count * (uint32_t)sizeof(Mm_Written_Range));
 }
 
 /* SUBMIT's command buffers ({nvmap handle, byte offset, words}) run on
