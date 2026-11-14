@@ -116,6 +116,8 @@ const BIND_GROUP_CACHE_LIMIT = 4096;
 const PREWARM_BATCH = 8;
 /** At most this many cached pipelines are prewarmed (the newest). */
 const PREWARM_MAX = 512;
+/** Live render pipelines kept (least recently used go first). */
+const PIPELINE_LIMIT = 1200;
 const MAX_TEXTURES = 16; /* core/gpu/wgsl.h WGSL_MAX_TEXTURES: samplers bind at 1 + MAX_TEXTURES + i */
 
 export interface PresentTarget {
@@ -212,6 +214,8 @@ export interface ExecutorStats {
   pipelines: number;
   /** Pipelines built ahead of use from the persistent cache. */
   prewarmed: number;
+  /** Live pipelines dropped to stay under PIPELINE_LIMIT. */
+  pipelinesEvicted: number;
   presents: number;
   errors: number;
   shadows: number;
@@ -343,7 +347,7 @@ function emptyDrawState(pass: GPURenderPassEncoder | null): DrawState {
 }
 
 export class GpuExecutor {
-  readonly stats: ExecutorStats = { draws: 0, dispatches: 0, passes: 0, submits: 0, pipelines: 0, prewarmed: 0, presents: 0, errors: 0, shadows: 0, copies: 0 };
+  readonly stats: ExecutorStats = { draws: 0, dispatches: 0, passes: 0, submits: 0, pipelines: 0, prewarmed: 0, pipelinesEvicted: 0, presents: 0, errors: 0, shadows: 0, copies: 0 };
   private readonly textures = new Map<number, Tex>();
   private readonly shaders = new Map<number, GPUShaderModule>();
   /* Per-session shader ids -> WGSL content hash; modules shared by hash. */
@@ -1109,12 +1113,28 @@ export class GpuExecutor {
 
   private cached(key: string, make: () => CachedPipeline): CachedPipeline {
     const hit = this.pipelines.get(key);
-    if (hit) return hit;
+    if (hit) {
+      /* Most recently used last: the map's order is the eviction order. */
+      this.pipelines.delete(key);
+      this.pipelines.set(key, hit);
+      return hit;
+    }
     const made = make();
     this.pipelines.set(key, made);
+    this.evictPipelines();
     this.stats.pipelines++;
     this.newPipelines++;
     return made;
+  }
+
+  /** Chrome's GPU process fell over near 1,900 live pipelines: past
+   * PIPELINE_LIMIT the least recently used go (rebuilt if drawn with again). */
+  private evictPipelines(): void {
+    for (const key of this.pipelines.keys()) {
+      if (this.pipelines.size <= PIPELINE_LIMIT) break;
+      this.pipelines.delete(key);
+      this.stats.pipelinesEvicted++;
+    }
   }
 
   private sampler(state: number): GPUSampler {
@@ -1720,7 +1740,7 @@ export class GpuExecutor {
     this.host.log("info", `GPU memory: render targets ${mb(render)} MB (${renderCount}; most: ${commonShapes}; ` +
       `${this.renderCreates} made, ${this.renderDestroys} destroyed, ${this.unknownDestroys} unknown of ${this.destroysSeen} destroys), textures ${mb(sampled)} MB ` +
       `(${sampledCount}), storage buffers ${mb(buffers)} MB (${this.buffers.size}), shadows ${this.shadows.size}, ` +
-      `${this.pipelines.size} pipelines, ${this.modulesByHash.size} shader modules (${mb(this.shaderBytes)} MB of WGSL); in the last ${MEMORY_REPORT_PRESENTS} ` +
+      `${this.pipelines.size} pipelines (${this.stats.pipelinesEvicted} evicted), ${this.modulesByHash.size} shader modules (${mb(this.shaderBytes)} MB of WGSL); in the last ${MEMORY_REPORT_PRESENTS} ` +
       `presents ${mb(this.uploadedBytes)} MB texture uploads, ${mb(this.bufferBytes)} MB buffer uploads (vertices ${mb(this.vertexBytes)}, data ${mb(this.dataBytes)}, ` +
       `pool ${mb(this.poolBytes)}; ${this.bufferWrites} writes), ${this.submits} ` +
       `submits; textures by format: ` +
