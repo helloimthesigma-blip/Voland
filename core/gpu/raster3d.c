@@ -4792,7 +4792,9 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
    * (f18d216) while the interpreter draws it right; Tears of the Kingdom's
    * subtitle program is right on the CPU too. Until the WGSL difference is
    * found, such programs shade on the CPU. */
-  if (ctx->vs->uses_jump_table) {
+  static int gpu_jump_tables = -1; /* VOLAND_GPU_JUMP_TABLES=1: through the WGSL anyway (diagnostics) */
+  if (gpu_jump_tables < 0) gpu_jump_tables = getenv("VOLAND_GPU_JUMP_TABLES") ? 1 : 0;
+  if (ctx->vs->uses_jump_table && !gpu_jump_tables) {
     st->cpu_vs_jump_table++;
     return;
   }
