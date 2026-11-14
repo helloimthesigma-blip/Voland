@@ -29,7 +29,9 @@
  * TRACE_PIXEL=x,y adds that texel of TRACE_TARGET to each draw's line (a depth
  * target's: its depth, and the target's min and max);
  * TRACE_WRITES=id,... lists every draw into those targets; CB_DUMP=shader,slot,words
- * prints a constant buffer (from the pool) for that shader's draws.
+ * prints a constant buffer (from the pool) for that shader's draws (with
+ * TRACE_SHAPES); TRACE_VERTEX_WORDS=1 prints the first six CPU-transformed
+ * vertices whole and the raw binding list of draws without a vertex stage.
  */
 import { chromium } from "@playwright/test";
 import { readFileSync, statSync, createReadStream, writeFileSync } from "node:fs";
@@ -98,6 +100,7 @@ if (process.env.MEASURE) await page.evaluate(() => { globalThis.MEASURE = true; 
 if (process.env.DRAW_TRACE) await page.evaluate((n) => { globalThis.DRAW_TRACE = n; }, Number(process.env.DRAW_TRACE));
 if (process.env.NO_SHADOW_COMPARE) await page.evaluate(() => { globalThis.NO_SHADOW_COMPARE = true; });
 if (process.env.TRACE_SHAPES) await page.evaluate((n) => { globalThis.TRACE_SHAPES = n; }, Number(process.env.TRACE_SHAPES));
+if (process.env.TRACE_VERTEX_WORDS) await page.evaluate(() => { globalThis.TRACE_VERTEX_WORDS = true; });
 if (process.env.TEX_INFO) await page.evaluate((t) => { globalThis.TEX_INFO = t; }, process.env.TEX_INFO.split(",").map(Number));
 if (process.env.TRACE_TARGET) await page.evaluate((n) => { globalThis.TRACE_TARGET = n; }, Number(process.env.TRACE_TARGET));
 if (process.env.SYNC_DRAWS) await page.evaluate(() => { globalThis.SYNC_DRAWS = true; });
@@ -343,9 +346,18 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
           let vat = 432;
           for (let k = 0; k < dv.getUint32(400, true); k++) vat += 16 + (dv.getUint32(vat, true) === 1 ? dv.getUint32(vat + 8, true) : 0);
           const stride = 16 + 16 * dv.getUint32(392, true), first = [];
-          for (let k = 0; k < 3 && k < dv.getUint32(404, true) && vat + (k + 1) * stride <= payload.byteLength; k++)
-            first.push([0, 4, 8, 12].map((o) => dv.getFloat32(vat + k * stride + o, true).toFixed(3)).join(","));
+          const shown = globalThis.TRACE_VERTEX_WORDS ? 6 : 3;
+          for (let k = 0; k < shown && k < dv.getUint32(404, true) && vat + (k + 1) * stride <= payload.byteLength; k++)
+            first.push(Array.from({ length: globalThis.TRACE_VERTEX_WORDS ? stride / 4 : 4 }, (_, i) => dv.getFloat32(vat + k * stride + 4 * i, true).toFixed(3)).join(","));
           console.log(`  vertices ${first.join(" | ")}`);
+          if (globalThis.TRACE_VERTEX_WORDS) {
+            const kinds = [];
+            for (let k = 0, at2 = 432 + (dv.getUint32(432, true) === 0 ? 16 : 0); k < dv.getUint32(400, true); k++) {
+              kinds.push(`${dv.getUint32(at2, true)}:${dv.getUint32(at2 + 4, true)}:${dv.getUint32(at2 + 8, true)}:${dv.getUint32(at2 + 12, true)}`);
+              at2 += 16 + (dv.getUint32(at2, true) === 1 ? dv.getUint32(at2 + 8, true) : 0);
+            }
+            console.log(`  bindings (kind:binding:bytes:id) ${kinds.join(" ")} count ${dv.getUint32(400, true)} inputs ${dv.getUint32(392, true)}`);
+          }
         }
       }
       if (globalThis.DRAW_TRACE && type === 6 && presents + 1 === globalThis.DRAW_TRACE) {
