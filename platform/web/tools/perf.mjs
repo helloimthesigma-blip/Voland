@@ -400,7 +400,7 @@ async function main() {
       if ((m.type() === "error" && /\[(ERROR|WARN )\]|failed|crash/i.test(m.text())) || /core: |svcBreak|shader cache/.test(m.text()))
         console.log(`  console: ${m.text()}`);
       /* Parallel guest threads' periodic timing report (docs/PARALLEL.md "Measuring"). */
-      if (/\[parallel\] |\[gpu\] (stream|render targets|compute mirrors)|GPU memory:/.test(m.text())) console.log(`  ${m.text().replace(/^\[INFO \] /, "")}`);
+      if (/\[parallel\] |\[gpu\] (stream|render targets|compute mirrors|method 0x)|GPU memory:/.test(m.text())) console.log(`  ${m.text().replace(/^\[INFO \] /, "")}`);
       if (/^\[WARN \] \[threads\]/.test(m.text())) console.log(`  ${m.text()}`);
       if (opts.logMatch && new RegExp(opts.logMatch).test(m.text())) console.log(`  log: ${m.text()}`);
     });
