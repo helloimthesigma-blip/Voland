@@ -20,7 +20,7 @@ were measured.
 | Hollow Knight: Silksong | boot to gameplay, saves, video cutscenes | ~59 (Bone Bottom) | ~58 | none known |
 | Super Mario Odyssey | opening, Cap Kingdom | 35-46 by scene | 37-40 (cutscenes) | the camera tutorial needs the right stick pushed up |
 | Nine Sols | title, opening cinematic, gameplay, dialogue | ~45 (the first cave) | ~52 | |
-| Super Smash Bros. Ultimate | matches, opening movie | 22-27 in a fight (Oct.) | ~60 | |
+| Super Smash Bros. Ultimate | matches, opening movie, save states in a fight | 58-60 on lighter stages, ~31-35 on busy ones (Mario Circuit, Boxing Ring) | ~60 | the title screen shows only "ULTIMATE" (the "SUPER SMASH BROS." logo above it is missing) |
 | Mario Kart 8 Deluxe (32-bit) | whole races | ~44 at the race start | ~60 | |
 | Animal Crossing: New Horizons | opening through arrival on the island | ~8 on the island (Oct.) | ~55 (intro) | none known (the black sea and the dark blotches were fixed on 2026-10-30) |
 | Tears of the Kingdom | the opening descent | ~8 | - | slow; the picture is over-exposed; occasional crashes on three cores |
