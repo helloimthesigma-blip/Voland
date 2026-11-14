@@ -3,6 +3,11 @@
  * ring-draining worklet. Browsers start AudioContexts suspended until a
  * user gesture, so this resumes on the next click/key if needed. Audio is
  * a lifecycle concern only: samples never cross postMessage (§6).
+ *
+ * A gain stage after the worklet mutes the output while a game boots and
+ * has shown no picture yet (setAudioMuted): the worklet keeps draining the
+ * ring, so nothing waits, but the stretched, slowed boot sound (Hollow
+ * Knight's) is not heard over a black screen.
  */
 import type { VolandAudioReport } from "../e2e-hooks";
 import processorUrl from "./ring-processor.ts?worker&url";
@@ -11,6 +16,20 @@ const SAMPLE_RATE = 48_000;
 const STRETCH_SETTLE_MS = 5_000;
 
 let context: AudioContext | null = null;
+let gain: GainNode | null = null;
+/** Wanted before the output exists (a load mutes before audio starts). */
+let mutedWanted = false;
+/** Seconds the output takes to fade back in (no click). */
+const UNMUTE_FADE_S = 0.05;
+
+/** Mutes or unmutes what the worklet plays (lifecycle: per load, not per frame). */
+export function setAudioMuted(muted: boolean): void {
+  mutedWanted = muted;
+  if (!gain || !context) return;
+  gain.gain.cancelScheduledValues(context.currentTime);
+  if (muted) gain.gain.setValueAtTime(0, context.currentTime);
+  else gain.gain.setTargetAtTime(1, context.currentTime, UNMUTE_FADE_S);
+}
 
 export async function startAudioOutput(memory: WebAssembly.Memory, ringBase: number, capacityFrames: number,
                                        onLog: (message: string) => void): Promise<void> {
@@ -24,7 +43,9 @@ export async function startAudioOutput(memory: WebAssembly.Memory, ringBase: num
       outputChannelCount: [2],
       processorOptions: { memory, ringBase, capacityFrames },
     });
-    node.connect(context.destination);
+    gain = new GainNode(context, { gain: mutedWanted ? 0 : 1 });
+    node.connect(gain);
+    gain.connect(context.destination);
     let candidate = false;
     let candidateSince = 0;
     let reported = false;

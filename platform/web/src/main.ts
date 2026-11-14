@@ -28,7 +28,7 @@ import { PUBLISH_INDEX } from "@bindings/framebuffer";
 import { DEVICE_SUBGROUPS, GPU_STREAM_HEADER_BYTES, OFF_PRESENTS } from "@bindings/gpu-records";
 import { appendGuestOutput, resetGuestConsole, setGpuTrouble, setGuestFps, setGuestRunState } from "./guest-console";
 import { clearTextInput, showTextInput } from "./text-input-store";
-import { startAudioOutput } from "./audio/audio-output";
+import { setAudioMuted, startAudioOutput } from "./audio/audio-output";
 import { startInputLoop } from "./input/input-loop";
 import { getBindings } from "./input/bindings-store";
 import { appendLogLine, setStatus } from "./log";
@@ -514,6 +514,28 @@ async function boot(): Promise<BootResult | null> {
     window.__VOLAND_STATS__ = { fps, presents: published };
   }, 1000);
 
+  /* Sound waits for the game's first picture after a load: the presented
+   * frame counter, read straight from shared memory once an animation
+   * frame until it moves (§6: nothing per frame crosses postMessage). */
+  let soundWaitFrame = 0;
+  const publishedNow = (current: MemoryLayout): number => {
+    const counters = new Int32Array(memory.buffer, toByteOffset(current.framebufferSlotBase), 2);
+    const stream = new Int32Array(memory.buffer, toByteOffset(current.gpuRingBase), GPU_STREAM_HEADER_BYTES / 4);
+    return (Atomics.load(counters, PUBLISH_INDEX) + Atomics.load(stream, OFF_PRESENTS / 4)) | 0;
+  };
+  function muteUntilFirstPicture(): void {
+    const current = layout as MemoryLayout | null;
+    if (!current) return;
+    cancelAnimationFrame(soundWaitFrame);
+    setAudioMuted(true);
+    const before = publishedNow(current);
+    const poll = (): void => {
+      if (publishedNow(current) !== before) setAudioMuted(false);
+      else soundWaitFrame = requestAnimationFrame(poll);
+    };
+    soundWaitFrame = requestAnimationFrame(poll);
+  }
+
   function loadGame(file: File, extras: readonly File[] = []): Promise<GameLoadOutcome> {
     if (pendingLoad) {
       return Promise.resolve<GameLoadOutcome>({
@@ -527,6 +549,7 @@ async function boot(): Promise<BootResult | null> {
         failure: { reason: "internal", message: "the CPU worker is not running, so nothing can be loaded" },
       });
     }
+    muteUntilFirstPicture();
     /* A load is a user gesture: the moment browsers allow audio to start. */
     if (finalLayout && memory) {
       void startAudioOutput(memory, toByteOffset(finalLayout.audioRingBase), AUDIO_RING_CAPACITY_FRAMES,
