@@ -920,6 +920,7 @@ typedef struct Seen_Draw {
   /* Stream version 11: render targets re-described over the same bytes. */
   uint32_t reinterprets, reinterpret_src, reinterpret_dst;
   uint32_t texture_writes, last_texture_id, destroyed_id;
+  uint8_t first_write_bytes[16]; /* the first TEXTURE_WRITE's first texels */
   uint32_t samplers; /* the last draw's hardware samplers (GPU_BIND_SAMPLER) */
   /* Stream version 12: copies into layers and levels (gathered cube maps). */
   uint32_t copies, copy_layers, copy_levels; /* bit per destination layer / level */
@@ -949,7 +950,11 @@ static void stream_drain(Seen_Draw *seen) {
       seen->copy_layers |= 1u << (c.dst_layer & 31u);
       seen->copy_levels |= 1u << (c.dst_level & 31u);
     }
-    if (rec.type == GPU_REC_TEXTURE_WRITE) seen->texture_writes++;
+    if (rec.type == GPU_REC_TEXTURE_WRITE) {
+      if (!seen->texture_writes && rec.payload_bytes >= sizeof(Gpu_Rec_Texture_Write) + 16u)
+        memcpy(seen->first_write_bytes, rec.payload + sizeof(Gpu_Rec_Texture_Write), 16u);
+      seen->texture_writes++;
+    }
     if (rec.type == GPU_REC_TEXTURE_DESTROY) memcpy(&seen->destroyed_id, rec.payload, sizeof(uint32_t));
     if (rec.type == GPU_REC_TEXTURE_REINTERPRET) {
       seen->reinterprets++;
@@ -1093,6 +1098,94 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
   stream_drain(&seen);
   raster3d_set_gpu(r, NULL);
   return seen;
+}
+
+/* GPU mode: a target drawn again at an address where a re-described view
+ * of it also lives (made by a full clear, which loads nothing and so keeps
+ * the old view) is found as it is; the other view stays, rather than being
+ * taken as a carry-over and dropped without its texture's destroy (Super
+ * Mario Odyssey leaked a 640x720 target a frame that way). */
+#define VIEWS_RT_OFFSET 0x20000u /* RT_BL + this: bytes no earlier test drew */
+static void test_gpu_surface_views_kept(Raster3d *r) {
+  static Gpu_Stream stream;
+  Seen_Draw seen;
+  memset(&seen, 0, sizeof(seen));
+  gpu_stream_init(&stream, g_stream_header, (uint8_t *)g_stream_ring, GPU_RING_BYTES, stream_wait, &seen);
+  raster3d_set_gpu(r, &stream);
+  const uint64_t at = RT_BL + VIEWS_RT_OFFSET;
+  base_state(at, true, PS_OFFSET);
+  vertex(0, -1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(1, 1.0f, -1.0f, 1, 0, 0, 1);
+  vertex(2, -1.0f, 1.0f, 1, 0, 0, 1);
+  raster3d_begin_submission(r);
+  draw_arrays(r, 4, 3);                 /* A8B8G8R8 view */
+  g_regs[0x204] = 0xDE;                 /* R16G16_FLOAT: same bytes */
+  clear_to(r, 0.0f, 0.0f, 0.0f, 0.0f);  /* full clear: made without loading, so both views live */
+  g_regs[0x204] = 0xD5;
+  draw_arrays(r, 4, 3);                 /* the A8B8G8R8 view again */
+  raster3d_flush(r, &k_mem);
+  gpu_stream_publish(&stream);
+  stream_drain(&seen);
+  raster3d_set_gpu(r, NULL);
+  uint32_t live = 0, orphans = 0;
+  for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
+    const Raster3d_Gpu_Surface *g = &r->gpu_surfaces[i];
+    if (g->address != at) continue;
+    live += g->in_use;
+    orphans += !g->in_use && g->id != 0;
+  }
+  CHECK(live == 2u && orphans == 0u, "surface views: %u live, %u dropped without a destroy", live, orphans);
+}
+
+/* GPU mode: render targets past the byte budget evict the least recently
+ * used idle ones (Super Mario Odyssey drew a 640x720 target at a new
+ * address every frame and kept ~2000 of them, gigabytes, alive), but never
+ * one used within RASTER_GPU_SURFACE_IDLE_FRAMES. */
+#define BUDGET_TARGETS 3u
+static void test_gpu_surface_budget(Raster3d *r) {
+  const uint64_t target_bytes = (uint64_t)RT_SIZE * RT_SIZE * 4u;
+  r->gpu_surface_budget = r->gpu_surface_bytes + BUDGET_TARGETS * target_bytes; /* room for three more */
+  g_gpu_rt_bl = true;
+  uint32_t destroys_young = 0, destroys_old = 0;
+  for (uint32_t k = 0; k < BUDGET_TARGETS + 2u; k++) { /* five new targets in one frame: none idle */
+    g_gpu_rt_offset = 0x10000u + k * 0x1000u * 4u;
+    const Seen_Draw seen = gpu_draw_once(r, FRONT_CW_REG);
+    destroys_young += seen.destroyed_id != 0;
+  }
+  for (uint32_t f = 0; f < RASTER_GPU_SURFACE_IDLE_FRAMES; f++) raster3d_end_frame(r);
+  g_gpu_rt_offset = 0x10000u + (BUDGET_TARGETS + 2u) * 0x1000u * 4u; /* a new one, the others long idle */
+  const Seen_Draw seen = gpu_draw_once(r, FRONT_CW_REG);
+  destroys_old += seen.destroyed_id != 0;
+  g_gpu_rt_bl = false;
+  g_gpu_rt_offset = 0;
+  CHECK(destroys_young == 0 && destroys_old == 1 && r->gpu_surface_bytes <= r->gpu_surface_budget + target_bytes,
+        "surface budget: %u evicted while in use, %u once idle, %llu bytes live", destroys_young, destroys_old,
+        (unsigned long long)r->gpu_surface_bytes);
+  r->gpu_surface_budget = RASTER_GPU_SURFACE_BUDGET;
+}
+
+/* GPU mode: a render target loaded from guest memory keeps its bytes. Only
+ * a pad byte (X8B8G8R8) reads as alpha 1; R11G11B10 uses all four bytes,
+ * and forcing the top one to 0xFF made every texel's blue NaN (Tears of
+ * the Kingdom's cube-map mips: blotches spread from them into the light). */
+#define NO_PAD_RT_OFFSET 0x30000u /* RT_BL + this: bytes no earlier test drew */
+static void test_gpu_upload_keeps_bytes(Raster3d *r) {
+  uint8_t *bytes = g_gpu + (RT_BL + NO_PAD_RT_OFFSET - GPU_BASE);
+  const uint32_t one = 0x3c0u | (0x3c0u << 11) | (0x1e0u << 22); /* 1.0 in each channel */
+  for (uint32_t i = 0; i < RT_SIZE * RT_SIZE; i++) memcpy(bytes + 4u * i, &one, 4);
+  g_rt_format = 0xE0; /* R11G11B10_FLOAT */
+  g_gpu_rt_bl = true;
+  g_gpu_rt_offset = NO_PAD_RT_OFFSET;
+  const Seen_Draw seen = gpu_draw_once(r, FRONT_CW_REG);
+  g_gpu_rt_bl = false;
+  g_gpu_rt_offset = 0;
+  g_rt_format = 0xD5;
+  uint32_t first, second;
+  memcpy(&first, seen.first_write_bytes, 4);
+  memcpy(&second, seen.first_write_bytes + 4, 4);
+  CHECK(seen.count == 1 && seen.texture_writes >= 1 && first == one && second == one,
+        "R11G11B10 upload: %u draw(s), %u write(s), texels 0x%08x 0x%08x (0x%08x wanted)", seen.count, seen.texture_writes,
+        first, second, one);
 }
 
 /* GPU mode: a render target re-described over the same bytes in another
@@ -1834,6 +1927,9 @@ int main(void) {
   test_gpu_padded_target(&r);
   test_gpu_gathered_cube(&r);
   test_gpu_reinterpret(&r);
+  test_gpu_upload_keeps_bytes(&r);
+  test_gpu_surface_budget(&r);
+  test_gpu_surface_views_kept(&r);
   test_compute(&r);
   test_gpu_compute(&r);
   CHECK(r.stats.shader_faults == 0, "no shader faults");

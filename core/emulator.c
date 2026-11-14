@@ -1153,6 +1153,13 @@ static void report_stream(Emulator* emulator) {
     emulator->stream_type_reported[t] = emulator->gpu_stream.type_bytes[t];
     if (delta) at += snprintf(line + at, sizeof(line) - (size_t)at, " %u:%.1f", t, (double)delta / EMULATOR_BYTES_PER_MIB);
   }
+  uint32_t surfaces_live = 0;
+  for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) surfaces_live += emulator->renderer.gpu_surfaces[i].in_use;
+  log_info("[gpu] render targets: %u live of %u, %llu MiB (budget %llu MiB); %llu made, %llu dropped, %llu re-described",
+           surfaces_live, RASTER_GPU_SURFACES, (unsigned long long)(emulator->renderer.gpu_surface_bytes >> 20),
+           (unsigned long long)(emulator->renderer.gpu_surface_budget >> 20),
+           (unsigned long long)emulator->renderer.gpu_stats.surfaces, (unsigned long long)emulator->renderer.gpu_stats.surface_drops,
+           (unsigned long long)emulator->renderer.gpu_stats.surface_carries);
   log_info("%s; frames queued %llu, dropped %llu, presented %llu", line,
            (unsigned long long)emulator->vi.frames_queued, (unsigned long long)emulator->vi.frames_dropped,
            (unsigned long long)emulator->vi.frames_presented);

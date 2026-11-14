@@ -81,6 +81,13 @@ struct Gpu_Stream;
  * MK8DX keeps well over 64 (light-probe faces and their mips at 32x32
  * and below, plus the frame's 1080p targets). */
 #define RASTER_GPU_SURFACES 2048u
+/* GPU mode: render targets' bytes past which a new one first evicts the
+ * least recently used targets idle for RASTER_GPU_SURFACE_IDLE_FRAMES. A
+ * game that draws a frame's target at a new address each frame (Super Mario
+ * Odyssey's 640x720 R11G11B10, from a rotating pool) otherwise kept up to
+ * the whole table alive - gigabytes - and the browser ran out of memory. */
+#define RASTER_GPU_SURFACE_BUDGET ((uint64_t)1536u << 20)
+#define RASTER_GPU_SURFACE_IDLE_FRAMES 120u
 /* GPU mode: the most bytes sampled textures' GPU copies may hold. Past it
  * the least recently used copies are dropped (re-uploaded from guest
  * memory if sampled again). A guard, not a squeeze: on Apple silicon GPU
@@ -179,6 +186,7 @@ typedef struct Raster3d_Gpu_Surface {
   uint64_t guest_bytes;
   uint32_t last_used;
   uint32_t written;     /* tick when last bound as a target or uploaded (gpu_gather copies again after) */
+  uint32_t last_frame;  /* texture_epoch when last drawn or read (budget eviction: idle frames) */
 } Raster3d_Gpu_Surface;
 
 typedef struct Raster3d_Gpu_Shader {
@@ -229,6 +237,7 @@ typedef struct Raster3d_Gpu_Stats {
    * lines, bindless textures in the vertex program, unplannable global
    * buffers, constants large for the vertex count, the data window. */
   uint64_t cpu_vs_topology, cpu_vs_bindless, cpu_vs_globals, cpu_vs_small, cpu_vs_window;
+  uint64_t surface_drops, surface_carries; /* surfaces destroyed (evicted / re-described), diagnostics */
 } Raster3d_Gpu_Stats;
 
 typedef struct Raster3d_Stats {
@@ -312,6 +321,8 @@ typedef struct Raster3d {
   uint32_t gpu_compression; /* GPU_COMPRESSION_* the device samples (raster3d_set_gpu_compression) */
   uint32_t gpu_next_id;
   Raster3d_Gpu_Surface gpu_surfaces[RASTER_GPU_SURFACES];
+  uint64_t gpu_surface_bytes;  /* the live surfaces' bytes */
+  uint64_t gpu_surface_budget; /* RASTER_GPU_SURFACE_BUDGET (tests lower it) */
   /* gpu_surfaces in use, by address: bucket heads and chains of slot + 1
    * (0 ends a chain). Texture bindings look up every draw. */
   uint16_t gpu_surface_head[RASTER_GPU_SURFACE_BUCKETS];

@@ -187,6 +187,7 @@ size_t raster3d_storage_bytes(void) { return STORAGE_BYTES; }
 
 void raster3d_init(Raster3d *r, uint8_t *storage, size_t bytes) {
   memset(r, 0, sizeof(*r));
+  r->gpu_surface_budget = RASTER_GPU_SURFACE_BUDGET;
   if (!storage || bytes < STORAGE_BYTES) return;
   /* Align the base for the structs carved out of it. */
   const uintptr_t base = ((uintptr_t)storage + 63u) & ~(uintptr_t)63u;
@@ -3491,6 +3492,16 @@ static bool format_lacks_alpha(uint32_t format) {
   return true;
 }
 
+/* A 4-byte format whose fourth byte is padding (X8B8G8R8 and kin): uploaded
+ * as RGBA8, so that byte must read as alpha 1. Not formats that merely
+ * have no alpha - R11G11B10, R32F, RG16F use all four bytes, and forcing
+ * the top one to 0xFF made every texel's blue (R11G11B10) or value
+ * (R32F, RG16F's green) NaN or wild. */
+static bool format_has_pad_byte(uint32_t format) {
+  const Color_Format *f = color_format(format);
+  return f && f->bytes == 4u && f->count == 4u && f->channel[3] == CH_PAD && f->bits[3] == 8u;
+}
+
 static bool gpu_format_is_int(uint32_t f, bool *is_signed) {
   *is_signed = f == GPU_FMT_RGBA16_SINT || f == GPU_FMT_RGBA32_SINT || f == GPU_FMT_R32_SINT;
   return *is_signed || f == GPU_FMT_RGBA32_UINT || f == GPU_FMT_RGBA16_UINT || f == GPU_FMT_RGBA8_UINT ||
@@ -3772,7 +3783,7 @@ static void gpu_surface_upload(Raster3d *r, Raster3d_Gpu_Surface *s, const Gpu_M
       if (!mem->read(mem->user, s->address + (uint64_t)y * s->pitch, pixels + (uint64_t)y * row, row))
         memset(pixels + (uint64_t)y * row, 0, row);
   }
-  if (format_lacks_alpha(s->format) && s->bytes_per_pixel == 4u) /* the pad byte: alpha 1 */
+  if (format_has_pad_byte(s->format)) /* the pad byte: alpha 1 */
     for (uint64_t i = 3; i < (uint64_t)row * s->height; i += 4u) pixels[i] = 0xffu;
   gpu_write_rows(r, s->id, s->width, s->height, 0, row, pixels);
   r->gpu_stats.surface_upload_bytes += (uint64_t)row * s->height;
@@ -3811,7 +3822,7 @@ static void gpu_surface_upload_range(Raster3d *r, Raster3d_Gpu_Surface *s, const
       if (!mem->read(mem->user, s->address + (uint64_t)y * s->pitch, pixels + (uint64_t)(y - y0) * row, row))
         memset(pixels + (uint64_t)(y - y0) * row, 0, row);
   }
-  if (format_lacks_alpha(s->format) && s->bytes_per_pixel == 4u)
+  if (format_has_pad_byte(s->format))
     for (uint64_t i = 3; i < (uint64_t)row * (y1 - y0); i += 4u) pixels[i] = 0xffu;
   gpu_write_rows_at(r, s->id, s->width, y0, y1 - y0, 0, row, pixels);
   r->gpu_stats.surface_upload_bytes += (uint64_t)row * (y1 - y0);
@@ -3855,6 +3866,43 @@ static bool surface_same_bytes(const Raster3d_Gpu_Surface *s, const Surface_Desc
          (s->block_linear ? s->block_height_log2 == d->block_height_log2 : s->pitch == d->pitch);
 }
 
+/* A live surface's GPU bytes (its texels; RASTER_GPU_SURFACE_BUDGET). */
+static uint64_t gpu_surface_size(const Raster3d_Gpu_Surface *s) {
+  return (uint64_t)s->width * s->height * s->bytes_per_pixel;
+}
+
+/* Drops surface `slot` (its GPU texture too). */
+static void gpu_surface_drop(Raster3d *r, uint32_t slot) {
+  Raster3d_Gpu_Surface *s = &r->gpu_surfaces[slot];
+  r->gpu_stats.surface_drops++;
+  gpu_destroy(r, s->id);
+  surface_index_remove(r, slot);
+  r->gpu_surface_bytes -= gpu_surface_size(s);
+  memset(s, 0, sizeof(*s));
+}
+
+/* Before a surface of `bytes` is made: while the live ones would pass
+ * RASTER_GPU_SURFACE_BUDGET, the least recently used one idle for at least
+ * RASTER_GPU_SURFACE_IDLE_FRAMES goes (none idle that long: over budget it
+ * is - a frame's own targets are never dropped). */
+#define SURFACE_EVICT_LOG_LIMIT 4u
+static void gpu_surface_budget(Raster3d *r, uint64_t bytes) {
+  static uint32_t logged;
+  while (r->gpu_surface_bytes + bytes > r->gpu_surface_budget) {
+    int32_t oldest = -1;
+    for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
+      const Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
+      if (!s->in_use || r->texture_epoch - s->last_frame < RASTER_GPU_SURFACE_IDLE_FRAMES) continue;
+      if (oldest < 0 || s->last_used < r->gpu_surfaces[oldest].last_used) oldest = (int32_t)i;
+    }
+    if (oldest < 0) return;
+    if (logged++ < SURFACE_EVICT_LOG_LIMIT)
+      log_info("[gpu] render targets over %llu MB: dropping idle %ux%u @%llx", (unsigned long long)(r->gpu_surface_budget >> 20),
+               r->gpu_surfaces[oldest].width, r->gpu_surfaces[oldest].height, (unsigned long long)r->gpu_surfaces[oldest].address);
+    gpu_surface_drop(r, (uint32_t)oldest);
+  }
+}
+
 /* The GPU surface for a render target, created on first use. `load`:
  * its current guest contents matter (not about to be fully overwritten). */
 static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d, const Gpu_Memory *mem, bool load) {
@@ -3865,17 +3913,27 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
    * (one that is the target samples it through gpu_surface_at). Forcing
    * a whole re-hash per bound target cost SSBU ~1.5 GB hashed per frame. */
   Raster3d_Gpu_Surface *victim = NULL;
+  /* This very description first: a re-described view below must not be
+   * taken (and freed) when the target itself is here too - its texture
+   * was then never destroyed, and Super Mario Odyssey, which has both at
+   * one address, leaked a 640x720 target a frame (gigabytes in minutes). */
+  for (uint32_t at = r->gpu_surface_head[surface_bucket(d->address)]; at;) {
+    Raster3d_Gpu_Surface *s = &r->gpu_surfaces[at - 1u];
+    at = r->gpu_surface_next[at - 1u];
+    if (s->in_use && s->address == d->address && s->width == d->width && s->height == d->height &&
+        s->format == d->format && s->depth == d->depth) {
+      s->last_used = s->written = r->tick;
+      s->last_frame = r->texture_epoch;
+      if (s->stale && load) gpu_surface_upload_range(r, s, mem, s->stale_lo, s->stale_hi);
+      s->stale = false;
+      return s;
+    }
+  }
   for (uint32_t at = r->gpu_surface_head[surface_bucket(d->address)]; at;) {
     Raster3d_Gpu_Surface *s = &r->gpu_surfaces[at - 1u];
     const uint32_t slot = at - 1u;
     at = r->gpu_surface_next[slot];
     if (!s->in_use || s->address != d->address) continue;
-    if (s->width == d->width && s->height == d->height && s->format == d->format && s->depth == d->depth) {
-      s->last_used = s->written = r->tick;
-      if (s->stale && load) gpu_surface_upload_range(r, s, mem, s->stale_lo, s->stale_hi);
-      s->stale = false;
-      return s;
-    }
     /* Another description of the same bytes (format view): its texels
      * carry over. A different layout at the same address is memory the
      * game reuses within a frame (Super Mario Odyssey: three targets at
@@ -3884,8 +3942,10 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
     if (!load || carried || !surface_same_bytes(s, d)) continue;
     carried = s->id;
     surface_index_remove(r, slot);
+    r->gpu_surface_bytes -= gpu_surface_size(s);
     s->in_use = false;
   }
+  gpu_surface_budget(r, (uint64_t)d->width * d->height * d->bytes_per_pixel);
   for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
     Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
     if (!s->in_use) {
@@ -3900,8 +3960,7 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
     if (dropped++ < SURFACE_DROP_LOG_LIMIT)
       log_warn("[gpu] GPU surface table full: dropping %ux%u @%llx (least recently used)", victim->width, victim->height,
                (unsigned long long)victim->address);
-    gpu_destroy(r, victim->id);
-    surface_index_remove(r, victim_slot);
+    gpu_surface_drop(r, victim_slot);
   }
   memset(victim, 0, sizeof(*victim));
   victim->in_use = true;
@@ -3920,6 +3979,8 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
   victim->pitch = d->pitch;
   victim->guest_bytes = surface_guest_bytes(d);
   victim->last_used = victim->written = r->tick;
+  victim->last_frame = r->texture_epoch;
+  r->gpu_surface_bytes += gpu_surface_size(victim);
   bool direct = false;
   victim->gpu_format = d->depth ? gpu_zeta_format(d->format) : gpu_color_format(d->format, &direct);
   gpu_create(r, victim->id, victim->gpu_format, d->width, d->height, 1, GPU_USAGE_SAMPLED | GPU_USAGE_RENDER, 1);
@@ -3930,6 +3991,7 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
     const uint32_t ids[2] = {carried, victim->id};
     gpu_stream_write(r->gpu, GPU_REC_TEXTURE_REINTERPRET, ids, sizeof(ids));
     gpu_destroy(r, carried);
+    r->gpu_stats.surface_carries++;
   } else if (load) {
     gpu_surface_upload(r, victim, mem);
   }
@@ -4082,6 +4144,7 @@ static uint32_t gpu_gather(Raster3d *r, const Tex_Header *h, const Raster3d_Gpu_
  * aged out, the re-created LUT read zeros and the world went black. */
 static Raster3d_Gpu_Surface *gpu_surface_touch(Raster3d *r, Raster3d_Gpu_Surface *s) {
   s->last_used = ++r->tick;
+  s->last_frame = r->texture_epoch;
   return s;
 }
 

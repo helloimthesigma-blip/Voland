@@ -136,6 +136,8 @@ export interface DebugTarget {
 const DEBUG_MIN_TEXELS = 256 * 256;
 /* A memory report (textures by kind, storage buffers) every this many presents. */
 const MEMORY_REPORT_PRESENTS = 300;
+/* Render-target shapes the memory report names (the most numerous). */
+const REPORT_SHAPES = 3;
 /* WebGPU's bytesPerRow alignment for buffer <-> texture copies. */
 const COPY_ROW_ALIGN = 256;
 /** Approximate bytes per texel of a format (block-compressed: per texel of its blocks). */
@@ -342,6 +344,12 @@ export class GpuExecutor {
   private cacheStore: ShaderCacheStore | null = null;
   private readonly pipelines = new Map<string, CachedPipeline>();
   private readonly shadows = new Map<string, Tex>();
+  /* Diagnostics (the memory report): render targets made and destroyed, and
+   * destroys of ids never made (a lost or reordered create). */
+  private renderCreates = 0;
+  private renderDestroys = 0;
+  private unknownDestroys = 0;
+  private destroysSeen = 0;
   private readonly samplers = new Map<number, GPUSampler>();
   private readonly vertexBuffers: GPUBuffer[] = [];
   private readonly dataBuffers: GPUBuffer[] = [];
@@ -636,8 +644,10 @@ export class GpuExecutor {
       this.warnOnce(`format ${format}`, `GPU texture format ${format} needs a device feature this one lacks`);
       return;
     }
+    if (this.textures.has(c.id)) this.textureDestroy(c.id); /* an id made again: the old texture goes */
     this.textures.set(c.id, this.makeTex(format, width, height, Math.max(1, c.layers), (c.usage & USAGE_RENDER) !== 0,
       fallback, levels));
+    if ((c.usage & USAGE_RENDER) !== 0) this.renderCreates++;
   }
 
   /* ---- storage buffers and compute (stream version 6) ---- */
@@ -811,7 +821,9 @@ export class GpuExecutor {
 
   private textureDestroy(id: number): void {
     const t = this.textures.get(id);
-    if (!t) return;
+    this.destroysSeen++;
+    if (!t) { this.unknownDestroys++; return; }
+    if (t.renderView) this.renderDestroys++;
     this.textures.delete(id);
     this.mipsStale.delete(t.texture);
     this.pendingColor.delete(id);
@@ -1629,10 +1641,17 @@ export class GpuExecutor {
   private reportMemory(): void {
     let render = 0, sampled = 0, renderCount = 0, sampledCount = 0;
     const byFormat = new Map<string, number>();
+    const renderShapes = new Map<string, number>(); /* render targets by shape: a leak shows as one that keeps growing */
     for (const t of this.textures.values()) {
       const base = t.width * t.height * t.layers * texelBytes(t.format);
       const bytes = t.levels > 1 ? base + base / 3 : base;
-      if (t.renderView) { render += bytes; renderCount++; continue; }
+      if (t.renderView) {
+        render += bytes;
+        renderCount++;
+        const shape = `${t.format} ${t.width}x${t.height}${t.layers > 1 ? `x${t.layers}` : ""}`;
+        renderShapes.set(shape, (renderShapes.get(shape) ?? 0) + 1);
+        continue;
+      }
       sampled += bytes;
       sampledCount++;
       const kind = t.format.startsWith("astc") ? "astc" : t.format.startsWith("bc") ? "bc" : t.format;
@@ -1641,7 +1660,10 @@ export class GpuExecutor {
     let buffers = 0;
     for (const b of this.buffers.values()) buffers += b.size;
     const mb = (n: number): string => (n / (1024 * 1024)).toFixed(0);
-    this.host.log("info", `GPU memory: render targets ${mb(render)} MB (${renderCount}), textures ${mb(sampled)} MB ` +
+    const commonShapes = [...renderShapes.entries()].sort((x, y) => y[1] - x[1]).slice(0, REPORT_SHAPES)
+      .map(([shape, n]) => `${n}x ${shape}`).join(", ");
+    this.host.log("info", `GPU memory: render targets ${mb(render)} MB (${renderCount}; most: ${commonShapes}; ` +
+      `${this.renderCreates} made, ${this.renderDestroys} destroyed, ${this.unknownDestroys} unknown of ${this.destroysSeen} destroys), textures ${mb(sampled)} MB ` +
       `(${sampledCount}), storage buffers ${mb(buffers)} MB (${this.buffers.size}), shadows ${this.shadows.size}, ` +
       `${this.pipelines.size} pipelines, ${this.modulesByHash.size} shader modules (${mb(this.shaderBytes)} MB of WGSL); in the last ${MEMORY_REPORT_PRESENTS} ` +
       `presents ${mb(this.uploadedBytes)} MB texture uploads, ${mb(this.bufferBytes)} MB buffer uploads (vertices ${mb(this.vertexBytes)}, data ${mb(this.dataBytes)}, ` +
