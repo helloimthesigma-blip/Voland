@@ -62,6 +62,7 @@ import {
   DRAW_BYTES,
   FRONT_CCW,
   type Draw,
+  type Target,
   FORMATS,
   PRESENT_FLIP_X,
   PRESENT_FLIP_Y,
@@ -346,6 +347,38 @@ function emptyDrawState(pass: GPURenderPassEncoder | null): DrawState {
     scissorOrigin: -1, scissorSize: -1 };
 }
 
+/* Per-draw lookups key on numbers, not strings or objects: SSBU fights
+ * spent 60% of the GPU worker collecting per-draw garbage. Two 32-bit
+ * FNV-style lanes make a 53-bit key. */
+const KEY_SEED_A = 0x811c9dc5;
+const KEY_SEED_B = 0x27d4eb2f;
+const KEY_PRIME_A = 0x01000193;
+const KEY_PRIME_B = 0x5bd1e995;
+const KEY_HIGH_LANE = 2 ** 21; /* the second lane's low 21 bits under the first's 32 */
+const KEY_LOW_MASK = KEY_HIGH_LANE - 1;
+/** Fast pipeline keys kept (cleared when full: rebuilt from the string keys). */
+const FAST_PIPELINE_LIMIT = 4 * 1200;
+const FLOAT_BITS = new Float64Array(1);
+const FLOAT_WORDS = new Uint32Array(FLOAT_BITS.buffer);
+const NO_DATA = new Uint8Array(16);
+
+interface ScratchWindow {
+  binding: number;
+  buffer: GPUBuffer;
+  writable: boolean;
+}
+
+interface CachedBindGroup {
+  readonly signature: readonly number[];
+  readonly group: GPUBindGroup;
+}
+
+function sameNumbers(a: readonly number[], b: readonly number[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
 export class GpuExecutor {
   readonly stats: ExecutorStats = { draws: 0, dispatches: 0, passes: 0, submits: 0, pipelines: 0, prewarmed: 0, pipelinesEvicted: 0, presents: 0, errors: 0, shadows: 0, copies: 0 };
   private readonly textures = new Map<number, Tex>();
@@ -401,7 +434,27 @@ export class GpuExecutor {
   /* Deferred full clears by texture id: colour value, or depth / stencil. */
   private readonly pendingColor = new Map<number, GPUColorDict>();
   private readonly pendingDepth = new Map<number, { depth: number | null; stencil: number | null }>();
-  private readonly bindGroups = new Map<string, GPUBindGroup>();
+  private readonly bindGroups = new Map<number, CachedBindGroup>();
+  /* Allocation-free per-draw lookups (see KEY_SEED_A). */
+  private keyA = KEY_SEED_A;
+  private keyB = KEY_SEED_B;
+  private readonly fastPipelines = new Map<number, { readonly key: string; readonly made: CachedPipeline }>();
+  private readonly shaderSerials = new Map<number, number>(); /* shader id -> its definition's serial */
+  private shaderSerial = 0;
+  private readonly stringCodes = new Map<string, number>(); /* formats and sample types as small numbers */
+  private readonly signature: number[] = [];
+  private readonly dynamicOffset = new Uint32Array(1);
+  private readonly scratchTextureIds: number[] = [];
+  private readonly scratchFiltered: boolean[] = [];
+  private readonly scratchSamplers: number[] = []; /* binding, sampler state pairs */
+  private readonly scratchWindows: ScratchWindow[] = [];
+  private readonly windowPool: ScratchWindow[] = [];
+  private readonly scratchTextures: Tex[] = [];
+  private readonly scratchColorIds: number[] = [];
+  private readonly scratchColorFormats: (GPUTextureFormat | null)[] = [];
+  /* The open pass's attachments when passFor began it (null: another kind of pass). */
+  private passColorIds: number[] | null = null;
+  private passDepthId = 0;
   private readonly objectIds = new WeakMap<object, number>();
   private nextObjectId = 1;
   private readonly warned = new Set<string>();
@@ -961,6 +1014,7 @@ export class GpuExecutor {
     }
     this.shaders.set(id, module);
     this.shaderHashes.set(id, hash);
+    this.shaderSerials.set(id, ++this.shaderSerial);
     const windows = [...code.matchAll(/@binding\((\d+)\) var<storage, read_write>/g)].map((m) => Number(m[1]));
     if (windows.length) this.computeWindows.set(id, windows);
     else this.computeWindows.delete(id);
@@ -1032,6 +1086,37 @@ export class GpuExecutor {
     if (this.pass) this.pass.end();
     this.pass = null;
     this.passKey = "";
+    this.passColorIds = null;
+  }
+
+  private keyStart(): void {
+    this.keyA = KEY_SEED_A;
+    this.keyB = KEY_SEED_B;
+  }
+
+  private keyMix(x: number): void {
+    this.keyA = Math.imul(this.keyA ^ (x | 0), KEY_PRIME_A);
+    this.keyB = Math.imul((this.keyB ^ (x | 0)) + (this.keyB >>> 15), KEY_PRIME_B);
+  }
+
+  private keyMixFloat(x: number): void {
+    FLOAT_BITS[0] = x;
+    this.keyMix(FLOAT_WORDS[0] ?? 0);
+    this.keyMix(FLOAT_WORDS[1] ?? 0);
+  }
+
+  private keyEnd(): number {
+    return (this.keyA >>> 0) * KEY_HIGH_LANE + ((this.keyB >>> 0) & KEY_LOW_MASK);
+  }
+
+  private stringCode(value: string | null): number {
+    if (value === null) return 0;
+    let code = this.stringCodes.get(value);
+    if (code === undefined) {
+      code = this.stringCodes.size + 1;
+      this.stringCodes.set(value, code);
+    }
+    return code;
   }
 
   private beginPass(key: string, colors: readonly (GPURenderPassColorAttachment | null)[],
@@ -1066,6 +1151,7 @@ export class GpuExecutor {
 
   /** A pass rendering into these attachments (loading their contents). */
   private passFor(colorIds: readonly number[], depthId: number): GPURenderPassEncoder | null {
+    if (this.pass && this.passColorIds && this.passDepthId === depthId && sameNumbers(this.passColorIds, colorIds)) return this.pass;
     const key = `${colorIds.join(",")}|${depthId}`;
     if (this.pass && this.passKey === key) return this.pass;
     let size: [number, number] | null = null;
@@ -1086,7 +1172,10 @@ export class GpuExecutor {
     const depth = dt && dt.renderView ? this.depthAttachment(dt, pd?.depth ?? null, pd?.stencil ?? null) : null;
     if (dt) size = [dt.width, dt.height];
     if (!size) return null;
-    return this.beginPass(key, colors, depth, size);
+    const pass = this.beginPass(key, colors, depth, size);
+    this.passColorIds = colorIds.slice();
+    this.passDepthId = depthId;
+    return pass;
   }
 
   /** Stages `bytes` at a DATA_ALIGN offset; `window`: the binding reads
@@ -1186,11 +1275,94 @@ export class GpuExecutor {
     };
   }
 
+  /** What drawSpec would describe, as a number (null: debug overrides are
+   * on, or a shader has no serial - take the slow path). */
+  private drawPipelineKey(d: Draw, textures: readonly Tex[], filtered: readonly boolean[],
+                          colorFormats: readonly (GPUTextureFormat | null)[], depth: Tex | undefined,
+                          windows: readonly DrawWindow[]): number | null {
+    const g = globalThis as { DEPTH_CMP?: unknown; DEPTH_OFF_SHADERS?: unknown };
+    if (g.DEPTH_CMP !== undefined || g.DEPTH_OFF_SHADERS !== undefined) return null;
+    const fs = this.shaderSerials.get(d.shaderId);
+    const vs = d.vsShaderId ? this.shaderSerials.get(d.vsShaderId) : 0;
+    if (fs === undefined || vs === undefined) return null;
+    this.keyStart();
+    this.keyMix(fs);
+    this.keyMix(vs);
+    if (d.vsShaderId) {
+      this.keyMix(d.vertexInputCount);
+      this.keyMix(d.cullMode);
+      this.keyMix(d.frontFace);
+      this.keyMix((d.flags & DRAW_VERTEX_PULL) !== 0 ? 1 : 0);
+    }
+    this.keyMix(d.varyingCount);
+    this.keyMix(textures.length);
+    for (let i = 0; i < textures.length; i++) this.keyMix(filtered[i] ? -1 : this.stringCode(textures[i]?.sampleType ?? null));
+    this.keyMix(d.targets.length);
+    for (let i = 0; i < d.targets.length; i++) {
+      const t = d.targets[i];
+      if (!t) continue;
+      this.keyMix(this.stringCode(colorFormats[i] ?? null));
+      this.keyMix(t.writeMask);
+      this.keyMix(t.blend ? 1 : 0);
+      if (t.blend) {
+        this.keyMix(t.colorOp); this.keyMix(t.colorSrc); this.keyMix(t.colorDst);
+        this.keyMix(t.alphaOp); this.keyMix(t.alphaSrc); this.keyMix(t.alphaDst);
+      }
+    }
+    this.keyMix(depth ? 1 : 0);
+    if (depth) {
+      this.keyMix(this.stringCode(depth.format));
+      this.keyMix(d.depthCompare);
+      this.keyMix(d.depthWrite ? 1 : 0);
+      this.keyMix(d.depthTest ? 1 : 0);
+      this.keyMix(d.stencil ? 1 : 0);
+      if (d.stencil) {
+        const f = d.stencilFront, b = d.stencilBack;
+        this.keyMix(f.compare); this.keyMix(f.fail); this.keyMix(f.depthFail); this.keyMix(f.pass);
+        this.keyMix(b.compare); this.keyMix(b.fail); this.keyMix(b.depthFail); this.keyMix(b.pass);
+        this.keyMix(d.stencilReadMask);
+        this.keyMix(d.stencilWriteMask);
+      }
+      this.keyMix(d.depthBias);
+      this.keyMixFloat(roundBiasSlope(d.depthBiasSlope));
+      this.keyMixFloat(d.depthBiasClamp);
+    }
+    this.keyMix((d.flags & DRAW_UNCLIPPED_DEPTH) !== 0 && this.device.features.has("depth-clip-control") ? 1 : 0);
+    this.keyMix(windows.length);
+    for (let i = 0; i < windows.length; i++) {
+      const w = windows[i];
+      if (!w) continue;
+      this.keyMix(w.binding);
+      this.keyMix(w.writable ? 1 : 0);
+    }
+    return this.keyEnd();
+  }
+
   private drawPipeline(d: Draw, module: GPUShaderModule, textures: readonly Tex[], filtered: readonly boolean[],
                        colorFormats: readonly (GPUTextureFormat | null)[], depth: Tex | undefined,
                        windows: readonly DrawWindow[]): CachedPipeline {
+    const fast = this.drawPipelineKey(d, textures, filtered, colorFormats, depth, windows);
+    const hit = fast === null ? undefined : this.fastPipelines.get(fast);
+    if (hit) {
+      const live = this.pipelines.get(hit.key);
+      if (live === hit.made) {
+        this.pipelines.delete(hit.key); /* most recently used last (evictPipelines) */
+        this.pipelines.set(hit.key, live);
+        return live;
+      }
+    }
     const spec = this.drawSpec(d, textures, filtered, colorFormats, depth, windows);
-    return this.cached(specKey(spec), () => {
+    const key = specKey(spec);
+    const made = this.slowDrawPipeline(d, module, spec, key);
+    if (fast !== null) {
+      if (this.fastPipelines.size >= FAST_PIPELINE_LIMIT) this.fastPipelines.clear();
+      this.fastPipelines.set(fast, { key, made });
+    }
+    return made;
+  }
+
+  private slowDrawPipeline(d: Draw, module: GPUShaderModule, spec: PipelineSpec, key: string): CachedPipeline {
+    return this.cached(key, () => {
       const vsModule = d.vsShaderId ? this.shaders.get(d.vsShaderId) : module;
       if (!vsModule) throw new Error(`draw uses unknown vertex shader ${d.vsShaderId}`);
       const { desc, layout } = this.pipelineDescriptor(spec, module, vsModule);
@@ -1355,7 +1527,7 @@ export class GpuExecutor {
   private invalidateDrawState(): void { this.drawState = emptyDrawState(null); }
 
   private scissor(pass: GPURenderPassEncoder, rect: readonly number[]): boolean {
-    const [w, h] = this.passSize;
+    const w = this.passSize[0], h = this.passSize[1];
     const x0 = Math.max(0, rect[0] ?? 0), y0 = Math.max(0, rect[1] ?? 0);
     const x1 = Math.min(w, (rect[0] ?? 0) + (rect[2] ?? 0)), y1 = Math.min(h, (rect[1] ?? 0) + (rect[3] ?? 0));
     if (x1 <= x0 || y1 <= y0) return false;
@@ -1376,14 +1548,16 @@ export class GpuExecutor {
       this.warnOnce(`shader ${d.shaderId}`, `draw with unknown shader ${d.shaderId}`);
       return;
     }
-    /* Bindings. */
+    /* Bindings, into the executor's scratch arrays (no per-draw garbage). */
     let at = DRAW_BYTES;
     let data: Uint8Array | null = null;
-    const textureIds: number[] = [];
-    const filtered: boolean[] = [];
-    const samplerStates = new Map<number, number>();
+    const textureIds = this.scratchTextureIds, filtered = this.scratchFiltered, samplerStates = this.scratchSamplers;
+    const windows = this.scratchWindows;
+    textureIds.length = 0;
+    filtered.length = 0;
+    samplerStates.length = 0;
+    windows.length = 0;
     let resident: GPUBuffer | undefined;
-    const windows: DrawWindow[] = [];
     for (let i = 0; i < d.bindingCount; i++) {
       const kind = v.getUint32(at, true);
       const binding = v.getUint32(at + 4, true);
@@ -1397,12 +1571,23 @@ export class GpuExecutor {
         textureIds.push(texture);
         filtered.push((bytes & BIND_FILTERED) !== 0);
       } else if (kind === BIND_SAMPLER) {
-        samplerStates.set(binding, texture);
+        let k = 0;
+        while (k < samplerStates.length && samplerStates[k] !== binding) k += 2;
+        samplerStates[k] = binding; /* a later state for one binding replaces the earlier */
+        samplerStates[k + 1] = texture;
       } else if (kind === BIND_BUFFER) {
         const buffer = this.buffers.get(texture);
         if (!buffer) this.warnOnce(`buffer ${texture}`, `draw binds unknown buffer ${texture}`);
-        if (binding === VS_RESIDENT_BINDING) resident = buffer;
-        else windows.push({ binding, buffer: buffer ?? this.emptyStorage(), writable: (bytes & BIND_WRITABLE) !== 0 });
+        if (binding === VS_RESIDENT_BINDING) {
+          resident = buffer;
+        } else {
+          const w = this.windowPool[windows.length] ?? { binding: 0, buffer: this.emptyStorage(), writable: false };
+          this.windowPool[windows.length] = w;
+          w.binding = binding;
+          w.buffer = buffer ?? this.emptyStorage();
+          w.writable = (bytes & BIND_WRITABLE) !== 0;
+          windows.push(w);
+        }
       }
     }
     if (this.traceFrame) {
@@ -1412,30 +1597,39 @@ export class GpuExecutor {
     const pulled = d.vsShaderId !== 0 && (d.flags & DRAW_VERTEX_PULL) !== 0;
     const second = pulled ? resident ?? this.emptyStorage() : null;
     if (resident) this.touchedBuffers.add(resident);
-    for (const w of windows) this.touchedBuffers.add(w.buffer);
+    for (let i = 0; i < windows.length; i++) this.touchedBuffers.add((windows[i] as ScratchWindow).buffer);
     const stride = d.vsShaderId ? 16 * (d.vertexInputCount + 1) : VERTEX_HEADER_BYTES + 16 * d.varyingCount;
     const vertices = payload.subarray(at, at + stride * d.vertexCount);
     const indexStart = at + stride * d.vertexCount;
     const indices = d.indexCount ? payload.subarray(indexStart, indexStart + 4 * d.indexCount) : null;
     const indexBytes = indices ? Math.ceil(indices.byteLength / 16) * 16 : 0;
-    const colorIds = d.targets.map((t) => (t.id && this.textures.get(t.id)?.renderView ? t.id : 0));
+    const colorIds = this.scratchColorIds, colorFormats = this.scratchColorFormats;
+    colorIds.length = 0;
+    colorFormats.length = 0;
+    for (let i = 0; i < d.targets.length; i++) {
+      const id = (d.targets[i] as Target).id;
+      const t = id ? this.textures.get(id) : undefined;
+      colorIds.push(t?.renderView ? id : 0);
+      colorFormats.push(t?.renderView ? t.format : null);
+    }
     const depthTex = d.depthId && !(globalThis as { NO_DEPTH?: boolean }).NO_DEPTH ? this.textures.get(d.depthId) : undefined;
     const depthId = depthTex?.renderView ? d.depthId : 0;
     /* Textures; one that is also an attachment is sampled from a copy. */
-    const attached = new Set<number>([...colorIds, depthId].filter((id) => id !== 0));
-    const textures: Tex[] = [];
-    for (const id of textureIds) {
+    const textures = this.scratchTextures;
+    textures.length = 0;
+    for (let i = 0; i < textureIds.length; i++) {
+      const id = textureIds[i] as number;
       const t = this.textures.get(id);
       if (!t) {
         this.warnOnce(`texture ${id}`, `draw samples unknown texture ${id}`);
         return;
       }
       if (this.mipsStale.has(t.texture)) this.buildMips(t);
-      if (!attached.has(id)) this.materialize(id);
+      const attached = id === depthId || colorIds.includes(id);
+      if (!attached) this.materialize(id);
       this.touched.add(t.texture);
-      textures.push(attached.has(id) ? this.shadowOf(id, t) : t);
+      textures.push(attached ? this.shadowOf(id, t) : t);
     }
-    const colorFormats = colorIds.map((id) => (id ? this.textures.get(id)?.format ?? null : null));
     const { pipeline, layout } = this.drawPipeline(d, module, textures, filtered, colorFormats, depthId ? depthTex : undefined,
       windows);
     /* Vertices and data (a flush may happen in between: stage both first). */
@@ -1443,7 +1637,7 @@ export class GpuExecutor {
         Math.ceil(this.dataUsed / DATA_ALIGN) * DATA_ALIGN + Math.max(data?.byteLength ?? 0, DATA_WINDOW_BYTES) > DATA_BUFFER_BYTES) {
       this.flush();
     }
-    const dataOffset = this.stageData(data ?? new Uint8Array(16), DATA_WINDOW_BYTES);
+    const dataOffset = this.stageData(data ?? NO_DATA, DATA_WINDOW_BYTES);
     /* Vertices start on a whole vertex, so the buffer stays bound for the
      * pass and the draw names its first vertex (pulled stages count from
      * vertex 0: they bind at the offset instead). */
@@ -1454,50 +1648,85 @@ export class GpuExecutor {
     const indexOffset = this.vertexUsed;
     if (indices) this.vertexStaging.set(indices, indexOffset);
     this.vertexUsed += indexBytes;
+    /* One buffer both read and written by this draw: WebGPU refuses it (and
+     * the whole command buffer with it). The pulled vertex buffer is read. */
+    for (let i = 0; i < windows.length; i++) {
+      const w = windows[i] as ScratchWindow;
+      let clash = second === w.buffer && w.writable;
+      for (let j = 0; j < windows.length && !clash; j++) {
+        const o = windows[j] as ScratchWindow;
+        clash = o.buffer === w.buffer && o.writable !== w.writable;
+      }
+      if (clash) {
+        this.warnOnce(`storage ${d.shaderId}`, `draw with shader ${d.shaderId} reads and writes one buffer: skipped`);
+        return;
+      }
+    }
     /* Storage this draw writes that the open pass reads, or reads that it
      * writes: a new pass. */
-    const uses: readonly (readonly [GPUBuffer, boolean])[] = [
-      ...windows.map((w) => [w.buffer, w.writable] as const), ...(second ? [[second, false] as const] : []),
-    ];
-    /* One buffer both read and written by this draw: WebGPU refuses it (and
-     * the whole command buffer with it). */
-    if (uses.some(([b, w]) => uses.some(([o, ow]) => o === b && ow !== w))) {
-      this.warnOnce(`storage ${d.shaderId}`, `draw with shader ${d.shaderId} reads and writes one buffer: skipped`);
-      return;
-    }
-    if (this.pass && uses.some(([b, w]) => { const used = this.passBuffers.get(b); return used !== undefined && used !== w; })) {
-      this.endPass();
+    if (this.pass) {
+      let conflict = second !== null && this.passBuffers.get(second) === true;
+      for (let i = 0; i < windows.length && !conflict; i++) {
+        const w = windows[i] as ScratchWindow;
+        const used = this.passBuffers.get(w.buffer);
+        conflict = used !== undefined && used !== w.writable;
+      }
+      if (conflict) this.endPass();
     }
     const pass = this.passFor(colorIds, depthId);
     if (!pass) return;
-    for (const [b, w] of uses) this.passBuffers.set(b, w || (this.passBuffers.get(b) ?? false));
+    for (let i = 0; i < windows.length; i++) {
+      const w = windows[i] as ScratchWindow;
+      this.passBuffers.set(w.buffer, w.writable || (this.passBuffers.get(w.buffer) ?? false));
+    }
+    if (second) this.passBuffers.set(second, this.passBuffers.get(second) ?? false);
     if (!this.scissor(pass, d.scissor)) return;
-    const samplers = [...samplerStates].map(([binding, state]) => ({ binding, resource: this.sampler(state) }));
-    const key = [this.idOf(layout), this.set, ...textures.map((t) => this.idOf(t.sampleView)),
-      ...samplers.map((e) => `${e.binding}:${this.idOf(e.resource)}`), second ? `r${this.idOf(second)}` : "",
-      ...windows.map((w) => `w${w.binding}:${this.idOf(w.buffer)}`)].join(",");
-    let group = this.bindGroups.get(key);
-    if (!group) {
+    /* The bind group, found by a signature of what it binds. */
+    const sig = this.signature;
+    sig.length = 0;
+    sig.push(this.idOf(layout), this.set, textures.length);
+    for (let i = 0; i < textures.length; i++) sig.push(this.idOf((textures[i] as Tex).sampleView));
+    sig.push(samplerStates.length);
+    for (let k = 0; k < samplerStates.length; k += 2) {
+      sig.push(samplerStates[k] as number, this.idOf(this.sampler(samplerStates[k + 1] as number)));
+    }
+    sig.push(second ? this.idOf(second) : 0, windows.length);
+    for (let i = 0; i < windows.length; i++) {
+      const w = windows[i] as ScratchWindow;
+      sig.push(w.binding, this.idOf(w.buffer));
+    }
+    this.keyStart();
+    for (let i = 0; i < sig.length; i++) this.keyMix(sig[i] as number);
+    const groupKey = this.keyEnd();
+    const cachedGroup = this.bindGroups.get(groupKey);
+    let group: GPUBindGroup;
+    if (cachedGroup && sameNumbers(cachedGroup.signature, sig)) {
+      group = cachedGroup.group;
+    } else {
       if (this.bindGroups.size >= BIND_GROUP_CACHE_LIMIT) this.bindGroups.clear();
-      group = this.device.createBindGroup({
-        layout,
-        entries: [
-          { binding: 0, resource: { buffer: this.dataBuffer, offset: 0, size: DATA_WINDOW_BYTES } },
-          ...textures.map((t, i) => ({ binding: 1 + i, resource: t.sampleView })),
-          ...samplers,
-          ...(second ? [{ binding: VS_RESIDENT_BINDING, resource: { buffer: second } }] : []),
-          { binding: POOL_BINDING, resource: { buffer: this.pool } },
-          ...windows.map((w) => ({ binding: w.binding, resource: { buffer: w.buffer } })),
-        ],
-      });
-      this.bindGroups.set(key, group);
+      const entries: GPUBindGroupEntry[] = [
+        { binding: 0, resource: { buffer: this.dataBuffer, offset: 0, size: DATA_WINDOW_BYTES } },
+        { binding: POOL_BINDING, resource: { buffer: this.pool } },
+      ];
+      for (let i = 0; i < textures.length; i++) entries.push({ binding: 1 + i, resource: (textures[i] as Tex).sampleView });
+      for (let k = 0; k < samplerStates.length; k += 2) {
+        entries.push({ binding: samplerStates[k] as number, resource: this.sampler(samplerStates[k + 1] as number) });
+      }
+      if (second) entries.push({ binding: VS_RESIDENT_BINDING, resource: { buffer: second } });
+      for (let i = 0; i < windows.length; i++) {
+        const w = windows[i] as ScratchWindow;
+        entries.push({ binding: w.binding, resource: { buffer: w.buffer } });
+      }
+      group = this.device.createBindGroup({ layout, entries });
+      this.bindGroups.set(groupKey, { signature: sig.slice(), group });
     }
     const st = this.stateFor(pass);
     if (st.pipeline !== pipeline) {
       pass.setPipeline(pipeline);
       st.pipeline = pipeline;
     }
-    pass.setBindGroup(0, group, [dataOffset]); /* the data offset moves every draw */
+    this.dynamicOffset[0] = dataOffset;
+    pass.setBindGroup(0, group, this.dynamicOffset, 0, 1); /* the data offset moves every draw */
     let firstVertex = 0;
     if (vertices.byteLength && pulled) {
       pass.setVertexBuffer(0, this.vertexBuffer, vertexOffset, vertices.byteLength);

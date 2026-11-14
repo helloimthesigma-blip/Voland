@@ -62,6 +62,9 @@
  *   figure much less sensitive to a busy machine than wall time.
  * - --web-dir DIR builds and serves another checkout's platform/web (its
  *   core staged there), so this harness can measure older commits.
+ * - --alloc S: after the measurement, samples the GPU worker's allocations
+ *   (CDP HeapProfiler) for S seconds and prints the sites that allocate the
+ *   most - what its garbage collector is busy with.
  * - --profile-all (with --profile): also samples every other worker (the
  *   core's pthreads: parallel guest cores, renderer workers) and prints
  *   their merged self time - where parallel mode's time goes.
@@ -111,13 +114,14 @@ const TICKS_PER_SECOND = 19_200_000;
  * shaders can hold one off for well over Playwright's default 30 s. */
 const STALL_DUMP_MS = 60_000; /* frames stopped this long while warming up: dump threads once */
 const SHOT_TIMEOUT_MS = 180_000;
+const ALLOC_SAMPLING_BYTES = 1024; /* --alloc: one sample per this many bytes allocated */
 const BROWSER_CLOSE_WAIT_MS = 10_000;
 const HARDWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"];
 const SOFTWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"];
 
 function parseArgs(argv) {
   const opts = {
-    game: "", clock: "slices", warmupSlices: 860_000, seconds: 30, profile: 0, port: 0, debugPort: 0,
+    game: "", clock: "slices", warmupSlices: 860_000, seconds: 30, profile: 0, alloc: 0, port: 0, debugPort: 0,
     build: true, software: false, urlParams: "", outDir: tmpdir(), browserArgs: [], presses: [], shot: "", restoreSaves: "", phases: [], json: "", expectJitAsync: false,
   };
   for (let i = 0; i < argv.length; i++) {
@@ -137,6 +141,7 @@ function parseArgs(argv) {
     else if (a === "--seconds") opts.seconds = Number(next());
     else if (a === "--profile") opts.profile = Number(next());
     else if (a === "--profile-all") opts.profileAll = true;
+    else if (a === "--alloc") opts.alloc = Number(next());
     else if (a === "--port") opts.port = Number(next());
     else if (a === "--debug-port") opts.debugPort = Number(next());
     else if (a === "--no-build") opts.build = false;
@@ -860,6 +865,32 @@ async function main() {
       if (opts.expectJitAsync && (finalPerf.jitAsyncInstalled === 0 || finalPerf.jitAsyncFailed > 0)) {
         console.error("FAIL: --expect-jit-async: the JIT's asynchronous compiles did not install cleanly");
         process.exitCode = 1;
+      }
+    }
+
+    if (opts.alloc > 0) {
+      const cdp = await Cdp.connect(opts.debugPort);
+      try {
+        const [gpuSession] = await attachToWorkers(cdp, baseUrl, [/gpu\.worker/]);
+        await cdp.send("HeapProfiler.enable", {}, gpuSession);
+        await cdp.send("HeapProfiler.startSampling", { samplingInterval: ALLOC_SAMPLING_BYTES, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true }, gpuSession);
+        await sleep(opts.alloc * 1000);
+        const { profile } = await cdp.send("HeapProfiler.stopSampling", {}, gpuSession);
+        const bySite = new Map();
+        let total = 0;
+        const walk = (node) => {
+          const f = node.callFrame;
+          const site = `${f.functionName || "(anonymous)"} ${f.url.split("/").pop()}:${f.lineNumber + 1}`;
+          bySite.set(site, (bySite.get(site) ?? 0) + node.selfSize);
+          total += node.selfSize;
+          for (const child of node.children) walk(child);
+        };
+        walk(profile.head);
+        console.log(`\nGPU worker allocations (${opts.alloc} s, sampled; ${(total / 1048576).toFixed(0)} MiB sampled, collected included):`);
+        for (const [site, bytes] of [...bySite.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25))
+          console.log(`  ${((100 * bytes) / Math.max(total, 1)).toFixed(1).padStart(5)}%  ${site}`);
+      } finally {
+        cdp.close();
       }
     }
 
