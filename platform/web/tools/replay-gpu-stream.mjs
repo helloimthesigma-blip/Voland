@@ -31,7 +31,9 @@
  * TRACE_WRITES=id,... lists every draw into those targets; CB_DUMP=shader,slot,words
  * prints a constant buffer (from the pool) for that shader's draws (with
  * TRACE_SHAPES); TRACE_VERTEX_WORDS=1 prints the first six CPU-transformed
- * vertices whole and the raw binding list of draws without a vertex stage.
+ * vertices whole and the raw binding list of draws without a vertex stage;
+ * TEX_NAN=record:id,... counts NaN / Inf texels per layer and level of
+ * those textures just before that record.
  */
 import { chromium } from "@playwright/test";
 import { readFileSync, statSync, createReadStream, writeFileSync } from "node:fs";
@@ -101,6 +103,7 @@ if (process.env.DRAW_TRACE) await page.evaluate((n) => { globalThis.DRAW_TRACE =
 if (process.env.NO_SHADOW_COMPARE) await page.evaluate(() => { globalThis.NO_SHADOW_COMPARE = true; });
 if (process.env.TRACE_SHAPES) await page.evaluate((n) => { globalThis.TRACE_SHAPES = n; }, Number(process.env.TRACE_SHAPES));
 if (process.env.TRACE_VERTEX_WORDS) await page.evaluate(() => { globalThis.TRACE_VERTEX_WORDS = true; });
+if (process.env.TEX_NAN) await page.evaluate((t) => { globalThis.TEX_NAN = t; }, process.env.TEX_NAN.split(/[:,]/).map(Number));
 if (process.env.TEX_INFO) await page.evaluate((t) => { globalThis.TEX_INFO = t; }, process.env.TEX_INFO.split(",").map(Number));
 if (process.env.TRACE_TARGET) await page.evaluate((n) => { globalThis.TRACE_TARGET = n; }, Number(process.env.TRACE_TARGET));
 if (process.env.SYNC_DRAWS) await page.evaluate(() => { globalThis.SYNC_DRAWS = true; });
@@ -262,6 +265,43 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
       if (globalThis.CB_DUMP && type === 14) {
         const pv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
         (globalThis.CB_POOL ??= new Uint8Array(16 << 20)).set(payload.subarray(16, 16 + pv.getUint32(4, true)), pv.getUint32(0, true));
+      }
+      /* TEX_NAN=record:id,...: just before that record, every layer and level of
+       * those textures (rgba16float / rg11b10ufloat / r32float / rgba32float):
+       * NaN and Inf counts and the largest finite value, per channel. */
+      if (globalThis.TEX_NAN && records === globalThis.TEX_NAN[0]) {
+        ex.flush();
+        for (const id of globalThis.TEX_NAN.slice(1)) {
+          const t = ex.textures.get(id);
+          if (!t) { console.log(`texnan ${id}: missing`); continue; }
+          const texel = TEXEL_BYTES[t.format];
+          if (!texel) { console.log(`texnan ${id}: ${t.format} not read`); continue; }
+          for (let layer = 0; layer < t.texture.depthOrArrayLayers; layer++)
+            for (let level = 0; level < t.texture.mipLevelCount; level++) {
+              const w = Math.max(1, t.width >> level), h = Math.max(1, t.height >> level);
+              const bytesPerRow = Math.ceil((w * texel) / 256) * 256;
+              const buffer = device.createBuffer({ size: bytesPerRow * h, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+              const enc = device.createCommandEncoder();
+              enc.copyTextureToBuffer({ texture: t.texture, mipLevel: level, origin: [0, 0, layer] }, { buffer, bytesPerRow }, [w, h, 1]);
+              device.queue.submit([enc.finish()]);
+              await buffer.mapAsync(GPUMapMode.READ);
+              const d = new DataView(buffer.getMappedRange());
+              const nan = [0, 0, 0, 0], inf = [0, 0, 0, 0], max = [0, 0, 0, 0];
+              for (let y = 0; y < h; y++)
+                for (let x = 0; x < w; x++) {
+                  const at = y * bytesPerRow + x * texel;
+                  let c;
+                  if (t.format === "rg11b10ufloat") { const v = d.getUint32(at, true); c = [small(v & 2047, 6), small((v >> 11) & 2047, 6), small(v >>> 22, 5)]; }
+                  else if (t.format === "rgba16float") c = [0, 2, 4, 6].map((k) => half(d.getUint16(at + k, true)));
+                  else if (t.format === "r32float") c = [d.getFloat32(at, true)];
+                  else if (t.format === "rgba32float") c = [0, 4, 8, 12].map((k) => d.getFloat32(at + k, true));
+                  else c = [0, 1, 2, 3].map((k) => d.getUint8(at + k) / 255);
+                  c.forEach((v, k) => { if (Number.isNaN(v)) nan[k]++; else if (!Number.isFinite(v)) inf[k]++; else max[k] = Math.max(max[k], v); });
+                }
+              buffer.destroy();
+              console.log(`texnan ${id} layer ${layer} level ${level} ${w}x${h}: NaN ${nan.join(",")} Inf ${inf.join(",")} max ${max.map((v) => v.toPrecision(4)).join(",")}`);
+            }
+        }
       }
       const r0 = performance.now();
       if (globalThis.MEASURE && type === 6 && records > 8000 && records < 12000) {
