@@ -5860,9 +5860,14 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     if (!seen && skip_logged_count < SKIP_LOG_PROGRAMS) {
       skip_logged[skip_logged_count++] = ctx->ps->address;
       if (r->stats.skipped_draws) /* (the first is logged below) */
-        log_warn("[gpu] draw skipped: pixel program %llx, %u targets, depth %s, clip %d,%d-%d,%d, CT_WRITE 0x%x",
-                 (unsigned long long)ctx->ps->address, rs.target_count, rs.depth ? "on" : "off", rs.clip.x0,
-                 rs.clip.y0, rs.clip.x1, rs.clip.y1, regs[REG_CT_WRITE]);
+        log_warn("[gpu] draw skipped: vertex program %llx, pixel program %llx, %u targets, depth %s, clip %d,%d-%d,%d, CT_WRITE 0x%x; "
+                 "RT0 %ux%u, zeta %ux%u, scissor %s 0x%x 0x%x, viewport clip 0x%x 0x%x, surface clip 0x%x 0x%x",
+                 (unsigned long long)ctx->vs->address, (unsigned long long)ctx->ps->address, rs.target_count,
+                 rs.depth ? "on" : "off", rs.clip.x0, rs.clip.y0, rs.clip.x1, rs.clip.y1, regs[REG_CT_WRITE],
+                 regs[REG_RT + 2], regs[REG_RT + 3],
+                 regs[REG_ZT_SIZE_A], regs[REG_ZT_SIZE_B], (regs[REG_SCISSOR] & 1u) ? "on" : "off",
+                 regs[REG_SCISSOR + 1u], regs[REG_SCISSOR + 2u], regs[REG_VIEWPORT_CLIP], regs[REG_VIEWPORT_CLIP + 1u],
+                 regs[REG_SURFACE_CLIP_H], regs[REG_SURFACE_CLIP_V]);
     }
     if (!r->stats.skipped_draws) {
       Surface_Desc d;

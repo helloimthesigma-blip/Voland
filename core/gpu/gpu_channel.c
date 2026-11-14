@@ -7,6 +7,7 @@
 #include "common/log.h"
 #include "gpu/block_linear.h"
 
+#include <stdlib.h>
 #include <string.h>
 
 /* GP entry. */
@@ -772,9 +773,16 @@ static void mme_set_method(Mme_Run *m, uint32_t value) {
   m->has_method = true;
 }
 
+/* VOLAND_WATCH_METHOD=0xNNN (diagnostics): every write to that 3D method
+ * is logged, and whether a macro emitted it. */
+static int64_t g_watch_method = -2;
+static bool g_watch_from_macro;
+
 static void mme_emit(Gpu_Channel *ch, const Gpu_Memory *mem, Mme_Run *m, uint32_t value) {
   if (!m->has_method) return;
+  g_watch_from_macro = true;
   engine3d_method(ch, mem, m->method, value);
+  g_watch_from_macro = false;
   m->method = (m->method + m->increment) & MME_METHOD_ADDRESS_MASK;
 }
 
@@ -1052,6 +1060,12 @@ static bool draw_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t method,
 
 static void engine3d_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t method, uint32_t data) {
   method &= GPU_3D_REGISTER_WORDS - 1u;
+  if (g_watch_method == -2) {
+    const char *spec = getenv("VOLAND_WATCH_METHOD");
+    g_watch_method = spec ? (int64_t)strtoul(spec, NULL, 0) : -1;
+  }
+  if ((int64_t)method == g_watch_method)
+    log_info("[gpu] method 0x%x = 0x%x%s", method, data, g_watch_from_macro ? " (from a macro)" : "");
   if (method >= M3D_MACRO_FIRST) {
     macro_method(ch, mem, method, data);
     return;
