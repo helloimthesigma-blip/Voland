@@ -20,6 +20,7 @@ import { handleSavesMessage, registerSavesWorker, rememberTitleName } from "./sa
 import { handleSavestateMessage, registerSavestateWorker } from "./savestates";
 import { startAutoStates } from "./autostate";
 import { recordMemoryUse } from "./memory-guard";
+import { memoryFailureMessage } from "./device-support";
 import { handleModsMessage, registerModsWorker } from "./mods";
 import { handleReportMessage, registerReportWorker } from "./compat-report";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
@@ -206,8 +207,7 @@ async function boot(): Promise<BootResult | null> {
    * (§4). No separate SharedArrayBuffers. */
   const memory = allocateSharedMemory();
   if (!memory) {
-    fatal("Could not allocate emulator memory (~5.25GiB). Your browser or " +
-          "device limits shared memory; use a native build.");
+    fatal(memoryFailureMessage(navigator.userAgent, navigator.maxTouchPoints));
     return null;
   }
   appendLogLine("debug", `allocated shared memory: ${TOTAL_MEMORY_PAGES} pages (~5.25GiB)`);

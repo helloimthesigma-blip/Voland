@@ -147,7 +147,12 @@ function LoadPanel(props: LoadPanelProps) {
    * the screen box (mount.tsx), so the box element has nothing to show. */
   function enterFullscreen(): void {
     const canvas = document.getElementById("game");
-    void canvas?.requestFullscreen?.().catch(() => undefined);
+    /* On a phone, fullscreen also turns the picture sideways (Android
+     * Chrome allows the lock only in fullscreen; elsewhere it refuses). */
+    const orientation = screen.orientation as ScreenOrientation & { lock?: (o: string) => Promise<void> };
+    void canvas?.requestFullscreen?.()
+      .then(() => orientation.lock?.("landscape"))
+      .catch(() => undefined);
   }
 
   async function load(file: File, gameId: string | null = null, extras: readonly File[] = []): Promise<boolean> {

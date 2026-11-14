@@ -53,7 +53,7 @@ function GettingStarted() {
       <p class="voland-load-note">
         Optional: choose a <em>Voland folder</em> (below) to keep games, system files and mods in one place and
         have them found by themselves; the <em>Mods</em> tab adds mods you have.
-        Just curious? <em>Run the demo</em> starts a tiny built-in program. Chrome or Edge on a computer works best.
+        Just curious? <em>Run the demo</em> starts a tiny built-in program. Chrome or Edge on a computer works best; Chrome on an Android phone works too, with a controller paired (there are no touch controls).
       </p>
     </details>
   );

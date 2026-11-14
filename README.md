@@ -27,7 +27,7 @@ were measured.
 
 "(Oct.)" marks numbers measured in October 2026, before later speed work, and not
 re-measured since. On an M1 Mac, Silksong gameplay runs at about 33 fps.
-Only macOS has been tested. The numbers come from `platform/web/tools/perf.mjs`,
+Only macOS has been tested. Phones: Chrome on Android (64-bit, with WebGPU) should run it - the page fits a phone and plays with a paired controller (there are no touch controls) - but it has only been checked in Chrome's phone emulation, and a phone must grant the fixed 5.25 GB of memory. iPhones and iPads cannot run it yet, in Safari or Chrome: every iOS browser, Chrome included, uses Safari's engine, which lacks the 64-bit WebAssembly memory Voland needs, and iOS allows a tab far less than 5.25 GB. The numbers come from `platform/web/tools/perf.mjs`,
 which loads a game in Chrome, plays a scripted input sequence and reports fps,
 so you can rerun them with your own game files.
 
