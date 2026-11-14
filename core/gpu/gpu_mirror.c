@@ -14,6 +14,13 @@
 #define WRITE_RUN_BYTES (256u * 1024u) /* largest BUFFER_WRITE record */
 #define HASH_MULTIPLIER 0x9E3779B97F4A7C15ull
 #define HASH_SEED 0x243F6A8885A308D3ull
+/* Change detection backs off like the texture cache's: a page unchanged
+ * through COLD_AFTER_SYNCS syncs is cold and is hashed on one sync in
+ * COLD_STRIDE (staggered by page), so a guest write to it shows within
+ * that many submissions. SSBU fights hashed ~10,000 pages a frame and
+ * found none changed. */
+#define COLD_AFTER_SYNCS 8u
+#define COLD_STRIDE 8u
 
 typedef struct Mirror {
   uint32_t id;         /* buffer id; 0 = unused */
@@ -21,7 +28,9 @@ typedef struct Mirror {
   uint32_t pages;
   uint32_t synced;     /* the submission last synced (+1; 0 = never) */
   uint64_t last_used;
+  uint32_t syncs;            /* syncs so far (staggers cold pages' checks) */
   uint64_t hash[PAGES];      /* the guest copy as last seen (uploaded, or when taken) */
+  uint8_t unchanged[PAGES];  /* syncs in a row that found the page the same (saturates) */
   bool known[PAGES];         /* hash is valid */
   bool gpu_owned[PAGES];
 } Mirror;
@@ -103,7 +112,9 @@ static void sync(Gpu_Stream *s, const Gpu_Memory *mem, Mirror *m) {
   uint32_t run_first = 0, run_count = 0;
   for (uint32_t i = 0; i <= m->pages; i++) {
     bool send = false;
-    if (i < m->pages) {
+    if (i < m->pages && m->known[i] && m->unchanged[i] >= COLD_AFTER_SYNCS && (m->syncs + i) % COLD_STRIDE != 0u) {
+      /* cold, and not its turn: as it was */
+    } else if (i < m->pages) {
       if (!mem->read(mem->user, m->va + (uint64_t)i * GPU_MIRROR_PAGE_BYTES, g_page, GPU_MIRROR_PAGE_BYTES))
         memset(g_page, 0, sizeof(g_page));
       const uint64_t h = page_hash(g_page);
@@ -112,7 +123,10 @@ static void sync(Gpu_Stream *s, const Gpu_Memory *mem, Mirror *m) {
         m->gpu_owned[i] = false;
         g_stats.pages_returned++;
       }
-      send = !m->gpu_owned[i] && (!m->known[i] || h != m->hash[i]);
+      const bool same = m->known[i] && h == m->hash[i];
+      send = !m->gpu_owned[i] && !same;
+      if (!same) m->unchanged[i] = 0;
+      else if (m->unchanged[i] < UINT8_MAX) m->unchanged[i]++;
       m->hash[i] = h;
       m->known[i] = true;
       if (send) {
@@ -126,6 +140,7 @@ static void sync(Gpu_Stream *s, const Gpu_Memory *mem, Mirror *m) {
       run_count = 0;
     }
   }
+  m->syncs++;
 }
 
 uint32_t gpu_mirror_window(Gpu_Stream *stream, const Gpu_Memory *mem, uint64_t va, uint32_t bytes,

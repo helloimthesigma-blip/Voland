@@ -1820,6 +1820,40 @@ static uint64_t STG_E32(uint32_t d, uint32_t a) {
   return (0xeed8ull << 48) | ((uint64_t)LDST_32 << 48) | (1ull << 45) | GUARD | ((uint64_t)a << 8) | d;
 }
 
+/* Compute mirrors: a page unchanged through several syncs is hashed only
+ * on some syncs, and a guest write to it still uploads within the stride
+ * (gpu_mirror.c COLD_AFTER_SYNCS / COLD_STRIDE: 8 each). */
+#define MIRROR_TEST_VA (GPU_BASE + 0x40000u)
+#define MIRROR_TEST_PAGES 16u
+#define MIRROR_WARM_SYNCS 24u
+#define MIRROR_STRIDE_SYNCS 8u
+static void test_gpu_mirror_cold_pages(void) {
+  static Gpu_Stream stream;
+  Seen_Draw seen;
+  memset(&seen, 0, sizeof(seen));
+  gpu_stream_init(&stream, g_stream_header, (uint8_t *)g_stream_ring, GPU_RING_BYTES, stream_wait, &seen);
+  gpu_mirror_reset(&stream);
+  const uint32_t bytes = MIRROR_TEST_PAGES * GPU_MIRROR_PAGE_BYTES;
+  uint32_t submission = 0, offset = 0;
+  for (uint32_t i = 0; i < MIRROR_WARM_SYNCS; i++) {
+    CHECK(gpu_mirror_window(&stream, &k_mem, MIRROR_TEST_VA, bytes, submission++, &offset) != 0, "mirrored");
+    stream_drain(&seen);
+  }
+  const Gpu_Mirror_Stats before = *gpu_mirror_stats();
+  CHECK(gpu_mirror_window(&stream, &k_mem, MIRROR_TEST_VA, bytes, submission++, &offset) != 0, "mirrored");
+  const uint64_t hashed = gpu_mirror_stats()->pages_hashed - before.pages_hashed;
+  CHECK(hashed < MIRROR_TEST_PAGES, "cold pages wait their turn (%llu hashed)", (unsigned long long)hashed);
+  put32(MIRROR_TEST_VA + 5u * GPU_MIRROR_PAGE_BYTES, 0xC0FFEEu);
+  bool uploaded = false;
+  for (uint32_t i = 0; i < MIRROR_STRIDE_SYNCS && !uploaded; i++) {
+    CHECK(gpu_mirror_window(&stream, &k_mem, MIRROR_TEST_VA, bytes, submission++, &offset) != 0, "mirrored");
+    uploaded = gpu_mirror_stats()->pages_uploaded > before.pages_uploaded;
+  }
+  stream_drain(&seen);
+  CHECK(uploaded, "a write to a cold page uploads within the stride");
+  gpu_mirror_reset(&stream);
+}
+
 static void test_gpu_compute(Raster3d *r) {
   static Gpu_Stream stream;
   Seen_Draw seen;
@@ -1932,6 +1966,7 @@ int main(void) {
   test_gpu_surface_views_kept(&r);
   test_compute(&r);
   test_gpu_compute(&r);
+  test_gpu_mirror_cold_pages();
   CHECK(r.stats.shader_faults == 0, "no shader faults");
   raster3d_shutdown(&r);
   free(storage);
