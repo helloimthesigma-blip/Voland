@@ -143,6 +143,7 @@ bool video_frame_for(Video_Stream *v, uint32_t sequence, Video_Frame *out) {
   }
   if (chosen < 0) return false;
   fill_frame(v, (uint32_t)chosen, out);
+  out->wanted = sequence;
   return true;
 }
 
@@ -152,7 +153,8 @@ void video_frame_used(Video_Stream *v, const Video_Frame *frame) {
     if (i == frame->slot || slot_state(v, i) != VIDEO_SLOT_READY) continue;
     const uint32_t output = slot_u32(v, i, VIDEO_SLOT_OFF_OUTPUT);
     const bool shown = v->shown_output[i] == output && output;
-    const bool skipped = slot_u32(v, i, VIDEO_SLOT_OFF_SEQUENCE) + VIDEO_SLOT_COUNT < frame->sequence;
+    const uint32_t reached = frame->wanted > frame->sequence ? frame->wanted : frame->sequence;
+    const bool skipped = slot_u32(v, i, VIDEO_SLOT_OFF_SEQUENCE) + VIDEO_SLOT_COUNT < reached;
     if (shown || skipped) set_slot_state(v, i, VIDEO_SLOT_FREE);
   }
   v->shown_output[frame->slot] = frame->output;

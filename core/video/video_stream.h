@@ -78,6 +78,9 @@
 typedef struct Video_Frame {
   uint32_t slot;
   uint32_t output, sequence, generation;
+  /* The sequence video_frame_for was asked for: this frame's own, or a
+   * later one it stands in for while the decoder catches up. */
+  uint32_t wanted;
   uint32_t width, height, pitch;
   const uint8_t *luma;
   const uint8_t *chroma; /* interleaved Cb,Cr */
@@ -120,8 +123,10 @@ bool video_frame_for(Video_Stream *v, uint32_t sequence, Video_Frame *out);
 
 /* `frame` (from video_frame_for) was shown. Frames shown before it are
  * freed, and so are frames the stream has moved well past without
- * showing them; `frame` stays until a later one is shown, so showing it
- * again still works. Frames come out of the decoder in decode order
+ * showing them - measured from the sequence asked for, so a stand-in
+ * for a frame not yet decoded still frees the ones left behind (else
+ * they fill every slot and the decoder can publish nothing new); `frame`
+ * stays until a later one is shown, so showing it again still works. Frames come out of the decoder in decode order
  * but are shown in display order: nothing is freed just for being old. */
 void video_frame_used(Video_Stream *v, const Video_Frame *frame);
 

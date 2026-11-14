@@ -189,6 +189,32 @@ static void test_slots(void) {
   CHECK(!video_frame_for(&v, 1, &f));
 }
 
+/* The decoder fell behind and every slot holds a frame VIC has moved
+ * past (SSBU's opening on three cores): VIC asks for a later sequence,
+ * gets the newest as a stand-in, and showing it must free the others -
+ * else no slot ever frees, the decoder publishes nothing new and the
+ * movie stays on its first picture. */
+static void test_stand_in_frees_left_behind(void) {
+  Video_Stream v;
+  Backend_Log log = {0};
+  const Video_Backend backend = {&log, log_configure, log_decode};
+  video_stream_init(&v, g_region, NULL, &backend);
+  video_configure(&v, 1280, 720, "vp09.00.10.08");
+  for (uint32_t i = 0; i < VIDEO_SLOT_COUNT; i++) {
+    const int32_t slot = video_slot_acquire(&v);
+    CHECK(slot >= 0);
+    video_slot_publish(&v, (uint32_t)slot, i + 1u, i + 1u, v.generation, 16, 16, 16, 256);
+  }
+  CHECK(video_slot_acquire(&v) < 0); /* full */
+  const uint32_t wanted = 2u * VIDEO_SLOT_COUNT + 2u;
+  Video_Frame f;
+  CHECK(video_frame_for(&v, wanted, &f) && f.sequence == VIDEO_SLOT_COUNT && f.wanted == wanted);
+  video_frame_used(&v, &f);
+  uint32_t freed = 0;
+  for (int32_t slot = video_slot_acquire(&v); slot >= 0; slot = video_slot_acquire(&v)) freed++;
+  CHECK(freed == VIDEO_SLOT_COUNT - 1u); /* all but the one shown */
+}
+
 /* No consumer (Node, no WebCodecs): the producer must never wait. A
  * ring filled to the brim drops further requests and counts them; once
  * the consumer frees room, a pending CONFIGURE goes out first. */
@@ -225,6 +251,7 @@ int main(void) {
   test_h264_current_picture();
   test_stream_ring();
   test_slots();
+  test_stand_in_frees_left_behind();
   test_no_consumer_never_blocks();
   printf("[video_test] passed\n");
   return 0;
