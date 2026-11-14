@@ -452,6 +452,8 @@ void sm_program_decode(const uint8_t *bytes, uint32_t size, uint64_t address, Sm
   out->uses_quads = false;
   out->uses_bindless_textures = false;
   out->stores_memory = false;
+  out->writes_layer = false;
+  out->writes_viewport_index = false;
   out->texture_pc_count = 0;
   memset(out->cbuf_extent, 0, sizeof(out->cbuf_extent));
   uint32_t sph[SM_SPH_WORDS];
@@ -477,6 +479,11 @@ void sm_program_decode(const uint8_t *bytes, uint32_t size, uint64_t address, Sm
     if (in->op == SM_OP_FSWZADD || in->op == SM_OP_SHFL) out->uses_quads = true;
     if (in->op == SM_OP_TEX_B) out->uses_bindless_textures = true;
     if (in->op == SM_OP_STG || in->op == SM_OP_ST || in->op == SM_OP_ATOM || in->op == SM_OP_RED) out->stores_memory = true;
+    if (in->op == SM_OP_AST) {
+      const uint32_t base = BITS(w, 20, 10), end = base + 4u * (BITS(w, 47, 2) + 1u);
+      if (base <= SM_ATTR_LAYER && SM_ATTR_LAYER < end) out->writes_layer = true;
+      if (base <= SM_ATTR_VIEWPORT_INDEX && SM_ATTR_VIEWPORT_INDEX < end) out->writes_viewport_index = true;
+    }
     if (sm_is_texture_op(in->op)) {
       if (out->texture_pc_count < SM_MAX_TEXTURE_PCS) out->texture_pcs[out->texture_pc_count] = (uint16_t)i;
       out->texture_pc_count++;

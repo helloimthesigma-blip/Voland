@@ -737,6 +737,8 @@ void raster3d_flush(Raster3d *r, const Gpu_Memory *mem) {
 
 #define STALE_LOG_LIMIT 40u
 #define PRESENT_MISS_LOG_LIMIT 8u
+#define LAYER_LOG_LIMIT 16u
+#define STAGE_LOG_LIMIT 16u
 
 void raster3d_sync_range(Raster3d *r, const Gpu_Memory *mem, uint64_t address, uint64_t bytes, bool write) {
   if (!r || !r->ready || !bytes) return;
@@ -1016,6 +1018,14 @@ static const Sm_Program *program_get(Raster3d *r, uint64_t address, const Gpu_Me
   slot->last_used = r->tick;
   r->stats.unknown_ops += slot->program.unknown_ops;
   if (slot->program.unknown_ops) warn_unknown_ops("shader", &slot->program);
+  if (slot->program.writes_layer || slot->program.writes_viewport_index) {
+    static uint32_t logged;
+    if (logged++ < LAYER_LOG_LIMIT)
+      log_warn("[gpu] program %llx writes %s%s%s (not honoured: viewport/scissor 0 and layer 0 are used)",
+               (unsigned long long)address, slot->program.writes_layer ? "the layer" : "",
+               slot->program.writes_layer && slot->program.writes_viewport_index ? " and " : "",
+               slot->program.writes_viewport_index ? "the viewport index" : "");
+  }
   return &slot->program;
 }
 
@@ -5912,6 +5922,11 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     } else if (type == SM_STAGE_PIXEL) {
       ctx->ps = program_get(r, region + p[1], mem);
       ps_group = group;
+    } else {
+      static uint32_t logged;
+      if (logged++ < STAGE_LOG_LIMIT)
+        log_warn("[gpu] draw enables pipeline stage %u of type %u (program %llx): not run", j, type,
+                 (unsigned long long)(region + p[1]));
     }
   }
   if (!ctx->vs || !ctx->ps) {

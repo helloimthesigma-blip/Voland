@@ -56,6 +56,8 @@
 #define SM_MAX_STEPS 1000000u   /* runaway guard per invocation */
 
 /* Attribute addresses (bytes). */
+#define SM_ATTR_LAYER 0x64u
+#define SM_ATTR_VIEWPORT_INDEX 0x68u
 #define SM_ATTR_POSITION 0x70u  /* x, y, z, w */
 #define SM_ATTR_GENERIC 0x80u   /* + 16 * n, n < 32 */
 #define SM_ATTR_GENERIC_COUNT 32u
@@ -190,6 +192,9 @@ typedef struct Sm_Program {
   /* Writes memory (STG, ST, ATOM, RED): a pixel program with no target to
    * draw into still has an effect. */
   bool stores_memory;
+  /* Writes a[0x64] (layer) or a[0x68] (viewport index): which target
+   * layer, or which viewport and scissor, its primitives go to. */
+  bool writes_layer, writes_viewport_index;
   /* Its texture instructions' words in order: per-draw setup visits these
    * rather than every instruction. texture_pc_count counts them all; above
    * SM_MAX_TEXTURE_PCS only the first are listed (sm_texture_pcs_complete). */
