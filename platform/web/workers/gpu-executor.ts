@@ -115,6 +115,8 @@ const POOL_GATHER_BYTES = 1024 * 1024;
 const BIND_GROUP_CACHE_LIMIT = 4096;
 /** Cached pipelines built per turn of the event loop while a title starts (usePersistentCache). */
 const PREWARM_BATCH = 8;
+/** Presents logged after a debug target dump (which ones the screen shows). */
+const TRACE_PRESENTS = 6;
 /** At most this many cached pipelines are prewarmed (the newest). */
 const PREWARM_MAX = 512;
 /** Live render pipelines kept (least recently used go first). */
@@ -424,6 +426,7 @@ export class GpuExecutor {
   private pass: GPURenderPassEncoder | null = null;
   /** Diagnostics: log each draw of the frame after a target dump, up to its present. */
   private traceFrame = false;
+  private tracePresents = 0; /* presents still to log after a target dump (diagnostics) */
   private passKey = "";
   /* Buffers the open render pass binds as storage: true once written. A
    * buffer cannot be written and read in one pass (one usage scope). */
@@ -556,6 +559,7 @@ export class GpuExecutor {
   async debugTargets(): Promise<DebugTarget[]> {
     this.flush();
     this.traceFrame = true;
+    this.tracePresents = TRACE_PRESENTS;
     const out: DebugTarget[] = [];
     for (const [id, t] of this.textures) {
       const texel = DEBUG_TEXEL_BYTES[t.format];
@@ -1832,14 +1836,14 @@ export class GpuExecutor {
 
   /** Draws `src`'s rectangle into a pass already targeting the destination. */
   private blit(pass: GPURenderPassEncoder, src: Tex, dstFormat: GPUTextureFormat, srcRect: readonly number[],
-               dstRect: readonly number[], flags: number): void {
+               dstRect: readonly number[], flags: number, writeMask: number = GPUColorWrite.ALL): void {
     const canFilter = filterable(src.format);
     const entries: GPUBindGroupLayoutEntry[] = [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: "read-only-storage" } },
       { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: canFilter ? "float" : "unfilterable-float", viewDimension: "2d-array" } },
     ];
     if (canFilter) entries.push({ binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: "filtering" } });
-    const { pipeline, layout } = this.simplePipeline(`blit-${canFilter}`, blitShader(canFilter), dstFormat, 0xf, null, entries);
+    const { pipeline, layout } = this.simplePipeline(`blit-${canFilter}`, blitShader(canFilter), dstFormat, writeMask, null, entries);
     let f = flags;
     if (!canFilter) f &= ~4;
     if (isSrgb(src.format) && !isSrgb(dstFormat)) f |= 8;
@@ -1914,10 +1918,11 @@ export class GpuExecutor {
   private present(p: Present): void {
     const src = this.textures.get(p.id);
     const width = p.rect[2] ?? 0, height = p.rect[3] ?? 0;
-    if (this.traceFrame) {
-      console.log(`trace present ${p.id} ${src ? `${src.format} ${src.width}x${src.height}` : "missing"} rect ${p.rect.join(",")}`);
-      this.traceFrame = false;
+    if (this.tracePresents > 0) {
+      this.tracePresents--;
+      this.host.log("info", `trace present ${p.id} ${src ? `${src.format} ${src.width}x${src.height}` : "missing"} rect ${p.rect.join(",")} flags ${p.flags}`);
     }
+    this.traceFrame = false;
     if (!src || width <= 0 || height <= 0) return;
     this.materialize(p.id);
     const target = this.host.presentTarget(width, height);
@@ -1927,7 +1932,11 @@ export class GpuExecutor {
     const pass = this.pass;
     if (!pass) return;
     const flags = ((p.flags & PRESENT_FLIP_X) ? 1 : 0) | ((p.flags & PRESENT_FLIP_Y) ? 2 : 0);
-    this.blit(pass, src, target.format, p.rect, [0, 0, target.width, target.height], flags);
+    /* Colour only: the screen has no alpha (the cleared 1 stays), or a
+     * frame the guest leaves transparent shows the page behind it -
+     * Animal Crossing's scene changes went white, its dialogs pale. */
+    this.blit(pass, src, target.format, p.rect, [0, 0, target.width, target.height], flags,
+      GPUColorWrite.RED | GPUColorWrite.GREEN | GPUColorWrite.BLUE);
     this.flush();
     this.stats.presents++;
     if (this.newPipelines || this.newModules) {

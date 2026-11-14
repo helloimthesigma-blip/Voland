@@ -79,7 +79,7 @@
  *   contains NAME, the rest of the line), "export-saves FILE" (the Saves
  *   panel's backup tar, for --restore-saves), "sleep MS", "go"
  *   (measure now). Each
- *   command prints "drive: N done ...".
+ *   command prints "drive: N done ...". "targets DIR [PREFIX]" writes every render target as .pam; "pageshot FILE" the whole page; "dom FILE" its HTML.
  * - --restore-saves BACKUP.tar imports a saves backup (the Saves panel's
  *   "Back up saves" file) before the game loads, so a run can start from
  *   any save point.
@@ -286,6 +286,25 @@ class Cdp {
 }
 
 /* CDP sessions on the workers whose URLs match `patterns` (in order). */
+/** Every GPU render target as DIR/PREFIX-tex<id>-<w>x<h>-<format>.pam (RGBA8; float formats clamped). */
+async function dumpTargets(page, dir, prefix) {
+  const targets = await page.evaluate(async () => {
+    const list = await globalThis.__volandDebug.dumpTargets();
+    return list.map((t) => {
+      let bin = "";
+      for (let i = 0; i < t.rgba.length; i += 0x8000) bin += String.fromCharCode(...t.rgba.subarray(i, i + 0x8000));
+      return { id: t.id, format: t.format, width: t.width, height: t.height, b64: btoa(bin) };
+    });
+  });
+  mkdirSync(dir, { recursive: true });
+  for (const t of targets) {
+    const header = `P7\nWIDTH ${t.width}\nHEIGHT ${t.height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n`;
+    writeFileSync(`${dir}/${prefix}-tex${t.id}-${t.width}x${t.height}-${t.format}.pam`,
+      Buffer.concat([Buffer.from(header), Buffer.from(t.b64, "base64")]));
+  }
+  return targets.length;
+}
+
 async function attachToWorkers(cdp, pageUrl, patterns) {
   const { targetInfos } = await cdp.send("Target.getTargets");
   const pageTarget = targetInfos.find((t) => t.type === "page" && t.url.startsWith(pageUrl));
@@ -400,7 +419,7 @@ async function main() {
       if ((m.type() === "error" && /\[(ERROR|WARN )\]|failed|crash/i.test(m.text())) || /core: |svcBreak|shader cache/.test(m.text()))
         console.log(`  console: ${m.text()}`);
       /* Parallel guest threads' periodic timing report (docs/PARALLEL.md "Measuring"). */
-      if (/\[parallel\] |\[gpu\] (stream|render targets|compute mirrors|method 0x)|GPU memory:/.test(m.text())) console.log(`  ${m.text().replace(/^\[INFO \] /, "")}`);
+      if (/\[parallel\] |\[gpu\] (stream|render targets|compute mirrors|method 0x)|GPU memory:|frame presented|WebGPU frame|trace present/.test(m.text())) console.log(`  ${m.text().replace(/^\[INFO \] /, "")}`);
       if (/^\[WARN \] \[threads\]/.test(m.text())) console.log(`  ${m.text()}`);
       if (opts.logMatch && new RegExp(opts.logMatch).test(m.text())) console.log(`  log: ${m.text()}`);
     });
@@ -658,21 +677,8 @@ async function main() {
       /* --dump-targets-at SLICE DIR: every GPU render target, once (debugging). */
       if (opts.dumpTargetsAt && !opts.dumpedTargets && progress(s) >= opts.dumpTargetsAt) {
         opts.dumpedTargets = true;
-        const targets = await page.evaluate(async () => {
-          const list = await globalThis.__volandDebug.dumpTargets();
-          return list.map((t) => {
-            let bin = "";
-            for (let i = 0; i < t.rgba.length; i += 0x8000) bin += String.fromCharCode(...t.rgba.subarray(i, i + 0x8000));
-            return { id: t.id, format: t.format, width: t.width, height: t.height, b64: btoa(bin) };
-          });
-        });
-        mkdirSync(opts.dumpTargetsDir, { recursive: true });
-        for (const t of targets) {
-          const header = `P7\nWIDTH ${t.width}\nHEIGHT ${t.height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n`;
-          writeFileSync(`${opts.dumpTargetsDir}/s${progress(s)}-tex${t.id}-${t.width}x${t.height}-${t.format}.pam`,
-            Buffer.concat([Buffer.from(header), Buffer.from(t.b64, "base64")]));
-        }
-        console.log(`dumped ${targets.length} render targets at ${progress(s)} into ${opts.dumpTargetsDir}`);
+        const count = await dumpTargets(page, opts.dumpTargetsDir, `s${progress(s)}`);
+        console.log(`dumped ${count} render targets at ${progress(s)} into ${opts.dumpTargetsDir}`);
       }
       if (opts.mash && Date.now() - opts.mash.last >= opts.mash.every) {
         opts.mash.last = Date.now();
@@ -739,6 +745,12 @@ async function main() {
           note = arg;
         } else if (cmd === "status") {
           note = (await page.getByTestId(arg).first().textContent().catch(() => "")) ?? "";
+        } else if (cmd === "dom") {
+          writeFileSync(arg, await page.content());
+        } else if (cmd === "pageshot") {
+          await page.screenshot({ path: arg, fullPage: true, timeout: SHOT_TIMEOUT_MS });
+        } else if (cmd === "targets") {
+          note = `${await dumpTargets(page, arg, arg2 ?? "t")} render targets`;
         } else if (cmd === "stats") {
           const now = await sample();
           note = `slices ${now.perf.slices} virtual ${(now.perf.ticks / TICKS_PER_SECOND).toFixed(1)} s presents ${now.presents} fps ${now.fps}`;
