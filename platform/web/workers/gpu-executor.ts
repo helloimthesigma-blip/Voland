@@ -58,6 +58,7 @@ import {
   type Copy,
   CULL_FRONT,
   CULL_NONE,
+  DRAW_POINTS,
   DRAW_UNCLIPPED_DEPTH,
   DRAW_VERTEX_PULL,
   DRAW_BYTES,
@@ -1318,6 +1319,7 @@ export class GpuExecutor {
           ? { bias: [d.depthBias, roundBiasSlope(d.depthBiasSlope), d.depthBiasClamp] } : {}),
       } : null,
       ...((d.flags & DRAW_UNCLIPPED_DEPTH) !== 0 && this.device.features.has("depth-clip-control") ? { unclippedDepth: true } : {}),
+      ...((d.flags & DRAW_POINTS) !== 0 ? { points: true } : {}),
       ...(windows.length ? { windows: windows.map((w) => `${w.binding}${w.writable ? "w" : ""}`) } : {}),
     };
   }
@@ -1375,6 +1377,7 @@ export class GpuExecutor {
       this.keyMixFloat(d.depthBiasClamp);
     }
     this.keyMix((d.flags & DRAW_UNCLIPPED_DEPTH) !== 0 && this.device.features.has("depth-clip-control") ? 1 : 0);
+    this.keyMix((d.flags & DRAW_POINTS) !== 0 ? 1 : 0);
     this.keyMix(windows.length);
     for (let i = 0; i < windows.length; i++) {
       const w = windows[i];
@@ -1494,7 +1497,7 @@ export class GpuExecutor {
       vertex: { module: vsModule, entryPoint: "vs", buffers: spec.vs?.pull ? [] : [{ arrayStride: stride, attributes }] },
       fragment: { module, entryPoint: "fs", targets },
       primitive: {
-        topology: "triangle-list",
+        topology: spec.points ? "point-list" : "triangle-list",
         frontFace: spec.vs && spec.vs.front !== FRONT_CCW ? "cw" : "ccw",
         cullMode: !spec.vs || spec.vs.cull === CULL_NONE || (globalThis as { NO_CULL?: boolean }).NO_CULL ? "none" : spec.vs.cull === CULL_FRONT ? "front" : "back",
         ...(spec.unclippedDepth ? { unclippedDepth: true } : {}),

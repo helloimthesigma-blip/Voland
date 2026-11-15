@@ -949,6 +949,8 @@ static void test_worker_count_invariance(Raster3d *r) {
 #define GPU_RING_BYTES (1u << 20)
 #define SEEN_INDICES 12u
 #define TOPOLOGY_STRIP_TEST 5u /* Maxwell TRIANGLE_STRIP */
+#define TOPOLOGY_POINTS_TEST 0u
+#define REG_POINT_SIZE_TEST 0x546u /* raster3d.c REG_POINT_SIZE (f32) */
 
 static _Alignas(64) uint8_t g_stream_header[GPU_STREAM_HEADER_BYTES]; /* atomics: an unaligned header faults on ARM64 */
 static uint64_t g_stream_ring[GPU_RING_BYTES / 8u];
@@ -1119,6 +1121,7 @@ static uint64_t g_gpu_rt_offset; /* ... this far past RT_BL */
 static uint32_t g_base_instance; /* gpu_draw_topology: REG_BASE_INSTANCE */
 static bool g_masked_targets;    /* gpu_draw_topology: every colour channel masked (CT_WRITE 0) */
 static uint32_t g_clip_control;  /* gpu_draw_topology: SET_VIEW_VOLUME_CLIP_CONTROL */
+static float g_point_size;       /* gpu_draw_topology: POINT_SIZE */
 static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_t topology, uint32_t count) {
   static Gpu_Stream stream;
   Seen_Draw seen;
@@ -1131,6 +1134,7 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
   g_regs[REG_BASE_INSTANCE_TEST] = g_base_instance;
   if (g_masked_targets) g_regs[0x680] = 0;
   g_regs[REG_VIEW_VOLUME_CLIP_CONTROL_TEST] = g_clip_control;
+  memcpy(&g_regs[REG_POINT_SIZE_TEST], &g_point_size, sizeof(g_point_size));
   g_regs[REG_CULL_ENABLE_TEST] = 1;
   g_regs[REG_CULL_FACE_TEST] = CULL_BACK_REG;
   g_regs[REG_FRONT_FACE_TEST] = front_face_reg;
@@ -1544,6 +1548,19 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   bool in_range = true;
   for (uint32_t i = 0; i < strip.index_count; i++) in_range = in_range && strip.indices[i] < 4u;
   CHECK(in_range, "indices address the record's vertices");
+  /* One-pixel points: a point list on the GPU vertex stage, one index per
+   * point (a program sampling GPU-drawn textures must not shade them on
+   * the CPU). Larger points stay CPU-shaded quads, two triangles each. */
+  const Seen_Draw points = gpu_draw_topology(r, FRONT_CW_REG, TOPOLOGY_POINTS_TEST, 3);
+  CHECK(points.count == 1 && points.last.vs_shader_id != 0 && (points.last.flags & GPU_DRAW_POINTS) &&
+            points.last.index_count == 3u && points.last.cull_mode == GPU_CULL_NONE,
+        "points: vertex stage %u, flags 0x%x, %u indices, cull %u", points.last.vs_shader_id, points.last.flags,
+        points.last.index_count, points.last.cull_mode);
+  g_point_size = 4.0f;
+  const Seen_Draw big = gpu_draw_topology(r, FRONT_CW_REG, TOPOLOGY_POINTS_TEST, 3);
+  g_point_size = 0.0f;
+  CHECK(big.count == 1 && big.last.vs_shader_id == 0 && !(big.last.flags & GPU_DRAW_POINTS) && big.last.vertex_count == 18u,
+        "4-pixel points: CPU quads (vertex stage %u, %u vertices)", big.last.vs_shader_id, big.last.vertex_count);
 
   /* Vertex pulling: no vertices; the indices are vertex ids and the data
    * binding carries each input's descriptor and its stream's bytes (the

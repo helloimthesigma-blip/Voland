@@ -237,6 +237,9 @@ _Static_assert(sizeof(Gpu_Rec_Draw) % 8u == 0u, "a draw's tail data starts align
  * there (SET_VIEW_VOLUME_CLIP_CONTROL's clamp bits): WebGPU's
  * unclippedDepth. */
 #define GPU_DRAW_UNCLIPPED_DEPTH 2u
+/* Version 15: a vertex-stage draw whose indices are one-pixel points (a
+ * point list), not triangles. */
+#define GPU_DRAW_POINTS 4u
 
 #define GPU_CULL_NONE 0u
 #define GPU_CULL_FRONT 1u

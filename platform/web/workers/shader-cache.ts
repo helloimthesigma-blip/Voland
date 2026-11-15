@@ -81,6 +81,8 @@ export interface PipelineSpec {
   readonly depth: DepthSpec | null;
   /** Depth clamped, not clipped, at the near and far planes. Absent: clipped. */
   readonly unclippedDepth?: boolean;
+  /** A point list (one-pixel points). Absent: a triangle list. */
+  readonly points?: boolean;
   /** GPU mirrors bound as global memory (version 14): binding number, "w" when written. Absent: none. */
   readonly windows?: readonly string[];
 }

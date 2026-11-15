@@ -3287,12 +3287,12 @@ typedef struct Assembler {
   uint32_t prev[3];
 } Assembler;
 
-static void gpu_vs_triangle_ids(Raster_State *rs, const uint32_t ids[3], uint32_t provoking);
+static void gpu_vs_primitive_ids(Raster_State *rs, const uint32_t *ids, uint32_t count, uint32_t provoking);
 
 static void emit_triangle(Raster_State *rs, Vertex_Cache *cache, uint32_t i0, uint32_t i1, uint32_t i2, uint32_t prov) {
   if (gpu_raw_vertices()) { /* the GPU vertex stage needs only the ids */
     const uint32_t ids[3] = {i0, i1, i2};
-    gpu_vs_triangle_ids(rs, ids, prov);
+    gpu_vs_primitive_ids(rs, ids, 3u, prov);
     return;
   }
   bool ok = true;
@@ -3336,6 +3336,10 @@ static void assemble(Raster_State *rs, Vertex_Cache *cache, Assembler *as, uint3
   if (n == 0) as->first = index;
   switch (as->topology) {
   case TOPOLOGY_POINTS: {
+    if (gpu_raw_vertices()) { /* a one-pixel point for the GPU vertex stage's point list */
+      gpu_vs_primitive_ids(rs, &index, 1u, 0);
+      break;
+    }
     bool ok = true;
     Vertex v = *vertex_get(rs->ctx, cache, index, &ok);
     if (ok) draw_point(rs, &v);
@@ -4457,6 +4461,7 @@ typedef struct Gpu_Draw {
   uint32_t input_count;
   uint8_t input_vector[WGSL_MAX_VARYINGS + 2u]; /* vertex input i + 1 -> generic vector */
   uint32_t cull_mode, front_face;
+  bool points; /* a point list (GPU_DRAW_POINTS): one index per point */
   /* Vertex pulling (vs_desc.vertex_pull): records carry the ids and each
    * stream's raw bytes over the ids' span [id_lo, id_hi]; the WGSL decodes
    * the inputs. pull_bytes_per_id and pull_fixed_bytes size that copy. */
@@ -4868,7 +4873,12 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
   Gpu_Draw *g = &g_gpu_draw;
   if (ctx->r->cpu_vertices) return;
   Raster3d_Gpu_Stats *st = &ctx->r->gpu_stats;
-  if (!vs_topology(topology)) {
+  /* One-pixel points draw as WebGPU's point list; larger ones stay quads
+   * shaded on the CPU (draw_point). On the CPU a program sampling what
+   * the GPU drew reads stale guest copies (Tears of the Kingdom measures
+   * its scene's brightness with 25 such points). */
+  const bool points = topology == TOPOLOGY_POINTS && f32(ctx->regs[REG_POINT_SIZE]) <= 1.0f;
+  if (!vs_topology(topology) && !points) {
     st->cpu_vs_topology++;
     if (!g_vs_cpu_topology++) log_warn("[gpu] vertices on the CPU: topology %u", topology);
     return;
@@ -4951,7 +4961,8 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
    * coordinates (y down) - the screen space gpu_triangle's area uses. */
   g->front_face = rs->front_ccw ? GPU_FRONT_CCW : GPU_FRONT_CW;
   g->cull_mode = GPU_CULL_NONE;
-  if (rs->cull) {
+  g->points = points;
+  if (rs->cull && !points) { /* points have no faces */
     if (rs->cull_face == 0x408u) g->dead = true; /* both faces: nothing to draw */
     else g->cull_mode = rs->cull_face == 0x404u ? GPU_CULL_FRONT : GPU_CULL_BACK;
   }
@@ -5500,6 +5511,7 @@ static void gpu_emit_draw(Raster_State *rs) {
     d.front_face = g->front_face;
     d.index_count = g->index_count;
     if (g->pull) d.flags = GPU_DRAW_VERTEX_PULL;
+    if (g->points) d.flags |= GPU_DRAW_POINTS;
   }
   if (rs->clamp_near || rs->clamp_far) d.flags |= GPU_DRAW_UNCLIPPED_DEPTH;
   memcpy(p, &d, sizeof(d));
@@ -5652,13 +5664,13 @@ static void gpu_pull_off(Raster_State *rs) {
   if (g->vs_shader_id == GPU_SHADER_FAILED) g->dead = true;
 }
 
-/* Appends a pulled triangle's ids (provoking first). A record ends where
- * its ids' span would outgrow the data window; false when even this
- * triangle's does - the draw stops pulling and the caller adds it. */
-static bool gpu_pull_triangle(Raster_State *rs, const uint32_t ids[3], uint32_t provoking) {
+/* Appends a pulled primitive's `count` ids (provoking first). A record
+ * ends where its ids' span would outgrow the data window; false when even
+ * this primitive's does - the draw stops pulling and the caller adds it. */
+static bool gpu_pull_primitive(Raster_State *rs, const uint32_t *ids, uint32_t count, uint32_t provoking) {
   Gpu_Draw *g = &g_gpu_draw;
   uint32_t lo = ids[0], hi = ids[0];
-  for (uint32_t k = 1; k < 3u; k++) {
+  for (uint32_t k = 1; k < count; k++) {
     if (ids[k] < lo) lo = ids[k];
     if (ids[k] > hi) hi = ids[k];
   }
@@ -5669,7 +5681,7 @@ static bool gpu_pull_triangle(Raster_State *rs, const uint32_t ids[3], uint32_t 
   }
   if (g->index_count) {
     const uint32_t span_lo = lo < g->id_lo ? lo : g->id_lo, span_hi = hi > g->id_hi ? hi : g->id_hi;
-    if (pull_copy_bytes(g, span_lo, span_hi) > pull_budget(g) || g->index_count + 3u > GPU_MAX_INDICES) {
+    if (pull_copy_bytes(g, span_lo, span_hi) > pull_budget(g) || g->index_count + count > GPU_MAX_INDICES) {
       gpu_emit_draw(rs);
     } else {
       lo = span_lo;
@@ -5678,16 +5690,16 @@ static bool gpu_pull_triangle(Raster_State *rs, const uint32_t ids[3], uint32_t 
   }
   g->id_lo = lo;
   g->id_hi = hi;
-  for (uint32_t k = 0; k < 3u; k++) g_gpu_indices[g->index_count++] = ids[(provoking + k) % 3u];
+  for (uint32_t k = 0; k < count; k++) g_gpu_indices[g->index_count++] = ids[(provoking + k) % count];
   return true;
 }
 
-/* A triangle for the GPU vertex stage, by guest vertex ids: untransformed,
- * provoking vertex (ids[provoking]) first - WebGPU's flat interpolation
- * takes the first; the rotation keeps the winding. The draw is prepared
- * from the first triangle shaded on the CPU once - the pixel program's
- * texture probe reads its varyings. */
-static void gpu_vs_triangle_ids(Raster_State *rs, const uint32_t ids[3], uint32_t provoking) {
+/* A triangle (count 3) or point (count 1) for the GPU vertex stage, by
+ * guest vertex ids: untransformed, provoking vertex (ids[provoking]) first
+ * - WebGPU's flat interpolation takes the first; the rotation keeps the
+ * winding. The draw is prepared from the first primitive shaded on the
+ * CPU once - the pixel program's texture probe reads its varyings. */
+static void gpu_vs_primitive_ids(Raster_State *rs, const uint32_t *ids, uint32_t count, uint32_t provoking) {
   Gpu_Draw *g = &g_gpu_draw;
   if (!g->active || g->dead) return;
   if (!g->prepared) {
@@ -5706,7 +5718,8 @@ static void gpu_vs_triangle_ids(Raster_State *rs, const uint32_t ids[3], uint32_
     g->prepared_shaded = true;
     static Vertex shaded[3];
     Vertex *outs[3] = {&shaded[0], &shaded[1], &shaded[2]};
-    bool ok = shade_vertices(rs->ctx, ids, 3u, outs);
+    const uint32_t shade_ids[3] = {ids[0], ids[count > 1u ? 1u : 0u], ids[count > 2u ? 2u : 0u]}; /* a point: thrice */
+    bool ok = shade_vertices(rs->ctx, shade_ids, 3u, outs);
     Screen_Vertex sv[3];
     bool front = true;
     if (ok) {
@@ -5721,13 +5734,13 @@ static void gpu_vs_triangle_ids(Raster_State *rs, const uint32_t ids[3], uint32_
       return;
     }
   }
-  if (g->pull && !gpu_pull_triangle(rs, ids, provoking)) return;
+  if (g->pull && !gpu_pull_primitive(rs, ids, count, provoking)) return;
   if (g->pull) {
     rs->ctx->r->gpu_stats.triangles++;
     return;
   }
-  if (g->vertex_bytes + 3u * g->stride > GPU_VERTEX_BYTES || g->index_count + 3u > GPU_MAX_INDICES) gpu_emit_draw(rs);
-  for (uint32_t k = 0; k < 3u; k++) g_gpu_indices[g->index_count++] = gpu_vertex_slot(rs, ids[(provoking + k) % 3u]);
+  if (g->vertex_bytes + count * g->stride > GPU_VERTEX_BYTES || g->index_count + count > GPU_MAX_INDICES) gpu_emit_draw(rs);
+  for (uint32_t k = 0; k < count; k++) g_gpu_indices[g->index_count++] = gpu_vertex_slot(rs, ids[(provoking + k) % count]);
   rs->ctx->r->gpu_stats.triangles++;
 }
 
@@ -5776,7 +5789,7 @@ static uint32_t gpu_pull_bulk(Raster_State *rs, const uint32_t *ids, uint32_t co
 
 static void gpu_vs_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
   const uint32_t ids[3] = {RAW_VERTEX_ID(a), RAW_VERTEX_ID(b), RAW_VERTEX_ID(c)};
-  gpu_vs_triangle_ids(rs, ids, provoking == b ? 1u : (provoking == c ? 2u : 0u));
+  gpu_vs_primitive_ids(rs, ids, 3u, provoking == b ? 1u : (provoking == c ? 2u : 0u));
 }
 
 static void gpu_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {

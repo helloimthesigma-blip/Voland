@@ -1,4 +1,4 @@
-# GPU command stream (version 14)
+# GPU command stream (version 15)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -191,6 +191,16 @@ The WebGPU consumer rounds the slope factor to 4 significant bits
 shadow passes' slope from the camera, so exact values built a new pipeline
 every few frames (1519 pipelines after ten minutes; 354 rounded). The
 stream itself carries the exact value.
+
+### Points (version 15)
+
+`GPU_DRAW_POINTS` in `Gpu_Rec_Draw.flags` (vertex-stage draws only): each
+index is a point, drawn by a `point-list` pipeline - WebGPU points are one
+pixel, so only draws whose point size (POINT_SIZE, 0x546) is at most 1
+come this way; larger points stay quads of CPU-shaded vertices. Before,
+every point went through the CPU, where a vertex program sampling what the
+GPU drew read stale guest copies: Tears of the Kingdom measures its scene's
+brightness with 25 such points, blended into one pixel of an 8x1 target.
 
 ### Unclipped depth (version 13)
 
