@@ -1155,6 +1155,11 @@ static void report_stream(Emulator* emulator) {
   }
   uint32_t surfaces_live = 0;
   for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) surfaces_live += emulator->renderer.gpu_surfaces[i].in_use;
+  {
+    uint64_t skips = 0;
+    for (uint32_t c = 0; emulator->gpu_channels && c < NVDRV_MAX_CHANNELS; c++) skips += emulator->gpu_channels[c].conditional_skips;
+    log_info("[gpu] conditional rendering skipped %llu draws and clears so far", (unsigned long long)skips);
+  }
   log_info("[gpu] render targets: %u live of %u, %llu MiB (budget %llu MiB); %llu made, %llu dropped, %llu re-described",
            surfaces_live, RASTER_GPU_SURFACES, (unsigned long long)(emulator->renderer.gpu_surface_bytes >> 20),
            (unsigned long long)(emulator->renderer.gpu_surface_budget >> 20),
