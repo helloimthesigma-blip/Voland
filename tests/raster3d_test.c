@@ -448,6 +448,7 @@ static uint32_t g_tic_rt_bl_width; /* texture_state: sample RT_BL's target at th
 static uint32_t g_tic_rt_bl_height = RT_SIZE;
 static uint32_t g_tic_rt_bl_depth; /* ... as a 3D texture this deep (0: 2D) */
 static uint32_t g_tic_rt_bl_cube_levels; /* ... as a cube map with this many levels (0: not a cube) */
+static bool g_tic_rt_bl_pitch;           /* ... through a pitch header (RT_SIZE * 4-byte rows) */
 static uint32_t g_tic_word0; /* texture_state: this format, data types and swizzle (0: A8B8G8R8 UNORM) */
 static bool g_tic_srgb;      /* texture_state: the sRGB bit */
 static void texture_state(void) {
@@ -468,6 +469,10 @@ static void texture_state(void) {
     tic[4] = (g_tic_rt_bl_width - 1u) | ((g_tic_rt_bl_depth ? 2u : 1u) << 23); /* 3D / 2D */
     tic[5] = (g_tic_rt_bl_height - 1u) | (1u << 31);
     if (g_tic_rt_bl_depth) tic[5] |= (g_tic_rt_bl_depth - 1u) << 16;
+    if (g_tic_rt_bl_pitch) {
+      tic[2] = (uint32_t)(RT_BL >> 32) | (2u << 21); /* header version: pitch */
+      tic[3] = RT_SIZE * 4u >> 5;
+    }
     if (g_tic_rt_bl_cube_levels) {
       tic[4] = (tic[4] & ~(15u << 23)) | (3u << 23); /* cube */
       tic[3] |= (g_tic_rt_bl_cube_levels - 1u) << 28; /* levels - 1 */
@@ -1329,6 +1334,29 @@ static void test_gpu_padded_target(Raster3d *r) {
   g_tic_rt_bl_width = RT_SIZE; /* the whole target: the hardware sampler */
   seen = gpu_draw_once(r, FRONT_CW_REG);
   CHECK(seen.count == 1 && seen.samplers == 1u, "whole target: a hardware sampler (%u)", seen.samplers);
+  /* A 4x2 texture at the target's base fits one GOB (16 bytes by 2 rows):
+   * the target's top-left texels, not guest memory (Tears of the Kingdom's
+   * 1x1 view of its 8x1 brightness target). */
+  g_tic_rt_bl_width = 4u;
+  g_tic_rt_bl_height = 2u;
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  memcpy(&size_word, g_seen_data + 4u * (WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEXP_SIZE), sizeof(size_word));
+  CHECK(seen.count == 1 && size_word == (4u | (2u << 16)), "corner view: the target sampled at 4x2 (size word %08x)",
+        size_word);
+  /* Through a pitch header only row 0's first 16 bytes are the target's
+   * (the GOB's first sector): a 4x1 view samples it, a 4x2 one does not. */
+  g_tic_rt_bl_pitch = true;
+  g_tic_rt_bl_height = 1u;
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  memcpy(&size_word, g_seen_data + 4u * (WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEXP_SIZE), sizeof(size_word));
+  CHECK(seen.count == 1 && size_word == (4u | (1u << 16)), "pitch corner view: the target sampled at 4x1 (size word %08x)",
+        size_word);
+  g_tic_rt_bl_height = 2u;
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  memcpy(&size_word, g_seen_data + 4u * (WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEXP_SIZE), sizeof(size_word));
+  CHECK(seen.count == 1 && size_word == 0u, "pitch 4x2 view: guest memory, not the target (size word %08x)", size_word);
+  g_tic_rt_bl_pitch = false;
+  g_tic_rt_bl_height = RT_SIZE;
   g_tic_rt_bl_width = 0;
   /* An 8x8x2 volume whose slices are 16x8 targets one block (two GOBs,
    * 1 KB) apart: gathered into one 16-wide GPU texture, sampled at 8x8

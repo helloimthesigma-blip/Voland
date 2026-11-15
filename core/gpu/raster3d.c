@@ -5146,6 +5146,30 @@ static bool vs_samples_textures(const Sm_Program *vs) {
   return false;
 }
 
+/* A small 2D texture at a target's base whose texels are the target's
+ * top-left ones whatever either's width: inside one GOB when both are
+ * block linear (a texel's address there does not depend on the width),
+ * else one row inside the GOB's first sector (row 0's first 16 bytes are
+ * the same bytes pitch or block linear). Tears of the Kingdom samples its
+ * measured brightness as a 1x1 RGBA32F pitch texture over the first texel
+ * of an 8x1 target. NULL: not such a view. */
+#define GOB_SECTOR_BYTES 16u
+static Raster3d_Gpu_Surface *gpu_surface_corner(Raster3d *r, const Tex_Header *h) {
+  uint32_t bytes = 0, bw = 0, bh = 0;
+  if ((h->layout != TEX_LAYOUT_BLOCK_LINEAR && h->layout != TEX_LAYOUT_PITCH) ||
+      (h->type != TEX_TYPE_2D && h->type != TEX_TYPE_2D_NO_MIPMAP) || !tex_format_info(h->format, &bytes, &bw, &bh) ||
+      bw != 1u || bh != 1u)
+    return NULL;
+  Raster3d_Gpu_Surface *s = gpu_surface_at(r, h->address, 0);
+  if (!s || s->bytes_per_pixel != bytes || h->width > s->width || h->height > s->height) return NULL;
+  const uint64_t row_bytes = (uint64_t)h->width * bytes;
+  const bool both_block_linear = s->block_linear && h->layout == TEX_LAYOUT_BLOCK_LINEAR;
+  if (both_block_linear ? row_bytes > GOB_WIDTH_BYTES || h->height > BLOCK_LINEAR_GOB_HEIGHT
+                        : row_bytes > GOB_SECTOR_BYTES || h->height != 1u)
+    return NULL;
+  return s;
+}
+
 /* Binds texture `handle` (its TIC/TSC from the pools in `regs`) as binding
  * `b`: its GPU texture and sampler, sample type and parameter words in
  * `data`. False when it cannot be bound (no header, an unsupported format). */
@@ -5168,6 +5192,7 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
   uint32_t id = 0, sample_type = WGSL_SAMPLE_FLOAT, gpu_format = 0, levels = 1;
   bool padded = false; /* the image fills only part of its GPU texture (TEXP_SIZE) */
   Raster3d_Gpu_Surface *surf = gpu_surface_at(r, h.address, h.width);
+  if (!surf) surf = gpu_surface_corner(r, &h);
   if (surf && surf->stale) {
     /* Sampled after a CPU / copy-engine write (SSBU copies each movie
      * frame into textures it once cleared as targets): the written
