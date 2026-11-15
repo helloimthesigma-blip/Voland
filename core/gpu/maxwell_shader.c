@@ -452,7 +452,6 @@ void sm_program_decode(const uint8_t *bytes, uint32_t size, uint64_t address, Sm
   out->uses_quads = false;
   out->uses_bindless_textures = false;
   out->stores_memory = false;
-  out->uses_jump_table = false;
   out->writes_layer = false;
   out->writes_viewport_index = false;
   out->texture_pc_count = 0;
@@ -479,7 +478,6 @@ void sm_program_decode(const uint8_t *bytes, uint32_t size, uint64_t address, Sm
     if (in->op == SM_OP_LDC) note_cbuf(out, BITS(w, 36, 5), 0x10000u);
     if (in->op == SM_OP_FSWZADD || in->op == SM_OP_SHFL) out->uses_quads = true;
     if (in->op == SM_OP_TEX_B) out->uses_bindless_textures = true;
-    if (in->op == SM_OP_BRX) out->uses_jump_table = true;
     if (in->op == SM_OP_STG || in->op == SM_OP_ST || in->op == SM_OP_ATOM || in->op == SM_OP_RED) out->stores_memory = true;
     if (in->op == SM_OP_AST) {
       const uint32_t base = BITS(w, 20, 10), end = base + 4u * (BITS(w, 47, 2) + 1u);

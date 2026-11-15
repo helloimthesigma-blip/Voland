@@ -17,6 +17,7 @@
 #include "hle/loader/npdm.h"
 #include "hle/loader/nro.h"
 #include "common/workers.h"
+#include "gpu/vs_capture.h"
 #include "hle/kernel/handle_table.h"
 #include "hle/kernel/parallel.h"
 #include "cpu/backends/a32/a32.h"
@@ -522,6 +523,8 @@ static Error register_services(Emulator* emulator) {
   return err;
 }
 
+static void log_vertex_capture(void *user, const Sm_Program *program, const Sm_Env *env, const Sm_Thread *thread);
+
 Error emulator_create(Emulator* out) {
   return emulator_create_with_backend(out, cpu_get_active_backend());
 }
@@ -595,6 +598,7 @@ Error emulator_create_with_backend(Emulator* out, const CPU_Backend* backend) {
     raster3d_init(&out->renderer, storage, raster3d_storage_bytes());
   }
   if (!out->renderer.ready) log_warn("[emulator] no memory for the 3D renderer; draws will be skipped");
+  out->renderer.vertex_capture = log_vertex_capture; /* VOLAND_VS_CAPTURE_PROGRAM (voland-cli replaces it) */
   out->ramfs_ready = ramfs_pool_init(&out->ramfs, EMULATOR_RAMFS_BYTES);
   if (!out->ramfs_ready) log_warn("[emulator] no RAM for the SD card / saves; fsp-srv filesystems will be full");
   fs_init(&out->fs, out->ramfs_ready ? &out->ramfs : NULL);
@@ -1139,6 +1143,45 @@ static void update_devices(Emulator* emulator) {
   }
 }
 
+/* VOLAND_VS_CAPTURE_PROGRAM=0xADDR (diagnostics, the web build): the first
+ * CPU-shaded draw of that vertex program logged as "[vscap] " lines of
+ * EMULATOR_VSCAP_LINE_BYTES (vs_capture.h; joined they are a capture file
+ * for platform/web/tools/vertex-vectors.mjs). */
+#define EMULATOR_VSCAP_LINE_BYTES 400u
+typedef struct Vscap_Lines {
+  char line[EMULATOR_VSCAP_LINE_BYTES + 1u];
+  size_t used;
+} Vscap_Lines;
+
+static void vscap_emit(void *user, const char *text, size_t length) {
+  Vscap_Lines *v = (Vscap_Lines *)user;
+  for (size_t i = 0; i < length; i++) {
+    v->line[v->used++] = text[i];
+    if (v->used == EMULATOR_VSCAP_LINE_BYTES) {
+      v->line[v->used] = 0;
+      log_warn("[vscap] %s", v->line);
+      v->used = 0;
+    }
+  }
+}
+
+static void log_vertex_capture(void *user, const Sm_Program *program, const Sm_Env *env, const Sm_Thread *thread) {
+  (void)user;
+  static int64_t wanted = -2;
+  if (wanted == -2) {
+    const char *spec = getenv("VOLAND_VS_CAPTURE_PROGRAM");
+    wanted = spec ? (int64_t)strtoull(spec, NULL, 0) : -1;
+  }
+  if (wanted < 0 || program->address != (uint64_t)wanted) return;
+  wanted = -1; /* once */
+  static Vscap_Lines lines;
+  lines.used = 0;
+  vs_capture_write(program, env, thread, vscap_emit, &lines);
+  lines.line[lines.used] = 0;
+  log_warn("[vscap] %s", lines.line);
+  log_warn("[vscap-end]");
+}
+
 /* Diagnostics: what the GPU stream carried per record type, every
  * EMULATOR_STREAM_REPORT_FRAMES presented frames. */
 #define EMULATOR_STREAM_REPORT_FRAMES 600u
@@ -1184,7 +1227,7 @@ static void report_stream(Emulator* emulator) {
   log_info("[gpu] stream detail (MiB): textures %llu uploads %.1f (hashed new %llu unsampled %llu changed %llu "
            "periodic %llu forced %llu), surfaces %.1f; draw data %.1f pulled %.1f vertices %.1f indices %.1f; "
            "pool %.1f written %.1f reused; surfaces created %llu, draws %llu, vertices on the CPU: topology %llu bindless %llu globals %llu "
-           "small %llu window %llu jump table %llu; textures sampler %llu, shader-filtered: integer %llu cube %llu padded %llu "
+           "small %llu window %llu; textures sampler %llu, shader-filtered: integer %llu cube %llu padded %llu "
            "format %llu wrap %llu; vertex pages %llu (changed %llu, new %llu); vertex pool %llu streams, %.1f MiB "
            "uploaded, %llu chunks loaded",
            (unsigned long long)(now->texture_uploads - was->texture_uploads),
@@ -1204,7 +1247,7 @@ static void report_stream(Emulator* emulator) {
            (unsigned long long)(now->cpu_vs_globals - was->cpu_vs_globals),
            (unsigned long long)(now->cpu_vs_small - was->cpu_vs_small),
            (unsigned long long)(now->cpu_vs_window - was->cpu_vs_window),
-           (unsigned long long)(now->cpu_vs_jump_table - was->cpu_vs_jump_table), (unsigned long long)(now->tex_hw - was->tex_hw),
+           (unsigned long long)(now->tex_hw - was->tex_hw),
            (unsigned long long)(now->tex_sw_int - was->tex_sw_int), (unsigned long long)(now->tex_sw_cube - was->tex_sw_cube),
            (unsigned long long)(now->tex_sw_padded - was->tex_sw_padded),
            (unsigned long long)(now->tex_sw_format - was->tex_sw_format),

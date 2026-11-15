@@ -240,7 +240,6 @@ static void test_branches(void) {
     w = BRA(offset_to(bra_at, else_at), 0, true);
     memcpy(b.bytes + SM_SPH_BYTES + 8u * bra_at, &w, 8);
     load(&b);
-    CHECK(!g_prog.uses_jump_table, "BRA alone is not a jump table");
     put_cb(1, 0, pass);
     sm_thread_reset(&g_thread, 1);
     CHECK(run(), "branch program runs (pass %u)", pass);
@@ -458,7 +457,6 @@ static void test_indirect_branch(void) {
   memcpy(b.bytes + SM_SPH_BYTES + 8u * ssy_at, &w, 8);
   for (uint32_t k = 0; k < 3; k++) put_cb(0, 0x40 + 4u * k, case_at[k] * 8u);
   load(&b);
-  CHECK(g_prog.uses_jump_table, "a BRX program is flagged (its vertex stage shades on the CPU)");
   sm_thread_reset(&g_thread, SM_LANES);
   for (uint32_t l = 0; l < SM_LANES; l++) g_thread.attr_in[SM_ATTR_GENERIC / 4u][l] = l % 3u;
   CHECK(run(), "BRX program runs");

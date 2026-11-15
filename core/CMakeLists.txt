@@ -70,6 +70,7 @@ set(SWITCH_CORE_SOURCES
   gpu/gpu_mirror.c
   gpu/gpu_thread.c
   gpu/wgsl.c
+  gpu/vs_capture.c
   hle/fs/ramfs.c
   hle/fs/system_data.c
   hle/fs/save_archive.c

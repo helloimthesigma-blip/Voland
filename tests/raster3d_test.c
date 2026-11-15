@@ -46,7 +46,8 @@ static int g_failures;
 #define PS_LDG_BRANCH_OFFSET 0x3c00u /* its address loaded before a branch over other code */
 #define PS_LDG_ENTRY_OFFSET 0x3e00u  /* ... but a branch from before the load reaches the LDG */
 #define PS_STORE_OFFSET 0x1c00u /* a pixel program whose only output is a store to the storage buffer */
-#define PS_DEPTH_OUT_OFFSET 0x1d00u /* a pixel program writing depth only: 0.75 in R1 (0.25 in R0) */
+#define PS_DEPTH_OUT_OFFSET 0x1d00u
+#define PS_LDC_OFFSET 0x2400u /* a pixel program whose colour is c[1][0..12], indexed */ /* a pixel program writing depth only: 0.75 in R1 (0.25 in R0) */
 #define STORED_WORD 0x5a5a5a5au
 #define SSBO_DESC 0x110u      /* the storage buffer's descriptor in c[0] (NVN) */
 #define SSBO (GPU_BASE + 0xC000u)
@@ -117,6 +118,10 @@ static uint64_t IADD_C_X(uint32_t d, uint32_t offset) {
 }
 static uint64_t LDG_E128(uint32_t d, uint32_t a) {
   return (0xeed0ull << 48) | (6ull << 48) | (1ull << 45) | GUARD | ((uint64_t)a << 8) | d;
+}
+/* LDC Rd = c[slot][Ra + offset] (32-bit). */
+static uint64_t LDC(uint32_t d, uint32_t a, uint32_t slot, uint32_t offset) {
+  return (0xef90ull << 48) | GUARD | (4ull << 48) | ((uint64_t)slot << 36) | ((uint64_t)offset << 20) | ((uint64_t)a << 8) | d;
 }
 static uint64_t EXIT(void) { return (0xe300ull << 48) | GUARD | 0xfull; }
 /* @P0 BRA forward by `words` instruction words (past the next one). */
@@ -198,6 +203,9 @@ static void build_programs(void) {
   const uint64_t psg[] = {MOV32I(12, 0), IADD_C_CC(4, 12, SSBO_DESC), IADD_C_X(5, SSBO_DESC + 4u), LDG_E128(0, 4),
                           stg_e32, EXIT()};
   write_program(PS_LDG_OFFSET, ps_sph, psg, 6);
+  /* PS: colour = c[1][R6 + 0..12] - indexed, so the whole slot is wanted. */
+  const uint64_t psc[] = {MOV32I(6, 0), LDC(0, 6, 1, 0), LDC(1, 6, 1, 4), LDC(2, 6, 1, 8), LDC(3, 6, 1, 12), EXIT()};
+  write_program(PS_LDC_OFFSET, ps_sph, psc, 6);
   /* MOV R4 = c[0][desc], MOV R5 = c[0][desc + 4]; LDG.E.128 R0, [R4]. */
   const uint64_t mov_lo = (0x4c98ull << 48) | (0xfull << 39) | GUARD | ((uint64_t)(SSBO_DESC / 4u) << 20) | 4u;
   const uint64_t mov_hi = (0x4c98ull << 48) | (0xfull << 39) | GUARD | ((uint64_t)((SSBO_DESC + 4u) / 4u) << 20) | 5u;
@@ -1741,6 +1749,41 @@ static void qmd_set(uint32_t *qmd, uint32_t lo, uint32_t width, uint32_t value) 
   }
 }
 
+/* A constant buffer bound wider than its mapping (a program's own
+ * constants, bound 64 KiB just before the end of the pool) binds what is
+ * mapped instead of nothing. */
+#define CBUF_TAIL (GPU_BASE + GPU_BYTES - 0x100u)
+#define CBUF_BOUND_BYTES 0x10000u
+
+static uint64_t mem_extent(void *user, uint64_t va) {
+  (void)user;
+  return va >= GPU_BASE && va < GPU_BASE + GPU_BYTES ? GPU_BASE + GPU_BYTES - va : 0u;
+}
+
+static void test_cbuf_past_mapping(Raster3d *r) {
+  const Gpu_Memory mem = {NULL, mem_read, mem_write, NULL, NULL, NULL, mem_extent};
+  base_state(RT, false, PS_LDC_OFFSET);
+  const float colour[4] = {0.0f, 1.0f, 0.0f, 1.0f};
+  memcpy(g_gpu + (CBUF_TAIL - GPU_BASE), colour, sizeof(colour));
+  g_bindings.address[4][1] = CBUF_TAIL;
+  g_bindings.size[4][1] = CBUF_BOUND_BYTES;
+  raster3d_begin_submission(r);
+  memcpy(&g_regs[0x360], &colour[0], 4); /* clear to black first */
+  raster3d_clear(r, g_regs, &mem, 0x3cu);
+  vertex(0, -1.0f, -1.0f, 0, 0, 0, 0);
+  vertex(1, 3.0f, -1.0f, 0, 0, 0, 0);
+  vertex(2, -1.0f, 3.0f, 0, 0, 0, 0);
+  Raster3d_Draw d;
+  memset(&d, 0, sizeof(d));
+  d.kind = RASTER_DRAW_ARRAYS;
+  d.topology = 4;
+  d.count = 3;
+  raster3d_draw(r, g_regs, &g_bindings, &mem, &d);
+  raster3d_flush(r, &mem);
+  CHECK(rgba_is(pixel(RT, false, 10, 10), 0, 255, 0, 255), "a cbuf bound past its mapping is read: %08x",
+        *(const uint32_t *)(const void *)pixel(RT, false, 10, 10));
+}
+
 static void test_compute(Raster3d *r) {
   uint8_t no_sph[SM_SPH_BYTES];
   memset(no_sph, 0, sizeof(no_sph));
@@ -1964,6 +2007,7 @@ int main(void) {
   test_gpu_upload_keeps_bytes(&r);
   test_gpu_surface_budget(&r);
   test_gpu_surface_views_kept(&r);
+  test_cbuf_past_mapping(&r);
   test_compute(&r);
   test_gpu_compute(&r);
   test_gpu_mirror_cold_pages();

@@ -192,8 +192,6 @@ typedef struct Sm_Program {
   /* Writes memory (STG, ST, ATOM, RED): a pixel program with no target to
    * draw into still has an effect. */
   bool stores_memory;
-  /* Has BRX: an indirect branch through a jump table. */
-  bool uses_jump_table;
   /* Writes a[0x64] (layer) or a[0x68] (viewport index): which target
    * layer, or which viewport and scissor, its primitives go to. */
   bool writes_layer, writes_viewport_index;

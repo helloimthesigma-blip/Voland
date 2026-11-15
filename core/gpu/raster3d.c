@@ -738,6 +738,7 @@ void raster3d_flush(Raster3d *r, const Gpu_Memory *mem) {
 #define STALE_LOG_LIMIT 40u
 #define PRESENT_MISS_LOG_LIMIT 8u
 #define LAYER_LOG_LIMIT 16u
+#define VS_FAULT_LOG_LIMIT 16u
 #define STAGE_LOG_LIMIT 16u
 
 void raster3d_sync_range(Raster3d *r, const Gpu_Memory *mem, uint64_t address, uint64_t bytes, bool write) {
@@ -1794,7 +1795,16 @@ static void env_setup(Draw_Context *ctx, uint32_t stage, const Sm_Program *progr
     uint32_t want = program->cbuf_extent[slot];
     if (slot == env->texture_cbuf_slot || !want || want > size) want = size;
     uint8_t *dst = ctx->r->cbuf_data + ((size_t)stage * SM_CBUF_SLOTS + slot) * CBUF_SLOT_BYTES;
-    if (!ctx->mem->read(ctx->mem->user, b->address[group][slot], dst, want)) continue;
+    if (!ctx->mem->read(ctx->mem->user, b->address[group][slot], dst, want)) {
+      /* The binding outruns its mapping: bind what is mapped. A program's
+       * own constants sit just after its code, bound 64 KiB wide; failing
+       * the whole read left the slot unbound, and Animal Crossing's vertex
+       * program 6950030 then read a zero jump-table offset and looped. */
+      const uint64_t mapped = ctx->mem->extent ? ctx->mem->extent(ctx->mem->user, b->address[group][slot]) : 0u;
+      if (!mapped || mapped >= want) continue;
+      want = (uint32_t)mapped;
+      if (!ctx->mem->read(ctx->mem->user, b->address[group][slot], dst, want)) continue;
+    }
     if (g_compute_out_next && compute_output_overlaps(b->address[group][slot], b->address[group][slot] + want))
       ctx->r->gpu_stats.compute_fed_cbufs++;
     env->cbuf[slot] = dst;
@@ -2030,6 +2040,14 @@ static bool shade_vertices(Draw_Context *ctx, const uint32_t *indices, uint32_t 
   }
   if (!sm_run(ctx->vs, &ctx->env[0], t)) {
     ctx->r->stats.shader_faults++;
+    static uint64_t faulted[VS_FAULT_LOG_LIMIT];
+    static uint32_t faulted_count;
+    bool seen = false;
+    for (uint32_t i = 0; i < faulted_count && !seen; i++) seen = faulted[i] == ctx->vs->address;
+    if (!seen && faulted_count < VS_FAULT_LOG_LIMIT) {
+      faulted[faulted_count++] = ctx->vs->address;
+      log_warn("[gpu] vertex program %llx faults in the interpreter: its draws are dropped", (unsigned long long)ctx->vs->address);
+    }
     return false;
   }
   if (ctx->r->vertex_capture) ctx->r->vertex_capture(ctx->r->vertex_capture_user, ctx->vs, &ctx->env[0], t);
@@ -4785,17 +4803,6 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
   }
   if (ctx->vs->uses_bindless_textures) { /* its handles need a shaded probe: the CPU path */
     st->cpu_vs_bindless++;
-    return;
-  }
-  /* A jump table (BRX): Animal Crossing's vertex program 6950030 renders
-   * its scene black through the WGSL once BRX reaches bundle starts
-   * (f18d216) while the interpreter draws it right; Tears of the Kingdom's
-   * subtitle program is right on the CPU too. Until the WGSL difference is
-   * found, such programs shade on the CPU. */
-  static int gpu_jump_tables = -1; /* VOLAND_GPU_JUMP_TABLES=1: through the WGSL anyway (diagnostics) */
-  if (gpu_jump_tables < 0) gpu_jump_tables = getenv("VOLAND_GPU_JUMP_TABLES") ? 1 : 0;
-  if (ctx->vs->uses_jump_table && !gpu_jump_tables) {
-    st->cpu_vs_jump_table++;
     return;
   }
   if (!gpu_plan_globals(ctx, g, &words)) {
