@@ -106,6 +106,9 @@ export interface SwitchCoreExports {
   /* Save states (core/emulator.h; workers/savestate.ts): the plan's address or 0. */
   readonly _emulator_savestate_begin_save_ffi: () => number;
   readonly _emulator_savestate_end_save_ffi: () => void;
+  /** Raster3d_Writeback entries (id, width, height, bytes per pixel: u32 each) at `out`; returns the count. */
+  readonly _emulator_gpu_writeback_list_ffi: (out: bigint, max: number) => number;
+  readonly _emulator_gpu_writeback_ffi: (id: number, pixels: bigint, bytes: number) => number;
   readonly _emulator_savestate_begin_restore_ffi: () => number;
   readonly _emulator_savestate_finish_restore_ffi: (applied: number) => number;
   /* LZ4 for stored chunks (core/common/chunk_lz4.h): compress returns the

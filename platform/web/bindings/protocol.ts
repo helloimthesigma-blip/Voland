@@ -68,6 +68,9 @@ export type MainToCPUMessage =
   | { readonly type: "load-state"; readonly id: string }
   | { readonly type: "list-states" }
   | { readonly type: "delete-state"; readonly id: string }
+  /* The GPU worker's answer to gpu-readback-request, relayed (a save
+   * state's lifecycle): each surface's texels, or null when unreadable. */
+  | { readonly type: "gpu-readback"; readonly pixels: readonly (ArrayBuffer | null)[] }
   /* §18: slot connect/disconnect is a lifecycle event; the state itself
    * travels through the input region, never postMessage. */
   | { readonly type: "controller-connected"; readonly index: number; readonly profileId: number }
@@ -180,6 +183,10 @@ export type CPUToMainMessage =
   | { readonly type: "state-loaded"; readonly ok: boolean; readonly error: string }
   | { readonly type: "states-listed"; readonly states: readonly SavestateInfo[] }
   | { readonly type: "state-deleted"; readonly id: string }
+  /* A save state is being taken: the render targets only the GPU holds,
+   * to read back once the GPU worker has run the stream up to `after`
+   * (main relays it as gpu-readback). */
+  | { readonly type: "gpu-readback-request"; readonly after: number; readonly surfaces: readonly GpuReadbackSurface[] }
   /* A running game's guest RAM use, every 30 s (src/memory-guard.ts). */
   | { readonly type: "memory-use"; readonly titleId: string; readonly guestRamBytes: number }
   /* Guest debug text (svcOutputDebugString) and run-state changes: both
@@ -187,6 +194,14 @@ export type CPUToMainMessage =
   | { readonly type: "guest-output"; readonly text: string }
   | { readonly type: "run-state"; readonly state: RunState; readonly detail: string }
   | { readonly type: "text-input-request"; readonly request: TextInputRequest };
+
+/** A GPU surface (core/gpu/raster3d.h Raster3d_Writeback). */
+export interface GpuReadbackSurface {
+  readonly id: number;
+  readonly width: number;
+  readonly height: number;
+  readonly bytesPerPixel: number;
+}
 
 export type MainToGPUMessage =
   | {
@@ -206,7 +221,10 @@ export type MainToGPUMessage =
    * is opened and pre-built (workers/shader-cache.ts). */
   | { readonly type: "title"; readonly titleId: string }
   /* Debugging only (perf.mjs --dump-targets-at): read back every render target. */
-  | { readonly type: "debug-dump-targets" };
+  | { readonly type: "debug-dump-targets" }
+  /* Save states: read back these surfaces after running the stream up to
+   * `after` (gpu-readback-request, relayed). */
+  | { readonly type: "gpu-readback"; readonly after: number; readonly surfaces: readonly GpuReadbackSurface[] };
 
 export interface DebugTargetImage {
   readonly id: number;
@@ -226,4 +244,6 @@ export type GPUToMainMessage =
   /* The device ran out of memory or was lost: main pauses the guest and
    * says so instead of letting frames go black. */
   | { readonly type: "gpu-trouble"; readonly reason: "out-of-memory" | "device-lost"; readonly detail: string }
-  | { readonly type: "debug-targets"; readonly targets: readonly DebugTargetImage[] };
+  | { readonly type: "debug-targets"; readonly targets: readonly DebugTargetImage[] }
+  /* Rows of width * bytesPerPixel per surface, in request order (null: unreadable). */
+  | { readonly type: "gpu-readback"; readonly pixels: readonly (ArrayBuffer | null)[] };

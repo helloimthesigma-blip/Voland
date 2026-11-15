@@ -116,7 +116,7 @@ if(EMSCRIPTEN)
                             '_emulator_set_shared_font_ffi','_emulator_sd_write_file_ffi','_emulator_identify_system_data_ffi','_emulator_sd_clear_ffi',
                             '_emulator_sd_generation_ffi','_emulator_sd_manifest_ffi','_emulator_sd_read_file_ffi',
                             '_emulator_save_commits_ffi','_emulator_save_committed_manifest_ffi','_emulator_save_restore_archive_ffi',
-                            '_emulator_savestate_begin_save_ffi','_emulator_savestate_end_save_ffi',
+                            '_emulator_savestate_begin_save_ffi','_emulator_savestate_end_save_ffi','_emulator_gpu_writeback_list_ffi','_emulator_gpu_writeback_ffi',
                             '_emulator_savestate_begin_restore_ffi','_emulator_savestate_finish_restore_ffi',
                             '_emulator_lz4_bound_ffi','_emulator_lz4_compress_ffi','_emulator_lz4_decompress_ffi',
                             '_emulator_text_request_ffi','_emulator_text_respond_ffi',

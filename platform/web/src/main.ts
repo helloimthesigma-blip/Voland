@@ -283,6 +283,9 @@ async function boot(): Promise<BootResult | null> {
         gpuWorker.postMessage({ type: "title", titleId: msg.titleId } satisfies MainToGPUMessage);
         pendingLoad?.({ success: true, titleId: msg.titleId, entryPoint: msg.entryPoint, title: msg.title, icon: msg.icon });
         pendingLoad = null;
+      } else if (msg.type === "gpu-readback-request") {
+        /* A save state's lifecycle: the GPU worker reads back what only it holds. */
+        gpuWorker.postMessage({ type: "gpu-readback", after: msg.after, surfaces: msg.surfaces } satisfies MainToGPUMessage);
       } else if (msg.type === "guest-output") {
         appendGuestOutput(msg.text);
       } else if (msg.type === "text-input-request") {
@@ -335,6 +338,11 @@ async function boot(): Promise<BootResult | null> {
       if (msg.type === "debug-targets") {
         debugTargetsResolve?.(msg.targets);
         debugTargetsResolve = null;
+        return;
+      }
+      if (msg.type === "gpu-readback") {
+        const transfer = msg.pixels.filter((p): p is ArrayBuffer => p !== null);
+        cpuWorker.postMessage({ type: "gpu-readback", pixels: msg.pixels } satisfies MainToCPUMessage, transfer);
         return;
       }
       if (msg.type === "gpu-trouble") {

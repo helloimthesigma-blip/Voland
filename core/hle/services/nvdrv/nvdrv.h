@@ -214,6 +214,9 @@ void nvdrv_init(Nvdrv_State *state, Gpu_Channel *channels);
  * address and how many bytes from there stay inside the mapping. */
 bool nvdrv_gpu_translate(const Nvdrv_State *state, uint64_t gpu_va, uint64_t *guest_va, uint64_t *contiguous);
 
+/* GPU memory as the channels see it (the renderer's reads and writes). */
+Gpu_Memory nvdrv_gpu_memory(Nvdrv_State *state);
+
 /* Registers the four service names with sm:. */
 Error nvdrv_register(Nvdrv_State *state, SM_Registry *registry);
 

@@ -17,7 +17,8 @@ import type { CpuBackendId, GameFileReadHook, GuestOutputHook, ModFileReadHook, 
 import { enabledModFiles } from "./mod-store";
 import { FeedFolder, type StatusSample, statusLine } from "./log-feed";
 import { CPU_BACKEND_DISPLAY_NAMES, backendVersionString } from "@bindings/core";
-import { readMemoryLayout } from "@bindings/layout";
+import { readMemoryLayout, toByteOffset } from "@bindings/layout";
+import { OFF_WRITE } from "@bindings/gpu-records";
 import { CoreResult, SYSTEM_FILES, formatTitleId, loadFailureFromResult, readCString, runStateAfterSlice } from "@bindings/load";
 import type { CheatInfo, CPUToMainMessage, MainToCPUMessage } from "@bindings/protocol";
 import { clearSdFiles, diffManifests, parseManifest, persistSdFile, removeSdFile, restoreSdFiles } from "./sd-persistence";
@@ -533,7 +534,7 @@ function pollTextInput(): void {
 }
 
 function runBurst(): void {
-  if (!core || !running || paused) return;
+  if (!core || !running || paused || stateBusy) return; /* a save state awaits the GPU worker with the guest frozen */
   const burstStart = performance.now();
   if (lastBurstEnd > 0) perf.yieldMs += burstStart - lastBurstEnd;
   perf.bursts++;
@@ -1078,6 +1079,7 @@ async function saveState(auto: boolean): Promise<CPUToMainMessage> {
   try {
     file = await createStateFile(id); /* before freezing: opening is asynchronous */
     const started = performance.now();
+    await writebackGpuSurfaces(core, coreMemory);
     const plan = corePlan(core._emulator_savestate_begin_save_ffi());
     if (!plan) throw new Error(coreErrorMessage());
     let bytes = 0;
@@ -1105,7 +1107,59 @@ async function saveState(auto: boolean): Promise<CPUToMainMessage> {
     return { type: "state-saved", info: null, error };
   } finally {
     stateBusy = false;
+    if (running && !paused) scheduleBurst(); /* bursts stood still for the readback */
   }
+}
+
+/* Save states in GPU mode: render targets only the GPU holds (guest memory
+ * never sees GPU drawing) are read back and written into guest memory
+ * first, or a state brings back stale texels - Animal Crossing's island
+ * came back speckled. Main relays the request to the GPU worker, which
+ * answers once its stream has caught up; a surface it cannot read keeps
+ * what guest memory holds. */
+let gpuRingHeader = 0;
+let readbackResolve: ((pixels: readonly (ArrayBuffer | null)[]) => void) | null = null;
+const WRITEBACK_MAX_SURFACES = 2048; /* core/gpu/raster3d.c RASTER_GPU_SURFACES */
+const WRITEBACK_ENTRY_WORDS = 4;     /* Raster3d_Writeback: id, width, height, bytes per pixel */
+const READBACK_TIMEOUT_MS = 30000;
+async function writebackGpuSurfaces(c: SwitchCoreExports, memory: WebAssembly.Memory): Promise<void> {
+  const listAt = c._malloc(WRITEBACK_MAX_SURFACES * WRITEBACK_ENTRY_WORDS * 4);
+  if (listAt === 0) return;
+  const count = c._emulator_gpu_writeback_list_ffi(BigInt(listAt), WRITEBACK_MAX_SURFACES);
+  const words = new Uint32Array(memory.buffer, listAt, count * WRITEBACK_ENTRY_WORDS).slice();
+  c._free(listAt);
+  if (count === 0 || gpuRingHeader === 0) return;
+  const surfaces = Array.from({ length: count }, (_, i) => ({
+    id: words[i * WRITEBACK_ENTRY_WORDS] ?? 0,
+    width: words[i * WRITEBACK_ENTRY_WORDS + 1] ?? 0,
+    height: words[i * WRITEBACK_ENTRY_WORDS + 2] ?? 0,
+    bytesPerPixel: words[i * WRITEBACK_ENTRY_WORDS + 3] ?? 0,
+  }));
+  const after = Number(Atomics.load(new BigInt64Array(memory.buffer, gpuRingHeader, 6), OFF_WRITE / 8));
+  const started = performance.now();
+  const pixels = await new Promise<readonly (ArrayBuffer | null)[]>((resolve) => {
+    const timer = setTimeout(() => { readbackResolve = null; resolve([]); }, READBACK_TIMEOUT_MS);
+    readbackResolve = (p) => { clearTimeout(timer); resolve(p); };
+    const request: CPUToMainMessage = { type: "gpu-readback-request", after, surfaces };
+    self.postMessage(request);
+  });
+  let written = 0, bytes = 0;
+  const largest = pixels.reduce((m, p) => Math.max(m, p?.byteLength ?? 0), 0);
+  const scratch = largest > 0 ? c._malloc(largest) : 0;
+  if (scratch !== 0) {
+    pixels.forEach((p, i) => {
+      const s = surfaces[i];
+      if (!p || !s) return;
+      new Uint8Array(memory.buffer, scratch, p.byteLength).set(new Uint8Array(p));
+      if (c._emulator_gpu_writeback_ffi(s.id, BigInt(scratch), p.byteLength) === CoreResult.Ok) {
+        written++;
+        bytes += p.byteLength;
+      }
+    });
+    c._free(scratch);
+  }
+  log("info", `save state: ${written} of ${count} GPU surface(s) written back (${(bytes / 2 ** 20).toFixed(1)} MiB) in ` +
+              `${((performance.now() - started) / 1000).toFixed(1)} s`);
 }
 
 /* Save-state chunks through the core's LZ4 (savestate.ts ChunkCodec): the
@@ -1307,6 +1361,7 @@ async function init(memory: WebAssembly.Memory): Promise<void> {
 
   const layoutPtr = core._layout_get_ffi();
   const layout = readMemoryLayout(memory, layoutPtr);
+  gpuRingHeader = toByteOffset(layout.gpuRingBase);
   const layoutMsg: CPUToMainMessage = { type: "layout", layout };
   self.postMessage(layoutMsg);
 
@@ -1382,6 +1437,11 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   }
   if (msg.type === "compat-report") {
     self.postMessage(compatReport());
+    return;
+  }
+  if (msg.type === "gpu-readback") {
+    readbackResolve?.(msg.pixels);
+    readbackResolve = null;
     return;
   }
   if (msg.type === "save-state") {

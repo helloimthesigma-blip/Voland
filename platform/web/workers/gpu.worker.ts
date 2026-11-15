@@ -30,7 +30,7 @@ import {
   REC_PAD,
 } from "@bindings/gpu-records";
 import { type MemoryLayout, toByteOffset } from "@bindings/layout";
-import type { GPUToMainMessage, MainToGPUMessage } from "@bindings/protocol";
+import type { GPUToMainMessage, GpuReadbackSurface, MainToGPUMessage } from "@bindings/protocol";
 import { GpuExecutor } from "./gpu-executor";
 import { ShaderCacheStore } from "./shader-cache";
 
@@ -67,6 +67,8 @@ struct VertexOut {
   return textureSample(frame, frame_sampler, in.uv);
 }`;
 
+/* Save states: how long a readback waits for the stream to catch up. */
+const READBACK_WAIT_MS = 10000;
 /* Fallback poll interval where Atomics.waitAsync is missing. */
 const POLL_MS = 4;
 /* Until the core turns GPU mode on, the stream header is all zeroes. */
@@ -121,10 +123,28 @@ function attachShaderCache(): void {
   }).catch((e: unknown) => log("warn", `shader cache unavailable: ${e instanceof Error ? e.message : String(e)}`));
 }
 
+/** How far the stream consumer has run (bytes; 0 before it starts). */
+let streamRead = (): number => 0;
+
+/* Save states: once the stream has run up to `after`, the surfaces' texels
+ * (gpu-readback). Replies with nulls when there is no WebGPU executor. */
+async function readbackSurfaces(after: number, surfaces: readonly GpuReadbackSurface[]): Promise<void> {
+  const deadline = performance.now() + READBACK_WAIT_MS;
+  while (streamRead() < after && performance.now() < deadline) await new Promise((resolve) => setTimeout(resolve, POLL_MS));
+  const executor = activeExecutor;
+  let pixels: (ArrayBuffer | null)[] = surfaces.map(() => null);
+  if (!executor) log("warn", "save state: no WebGPU executor to read surfaces back from");
+  else if (streamRead() < after) log("warn", "save state: the GPU stream did not catch up; surfaces not read back");
+  else pixels = await executor.readbackSurfaces(surfaces);
+  const reply: GPUToMainMessage = { type: "gpu-readback", pixels };
+  self.postMessage(reply, pixels.filter((p): p is ArrayBuffer => p !== null));
+}
+
 async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, headerBase: number): Promise<void> {
   const buffer = memory.buffer;
   const words = new Int32Array(buffer, headerBase, 12);
   const wide = new BigInt64Array(buffer, headerBase, 6);
+  streamRead = () => Number(Atomics.load(wide, OFF_READ / 8));
   while (Atomics.load(words, OFF_MAGIC / 4) !== GPU_STREAM_MAGIC) {
     await new Promise((resolve) => setTimeout(resolve, STREAM_IDLE_POLL_MS));
   }
@@ -363,6 +383,14 @@ self.addEventListener("message", (event: MessageEvent<MainToGPUMessage>) => {
       const reply: GPUToMainMessage = { type: "debug-targets", targets };
       self.postMessage(reply, targets.map((t) => t.rgba.buffer));
     }).catch((e: unknown) => log("error", `debug-dump-targets: ${String(e)}`));
+    return;
+  }
+  if (event.data.type === "gpu-readback") {
+    readbackSurfaces(event.data.after, event.data.surfaces).catch((e: unknown) => {
+      log("error", `save state readback: ${e instanceof Error ? e.message : String(e)}`);
+      const reply: GPUToMainMessage = { type: "gpu-readback", pixels: [] };
+      self.postMessage(reply);
+    });
     return;
   }
   if (event.data.type === "title") {

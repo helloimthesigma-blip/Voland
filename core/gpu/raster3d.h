@@ -425,6 +425,24 @@ void raster3d_end_frame(Raster3d *r);
  * are skipped. */
 void raster3d_set_skip(Raster3d *r, bool skip);
 
+/* GPU mode, for save states: render targets whose texels only the GPU
+ * holds (colour, in a format whose bytes the GPU keeps as the guest lays
+ * them out, current - not overwritten in guest memory since). The host
+ * reads each back and hands it to raster3d_writeback. */
+typedef struct Raster3d_Writeback {
+  uint32_t id;
+  uint32_t width;
+  uint32_t height;
+  uint32_t bytes_per_pixel;
+} Raster3d_Writeback;
+/* Up to `max` into `out`, least recently drawn first (aliases: the newest
+ * lands last); returns how many. */
+uint32_t raster3d_writeback_list(const Raster3d *r, Raster3d_Writeback *out, uint32_t max);
+/* Writes GPU surface `id`'s texels (rows of width * bytes_per_pixel, top
+ * first) into its guest memory, laid out as the guest reads it. False
+ * when `id` is no such surface or the bytes do not fit it. */
+bool raster3d_writeback(Raster3d *r, const struct Gpu_Memory *mem, uint32_t id, const uint8_t *pixels, uint64_t bytes);
+
 /* Writes every dirty render target back to guest memory (GPU mode:
  * publishes the stream). */
 void raster3d_flush(Raster3d *r, const struct Gpu_Memory *mem);

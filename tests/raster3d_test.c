@@ -1196,6 +1196,43 @@ static void test_gpu_upload_keeps_bytes(Raster3d *r) {
         first, second, one);
 }
 
+/* GPU mode, save states: a drawn target is listed for writeback, and its
+ * texels handed back land in guest memory in the target's own layout
+ * (block linear here); a size that does not fit is refused. */
+#define WRITEBACK_RT_OFFSET 0x40000u /* RT_BL + this: bytes no earlier test drew */
+static void test_gpu_writeback(Raster3d *r) {
+  g_gpu_rt_bl = true;
+  g_gpu_rt_offset = WRITEBACK_RT_OFFSET;
+  (void)gpu_draw_once(r, FRONT_CW_REG);
+  g_gpu_rt_bl = false;
+  g_gpu_rt_offset = 0;
+  const uint64_t at = RT_BL + WRITEBACK_RT_OFFSET;
+  static Raster3d_Writeback list[RASTER_GPU_SURFACES];
+  const uint32_t count = raster3d_writeback_list(r, list, RASTER_GPU_SURFACES);
+  uint32_t id = 0;
+  for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++)
+    if (r->gpu_surfaces[i].in_use && r->gpu_surfaces[i].address == at && !r->gpu_surfaces[i].depth) id = r->gpu_surfaces[i].id;
+  bool listed = false;
+  for (uint32_t i = 0; i < count; i++)
+    listed |= list[i].id == id && list[i].width == RT_SIZE && list[i].height == RT_SIZE && list[i].bytes_per_pixel == 4u;
+  CHECK(id && listed, "the drawn target is listed for writeback (id %u, %u listed)", id, count);
+  static uint8_t texels[RT_SIZE * RT_SIZE * 4u];
+  for (uint32_t y = 0; y < RT_SIZE; y++)
+    for (uint32_t x = 0; x < RT_SIZE; x++) {
+      uint8_t *t = texels + (y * RT_SIZE + x) * 4u;
+      t[0] = (uint8_t)x; t[1] = (uint8_t)y; t[2] = 0xab; t[3] = 0xcd;
+    }
+  CHECK(!raster3d_writeback(r, &k_mem, id, texels, sizeof(texels) - 4u), "a writeback of the wrong size is refused");
+  CHECK(raster3d_writeback(r, &k_mem, id, texels, sizeof(texels)), "the writeback is accepted");
+  bool same = true;
+  for (uint32_t y = 0; y < RT_SIZE && same; y++)
+    for (uint32_t x = 0; x < RT_SIZE && same; x++) {
+      const uint8_t *g = pixel(at, true, x, y);
+      same = g[0] == x && g[1] == y && g[2] == 0xab && g[3] == 0xcd;
+    }
+  CHECK(same, "guest memory holds the written-back texels, block linear");
+}
+
 /* GPU mode: a render target re-described over the same bytes in another
  * format with the same texel size starts from the old view's texels
  * (REINTERPRET, stream version 11), not from guest memory - GPU drawing
@@ -2005,6 +2042,7 @@ int main(void) {
   test_gpu_gathered_cube(&r);
   test_gpu_reinterpret(&r);
   test_gpu_upload_keeps_bytes(&r);
+  test_gpu_writeback(&r);
   test_gpu_surface_budget(&r);
   test_gpu_surface_views_kept(&r);
   test_cbuf_past_mapping(&r);

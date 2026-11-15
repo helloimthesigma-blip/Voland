@@ -2128,6 +2128,20 @@ Error emulator_savestate_begin_save(Emulator* emulator, Savestate_Plan* plan) {
   return OK;
 }
 
+uint32_t emulator_gpu_writeback_list(Emulator *emulator, Raster3d_Writeback *out, uint32_t max) {
+  if (!emulator || !emulator->program_loaded || !emulator->gpu_stream_ready) return 0;
+  gpu_thread_drain(&emulator->gpu_thread);
+  return raster3d_writeback_list(&emulator->renderer, out, max);
+}
+
+Error emulator_gpu_writeback(Emulator *emulator, uint32_t id, const uint8_t *pixels, uint64_t bytes) {
+  if (!emulator || !pixels) return ERR(RESULT_INVALID_ARGUMENT, "GPU writeback: no emulator or pixels");
+  const Gpu_Memory mem = nvdrv_gpu_memory(&emulator->nvdrv);
+  if (!raster3d_writeback(&emulator->renderer, &mem, id, pixels, bytes))
+    return ERR(RESULT_INVALID_ARGUMENT, "GPU writeback: no such surface, or its size differs");
+  return OK;
+}
+
 void emulator_savestate_end_save(Emulator* emulator) {
   if (emulator) savestate_resume(emulator);
 }

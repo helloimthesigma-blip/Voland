@@ -23,6 +23,7 @@
  * in the encoder) before the next draw samples a texture written since.
  */
 
+import type { GpuReadbackSurface } from "@bindings/protocol";
 import { type CacheContents, type PipelineSpec, type ShaderCacheStore, roundBiasSlope, specKey, wgslHash } from "./shader-cache";
 import {
   BIND_DATA,
@@ -145,6 +146,8 @@ export interface DebugTarget {
   readonly height: number;
   readonly rgba: Uint8Array;
 }
+/* Save-state readback: surfaces per submit (bounds the staging buffers alive at once). */
+const READBACK_BATCH = 16;
 /* Debug readback skips small targets (probes, LUTs): later scenes have thousands. */
 const DEBUG_MIN_TEXELS = 256 * 256;
 /* A memory report (textures by kind, storage buffers) every this many presents. */
@@ -588,6 +591,46 @@ export class GpuExecutor {
       buffer.unmap();
       buffer.destroy();
       out.push({ id, format: t.format, width: t.width, height: t.height, rgba });
+    }
+    return out;
+  }
+
+  /** Save states (gpu-readback): each surface's texels as rows of width *
+   * bytesPerPixel, or null when no texture of that size holds them as is. */
+  async readbackSurfaces(surfaces: readonly GpuReadbackSurface[]): Promise<(ArrayBuffer | null)[]> {
+    this.flush();
+    const out: (ArrayBuffer | null)[] = surfaces.map(() => null);
+    for (let first = 0; first < surfaces.length; first += READBACK_BATCH) {
+      const batch: { index: number; buffer: GPUBuffer; row: number; bytesPerRow: number; height: number }[] = [];
+      const enc = this.device.createCommandEncoder();
+      this.device.pushErrorScope("validation");
+      for (let i = first; i < Math.min(first + READBACK_BATCH, surfaces.length); i++) {
+        const s = surfaces[i];
+        const t = s ? this.textures.get(s.id) : undefined;
+        if (!s || !t || t.fallback || !t.renderView || t.width !== s.width || t.height !== s.height) continue;
+        const row = s.width * s.bytesPerPixel;
+        const bytesPerRow = Math.ceil(row / COPY_ROW_ALIGN) * COPY_ROW_ALIGN;
+        const buffer = this.device.createBuffer({ size: bytesPerRow * s.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+        enc.copyTextureToBuffer({ texture: t.texture }, { buffer, bytesPerRow }, [s.width, s.height]);
+        batch.push({ index: i, buffer, row, bytesPerRow, height: s.height });
+      }
+      this.device.queue.submit([enc.finish()]);
+      const error = await this.device.popErrorScope();
+      if (error) this.host.log("warn", `save state readback: ${error.message}`);
+      for (const b of batch) {
+        try {
+          if (error) throw error;
+          await b.buffer.mapAsync(GPUMapMode.READ);
+          const mapped = new Uint8Array(b.buffer.getMappedRange());
+          const rows = new Uint8Array(b.row * b.height);
+          for (let y = 0; y < b.height; y++) rows.set(mapped.subarray(y * b.bytesPerRow, y * b.bytesPerRow + b.row), y * b.row);
+          out[b.index] = rows.buffer;
+          b.buffer.unmap();
+        } catch {
+          /* left null: that surface keeps what guest memory holds */
+        }
+        b.buffer.destroy();
+      }
     }
     return out;
   }

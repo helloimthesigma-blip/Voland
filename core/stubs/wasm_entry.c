@@ -107,6 +107,8 @@ EXPORT double emulator_save_committed_manifest_ffi(uint64_t out, double max);
 EXPORT int emulator_save_restore_archive_ffi(uint64_t name, uint64_t bytes, double size);
 EXPORT double emulator_savestate_begin_save_ffi(void);
 EXPORT void emulator_savestate_end_save_ffi(void);
+EXPORT double emulator_gpu_writeback_list_ffi(uint64_t out, double max);
+EXPORT int emulator_gpu_writeback_ffi(double id, uint64_t pixels, double bytes);
 EXPORT double emulator_savestate_begin_restore_ffi(void);
 EXPORT int emulator_savestate_finish_restore_ffi(int applied);
 EXPORT double emulator_lz4_bound_ffi(double size);
@@ -828,6 +830,21 @@ EXPORT double emulator_savestate_begin_save_ffi(void)
 EXPORT void emulator_savestate_end_save_ffi(void)
 {
   if (g_initialised) emulator_savestate_end_save(&g_emulator);
+}
+
+/* Raster3d_Writeback entries (four u32 each) at `out`. */
+EXPORT double emulator_gpu_writeback_list_ffi(uint64_t out, double max)
+{
+  if (!g_initialised) return 0;
+  return (double)emulator_gpu_writeback_list(&g_emulator, (Raster3d_Writeback *)(uintptr_t)out, (uint32_t)max);
+}
+
+EXPORT int emulator_gpu_writeback_ffi(double id, uint64_t pixels, double bytes)
+{
+  if (!g_initialised) return (int)RESULT_INVALID_ARGUMENT;
+  const Error err = emulator_gpu_writeback(&g_emulator, (uint32_t)id, (const uint8_t *)(uintptr_t)pixels, (uint64_t)bytes);
+  g_last_error_message = err.message;
+  return (int)err.code;
 }
 
 EXPORT double emulator_savestate_begin_restore_ffi(void)

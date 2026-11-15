@@ -664,6 +664,11 @@ static void gpu_syncpoint_increment(void *user, uint32_t id) {
   syncpoint_complete(&s->syncpoints, id, syncpoint_increment_max(&s->syncpoints, id));
 }
 
+Gpu_Memory nvdrv_gpu_memory(Nvdrv_State *s) {
+  return (Gpu_Memory){s, gpu_read, gpu_write, gpu_syncpoint_increment, s->renderer, gpu_translate, gpu_extent};
+}
+
+
 static Gpu_Channel *channel_of(Nvdrv_State *s, Nv_Fd *f) {
   if (!s->channels) return NULL;
   if (f->channel == NVDRV_NO_CHANNEL) {

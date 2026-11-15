@@ -495,6 +495,13 @@ typedef struct Savestate_Plan {
 Error emulator_savestate_begin_save(Emulator *emulator, Savestate_Plan *plan);
 void emulator_savestate_end_save(Emulator *emulator);
 
+/* GPU mode, before a save: what only the GPU drew is not in guest memory,
+ * so a state would bring back stale texels. The host lists those render
+ * targets (raster3d_writeback_list; the GPU thread drained first), reads
+ * each back from the GPU and writes it into guest memory here. */
+uint32_t emulator_gpu_writeback_list(Emulator *emulator, Raster3d_Writeback *out, uint32_t max);
+Error emulator_gpu_writeback(Emulator *emulator, uint32_t id, const uint8_t *pixels, uint64_t bytes);
+
 /* Quiesces the machine and keeps what a restore must not replace (the
  * host side: renderer caches, GPU/video streams, host cores, pacing); fills
  * `plan` with the current ranges to compare with the stored one. The host

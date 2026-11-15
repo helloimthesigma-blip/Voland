@@ -3857,6 +3857,56 @@ static void gpu_surface_upload_range(Raster3d *r, Raster3d_Gpu_Surface *s, const
   r->gpu_stats.surface_upload_bytes += (uint64_t)row * (y1 - y0);
 }
 
+/* Save states: a surface's texels exist only on the GPU while it is
+ * current (guest memory never sees GPU drawing). */
+static bool gpu_surface_writes_back(const Raster3d_Gpu_Surface *s) {
+  bool direct = false;
+  if (!s->in_use || s->depth || s->stale || !s->cpu_address) return false;
+  (void)gpu_color_format(s->format, &direct);
+  return direct && (uint64_t)s->width * s->height * s->bytes_per_pixel <= RASTER_MAX_SURFACE_BYTES;
+}
+
+uint32_t raster3d_writeback_list(const Raster3d *r, Raster3d_Writeback *out, uint32_t max) {
+  uint32_t slots[RASTER_GPU_SURFACES];
+  uint32_t count = 0;
+  for (uint32_t i = 0; i < RASTER_GPU_SURFACES && count < max; i++) {
+    if (!gpu_surface_writes_back(&r->gpu_surfaces[i])) continue;
+    /* Insertion by last drawn: of two surfaces over the same bytes, the
+     * newer one's texels are written last. */
+    uint32_t at = count++;
+    while (at > 0 && r->gpu_surfaces[slots[at - 1u]].written > r->gpu_surfaces[i].written) {
+      slots[at] = slots[at - 1u];
+      at--;
+    }
+    slots[at] = i;
+  }
+  for (uint32_t i = 0; i < count; i++) {
+    const Raster3d_Gpu_Surface *s = &r->gpu_surfaces[slots[i]];
+    out[i] = (Raster3d_Writeback){s->id, s->width, s->height, s->bytes_per_pixel};
+  }
+  return count;
+}
+
+bool raster3d_writeback(Raster3d *r, const Gpu_Memory *mem, uint32_t id, const uint8_t *pixels, uint64_t bytes) {
+  for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
+    const Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
+    if (s->id != id || !gpu_surface_writes_back(s)) continue;
+    const uint32_t row = s->width * s->bytes_per_pixel;
+    if (bytes != (uint64_t)row * s->height) return false;
+    if (!s->block_linear) {
+      for (uint32_t y = 0; y < s->height; y++)
+        if (!mem->write(mem->user, s->address + (uint64_t)y * s->pitch, pixels + (uint64_t)y * row, row)) return false;
+      return true;
+    }
+    /* The guest's own bytes first: block padding past the image keeps them. */
+    if (s->guest_bytes > RASTER_MAX_SURFACE_BYTES || !mem->read(mem->user, s->address, r->staging, s->guest_bytes))
+      return false;
+    pitch_to_block_linear(pixels, row, r->staging, row, s->height, s->block_height_log2);
+    return mem->write(mem->user, s->address, r->staging, s->guest_bytes);
+  }
+  return false;
+}
+
 #define SURFACE_DROP_LOG_LIMIT 16u /* "table full" warnings (a title cycling targets drops old ones steadily) */
 
 /* The address index over gpu_surfaces (Raster3d.gpu_surface_head). */
