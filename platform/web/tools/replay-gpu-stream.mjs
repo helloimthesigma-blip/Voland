@@ -332,7 +332,7 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
         /* Gpu_Rec_Clear: colour id, mask, colour (f32 bits), then the depth target. */
         const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
         console.log(`clear colour ${dv.getUint32(0, true)} mask ${dv.getUint32(4, true)} value ${[8, 12, 16, 20].map((o) => dv.getFloat32(o, true)).join(",")}` +
-          ` depth ${dv.getUint32(24, true)} flags ${dv.getUint32(28, true)} z ${dv.getFloat32(32, true)}` +
+          ` depth ${dv.getUint32(24, true)} flags ${dv.getUint32(28, true)} z ${dv.getFloat32(32, true)} stencil ${dv.getUint32(36, true)} smask ${dv.getUint32(40, true)}` +
           ` rect ${[44, 48, 52, 56].map((o) => dv.getInt32(o, true)).join(",")}`);
       }
       if (globalThis.TRACE_SHAPES && type === 12 && presents + 1 === globalThis.TRACE_SHAPES) {
@@ -392,7 +392,7 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
           }
           at += 16 + (kind === 1 ? dv.getUint32(at + 8, true) : 0);
         }
-        console.log(`shape ${records} shader ${dv.getUint32(0, true)} vs ${dv.getUint32(8 + 36 * 8 + 4 * 13 + 4 * 4 + 4 * 4 + 4 * 4 + 4 * 4, true)} targets ${ids.join(",")} depth ${dv.getUint32(296, true)} test ${dv.getUint32(300, true)} write ${dv.getUint32(304, true)} cmp ${dv.getUint32(308, true)} tex ${tex.join(",")} vtx ${dv.getUint32(404, true)} vsid ${dv.getUint32(408, true)} inputs ${dv.getUint32(412, true)} cull ${dv.getUint32(416, true)} idx ${dv.getUint32(424, true)} flags ${dv.getUint32(428, true).toString(16)} scissor ${[0, 1, 2, 3].map((k) => dv.getInt32(376 + 4 * k, true)).join(",")}`);
+        console.log(`shape ${records} shader ${dv.getUint32(0, true)} vs ${dv.getUint32(8 + 36 * 8 + 4 * 13 + 4 * 4 + 4 * 4 + 4 * 4 + 4 * 4, true)} targets ${ids.join(",")} depth ${dv.getUint32(296, true)} test ${dv.getUint32(300, true)} write ${dv.getUint32(304, true)} cmp ${dv.getUint32(308, true)} tex ${tex.join(",")} vtx ${dv.getUint32(404, true)} vsid ${dv.getUint32(408, true)} inputs ${dv.getUint32(412, true)} cull ${dv.getUint32(416, true)} idx ${dv.getUint32(424, true)} flags ${dv.getUint32(428, true).toString(16)} scissor ${[0, 1, 2, 3].map((k) => dv.getInt32(376 + 4 * k, true)).join(",")} mask0 ${dv.getUint32(12, true).toString(16)} blend0 ${dv.getUint32(16, true)} stencil ${dv.getUint32(312, true)} front ${[0, 1, 2, 3].map((k) => dv.getUint32(316 + 4 * k, true)).join(",")} back ${[0, 1, 2, 3].map((k) => dv.getUint32(332 + 4 * k, true)).join(",")} masks ${dv.getUint32(348, true)},${dv.getUint32(352, true)} ref ${dv.getUint32(356, true)}`);
         /* Transformed vertices (no vertex stage): the first ones' x, y (NDC), z and 1/w after the bindings. */
         if (dv.getUint32(408, true) === 0 && dv.getUint32(404, true) > 0) {
           let vat = 432;
