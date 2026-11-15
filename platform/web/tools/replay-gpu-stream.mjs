@@ -21,8 +21,8 @@
  *
  * Diagnostics (environment): DRAW_TRACE=P sums the RGBA8 targets after
  * each draw of present P, or with TRACE_TARGET=id that one target (float
- * formats too); TRACE_SHAPES=P prints each draw's shader, colour targets
- * and depth state; NO_SHADOW_COMPARE=1 makes every depth compare pass;
+ * formats too); TRACE_SHAPES=P prints each draw's shader, colour targets,
+ * depth and stencil state (each clear's stencil value and mask too); NO_SHADOW_COMPARE=1 makes every depth compare pass;
  * DISCARD_SHADERS=id,... makes those pixel shaders write nothing;
  * DEPTH_OFF_SHADERS=id,... draws those shaders without the depth test;
  * DEPTH_CMP=id:cmp,... gives those shaders that depth compare (COMPARES index);

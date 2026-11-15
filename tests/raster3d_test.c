@@ -686,6 +686,55 @@ static void test_stencil(Raster3d *r) {
   g_regs[0x54e] = 0;
 }
 
+/* Under flip y with a negative y scale the stencil takes the back face's
+ * state for a triangle the cull keeps as a front face (SSBU's title logo
+ * mask: front write mask 0, back 0xff, REPLACE). */
+#define OP_REPLACE 0x1e01u
+
+static void test_stencil_flip_y(Raster3d *r) {
+  base_state(RT, false, PS_OFFSET);
+  g_regs[0x3f8] = (uint32_t)(ZT >> 32);
+  g_regs[0x3f9] = (uint32_t)ZT;
+  g_regs[0x3fa] = ZT_Z24S8;
+  g_regs[0x3fb] = 0;
+  g_regs[0x48a] = RT_SIZE;
+  g_regs[0x48b] = RT_SIZE;
+  g_regs[0x54e] = 1;
+  raster3d_begin_submission(r);
+  g_regs[0x368] = 0;
+  g_regs[0x4e7] = 0xff;
+  raster3d_clear(r, g_regs, &k_mem, 2u);
+  g_regs[0x680] = 0;
+  g_regs[0x4eb] = 0x10;           /* flip y */
+  const float flipped = -(RT_SIZE / 2.0f);
+  memcpy(&g_regs[0x281], &flipped, 4);
+  g_regs[REG_FRONT_FACE_TEST] = FRONT_CCW_REG;
+  g_regs[0x4e0] = 1;
+  stencil_ops(0x4e1, OP_REPLACE, OP_REPLACE, OP_REPLACE, FUNC_ALWAYS);
+  g_regs[0x4e5] = 1;
+  g_regs[0x4e6] = 0xff;
+  g_regs[0x4e7] = 0;              /* front: writes nothing */
+  g_regs[0x565] = 1;
+  stencil_ops(0x566, OP_REPLACE, OP_REPLACE, OP_REPLACE, FUNC_ALWAYS);
+  g_regs[0x3d5] = 1;
+  g_regs[0x3d6] = 0xff;           /* back: writes */
+  g_regs[0x3d7] = 0xff;
+  triangle(-1, -1, 1, -1, -1, 1);
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  const uint8_t *zt = g_gpu + (ZT - GPU_BASE);
+  const uint32_t at = (uint32_t)block_linear_offset(10u * 4u, 53, RT_SIZE * 4u, 0);
+  CHECK(zt[at] == 1, "flip y, negative y scale: the back stencil state writes (%u)", zt[at]);
+  const float scale = RT_SIZE / 2.0f;
+  memcpy(&g_regs[0x281], &scale, 4);
+  g_regs[0x4eb] = 0;
+  g_regs[0x565] = 0;
+  g_regs[0x4e0] = 0;
+  g_regs[0x4e7] = 0xff;
+  g_regs[0x680] = 0x1111;
+  g_regs[0x54e] = 0;
+}
+
 /* DEPTH_WRITE without DEPTH_TEST writes nothing (GL's and Vulkan's rule):
  * MK8DX draws a full-screen quad that way between its depth pre-pass and
  * the passes that read the depth. With the test on (ALWAYS), the same
@@ -2027,6 +2076,7 @@ int main(void) {
   test_texture(&r);
   test_render_to_texture(&r);
   test_stencil(&r);
+  test_stencil_flip_y(&r);
   test_depth_write_needs_test(&r);
   test_depth_bias(&r);
   test_depth_output(&r);

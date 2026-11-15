@@ -2328,6 +2328,28 @@ static bool stores_only_draws(void) {
   return !v || strcmp(v, "0") != 0;
 }
 
+static void swap_u32(uint32_t v[2]) {
+  const uint32_t t = v[0];
+  v[0] = v[1];
+  v[1] = t;
+}
+
+static void swap_u8(uint8_t v[2]) {
+  const uint8_t t = v[0];
+  v[0] = v[1];
+  v[1] = t;
+}
+
+static void stencil_swap_faces(Raster_State *rs) {
+  swap_u32(rs->stencil_op_fail);
+  swap_u32(rs->stencil_op_zfail);
+  swap_u32(rs->stencil_op_zpass);
+  swap_u32(rs->stencil_func);
+  swap_u8(rs->stencil_ref);
+  swap_u8(rs->stencil_func_mask);
+  swap_u8(rs->stencil_write_mask);
+}
+
 static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
   Raster3d *r = ctx->r;
   const uint32_t *regs = ctx->regs;
@@ -2494,6 +2516,12 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
    * full-screen passes: FRONT_FACE CCW, cull back, flip y, scale -360). */
   const bool flip_facing = (regs[REG_WINDOW_ORIGIN] & WINDOW_ORIGIN_FLIP_Y) != 0 && !(rs->vp_scale[1] < 0.0f);
   rs->front_ccw = (regs[REG_FRONT_FACE] == 0x901u) != flip_facing;
+  /* The stencil faces follow flip y even where the cull facing does not:
+   * SSBU's title masks its "SUPER SMASH BROS." letters with two-sided
+   * stencil (front write mask 0, back 0xff) under flip y and scale -360,
+   * and its mask quads face the same way as the full-screen passes that
+   * cull back - so the stencil takes them as back faces. */
+  if (rs->stencil && (regs[REG_WINDOW_ORIGIN] & WINDOW_ORIGIN_FLIP_Y) && !flip_facing) stencil_swap_faces(rs);
   rs->provoking_last = regs[REG_PROVOKING_VERTEX] & 1u;
   /* Varyings the pixel program reads, and how. */
   const Sm_Header *ph = &ctx->ps->header;
