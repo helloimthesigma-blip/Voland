@@ -22,7 +22,7 @@ were measured.
 | Nine Sols | title, opening cinematic, gameplay, dialogue | ~45 (the first cave) | ~52 | |
 | Super Smash Bros. Ultimate | matches, opening movie, save states in a fight | 58-60 on lighter stages, ~31-35 on busy ones (Mario Circuit, Boxing Ring) | ~60 | the title screen shows only "ULTIMATE" (the "SUPER SMASH BROS." logo above it is missing) |
 | Mario Kart 8 Deluxe (32-bit) | whole races | ~44 at the race start | ~60 | |
-| Animal Crossing: New Horizons | opening, naming, arrival on the island | ~29 at the island arrival | ~55 (intro) | some of the island's sea renders black in patches; after loading a save state on the island, white speckles cover the picture; generating the island takes a few minutes |
+| Animal Crossing: New Horizons | opening, naming, arrival on the island | ~29 at the island arrival | ~55 (intro) | some of the island's sea renders black in patches; generating the island takes a few minutes |
 | Tears of the Kingdom | the opening descent | ~8 | - | slow; the picture is over-exposed; occasional crashes on three cores |
 
 "(Oct.)" marks numbers measured in October 2026, before later speed work, and not
