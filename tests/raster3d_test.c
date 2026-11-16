@@ -55,6 +55,8 @@ static int g_failures;
 #define VERTICES (GPU_BASE + 0x4000u)
 #define VERTICES_COPIED 0x100u /* the first eight vertices */
 #define VERTICES_CROSSING (0x200000ull - 0x40u)
+#define INDICES (GPU_BASE + 0x80000u)
+#define REG_INDEX_BUFFER_TEST 0x5f2u /* raster3d.c REG_INDEX_BUFFER: address hi, lo */
 #define CBUF (GPU_BASE + 0x6000u)
 #define TIC_POOL (GPU_BASE + 0x7000u)
 #define TSC_POOL (GPU_BASE + 0x7400u)
@@ -336,6 +338,20 @@ static void draw_arrays(Raster3d *r, uint32_t topology, uint32_t count) {
   d.kind = RASTER_DRAW_ARRAYS;
   d.topology = topology;
   d.count = count;
+  raster3d_draw(r, g_regs, &g_bindings, &k_mem, &d);
+}
+
+/* Ids 0..count-1 as `size`-byte indices at INDICES, drawn indexed. */
+static void draw_indexed(Raster3d *r, uint32_t topology, uint32_t count, uint32_t size) {
+  for (uint32_t i = 0; i < count; i++) memcpy(g_gpu + (INDICES - GPU_BASE) + (size_t)i * size, &i, size);
+  g_regs[REG_INDEX_BUFFER_TEST] = (uint32_t)(INDICES >> 32);
+  g_regs[REG_INDEX_BUFFER_TEST + 1u] = (uint32_t)INDICES;
+  Raster3d_Draw d;
+  memset(&d, 0, sizeof(d));
+  d.kind = RASTER_DRAW_INDEXED;
+  d.topology = topology;
+  d.count = count;
+  d.index_size = size;
   raster3d_draw(r, g_regs, &g_bindings, &k_mem, &d);
 }
 
@@ -1103,7 +1119,7 @@ static void stream_drain(Seen_Draw *seen) {
       }
       /* Bindings: the data binding's bytes follow it; vertices come last. */
       const uint32_t vertex_bytes = seen->last.vs_shader_id ? 16u * (1u + seen->last.vertex_input_count) : 0u;
-      const uint32_t index_bytes = seen->last.index_count * 4u;
+      const uint32_t index_bytes = (seen->last.flags & GPU_DRAW_POOLED_INDICES) ? 0u : seen->last.index_count * 4u;
       /* Records are padded to 8 bytes after the indices. */
       const uint32_t tail = seen->last.vertex_count * vertex_bytes + index_bytes + (8u - index_bytes % 8u) % 8u;
       if (vertex_bytes && tail <= rec.payload_bytes) {
@@ -1141,6 +1157,7 @@ static uint32_t g_base_instance; /* gpu_draw_topology: REG_BASE_INSTANCE */
 static bool g_masked_targets;    /* gpu_draw_topology: every colour channel masked (CT_WRITE 0) */
 static uint32_t g_clip_control;  /* gpu_draw_topology: SET_VIEW_VOLUME_CLIP_CONTROL */
 static float g_point_size;       /* gpu_draw_topology: POINT_SIZE */
+static uint32_t g_index_size;    /* gpu_draw_topology: an indexed draw of ids 0..count-1 this wide (0: arrays) */
 static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_t topology, uint32_t count) {
   static Gpu_Stream stream;
   Seen_Draw seen;
@@ -1163,7 +1180,8 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
   vertex(2, -1.0f, 1.0f, 1, 0, 0, 1);
   vertex(3, 1.0f, 1.0f, 1, 0, 0, 1);
   raster3d_begin_submission(r);
-  draw_arrays(r, topology, count);
+  if (g_index_size) draw_indexed(r, topology, count, g_index_size);
+  else draw_arrays(r, topology, count);
   if (g_draw_twice) {
     if (g_twice_resubmit) raster3d_begin_submission(r);
     if (g_twice_poke) putf(g_twice_poke, 7.0f);
@@ -1659,6 +1677,22 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   memcpy(vsi, g_seen_data + 4u * WGSL_DRAW_VS_INPUTS, sizeof(vsi));
   CHECK(pooled.count == 1 && (vsi[1] & WGSL_VSI_RESIDENT) && pooled.buffer_writes == 2u,
         "pooled across 1 MiB: resident %u, %u writes", vsi[1] & WGSL_VSI_RESIDENT, pooled.buffer_writes);
+  /* An indexed triangle list: the record reads the guest's 16-bit indices
+   * from the pool instead of carrying them. */
+  g_index_size = 2u;
+  raster3d_begin_submission(r);
+  pooled = gpu_draw_topology(r, FRONT_CW_REG, 4, 6);
+  CHECK(pooled.count == 1 && (pooled.last.flags & GPU_DRAW_POOLED_INDICES) && (pooled.last.flags & GPU_DRAW_INDEX16) &&
+            pooled.last.index_count == 6u && pooled.last.index_buffer == pooled.resident_binding &&
+            pooled.last.index_offset % 2u == 0u && pooled.last.base_vertex == 0,
+        "pooled indices: flags 0x%x, %u indices, buffer %x (resident %x), offset %u", pooled.last.flags,
+        pooled.last.index_count, pooled.last.index_buffer, pooled.resident_binding, pooled.last.index_offset);
+  r->no_vertex_pool = true;
+  pooled = gpu_draw_topology(r, FRONT_CW_REG, 4, 6);
+  CHECK(pooled.count == 1 && !(pooled.last.flags & GPU_DRAW_POOLED_INDICES) && pooled.index_count == 6u &&
+            pooled.indices[5] == 5u,
+        "no pool: the indices ride in the record (flags 0x%x, %u)", pooled.last.flags, pooled.index_count);
+  g_index_size = 0;
   r->no_vertex_pool = true;
 
   /* A triangle list of two: the first through the assembler (it prepares

@@ -228,7 +228,13 @@ typedef struct Gpu_Rec_Draw {
   int32_t depth_bias;
   uint32_t depth_bias_slope;
   uint32_t depth_bias_clamp;
-  uint32_t reserved; /* the record stays a multiple of 8 bytes: its tail data is aligned */
+  /* Version 16: with GPU_DRAW_POOLED_INDICES, no indices follow: the
+   * index_count indices (u32, or u16 with GPU_DRAW_INDEX16) are the guest's
+   * own, at byte index_offset of buffer index_buffer, each plus base_vertex
+   * (drawIndexed's baseVertex) the guest vertex id. */
+  uint32_t index_buffer;
+  uint32_t index_offset;
+  int32_t base_vertex;
 } Gpu_Rec_Draw;
 _Static_assert(sizeof(Gpu_Rec_Draw) % 8u == 0u, "a draw's tail data starts aligned");
 
@@ -240,6 +246,9 @@ _Static_assert(sizeof(Gpu_Rec_Draw) % 8u == 0u, "a draw's tail data starts align
 /* Version 15: a vertex-stage draw whose indices are one-pixel points (a
  * point list), not triangles. */
 #define GPU_DRAW_POINTS 4u
+/* Version 16: the indices are read from a buffer (index_buffer). */
+#define GPU_DRAW_POOLED_INDICES 8u
+#define GPU_DRAW_INDEX16 16u
 
 #define GPU_CULL_NONE 0u
 #define GPU_CULL_FRONT 1u

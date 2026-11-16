@@ -59,6 +59,8 @@ import {
   CULL_FRONT,
   CULL_NONE,
   DRAW_POINTS,
+  DRAW_POOLED_INDICES,
+  DRAW_INDEX16,
   DRAW_UNCLIPPED_DEPTH,
   DRAW_VERTEX_PULL,
   DRAW_BYTES,
@@ -811,7 +813,8 @@ export class GpuExecutor {
     if (old) this.pendingBufferDestroy.push(old);
     this.buffers.set(id, this.device.createBuffer({
       size: Math.max(16, Math.ceil(bytes / 4) * 4),
-      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+      /* INDEX: the vertex pool also holds guest index buffers (DRAW_POOLED_INDICES). */
+      usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC | GPUBufferUsage.INDEX,
     }));
   }
 
@@ -1651,7 +1654,15 @@ export class GpuExecutor {
     const stride = d.vsShaderId ? 16 * (d.vertexInputCount + 1) : VERTEX_HEADER_BYTES + 16 * d.varyingCount;
     const vertices = payload.subarray(at, at + stride * d.vertexCount);
     const indexStart = at + stride * d.vertexCount;
-    const indices = d.indexCount ? payload.subarray(indexStart, indexStart + 4 * d.indexCount) : null;
+    const pooledIndices = (d.flags & DRAW_POOLED_INDICES) !== 0 ? this.buffers.get(d.indexBuffer) : undefined;
+    if ((d.flags & DRAW_POOLED_INDICES) !== 0) {
+      if (!pooledIndices) {
+        this.warnOnce(`buffer ${d.indexBuffer}`, `draw reads indices from unknown buffer ${d.indexBuffer}`);
+        return;
+      }
+      this.touchedBuffers.add(pooledIndices);
+    }
+    const indices = d.indexCount && !pooledIndices ? payload.subarray(indexStart, indexStart + 4 * d.indexCount) : null;
     const indexBytes = indices ? Math.ceil(indices.byteLength / 16) * 16 : 0;
     const colorIds = this.scratchColorIds, colorFormats = this.scratchColorFormats;
     colorIds.length = 0;
@@ -1797,7 +1808,11 @@ export class GpuExecutor {
       pass.setStencilReference(d.stencilRef);
       st.stencil = d.stencilRef;
     }
-    if (indices) {
+    if (pooledIndices) {
+      pass.setIndexBuffer(pooledIndices, (d.flags & DRAW_INDEX16) !== 0 ? "uint16" : "uint32", d.indexOffset);
+      st.indexBuffer = null; /* bound at an offset: the next draw binds its own */
+      pass.drawIndexed(d.indexCount, 1, 0, d.baseVertex);
+    } else if (indices) {
       if (st.indexBuffer !== this.vertexBuffer) {
         pass.setIndexBuffer(this.vertexBuffer, "uint32");
         st.indexBuffer = this.vertexBuffer;

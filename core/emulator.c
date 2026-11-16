@@ -1225,7 +1225,7 @@ static void report_stream(Emulator* emulator) {
   const Raster3d_Gpu_Stats *was = &emulator->stream_stats_reported;
   const double mib = EMULATOR_BYTES_PER_MIB;
   log_info("[gpu] stream detail (MiB): textures %llu uploads %.1f (hashed new %llu unsampled %llu changed %llu "
-           "periodic %llu forced %llu), surfaces %.1f; draw data %.1f pulled %.1f vertices %.1f indices %.1f; "
+           "periodic %llu forced %llu), surfaces %.1f; draw data %.1f pulled %.1f vertices %.1f indices %.1f (pooled %.1f); "
            "pool %.1f written %.1f reused; surfaces created %llu, draws %llu, vertices on the CPU: topology %llu bindless %llu globals %llu "
            "small %llu window %llu; textures sampler %llu, shader-filtered: integer %llu cube %llu padded %llu "
            "format %llu wrap %llu; vertex pages %llu (changed %llu, new %llu); vertex pool %llu streams, %.1f MiB "
@@ -1240,6 +1240,7 @@ static void report_stream(Emulator* emulator) {
            (double)(now->surface_upload_bytes - was->surface_upload_bytes) / mib,
            (double)(now->draw_data_bytes - was->draw_data_bytes) / mib, (double)(now->pulled_bytes - was->pulled_bytes) / mib,
            (double)(now->vertex_bytes - was->vertex_bytes) / mib, (double)(now->index_bytes - was->index_bytes) / mib,
+           (double)(now->pooled_index_bytes - was->pooled_index_bytes) / mib,
            (double)(now->pool_bytes - was->pool_bytes) / mib, (double)(now->pool_reused_bytes - was->pool_reused_bytes) / mib,
            (unsigned long long)(now->surfaces - was->surfaces), (unsigned long long)(now->draws - was->draws),
            (unsigned long long)(now->cpu_vs_topology - was->cpu_vs_topology),

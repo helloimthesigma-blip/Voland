@@ -1,4 +1,4 @@
-# GPU command stream (version 15)
+# GPU command stream (version 16)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -191,6 +191,21 @@ The WebGPU consumer rounds the slope factor to 4 significant bits
 shadow passes' slope from the camera, so exact values built a new pipeline
 every few frames (1519 pipelines after ten minutes; 354 rounded). The
 stream itself carries the exact value.
+
+### Pooled indices (version 16)
+
+`Gpu_Rec_Draw` ends with `index_buffer`, `index_offset` and `base_vertex`
+(i32), replacing the reserved word. With `GPU_DRAW_POOLED_INDICES` in
+`flags` (pulled vertex-stage draws only), no indices follow the record:
+its `index_count` indices are the guest's own index buffer, u32 or u16
+(`GPU_DRAW_INDEX16`), at byte `index_offset` of buffer `index_buffer` (the
+vertex pool, which keeps the bytes synced like the vertex streams it holds).
+Each index plus `base_vertex` is the guest vertex id, as `drawIndexed`'s
+`baseVertex` adds it; the consumer creates mirror buffers with INDEX usage
+to allow this. The producer uses it for a pulled triangle list when one
+record holds the whole draw in the guest's order, without restarts or flat
+varyings; anything else carries u32 ids as before. Tears of the Kingdom's
+records carried about 4 GB of indices per 20 s before this.
 
 ### Points (version 15)
 

@@ -5,7 +5,7 @@
  */
 
 export const GPU_STREAM_MAGIC = 0x55504756;
-export const GPU_STREAM_VERSION = 15;
+export const GPU_STREAM_VERSION = 16;
 export const GPU_STREAM_HEADER_BYTES = 56;
 export const GPU_STREAM_RECORD_HEADER_BYTES = 8;
 export const OFF_MAGIC = 0;
@@ -180,7 +180,7 @@ export const TARGET_BYTES = 36;
 export const STENCIL_FACE_BYTES = 16;
 /* Version 3 adds the GPU vertex stage's four words (vs shader, inputs, cull, front face);
  * version 4 the index count and a flags word (version 5: DRAW_VERTEX_PULL). */
-export const DRAW_BYTES = 4 + 4 + TARGET_BYTES * MAX_TARGETS + 16 + 4 + STENCIL_FACE_BYTES * 2 + 12 + 16 + 16 + 16 + 16 + 8 + 16;
+export const DRAW_BYTES = 4 + 4 + TARGET_BYTES * MAX_TARGETS + 16 + 4 + STENCIL_FACE_BYTES * 2 + 12 + 16 + 16 + 16 + 16 + 8 + 24;
 /* Draw flags: no vertices; the indices are guest vertex ids and the vertex
  * stage decodes its inputs from the data binding (core/gpu/gpu_records.h). */
 export const DRAW_VERTEX_PULL = 1;
@@ -188,6 +188,9 @@ export const DRAW_VERTEX_PULL = 1;
 export const DRAW_UNCLIPPED_DEPTH = 2;
 /* Version 15: the indices are one-pixel points (a point list), not triangles. */
 export const DRAW_POINTS = 4;
+/* Version 16: the indices are read from a buffer (Draw.indexBuffer), u16 with DRAW_INDEX16. */
+export const DRAW_POOLED_INDICES = 8;
+export const DRAW_INDEX16 = 16;
 export const CULL_NONE = 0;
 export const CULL_FRONT = 1;
 export const CULL_BACK = 2;
@@ -298,6 +301,11 @@ export interface Draw {
   readonly depthBias: number;
   readonly depthBiasSlope: number;
   readonly depthBiasClamp: number;
+  /** Version 16: with DRAW_POOLED_INDICES the indices are in buffer indexBuffer at
+   * byte indexOffset (u32, or u16 with DRAW_INDEX16), each plus baseVertex. */
+  readonly indexBuffer: number;
+  readonly indexOffset: number;
+  readonly baseVertex: number;
 }
 
 export interface Copy {
@@ -399,6 +407,7 @@ export function parseDraw(v: DataView): Draw {
     indexCount: u32(v, at + 76), flags: u32(v, at + 80),
     depthBias: v.getInt32(at + 84, true), depthBiasSlope: v.getFloat32(at + 88, true),
     depthBiasClamp: v.getFloat32(at + 92, true),
+    indexBuffer: u32(v, at + 96), indexOffset: u32(v, at + 100), baseVertex: v.getInt32(at + 104, true),
   };
 }
 

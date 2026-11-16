@@ -4474,6 +4474,13 @@ typedef struct Gpu_Draw {
   bool pull;
   uint32_t id_lo, id_hi;
   uint64_t pull_bytes_per_id, pull_fixed_bytes;
+  /* A pulled indexed triangle list whose one record holds every index in
+   * the guest's order: the record reads them from the vertex pool
+   * (GPU_DRAW_POOLED_INDICES) instead of carrying them. index_va 0: not
+   * such a draw (yet); records: emitted so far in this draw. */
+  uint64_t index_va;
+  uint32_t index_size, index_total, records;
+  int32_t base_vertex;
   /* The vertex program's global memory (wgsl_find_globals): copied whole. */
   uint32_t global_count;
   uint64_t global_base[WGSL_MAX_GLOBALS];
@@ -5478,12 +5485,21 @@ static void gpu_emit_draw(Raster_State *rs) {
     if (g->data_words & 1u) pull_bytes += 4u; /* the data stays a multiple of 8 bytes */
   }
   if (resident_id) bindings++;
+  /* The guest's index buffer from the vertex pool, when this record is the
+   * whole draw in the guest's order (each triangle's vertices may start at
+   * another corner: without flat varyings that draws the same). */
+  uint32_t index_offset = 0;
+  const bool pooled_indices = g->index_va && !g->records && g->index_count == g->index_total && !g->flat_mask &&
+                              vpool_window(r, rs->ctx->mem, g->index_va, (uint64_t)g->index_total * g->index_size,
+                                           &index_offset) &&
+                              index_offset % g->index_size == 0u;
+  const uint32_t carried_indices = pooled_indices ? 0u : g->index_count;
   const uint32_t vs_windows = g->vs_mode && g->vs_windows ? g->global_count : 0u;
   const uint32_t ps_windows = g->ps_windows ? g->ps_global_count : 0u;
   bindings += vs_windows + ps_windows;
   const uint64_t data_bytes = (uint64_t)g->data_words * 4u + pull_bytes;
   const uint64_t bytes = sizeof(Gpu_Rec_Draw) + sizeof(Gpu_Rec_Binding) * bindings + data_bytes + g->vertex_bytes +
-                         (uint64_t)g->index_count * sizeof(uint32_t);
+                         (uint64_t)carried_indices * sizeof(uint32_t);
   if (bytes > gpu_stream_max_payload(r->gpu)) {
     log_warn("[gpu] draw of %u bytes exceeds the stream's record limit: dropped", (uint32_t)bytes);
     g->vertices = g->vertex_bytes = g->index_count = 0;
@@ -5554,6 +5570,12 @@ static void gpu_emit_draw(Raster_State *rs) {
     d.index_count = g->index_count;
     if (g->pull) d.flags = GPU_DRAW_VERTEX_PULL;
     if (g->points) d.flags |= GPU_DRAW_POINTS;
+    if (pooled_indices) {
+      d.flags |= GPU_DRAW_POOLED_INDICES | (g->index_size == 2u ? GPU_DRAW_INDEX16 : 0u);
+      d.index_buffer = VPOOL_BUFFER_ID;
+      d.index_offset = index_offset;
+      d.base_vertex = g->base_vertex;
+    }
   }
   if (rs->clamp_near || rs->clamp_far) d.flags |= GPU_DRAW_UNCLIPPED_DEPTH;
   memcpy(p, &d, sizeof(d));
@@ -5618,8 +5640,9 @@ static void gpu_emit_draw(Raster_State *rs) {
   }
   memcpy(p, r->gpu_vertices, g->vertex_bytes);
   p += g->vertex_bytes;
-  memcpy(p, g_gpu_indices, (size_t)g->index_count * sizeof(uint32_t));
+  memcpy(p, g_gpu_indices, (size_t)carried_indices * sizeof(uint32_t));
   gpu_stream_end(r->gpu);
+  g->records++;
   /* What the pixel program stored is the GPU's now: readers bind the mirrors. */
   for (uint32_t k = 0; g->ps_window_writes && k < ps_windows; k++)
     gpu_mirror_take(rs->ctx->mem, g->ps_global_base[k], g->ps_global_size[k]);
@@ -5627,7 +5650,8 @@ static void gpu_emit_draw(Raster_State *rs) {
   r->gpu_stats.draw_data_bytes += (uint64_t)g->data_words * 4u;
   r->gpu_stats.pulled_bytes += pull_bytes;
   r->gpu_stats.vertex_bytes += g->vertex_bytes;
-  r->gpu_stats.index_bytes += (uint64_t)g->index_count * sizeof(uint32_t);
+  r->gpu_stats.index_bytes += (uint64_t)carried_indices * sizeof(uint32_t);
+  if (pooled_indices) r->gpu_stats.pooled_index_bytes += (uint64_t)g->index_total * g->index_size;
   g->vertices = 0;
   g->vertex_bytes = 0;
   g->index_count = 0;
@@ -6179,6 +6203,12 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     const uint32_t size = inline_indices ? 4u : draw->index_size;
     const uint64_t base = addr40(regs[REG_INDEX_BUFFER], regs[REG_INDEX_BUFFER + 1u]) + (uint64_t)draw->first * size;
     if (r->gpu && !inline_indices) vertex_pages_note(r, mem, base, (uint64_t)draw->count * size);
+    if (bulk && !inline_indices && (size == 2u || size == 4u) && draw->count <= GPU_MAX_INDICES) {
+      g_gpu_draw.index_va = base;
+      g_gpu_draw.index_size = size;
+      g_gpu_draw.index_total = draw->count;
+      g_gpu_draw.base_vertex = (int32_t)base_vertex;
+    }
     const uint32_t restart_value = size == 4u ? restart_index : (restart_index & ((1u << (8u * size)) - 1u));
     static uint8_t batch[INDEX_BATCH * 4u];
     for (uint32_t done = 0; done < draw->count;) {
@@ -6193,6 +6223,7 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
         if (chunk[i] != RESTART) vertices[vertex_count++] = chunk[i];
       }
       if (!gpu_raw_vertices()) vertex_prefetch(ctx, &cache, vertices, vertex_count);
+      if (vertex_count != n) g_gpu_draw.index_va = 0; /* restarts: the guest's list is not a triangle list */
       uint32_t first_left = 0;
       if (bulk && vertex_count == n) first_left = assemble_bulk(&rs, &cache, &as, chunk, n); /* no restarts here */
       for (uint32_t i = first_left; i < n; i++) {
