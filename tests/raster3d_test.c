@@ -56,6 +56,7 @@ static int g_failures;
 #define VERTICES_COPIED 0x100u /* the first eight vertices */
 #define VERTICES_CROSSING (0x200000ull - 0x40u)
 #define INDICES (GPU_BASE + 0x80000u)
+#define BIG_INDEXED_DRAW 3000u /* past the first batch of indices */
 #define REG_INDEX_BUFFER_TEST 0x5f2u /* raster3d.c REG_INDEX_BUFFER: address hi, lo */
 #define CBUF (GPU_BASE + 0x6000u)
 #define TIC_POOL (GPU_BASE + 0x7000u)
@@ -341,9 +342,14 @@ static void draw_arrays(Raster3d *r, uint32_t topology, uint32_t count) {
   raster3d_draw(r, g_regs, &g_bindings, &k_mem, &d);
 }
 
-/* Ids 0..count-1 as `size`-byte indices at INDICES, drawn indexed. */
+static uint32_t g_index_mod; /* draw_indexed: ids i % this (0: i) */
+
+/* Ids 0..count-1 (or i % g_index_mod) as `size`-byte indices at INDICES, drawn indexed. */
 static void draw_indexed(Raster3d *r, uint32_t topology, uint32_t count, uint32_t size) {
-  for (uint32_t i = 0; i < count; i++) memcpy(g_gpu + (INDICES - GPU_BASE) + (size_t)i * size, &i, size);
+  for (uint32_t i = 0; i < count; i++) {
+    const uint32_t id = g_index_mod ? i % g_index_mod : i;
+    memcpy(g_gpu + (INDICES - GPU_BASE) + (size_t)i * size, &id, size);
+  }
   g_regs[REG_INDEX_BUFFER_TEST] = (uint32_t)(INDICES >> 32);
   g_regs[REG_INDEX_BUFFER_TEST + 1u] = (uint32_t)INDICES;
   Raster3d_Draw d;
@@ -996,6 +1002,7 @@ typedef struct Seen_Draw {
   uint32_t raw[12]; /* the first vertex: ids, then two input vectors */
   uint32_t indices[SEEN_INDICES];
   uint32_t index_count;
+  uint32_t last_index; /* the record's last index (0: none) */
   bool vertex_shader;
   uint32_t data_bytes;          /* the data binding (constants, constant buffers, pulled streams) */
   /* Stream version 6: compute and the buffers mirroring guest memory. */
@@ -1127,6 +1134,8 @@ static void stream_drain(Seen_Draw *seen) {
         memcpy(seen->raw, vertices, vertex_bytes < sizeof(seen->raw) ? vertex_bytes : sizeof(seen->raw));
         seen->index_count = seen->last.index_count < SEEN_INDICES ? seen->last.index_count : SEEN_INDICES;
         memcpy(seen->indices, vertices + seen->last.vertex_count * vertex_bytes, seen->index_count * 4u);
+        if (index_bytes)
+          memcpy(&seen->last_index, vertices + seen->last.vertex_count * vertex_bytes + index_bytes - 4u, 4u);
       }
     }
     gpu_stream_consume(g_stream_header, &rec);
@@ -1707,7 +1716,25 @@ static void test_gpu_vertex_stage(Raster3d *r) {
             pooled.last.index_offset % 2u == 0u && pooled.last.base_vertex == 0,
         "pooled indices: flags 0x%x, %u indices, buffer %x (resident %x), offset %u", pooled.last.flags,
         pooled.last.index_count, pooled.last.index_buffer, pooled.resident_binding, pooled.last.index_offset);
+  /* Past the first batch the indices are taken by their range alone (no
+   * id through the assembler); without the pool they are read back into
+   * the record. */
+  g_index_mod = 3u;
+  const uint64_t fast_before = r->gpu_stats.fast_index_draws;
+  pooled = gpu_draw_topology(r, FRONT_CW_REG, 4, BIG_INDEXED_DRAW);
+  CHECK(pooled.count == 1 && (pooled.last.flags & GPU_DRAW_POOLED_INDICES) && pooled.last.index_count == BIG_INDEXED_DRAW &&
+            r->gpu_stats.fast_index_draws == fast_before + 1u,
+        "big pooled draw: flags 0x%x, %u indices, %llu fast", pooled.last.flags, pooled.last.index_count,
+        (unsigned long long)(r->gpu_stats.fast_index_draws - fast_before));
   r->no_vertex_pool = true;
+  pooled = gpu_draw_topology(r, FRONT_CW_REG, 4, BIG_INDEXED_DRAW);
+  bool ids_ok = pooled.index_count == SEEN_INDICES;
+  for (uint32_t i = 0; i < pooled.index_count && ids_ok; i++) ids_ok = pooled.indices[i] == i % 3u;
+  ids_ok = ids_ok && pooled.last_index == (BIG_INDEXED_DRAW - 1u) % 3u; /* read back from guest memory */
+  CHECK(pooled.count == 1 && !(pooled.last.flags & GPU_DRAW_POOLED_INDICES) && pooled.last.index_count == BIG_INDEXED_DRAW &&
+            ids_ok,
+        "big draw without the pool: %u indices carried, ids ok %d", pooled.last.index_count, ids_ok);
+  g_index_mod = 0;
   pooled = gpu_draw_topology(r, FRONT_CW_REG, 4, 6);
   CHECK(pooled.count == 1 && !(pooled.last.flags & GPU_DRAW_POOLED_INDICES) && pooled.index_count == 6u &&
             pooled.indices[5] == 5u,

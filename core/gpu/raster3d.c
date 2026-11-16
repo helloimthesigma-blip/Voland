@@ -4510,6 +4510,7 @@ typedef struct Gpu_Draw {
   uint64_t index_va;
   uint32_t index_size, index_total, records;
   int32_t base_vertex;
+  uint32_t ids_from; /* g_gpu_indices holds ids up to here; the rest only in guest memory (gpu_index_fast) */
   /* The vertex program's global memory (wgsl_find_globals): copied whole. */
   uint32_t global_count;
   uint64_t global_base[WGSL_MAX_GLOBALS];
@@ -5019,6 +5020,7 @@ static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs, uint32_t topolog
   Raster3d *r = ctx->r;
   Gpu_Draw *g = &g_gpu_draw;
   memset(g, 0, offsetof(Gpu_Draw, desc));
+  g->ids_from = UINT32_MAX; /* every id the record holds is in g_gpu_indices */
   const uint32_t *regs = ctx->regs;
   const uint32_t select = regs[REG_CT_SELECT];
   for (uint32_t i = 0; i < rs->target_count; i++) {
@@ -5457,6 +5459,8 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
   return true;
 }
 
+static void gpu_index_materialize(const Gpu_Memory *mem);
+
 static void gpu_emit_draw(Raster_State *rs) {
   Raster3d *r = rs->ctx->r;
   Gpu_Draw *g = &g_gpu_draw;
@@ -5522,6 +5526,7 @@ static void gpu_emit_draw(Raster_State *rs) {
                               vpool_window(&g_ipool, r, rs->ctx->mem, g->index_va, (uint64_t)g->index_total * g->index_size,
                                            &index_offset) &&
                               index_offset % g->index_size == 0u;
+  if (!pooled_indices && g->ids_from < g->index_count) gpu_index_materialize(rs->ctx->mem);
   const uint32_t carried_indices = pooled_indices ? 0u : g->index_count;
   const uint32_t vs_windows = g->vs_mode && g->vs_windows ? g->global_count : 0u;
   const uint32_t ps_windows = g->ps_windows ? g->ps_global_count : 0u;
@@ -5684,6 +5689,7 @@ static void gpu_emit_draw(Raster_State *rs) {
   g->vertices = 0;
   g->vertex_bytes = 0;
   g->index_count = 0;
+  g->ids_from = UINT32_MAX;
   gpu_vertex_map_reset();
 }
 
@@ -5880,6 +5886,79 @@ static uint32_t gpu_pull_bulk(Raster_State *rs, const uint32_t *ids, uint32_t co
     taken += n;
   }
   return taken;
+}
+
+/* The rest of a pooled-index triangle list, [done, count), at once: the
+ * record reads the indices from the index pool, so only their range is
+ * needed here - a min/max over the guest's bytes instead of each id
+ * through the assembler (Super Mario Odyssey pools ~1.3 M indices a
+ * frame; walking them was most of the GPU thread's run_draw). False when
+ * the record cannot take them so (a restart, a span past the data window):
+ * the caller assembles them as before. */
+#define INDEX_SCAN_BATCH 4096u
+static bool gpu_index_fast(Raster_State *rs, const Gpu_Memory *mem, uint32_t done, uint32_t count, bool restart,
+                           uint32_t restart_value) {
+  Gpu_Draw *g = &g_gpu_draw;
+  if (!g->index_va || !g->active || g->dead || !g->pull || !g->prepared || !g->shader_id || g->flat_mask || g->records ||
+      g->index_count != done || done % 3u || count % 3u || count != g->index_total)
+    return false;
+  static uint8_t bytes[INDEX_SCAN_BATCH * 4u];
+  const uint32_t size = g->index_size;
+  uint32_t lo = UINT32_MAX, hi = 0;
+  for (uint32_t at = done; at < count;) {
+    const uint32_t n = count - at < INDEX_SCAN_BATCH ? count - at : INDEX_SCAN_BATCH;
+    if (!mem->read(mem->user, g->index_va + (uint64_t)at * size, bytes, (uint64_t)n * size)) return false;
+    if (size == 2u) {
+      const uint16_t *v = (const uint16_t *)(const void *)bytes;
+      for (uint32_t i = 0; i < n; i++) {
+        if (restart && v[i] == restart_value) return false;
+        lo = v[i] < lo ? v[i] : lo;
+        hi = v[i] > hi ? v[i] : hi;
+      }
+    } else {
+      const uint32_t *v = (const uint32_t *)(const void *)bytes;
+      for (uint32_t i = 0; i < n; i++) {
+        if (restart && v[i] == restart_value) return false;
+        lo = v[i] < lo ? v[i] : lo;
+        hi = v[i] > hi ? v[i] : hi;
+      }
+    }
+    at += n;
+  }
+  lo += (uint32_t)g->base_vertex;
+  hi += (uint32_t)g->base_vertex;
+  if (g->index_count) {
+    lo = g->id_lo < lo ? g->id_lo : lo;
+    hi = g->id_hi > hi ? g->id_hi : hi;
+  }
+  if (pull_copy_bytes(g, lo, hi) > pull_budget(g)) return false;
+  g->id_lo = lo;
+  g->id_hi = hi;
+  g->ids_from = done;
+  g->index_count = count;
+  rs->ctx->r->gpu_stats.triangles += (count - done) / 3u;
+  rs->ctx->r->gpu_stats.bulk_triangles += (count - done) / 3u;
+  rs->ctx->r->gpu_stats.fast_index_draws++;
+  return true;
+}
+
+/* The ids gpu_index_fast left in guest memory, into g_gpu_indices: the
+ * record carries them after all (the index pool could not take them). */
+static void gpu_index_materialize(const Gpu_Memory *mem) {
+  Gpu_Draw *g = &g_gpu_draw;
+  static uint8_t bytes[INDEX_SCAN_BATCH * 4u];
+  const uint32_t size = g->index_size;
+  for (uint32_t at = g->ids_from; at < g->index_count;) {
+    const uint32_t n = g->index_count - at < INDEX_SCAN_BATCH ? g->index_count - at : INDEX_SCAN_BATCH;
+    if (!mem->read(mem->user, g->index_va + (uint64_t)at * size, bytes, (uint64_t)n * size)) memset(bytes, 0, sizeof(bytes));
+    for (uint32_t i = 0; i < n; i++) {
+      uint32_t index = 0;
+      memcpy(&index, bytes + (size_t)i * size, size);
+      g_gpu_indices[at + i] = index + (uint32_t)g->base_vertex;
+    }
+    at += n;
+  }
+  g->ids_from = g->index_count;
 }
 
 static void gpu_vs_triangle(Raster_State *rs, const Vertex *a, const Vertex *b, const Vertex *c, const Vertex *provoking) {
@@ -6241,7 +6320,10 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     const uint32_t restart_value = size == 4u ? restart_index : (restart_index & ((1u << (8u * size)) - 1u));
     static uint8_t batch[INDEX_BATCH * 4u];
     for (uint32_t done = 0; done < draw->count;) {
-      const uint32_t n = draw->count - done < INDEX_BATCH ? draw->count - done : INDEX_BATCH;
+      /* After the first batch prepared the draw: the rest by range alone. */
+      if (done && bulk && !inline_indices && gpu_index_fast(&rs, mem, done, draw->count, restart, restart_value)) break;
+      uint32_t n = draw->count - done < INDEX_BATCH ? draw->count - done : INDEX_BATCH;
+      if (bulk && n < draw->count - done) n -= n % 3u; /* whole triangles, so the next batch starts on one */
       if (inline_indices) memcpy(batch, draw->inline_indices + done, (size_t)n * 4u);
       else if (!mem->read(mem->user, base + (uint64_t)done * size, batch, (uint64_t)n * size)) break;
       uint32_t vertex_count = 0;

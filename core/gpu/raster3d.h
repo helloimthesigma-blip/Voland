@@ -210,7 +210,8 @@ typedef struct Raster3d_Gpu_Stats {
   /* Pulled streams copied into draws instead: across a pool chunk's end,
    * beside a stream on a GPU-written mirror, or otherwise (unreadable). */
   uint64_t inline_crossing, inline_mirror, inline_other, inline_crossing_bytes;
-  uint64_t pooled_index_bytes; /* guest index bytes draws read from the vertex pool */
+  uint64_t pooled_index_bytes; /* guest index bytes draws read from the index pool */
+  uint64_t fast_index_draws;   /* of those, the indices past the first batch taken by range alone */
   /* Texture bindings by how they are filtered: the device's sampler, or the
    * shader's taps because the sample is integer, a cube, padded, the
    * format unfilterable, or a wrap mode beyond the sampler's. */
