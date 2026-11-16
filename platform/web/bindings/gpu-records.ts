@@ -22,6 +22,8 @@ export const OFF_PRESENTS = 48;
 export const COMPRESSION_BC = 1;
 export const COMPRESSION_ASTC = 2;
 export const DEVICE_SUBGROUPS = 4;
+/* gpu_records.h GPU_DEVICE_FLOAT32_FILTERABLE: the device has "float32-filterable". */
+export const DEVICE_FLOAT32_FILTERABLE = 8;
 
 export const REC_PAD = 0;
 export const REC_TEXTURE_CREATE = 1;

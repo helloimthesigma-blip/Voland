@@ -1474,6 +1474,25 @@ static void test_gpu_gathered_cube(Raster3d *r) {
   g_gpu_textured = false;
 }
 
+/* GPU mode: an R32F texture (ZF32, a depth surface sampled as a float -
+ * Tears of the Kingdom's most bound) is filtered in the shader unless the device
+ * filters 32-bit floats (float32-filterable), then by its sampler. */
+#define TIC_R32F (0x2Fu | (7u << 7) | (7u << 10) | (7u << 13) | (7u << 16) | (2u << 19) | (7u << 28))
+static void test_gpu_float32_filter(Raster3d *r) {
+  g_gpu_textured = true;
+  g_tic_word0 = TIC_R32F;
+  raster3d_set_gpu_compression(r, 0);
+  Seen_Draw seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.count == 1 && seen.last_texture_format == GPU_FMT_R32_FLOAT && seen.samplers == 0u,
+        "R32F: format %u, %u samplers (filtered in the shader)", seen.last_texture_format, seen.samplers);
+  raster3d_set_gpu_compression(r, GPU_DEVICE_FLOAT32_FILTERABLE);
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.count == 1 && seen.samplers == 1u, "R32F, float32-filterable device: %u samplers", seen.samplers);
+  raster3d_set_gpu_compression(r, 0);
+  g_tic_word0 = 0;
+  g_gpu_textured = false;
+}
+
 /* GPU mode with BCn sampled by the device: a DXT1 texture is created as
  * BC1 and its blocks stream as they are (one level, rows of blocks); with
  * the device lacking BCn it is decoded (an RGBA texture, no level writes). */
@@ -2198,6 +2217,7 @@ int main(void) {
   test_gpu_aliased_targets(&r);
   test_gpu_packed_upload(&r);
   test_gpu_compressed_upload(&r);
+  test_gpu_float32_filter(&r);
   test_gpu_padded_target(&r);
   test_gpu_gathered_cube(&r);
   test_gpu_reinterpret(&r);

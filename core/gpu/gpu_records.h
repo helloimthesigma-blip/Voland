@@ -117,6 +117,9 @@ enum {
 #define GPU_COMPRESSION_BC 1u
 #define GPU_COMPRESSION_ASTC 2u
 #define GPU_DEVICE_SUBGROUPS 4u
+/* WebGPU "float32-filterable": R32/RG32/RGBA32 float take the hardware
+ * sampler's filtering instead of the shader's. */
+#define GPU_DEVICE_FLOAT32_FILTERABLE 8u
 
 #define GPU_USAGE_SAMPLED 1u
 #define GPU_USAGE_RENDER 2u /* render attachment (also copy source / destination) */

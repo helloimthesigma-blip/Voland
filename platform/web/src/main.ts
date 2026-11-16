@@ -26,7 +26,7 @@ import { handleReportMessage, registerReportWorker } from "./compat-report";
 import { detectCapabilities, type PlatformCapabilities } from "./capabilities";
 import { publishBootMilestone } from "./e2e-hooks";
 import { PUBLISH_INDEX } from "@bindings/framebuffer";
-import { DEVICE_SUBGROUPS, GPU_STREAM_HEADER_BYTES, OFF_PRESENTS } from "@bindings/gpu-records";
+import { DEVICE_FLOAT32_FILTERABLE, DEVICE_SUBGROUPS, GPU_STREAM_HEADER_BYTES, OFF_PRESENTS } from "@bindings/gpu-records";
 import { appendGuestOutput, resetGuestConsole, setGpuTrouble, setGuestFps, setGuestRunState } from "./guest-console";
 import { clearTextInput, showTextInput } from "./text-input-store";
 import { setAudioMuted, startAudioOutput } from "./audio/audio-output";
@@ -362,8 +362,8 @@ async function boot(): Promise<BootResult | null> {
           cpuWorker.postMessage({ type: "set-gpu-mode", on: true } satisfies MainToCPUMessage);
           /* ?compressed=0: decode BCn / ASTC on the CPU even where the GPU samples them. */
           const compressed = new URLSearchParams(location.search).get("compressed") !== "0";
-          /* (The subgroups bit, GPU_DEVICE_SUBGROUPS, stays either way.) */
-          const deviceBits = msg.textureCompression & DEVICE_SUBGROUPS;
+          /* (The device bits, GPU_DEVICE_SUBGROUPS and _FLOAT32_FILTERABLE, stay either way.) */
+          const deviceBits = msg.textureCompression & (DEVICE_SUBGROUPS | DEVICE_FLOAT32_FILTERABLE);
           cpuWorker.postMessage({ type: "set-gpu-compression", mask: compressed ? msg.textureCompression : deviceBits } satisfies
             MainToCPUMessage);
           if (compressed && msg.textureCompression) {

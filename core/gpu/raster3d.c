@@ -3437,6 +3437,7 @@ void raster3d_set_gpu_compression(Raster3d *r, uint32_t mask) {
     log_info("[gpu] compressed textures upload as they are: %s%s", (mask & GPU_COMPRESSION_BC) ? "BCn " : "",
              (mask & GPU_COMPRESSION_ASTC) ? "ASTC" : compression ? "" : "none");
     if (mask & GPU_DEVICE_SUBGROUPS) log_info("[gpu] 32-lane subgroups: compute shuffles and votes run on the GPU");
+    if (mask & GPU_DEVICE_FLOAT32_FILTERABLE) log_info("[gpu] 32-bit float textures filter in the sampler");
   }
   r->gpu_compression = mask;
 }
@@ -3580,8 +3581,13 @@ static bool gpu_format_is_int(uint32_t f, bool *is_signed) {
  * shader taps (textureLoad) read the same decoded texels the sampler
  * filters - Super Mario Odyssey filtered most of its texture samples in
  * the shader before they were listed. */
-static bool gpu_format_filterable(uint32_t f) {
+static bool gpu_format_filterable(const Raster3d *r, uint32_t f) {
   if (f >= GPU_FMT_BC1_UNORM && f <= GPU_FMT_BC7_SRGB) return true;
+  /* Tears of the Kingdom's R32F textures were 94% of the shader-filtered
+   * bindings (1.7 M per 600 frames). */
+  if ((f == GPU_FMT_R32_FLOAT || f == GPU_FMT_RG32_FLOAT || f == GPU_FMT_RGBA32_FLOAT) &&
+      (r->gpu_compression & GPU_DEVICE_FLOAT32_FILTERABLE))
+    return true;
   if (f >= GPU_FMT_ASTC_FIRST && f <= GPU_FMT_ASTC_LAST) return true;
   switch (f) {
   case GPU_FMT_RGBA8_UNORM: case GPU_FMT_RGBA8_SRGB: case GPU_FMT_BGRA8_UNORM: case GPU_FMT_BGRA8_SRGB:
@@ -5249,10 +5255,10 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
   if (sample_type != WGSL_SAMPLE_FLOAT) ts->tex_sw_int++;
   else if (cube_map) ts->tex_sw_cube++;
   else if (padded) ts->tex_sw_padded++;
-  else if (!gpu_format_filterable(gpu_format)) ts->tex_sw_format++;
+  else if (!gpu_format_filterable(r, gpu_format)) ts->tex_sw_format++;
   else if (s.wrap[0] > 2u || s.wrap[1] > 2u) ts->tex_sw_wrap++;
   else ts->tex_hw++;
-  if (sample_type == WGSL_SAMPLE_FLOAT && !cube_map && !padded && gpu_format_filterable(gpu_format) &&
+  if (sample_type == WGSL_SAMPLE_FLOAT && !cube_map && !padded && gpu_format_filterable(r, gpu_format) &&
       s.wrap[0] <= 2u && s.wrap[1] <= 2u) {
     desc->hw_sample_mask |= 1u << b;
     /* Minification follows magnification on one level (the

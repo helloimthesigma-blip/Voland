@@ -19,6 +19,7 @@ import {
   COMPRESSION_ASTC,
   COMPRESSION_BC,
   DEVICE_SUBGROUPS,
+  DEVICE_FLOAT32_FILTERABLE,
   GPU_STREAM_MAGIC,
   OFF_CAPACITY,
   OFF_MAGIC,
@@ -361,7 +362,8 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
     streamRenderer: true,
     textureCompression: (device.features.has("texture-compression-bc") ? COMPRESSION_BC : 0) |
       (device.features.has("texture-compression-astc") ? COMPRESSION_ASTC : 0) |
-      (warpSubgroups && device.features.has("subgroups" as GPUFeatureName) ? DEVICE_SUBGROUPS : 0),
+      (warpSubgroups && device.features.has("subgroups" as GPUFeatureName) ? DEVICE_SUBGROUPS : 0) |
+      (device.features.has("float32-filterable") ? DEVICE_FLOAT32_FILTERABLE : 0),
   };
   self.postMessage(ready);
 
