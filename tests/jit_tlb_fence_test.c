@@ -51,9 +51,18 @@
  *   0x0c ldr w2, [x0]    ; must read the new page
  *   0x10 svc #0 */
 static const uint32_t k_program[] = {0xB9400001u, 0x88DFFC83u, 0x34FFFFE3u, 0xB9400002u, 0xD4000001u};
-/* The same with a plain load of the flag (no fence: the loop's back edge
- * must recheck - another core's TLB invalidation needs no barrier here). */
-static const uint32_t k_program_plain[] = {0xB9400001u, 0xB9400083u, 0x34FFFFE3u, 0xB9400002u, 0xD4000001u};
+/* A plain load of the flag (no fence): the loop's back edge rechecks. The
+ * data is read after one more time round once the flag was seen (w6, the
+ * last iteration's flag), so a back edge comes between - a load in the
+ * same iteration as the flag is not ordered after it on hardware either,
+ * and one during the remap would fault there too.
+ *   0x00 ldr w1, [x0]
+ *   0x04 mov w6, w3      ; the flag the last iteration saw (x3 = 0 first)
+ *   0x08 ldr w3, [x4]
+ *   0x0c cbz w6, 0x04
+ *   0x10 ldr w2, [x0]    ; must read the new page
+ *   0x14 svc #0 */
+static const uint32_t k_program_plain[] = {0xB9400001u, 0x2A0303E6u, 0xB9400083u, 0x34FFFFC6u, 0xB9400002u, 0xD4000001u};
 #define PLAIN_GVA (CODE_GVA + 0x100u)
 
 static VMM_Context *g_vmm;
@@ -89,6 +98,7 @@ static void run_once(const CPU_Backend *cpu, CPU_State *s, uint64_t entry) {
   cpu->set_reg(s, 4, FLAG_GVA);
   cpu->set_reg(s, 1, 0);
   cpu->set_reg(s, 2, 0);
+  cpu->set_reg(s, 3, 0);
   cpu->set_pc(s, entry);
   g_done = false;
   pthread_t other;
@@ -100,8 +110,8 @@ static void run_once(const CPU_Backend *cpu, CPU_State *s, uint64_t entry) {
   CHECK(pthread_join(other, NULL) == 0);
   CHECK(cpu->get_reg(s, 1) == OLD_WORD);
   if (cpu->get_reg(s, 2) != NEW_WORD)
-    fprintf(stderr, "[jit_tlb_fence_test] after the acquire: 0x%llx (0x%x is the old page)\n",
-            (unsigned long long)cpu->get_reg(s, 2), OLD_WORD);
+    fprintf(stderr, "[jit_tlb_fence_test] program at 0x%llx: read 0x%llx after the flag (0x%x is the old page)\n",
+            (unsigned long long)entry, (unsigned long long)cpu->get_reg(s, 2), OLD_WORD);
   CHECK(cpu->get_reg(s, 2) == NEW_WORD);
 }
 

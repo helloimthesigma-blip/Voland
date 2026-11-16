@@ -193,6 +193,10 @@ static void report_stop(const Jit_Thread *t, const Interp_State *s, CPU_ExitReas
     if (used >= sizeof(line)) break;
   }
   log_error("[jit] recent block starts (oldest first, * = compiled region entered):%s", line);
+  const Jit_State *j = (const Jit_State *)(const void *)s;
+  if (j->tlb_stale) /* JIT_TLB_VERIFY=1: this run's stale translation-cache hits */
+    log_error("[jit] TLB verify: %llu stale hits this run, the last at 0x%llx (pc 0x%llx)", (unsigned long long)j->tlb_stale,
+              (unsigned long long)j->tlb_stale_gva, (unsigned long long)j->tlb_stale_pc);
   if (reason != CPU_EXIT_FAULT || !s->vmm) return;
   /* What the address space holds there now: mapped means the access saw
    * stale translation state (or a mapping that landed in between), not a
@@ -1030,6 +1034,11 @@ void jit_set_interpret_only(bool enabled) { g_interpret_only = enabled; }
 static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
   Jit_State *j = (Jit_State *)state;
   Interp_State *s = &j->interp;
+  if (j->tlb_stale) { /* JIT_TLB_VERIFY=1: what the last run's cache hits got wrong */
+    log_warn("[jit] TLB verify: %llu stale hits, the last at 0x%llx (pc 0x%llx)", (unsigned long long)j->tlb_stale,
+             (unsigned long long)j->tlb_stale_gva, (unsigned long long)j->tlb_stale_pc);
+    j->tlb_stale = 0;
+  }
   SWITCH_ASSERT_ALWAYS(s->l1 != NULL, "jit run() without a vmm");
   if (g_interpret_only) /* diagnostics: the reference for a scene reached with the JIT */
     return j->isa == JIT_ISA_A32 ? CPU_BACKEND_A32.run(state, cycle_budget) : CPU_BACKEND_INTERPRETER.run(state, cycle_budget);

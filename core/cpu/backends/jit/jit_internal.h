@@ -55,6 +55,9 @@ typedef struct Jit_State {
    * Jit_Exit_Kind. */
   uint64_t region_entries, tlb_misses;
   uint64_t region_exits[JIT_EXIT_KINDS];
+  /* JIT_TLB_VERIFY=1 (diagnostics): translation-cache hits the full walk
+   * disagreed with (stale), and the last one's guest address and PC. */
+  uint64_t tlb_stale, tlb_stale_gva, tlb_stale_pc;
 } Jit_State;
 
 #define JIT_ISA_A64 0u

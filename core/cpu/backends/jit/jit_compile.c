@@ -171,6 +171,9 @@ _Static_assert(OFF_SP == OFF_X(31), "spill/reload move x30 and SP as one pair");
 #define OFF_BUDGET STATE_OFFSET(cycle_budget)
 #define OFF_REGION_ENTRIES STATE_OFFSET(region_entries)
 #define OFF_TLB_MISSES STATE_OFFSET(tlb_misses)
+#define OFF_TLB_STALE STATE_OFFSET(tlb_stale)
+#define OFF_TLB_STALE_GVA STATE_OFFSET(tlb_stale_gva)
+#define OFF_TLB_STALE_PC STATE_OFFSET(tlb_stale_pc)
 #define OFF_REGION_EXITS STATE_OFFSET(region_exits)
 #define OFF_SCRATCH STATE_OFFSET(scratch)
 #define OFF_THREAD_CACHE STATE_OFFSET(thread_cache)
@@ -2010,6 +2013,39 @@ static bool no_tlb(void) {
 }
 static void emit_walk_full(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow);
 
+/* JIT_TLB_VERIFY=1 (diagnostics): every hit also walks the tables and
+ * counts the hits whose translation is no longer current (Jit_State
+ * tlb_stale; jit.c reports them). */
+static bool tlb_verify(void) {
+  static int on = -1;
+  if (on < 0) on = getenv("JIT_TLB_VERIFY") != NULL;
+  return on != 0;
+}
+static void emit_tlb_verify(Ctx *c, uint32_t size, uint32_t perm, uint32_t delta) {
+  open_block(c); /* $match */
+  const uint32_t match = c->depth;
+  open_block(c); /* $stale: the walk faults now, or finds another page */
+  const uint32_t stale = c->depth;
+  emit_walk_full(c, size, perm, stale);
+  lget(c, L_HOST);
+  lget(c, L_ADDR);
+  lget(c, delta);
+  op(c, WASM_OP_I64_ADD);
+  op(c, WASM_OP_I64_EQ);
+  br_if(c, match);
+  end_(c); /* $stale */
+  state_count(c, OFF_TLB_STALE);
+  state_store64_local(c, OFF_TLB_STALE_GVA, L_ADDR);
+  lget(c, L_STATE);
+  i64c(c, c->pc);
+  mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_TLB_STALE_PC);
+  end_(c); /* $match */
+  lget(c, L_ADDR);
+  lget(c, delta);
+  op(c, WASM_OP_I64_ADD);
+  lset(c, L_HOST);
+}
+
 /* Which (base, delta) locals cache this access, and whether a miss also
  * refills the shared cache of its permission. Several entries matter
  * because one was not enough: a loop reading two buffers, or a function
@@ -2063,6 +2099,7 @@ static void emit_walk(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) {
   lget(c, delta);
   op(c, WASM_OP_I64_ADD);
   lset(c, L_HOST);
+  if (tlb_verify()) emit_tlb_verify(c, size, base == L_TLB_SBASE ? VMM_PERM_RW : perm, delta);
   else_(c);
   if (c->link->count_entries) state_count(c, OFF_TLB_MISSES);
   emit_walk_full(c, size, base == L_TLB_SBASE ? VMM_PERM_RW : perm, slow);

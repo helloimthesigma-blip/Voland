@@ -712,7 +712,11 @@ the same period), not specification guarantees.
   memory-heavy loops ran 20–90% slower in `tests/jit_bench.c`. The walk
   is therefore emitted inline. `JIT_SHARED_WALK` in the environment
   selects the call, for experiments; `JIT_NO_TLB` disables the
-  one-entry translation cache.
+  one-entry translation cache, and `JIT_TLB_VERIFY` walks the tables on
+  every cache hit too and logs hits whose translation is no longer
+  current (`[jit] TLB verify`, also in fault reports). In 25 Tears of the
+  Kingdom boots after the recheck fixes it logged none, and one boot
+  still crashed: that crash has another cause.
 - **Declared locals are zeroed on every call.** Only the locals a
   region uses are declared.
 - **Compiled modules cannot be persisted.** Chromium refuses to store a
