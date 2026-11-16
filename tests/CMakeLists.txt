@@ -184,6 +184,11 @@ add_executable(jit_tlb_test jit_tlb_test.c)
 target_link_libraries(jit_tlb_test PRIVATE switch_core)
 add_test(NAME jit_tlb_test COMMAND jit_tlb_test)
 
+# A remap by another host thread during an A64 region (jit_compile.c emit_tlb_recheck).
+add_executable(jit_tlb_fence_test jit_tlb_fence_test.c)
+target_link_libraries(jit_tlb_fence_test PRIVATE switch_core)
+add_test(NAME jit_tlb_fence_test COMMAND jit_tlb_fence_test)
+
 add_executable(a32_parallel_test a32_parallel_test.c)
 target_link_libraries(a32_parallel_test PRIVATE switch_core)
 add_test(NAME a32_parallel_test COMMAND a32_parallel_test)

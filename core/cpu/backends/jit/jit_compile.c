@@ -1985,12 +1985,10 @@ static bool shared_walk(void) {
  *
  * Serially that is exact: mappings change only in SVCs, which leave
  * compiled code. With guest threads on several host threads another core
- * may remap while a region runs; the region keeps its translation until
- * it exits (as long as a slice's budget at most), the next one sees the
- * new generation. Only an access to the very page being remapped can
- * notice - a race in the guest on hardware too - and the full walk had
- * the same window between its read of the tables and the access.
- * JIT_NO_TLB=1: no cache. */
+ * may remap while a region runs: the next region sees the new generation,
+ * and so does this one after each fence (emit_tlb_recheck) - where the
+ * guest synchronizes with the thread that remapped, and must then see
+ * the new mapping. JIT_NO_TLB=1: no cache. */
 #define TLB_EMPTY ((uint64_t)1 << 63) /* a page base no address matches */
 #define TLB_CARRIED_R 1u /* Ctx.tlb_carried: g_carried[0], [1], [2] */
 #define TLB_CARRIED_W 2u
@@ -5348,12 +5346,15 @@ static bool c_vector_load_store(Ctx *c, uint32_t insn) {
  * on several host threads (cpu_multicore(), docs/PARALLEL.md): the
  * interpreter's ordering rules, inline. Each core compiles its own code,
  * and the mode never changes while cores exist. */
+static void emit_tlb_recheck(Ctx *c);
 static void emit_multicore_fence(Ctx *c) {
   if (!cpu_multicore()) return;
   op(c, WASM_ATOMIC_PREFIX);
   op(c, WASM_ATOMIC_FENCE);
   op(c, 0);
+  emit_tlb_recheck(c);
 }
+
 
 /* i64.atomic.rmw{8,16,32,}.cmpxchg_u (threads proposal, 0xFE prefix). */
 #define WASM_ATOMIC_I64_CMPXCHG 0x49u
@@ -5378,6 +5379,48 @@ static uint32_t log2_size(uint32_t size) { return size == 8u ? 3u : size == 4u ?
 #define WASM_ATOMIC_I32_STORE 0x17u
 #define WASM_ATOMIC_I32_RMW_ADD 0x1Eu
 #define WASM_ATOMIC_I32_RMW_CMPXCHG 0x48u
+
+/* After a fence (an acquire, DMB, DSB): the region's translation caches
+ * empty if another core unmapped or reprotected anything since they were
+ * filled. A region otherwise keeps them until it exits, and a guest thread
+ * spinning in one region on another thread's signal then used a page that
+ * thread had unmapped and mapped again (Tears of the Kingdom decommits and
+ * recommits heap pages all the time) through its old physical page - by
+ * then another allocation's: its decoder wrote over a thread stack's
+ * pages and loaded data went bad (about one boot in four; none with the
+ * interpreter, which walks the tables on every access). On hardware the
+ * barrier makes the other core's page-table changes visible. */
+static void emit_tlb_recheck(Ctx *c) {
+  if (c->discover || !c->uses_tlb) return;
+  static const uint32_t carried_base[3] = {L_TLB_RBASE, L_TLB_WBASE, L_TLB_SBASE};
+  static const uint64_t carried_offset[3] = {OFF_TLB_RBASE, OFF_TLB_WBASE, OFF_TLB_SBASE};
+  state_load64(c, OFF_TLB_GENERATION);
+  i64c(c, c->link->map_generation_address);
+  op(c, WASM_ATOMIC_PREFIX);
+  wasm_uleb(c->b, WASM_ATOMIC_I64_LOAD);
+  wasm_uleb(c->b, ALIGN_8);
+  wasm_uleb(c->b, 0);
+  op(c, WASM_OP_I64_NE);
+  hint(c, false);
+  open_if(c, WASM_BLOCK_VOID);
+  lget(c, L_STATE);
+  i64c(c, c->link->map_generation_address);
+  op(c, WASM_ATOMIC_PREFIX);
+  wasm_uleb(c->b, WASM_ATOMIC_I64_LOAD);
+  wasm_uleb(c->b, ALIGN_8);
+  wasm_uleb(c->b, 0);
+  mem(c, WASM_OP_I64_STORE, ALIGN_8, OFF_TLB_GENERATION);
+  for (uint32_t i = 0; i < 3u; i++) {
+    i64c(c, TLB_EMPTY);
+    lset(c, carried_base[i]);
+    state_store64_local(c, carried_offset[i], carried_base[i]);
+  }
+  for (uint32_t slot = 0; slot < JIT_TLB_SLOTS; slot++) {
+    i64c(c, TLB_EMPTY);
+    lset(c, L_TLB_SLOT + 2u * slot);
+  }
+  end_(c);
+}
 
 /* i64 on the stack: the address of L_ADDR's granule sequence
  * (interp_exclusive_seq_slot). */
@@ -6263,6 +6306,9 @@ static void emit_function(Ctx *c) {
     op(c, WASM_OP_RETURN);
     end_(c);
     reload(c);
+    /* The interpreter fenced if that was an acquire or barrier (the A32
+     * backend's exclusives and DMB all come here in multicore mode). */
+    if (cpu_multicore()) emit_tlb_recheck(c);
     compute_room(c);
     lget(c, L_HNEXTLEN);
     lget(c, L_ROOM);

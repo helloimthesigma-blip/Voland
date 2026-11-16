@@ -202,16 +202,26 @@ entry's read-and-write walk is the same code.
   - Mappings only change in SVCs, which leave compiled code, so this is
     exact in serial mode.
   - With guest threads on several host threads, another core may remap
-    while a region runs. The region keeps its translation until it exits
-    (at most one slice's budget), and the next region sees the new
-    generation. Only an access to the very page being remapped can tell,
-    which is a guest race on hardware too. The full walk had the same
-    window between reading the tables and the access.
+    while a region runs. The next region sees the new generation, and so
+    does this one after every fence (`emit_tlb_recheck`: LDAR/STLR,
+    LDAXR, DMB/DSB, and the interpreter helper, which runs the A32
+    backend's exclusives and barriers). There the guest has synchronized
+    with the thread that remapped and must see the new mapping. Until
+    2026-11-16 a region kept its entries until it exited. A guest thread
+    spinning in one region on another thread's signal then used a page
+    that thread had unmapped and mapped again, through the old physical
+    page, which by then belonged to another allocation. Tears of the
+    Kingdom decommits and recommits heap pages constantly, and about one
+    boot in four crashed in its loader on corrupted data. The
+    interpreter, which walks the tables on every access, never crashed.
   - Before 2026-10-09 the cache was compiled out in multicore mode, so
     every access did the full walk; and each region started empty, so a
     tiny region walked on its first access to each page.
   - `tests/jit_tlb_test.c` remaps a page between two regions, serially
     and in multicore mode.
+  - `tests/jit_tlb_fence_test.c` remaps a page from another host thread
+    while an A64 region spins on an LDAR flag; it fails without the
+    recheck.
 - Page-crossing accesses go to `jit_helper_read`, `jit_helper_store` or
   `jit_helper_write`, which are all-or-nothing, exactly like the
   interpreter's `interp_read`/`interp_write`.
