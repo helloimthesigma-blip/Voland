@@ -1184,56 +1184,69 @@ static void vertex_pages_note(Raster3d *r, const Gpu_Memory *mem, uint64_t va, u
 
 /* The vertex pool (docs/NEXT.md 3): pulled vertex streams read from one
  * GPU buffer of slots that mirror guest memory, instead of riding in
- * every draw's data. A slot holds a 1 MiB aligned chunk and the chunk
- * after it, so a stream starting in the chunk may run into the next one
+ * every draw's data. A slot holds a 1 MiB aligned chunk and the first
+ * half of the next, so a stream starting in the chunk may run past its end
  * (Tears of the Kingdom's meshes, ~400 KB each, crossed chunk ends 8,000
  * times in 20 s: 3.2 GB copied into draws). A slot's pages are read and
  * hashed at their first use in a submission and uploaded (BUFFER_WRITE)
  * only when they changed - Super Mario Odyssey rewrites ~1.4% of them per
  * frame. A stream that runs past the slot, or whose pages cannot be read,
- * rides inline as before. Slots are reused least recently used first. */
+ * rides inline as before. Slots are reused least recently used first.
+ * Guest index buffers have a pool of their own (GPU_DRAW_POOLED_INDICES):
+ * in the vertex pool they evicted Super Mario Odyssey's vertex chunks
+ * (19,000 loads and 2 GB uploaded per 600 frames, against 0 before). */
 #define VPOOL_CHUNK_BYTES (1u << 20)
-#define VPOOL_SLOT_BYTES (2u * VPOOL_CHUNK_BYTES)
-#define VPOOL_CHUNKS 60u /* the buffer stays under WebGPU's default 128 MiB binding limit */
+#define VPOOL_SLOT_BYTES (VPOOL_CHUNK_BYTES + VPOOL_CHUNK_BYTES / 2u)
+#define VPOOL_CHUNKS 80u /* the vertex buffer stays under WebGPU's default 128 MiB binding limit */
+#define IPOOL_CHUNKS 48u /* bound as an index buffer only: no binding limit */
 #define VPOOL_PAGE_BYTES 4096u
 #define VPOOL_PAGES (VPOOL_SLOT_BYTES / VPOOL_PAGE_BYTES)
 #define VPOOL_BUFFER_ID 0x7fff0000u /* above gpu_mirror's ids, which count up from 1 */
+#define IPOOL_BUFFER_ID 0x7fff0001u
 
 typedef struct Vpool_Chunk {
   uint64_t va;        /* 1 MiB aligned */
-  uint64_t last_used; /* g_vpool.tick */
+  uint64_t last_used; /* Vpool.tick */
   bool used;
   uint64_t page_hash[VPOOL_PAGES];
   uint32_t page_sync[VPOOL_PAGES]; /* submission + 1 it was last synced in; 0 = never uploaded */
 } Vpool_Chunk;
 
-static struct {
-  int env_off; /* VOLAND_NO_VPOOL; -1: not read yet */
+typedef struct Vpool {
+  uint32_t buffer_id, chunk_count;
   bool created;
   uint64_t tick;
   Vpool_Chunk chunks[VPOOL_CHUNKS];
-  uint8_t page[VPOOL_PAGE_BYTES];
-} g_vpool = {-1, false, 0, {{0}}, {0}};
+} Vpool;
+
+static Vpool g_vpool = {VPOOL_BUFFER_ID, VPOOL_CHUNKS, false, 0, {{0}}};
+static Vpool g_ipool = {IPOOL_BUFFER_ID, IPOOL_CHUNKS, false, 0, {{0}}};
+static int g_vpool_env_off = -1; /* VOLAND_NO_VPOOL; -1: not read yet */
+static uint8_t g_vpool_page[VPOOL_PAGE_BYTES];
 
 static void vpool_reset(void) {
-  g_vpool.created = false;
-  for (uint32_t c = 0; c < VPOOL_CHUNKS; c++) g_vpool.chunks[c].used = false;
+  Vpool *pools[2] = {&g_vpool, &g_ipool};
+  for (uint32_t k = 0; k < 2u; k++) {
+    pools[k]->created = false;
+    for (uint32_t c = 0; c < pools[k]->chunk_count; c++) pools[k]->chunks[c].used = false;
+  }
 }
 
-/* The pool offset of guest [va, va + bytes), synced; false: read it inline. */
-static bool vpool_window(Raster3d *r, const Gpu_Memory *mem, uint64_t va, uint64_t bytes, uint32_t *offset) {
-  if (g_vpool.env_off < 0) g_vpool.env_off = getenv("VOLAND_NO_VPOOL") ? 1 : 0;
-  if (g_vpool.env_off || r->no_vertex_pool || !r->gpu || !bytes) return false;
+/* The offset in `pool`'s buffer of guest [va, va + bytes), synced; false:
+ * read it inline. */
+static bool vpool_window(Vpool *pool, Raster3d *r, const Gpu_Memory *mem, uint64_t va, uint64_t bytes, uint32_t *offset) {
+  if (g_vpool_env_off < 0) g_vpool_env_off = getenv("VOLAND_NO_VPOOL") ? 1 : 0;
+  if (g_vpool_env_off || r->no_vertex_pool || !r->gpu || !bytes) return false;
   const uint64_t base = va & ~(uint64_t)(VPOOL_CHUNK_BYTES - 1u);
   if (va + bytes > base + VPOOL_SLOT_BYTES) return false;
-  if (!g_vpool.created) {
-    const uint32_t create[2] = {VPOOL_BUFFER_ID, VPOOL_SLOT_BYTES * VPOOL_CHUNKS};
+  if (!pool->created) {
+    const uint32_t create[2] = {pool->buffer_id, VPOOL_SLOT_BYTES * pool->chunk_count};
     gpu_stream_write(r->gpu, GPU_REC_BUFFER_CREATE, create, sizeof(create));
-    g_vpool.created = true;
+    pool->created = true;
   }
   Vpool_Chunk *chunk = NULL, *victim = NULL;
-  for (uint32_t c = 0; c < VPOOL_CHUNKS && !chunk; c++) {
-    Vpool_Chunk *e = &g_vpool.chunks[c];
+  for (uint32_t c = 0; c < pool->chunk_count && !chunk; c++) {
+    Vpool_Chunk *e = &pool->chunks[c];
     if (e->used && e->va == base) chunk = e;
     else if (!victim || !e->used || (victim->used && e->last_used < victim->last_used)) victim = e;
   }
@@ -1244,21 +1257,21 @@ static bool vpool_window(Raster3d *r, const Gpu_Memory *mem, uint64_t va, uint64
     memset(chunk->page_sync, 0, sizeof(chunk->page_sync));
     r->gpu_stats.vpool_chunk_loads++;
   }
-  chunk->last_used = ++g_vpool.tick;
-  const uint32_t slot = (uint32_t)(chunk - g_vpool.chunks);
+  chunk->last_used = ++pool->tick;
+  const uint32_t slot = (uint32_t)(chunk - pool->chunks);
   const uint32_t stamp = r->submission + 1u;
   for (uint64_t p = (va - base) / VPOOL_PAGE_BYTES; p <= (va + bytes - 1u - base) / VPOOL_PAGE_BYTES; p++) {
     if (chunk->page_sync[p] == stamp) continue;
-    if (!mem->read(mem->user, base + p * VPOOL_PAGE_BYTES, g_vpool.page, VPOOL_PAGE_BYTES)) return false;
+    if (!mem->read(mem->user, base + p * VPOOL_PAGE_BYTES, g_vpool_page, VPOOL_PAGE_BYTES)) return false;
     Content_Hash h;
     content_hash_begin(&h, VPOOL_PAGE_BYTES);
-    content_hash_update(&h, g_vpool.page, VPOOL_PAGE_BYTES);
+    content_hash_update(&h, g_vpool_page, VPOOL_PAGE_BYTES);
     const uint64_t hash = content_hash_end(&h);
     if (!chunk->page_sync[p] || chunk->page_hash[p] != hash) {
-      const uint32_t head[3] = {VPOOL_BUFFER_ID, slot * VPOOL_SLOT_BYTES + (uint32_t)p * VPOOL_PAGE_BYTES, VPOOL_PAGE_BYTES};
+      const uint32_t head[3] = {pool->buffer_id, slot * VPOOL_SLOT_BYTES + (uint32_t)p * VPOOL_PAGE_BYTES, VPOOL_PAGE_BYTES};
       uint8_t *rec = gpu_stream_begin(r->gpu, GPU_REC_BUFFER_WRITE, (uint32_t)sizeof(head) + VPOOL_PAGE_BYTES);
       memcpy(rec, head, sizeof(head));
-      memcpy(rec + sizeof(head), g_vpool.page, VPOOL_PAGE_BYTES);
+      memcpy(rec + sizeof(head), g_vpool_page, VPOOL_PAGE_BYTES);
       gpu_stream_end(r->gpu);
       r->gpu_stats.vpool_upload_bytes += VPOOL_PAGE_BYTES;
     }
@@ -5472,7 +5485,7 @@ static void gpu_emit_draw(Raster_State *rs) {
       const uint64_t from = streams[k].address + (streams[k].instanced ? 0u : (uint64_t)g->id_lo * streams[k].stride);
       if (resident[k]) continue;
       if ((!resident_id || resident_id == VPOOL_BUFFER_ID) &&
-          vpool_window(r, rs->ctx->mem, from, stream_bytes[k], &resident_offset[k])) {
+          vpool_window(&g_vpool, r, rs->ctx->mem, from, stream_bytes[k], &resident_offset[k])) {
         resident[k] = true;
         resident_id = VPOOL_BUFFER_ID;
         stream_at[k] = 0;
@@ -5496,7 +5509,7 @@ static void gpu_emit_draw(Raster_State *rs) {
    * another corner: without flat varyings that draws the same). */
   uint32_t index_offset = 0;
   const bool pooled_indices = g->index_va && !g->records && g->index_count == g->index_total && !g->flat_mask &&
-                              vpool_window(r, rs->ctx->mem, g->index_va, (uint64_t)g->index_total * g->index_size,
+                              vpool_window(&g_ipool, r, rs->ctx->mem, g->index_va, (uint64_t)g->index_total * g->index_size,
                                            &index_offset) &&
                               index_offset % g->index_size == 0u;
   const uint32_t carried_indices = pooled_indices ? 0u : g->index_count;
@@ -5578,7 +5591,7 @@ static void gpu_emit_draw(Raster_State *rs) {
     if (g->points) d.flags |= GPU_DRAW_POINTS;
     if (pooled_indices) {
       d.flags |= GPU_DRAW_POOLED_INDICES | (g->index_size == 2u ? GPU_DRAW_INDEX16 : 0u);
-      d.index_buffer = VPOOL_BUFFER_ID;
+      d.index_buffer = IPOOL_BUFFER_ID;
       d.index_offset = index_offset;
       d.base_vertex = g->base_vertex;
     }

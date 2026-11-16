@@ -198,8 +198,9 @@ stream itself carries the exact value.
 (i32), replacing the reserved word. With `GPU_DRAW_POOLED_INDICES` in
 `flags` (pulled vertex-stage draws only), no indices follow the record:
 its `index_count` indices are the guest's own index buffer, u32 or u16
-(`GPU_DRAW_INDEX16`), at byte `index_offset` of buffer `index_buffer` (the
-vertex pool, which keeps the bytes synced like the vertex streams it holds).
+(`GPU_DRAW_INDEX16`), at byte `index_offset` of buffer `index_buffer` (an
+index pool beside the vertex pool, synced the same way; sharing the vertex
+pool evicted Super Mario Odyssey's vertex chunks).
 Each index plus `base_vertex` is the guest vertex id, as `drawIndexed`'s
 `baseVertex` adds it; the consumer creates mirror buffers with INDEX usage
 to allow this. The producer uses it for a pulled triangle list when one

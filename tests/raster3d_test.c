@@ -1702,7 +1702,8 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   raster3d_begin_submission(r);
   pooled = gpu_draw_topology(r, FRONT_CW_REG, 4, 6);
   CHECK(pooled.count == 1 && (pooled.last.flags & GPU_DRAW_POOLED_INDICES) && (pooled.last.flags & GPU_DRAW_INDEX16) &&
-            pooled.last.index_count == 6u && pooled.last.index_buffer == pooled.resident_binding &&
+            pooled.last.index_count == 6u && pooled.last.index_buffer != 0u &&
+            pooled.last.index_buffer != pooled.resident_binding && /* the index pool, not the vertex pool */
             pooled.last.index_offset % 2u == 0u && pooled.last.base_vertex == 0,
         "pooled indices: flags 0x%x, %u indices, buffer %x (resident %x), offset %u", pooled.last.flags,
         pooled.last.index_count, pooled.last.index_buffer, pooled.resident_binding, pooled.last.index_offset);
