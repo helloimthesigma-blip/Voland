@@ -373,6 +373,17 @@ static void test_triangle_and_blend(Raster3d *r, bool block_linear) {
         pixel(rt, block_linear, 4, 10)[0], pixel(rt, block_linear, 4, 10)[1], pixel(rt, block_linear, 4, 10)[2],
         pixel(rt, block_linear, 4, 10)[3]);
   CHECK(rgba_is(pixel(rt, block_linear, 20, 10), 255, 0, 0, 255), "scissored pixel untouched");
+  /* The alpha equation comes from its own registers even with the
+   * "separate alpha" word 0 (FFL clears its Mii mask's alpha this way):
+   * colour ONE/ZERO, alpha ZERO/ZERO. */
+  g_regs[0x4cf] = 0;
+  g_regs[0x4d1] = 0x4001; g_regs[0x4d2] = 0x4000;
+  g_regs[0x4d4] = 0x4000; g_regs[0x4d6] = 0x4000;
+  draw_arrays(r, 4, 3);
+  raster3d_flush(r, &k_mem);
+  CHECK(rgba_is(pixel(rt, block_linear, 4, 10), 0, 255, 0, 0), "alpha from the alpha registers (%u %u %u %u)",
+        pixel(rt, block_linear, 4, 10)[0], pixel(rt, block_linear, 4, 10)[1], pixel(rt, block_linear, 4, 10)[2],
+        pixel(rt, block_linear, 4, 10)[3]);
   /* Frame skip: neither draws nor clears touch a target the last drawn
    * frame drew, nor count. */
   raster3d_set_skip(r, true);

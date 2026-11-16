@@ -70,7 +70,6 @@
 #define REG_ALPHA_REF 0x4c4u
 #define REG_ALPHA_FUNC 0x4c5u
 #define REG_BLEND_CONST 0x4c7u
-#define REG_BLEND_SEPARATE 0x4cfu
 #define REG_BLEND_COLOR_OP 0x4d0u
 #define REG_BLEND_COLOR_SRC 0x4d1u
 #define REG_BLEND_COLOR_DST 0x4d2u
@@ -2381,23 +2380,26 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
     if (!t->write_mask) continue;
     t->surface = surface_get(r, &d, ctx->mem, true);
     t->blend = (regs[REG_BLEND_ENABLE + i] & 1u) != 0 && t->format->kind != KIND_UINT && t->format->kind != KIND_SINT;
+    /* The alpha equation always comes from its own registers; the
+     * "separate alpha" word does not gate them. FFL (MK8DX's Mii icons)
+     * leaves it 0 while clearing the mask's alpha with ZERO/ZERO and
+     * building it with MAX ONE/ONE - the colour factors there gave an
+     * opaque black mask over every face. */
     if (per_target) {
       const uint32_t *b = regs + REG_BLEND_TARGET + 8u * i;
-      const bool separate = (b[0] & 1u) != 0;
       t->color_op = blend_op(b[1]);
       t->color_src = blend_factor(b[2]);
       t->color_dst = blend_factor(b[3]);
-      t->alpha_op = separate ? blend_op(b[4]) : t->color_op;
-      t->alpha_src = separate ? blend_factor(b[5]) : t->color_src;
-      t->alpha_dst = separate ? blend_factor(b[6]) : t->color_dst;
+      t->alpha_op = blend_op(b[4]);
+      t->alpha_src = blend_factor(b[5]);
+      t->alpha_dst = blend_factor(b[6]);
     } else {
-      const bool separate = (regs[REG_BLEND_SEPARATE] & 1u) != 0;
       t->color_op = blend_op(regs[REG_BLEND_COLOR_OP]);
       t->color_src = blend_factor(regs[REG_BLEND_COLOR_SRC]);
       t->color_dst = blend_factor(regs[REG_BLEND_COLOR_DST]);
-      t->alpha_op = separate ? blend_op(regs[REG_BLEND_ALPHA_OP]) : t->color_op;
-      t->alpha_src = separate ? blend_factor(regs[REG_BLEND_ALPHA_SRC]) : t->color_src;
-      t->alpha_dst = separate ? blend_factor(regs[REG_BLEND_ALPHA_DST]) : t->color_dst;
+      t->alpha_op = blend_op(regs[REG_BLEND_ALPHA_OP]);
+      t->alpha_src = blend_factor(regs[REG_BLEND_ALPHA_SRC]);
+      t->alpha_dst = blend_factor(regs[REG_BLEND_ALPHA_DST]);
     }
     t->rgba8 = is_unorm8x4(t->format);
     t->alpha_blend = t->blend && t->color_op == BOP_ADD && t->color_src == BF_SRC_ALPHA && t->color_dst == BF_INV_SRC_ALPHA;
