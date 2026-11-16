@@ -239,9 +239,11 @@ in Silksong gameplay - about 18% of host time, the cores' "park" share.
 Free-running mode removes the per-slice barrier and keeps everything else.
 The browser runs free from the start (`?free=0` for slices; `?free=N`
 from slice N on), except titles in the CPU worker's `SLICED_TITLES`, which
-run in slices unless `?free=` says otherwise: Tears of the Kingdom, at
-10.1 fps sliced vs 8.7 free at the same virtual-time rate, with its
-multicore loader crash 1 run in 12 vs about 1 in 4. The slice mode stays the default for the CLI, the tests,
+run in slices unless `?free=` says otherwise (none now). Tears of the
+Kingdom was one (10.1 fps sliced vs 8.7 free, 2026-10-30) until its
+skinned meshes moved to the GPU: since then it runs 14.3-14.7 fps free vs
+11.1-11.4 sliced, at full speed, its cores having waited at slice barriers
+half the time (2026-11-16). The slice mode stays the default for the CLI, the tests,
 the goldens and `tools/perf.mjs` recipes, which count slices (it is
 deterministic).
 

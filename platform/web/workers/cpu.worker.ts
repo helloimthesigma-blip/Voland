@@ -471,12 +471,12 @@ function applyPlacement(target: SwitchCoreExports): void {
  * one run_for call per burst instead of a loop of slices. 0 = off; on from
  * the start by default (docs/PARALLEL.md). null = the title's default. */
 let requestedFreeFromSlice: number | null = null;
-/** Titles that run in slices by default instead of free-running:
- * - Tears of the Kingdom (0100F2C0115B6000): 9.9-11.7 fps vs 6.2-8.3
- *   free-running at the same virtual-time rate (browser, 3 cores,
- *   2026-10-30). Its loader crash (about 1 run in 4) was the browser
- *   enforcing no affinity: 0 of 11 since the fix, either mode. */
-const SLICED_TITLES: ReadonlySet<string> = new Set(["0100F2C0115B6000"]);
+/** Titles that run in slices by default instead of free-running (none:
+ * Tears of the Kingdom ran sliced until its skinned meshes moved to the
+ * GPU; since then it is 14.3-14.7 fps free vs 11.1-11.4 sliced, where its
+ * cores waited at slice barriers half the time - browser, 3 cores,
+ * 2026-11-16). */
+const SLICED_TITLES: ReadonlySet<string> = new Set();
 function freeFromSlice(): number {
   if (requestedFreeFromSlice !== null) return requestedFreeFromSlice;
   return loadedTitleId !== null && SLICED_TITLES.has(loadedTitleId) ? 0 : 1;
