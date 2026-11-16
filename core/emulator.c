@@ -1229,7 +1229,7 @@ static void report_stream(Emulator* emulator) {
            "pool %.1f written %.1f reused; surfaces created %llu, draws %llu, vertices on the CPU: topology %llu bindless %llu globals %llu "
            "small %llu window %llu; textures sampler %llu, shader-filtered: integer %llu cube %llu padded %llu "
            "format %llu wrap %llu; vertex pages %llu (changed %llu, new %llu); vertex pool %llu streams, %.1f MiB "
-           "uploaded, %llu chunks loaded",
+           "uploaded, %llu chunks loaded; inline streams: crossing %llu (%.1f MiB) mirror %llu other %llu",
            (unsigned long long)(now->texture_uploads - was->texture_uploads),
            (double)(now->upload_bytes - was->upload_bytes - (now->surface_upload_bytes - was->surface_upload_bytes)) / mib,
            (unsigned long long)(now->hashed_new - was->hashed_new),
@@ -1257,7 +1257,11 @@ static void report_stream(Emulator* emulator) {
            (unsigned long long)(now->vertex_pages_new - was->vertex_pages_new),
            (unsigned long long)(now->vpool_streams - was->vpool_streams),
            (double)(now->vpool_upload_bytes - was->vpool_upload_bytes) / mib,
-           (unsigned long long)(now->vpool_chunk_loads - was->vpool_chunk_loads));
+           (unsigned long long)(now->vpool_chunk_loads - was->vpool_chunk_loads),
+           (unsigned long long)(now->inline_crossing - was->inline_crossing),
+           (double)(now->inline_crossing_bytes - was->inline_crossing_bytes) / mib,
+           (unsigned long long)(now->inline_mirror - was->inline_mirror),
+           (unsigned long long)(now->inline_other - was->inline_other));
   emulator->stream_stats_reported = *now;
 }
 

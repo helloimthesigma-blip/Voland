@@ -1183,16 +1183,20 @@ static void vertex_pages_note(Raster3d *r, const Gpu_Memory *mem, uint64_t va, u
 }
 
 /* The vertex pool (docs/NEXT.md 3): pulled vertex streams read from one
- * GPU buffer of 1 MiB chunks that mirror guest memory, instead of riding
- * in every draw's data. A chunk's pages are read and hashed at their
- * first use in a submission and uploaded (BUFFER_WRITE) only when they
- * changed - Super Mario Odyssey rewrites ~1.4% of them per frame. A
- * stream that crosses a chunk boundary, or whose pages cannot be read,
- * rides inline as before. Chunks are reused least recently used first. */
+ * GPU buffer of slots that mirror guest memory, instead of riding in
+ * every draw's data. A slot holds a 1 MiB aligned chunk and the chunk
+ * after it, so a stream starting in the chunk may run into the next one
+ * (Tears of the Kingdom's meshes, ~400 KB each, crossed chunk ends 8,000
+ * times in 20 s: 3.2 GB copied into draws). A slot's pages are read and
+ * hashed at their first use in a submission and uploaded (BUFFER_WRITE)
+ * only when they changed - Super Mario Odyssey rewrites ~1.4% of them per
+ * frame. A stream that runs past the slot, or whose pages cannot be read,
+ * rides inline as before. Slots are reused least recently used first. */
 #define VPOOL_CHUNK_BYTES (1u << 20)
-#define VPOOL_CHUNKS 120u /* the buffer stays under WebGPU's default 128 MiB binding limit */
+#define VPOOL_SLOT_BYTES (2u * VPOOL_CHUNK_BYTES)
+#define VPOOL_CHUNKS 60u /* the buffer stays under WebGPU's default 128 MiB binding limit */
 #define VPOOL_PAGE_BYTES 4096u
-#define VPOOL_PAGES (VPOOL_CHUNK_BYTES / VPOOL_PAGE_BYTES)
+#define VPOOL_PAGES (VPOOL_SLOT_BYTES / VPOOL_PAGE_BYTES)
 #define VPOOL_BUFFER_ID 0x7fff0000u /* above gpu_mirror's ids, which count up from 1 */
 
 typedef struct Vpool_Chunk {
@@ -1221,9 +1225,9 @@ static bool vpool_window(Raster3d *r, const Gpu_Memory *mem, uint64_t va, uint64
   if (g_vpool.env_off < 0) g_vpool.env_off = getenv("VOLAND_NO_VPOOL") ? 1 : 0;
   if (g_vpool.env_off || r->no_vertex_pool || !r->gpu || !bytes) return false;
   const uint64_t base = va & ~(uint64_t)(VPOOL_CHUNK_BYTES - 1u);
-  if (((va + bytes - 1u) & ~(uint64_t)(VPOOL_CHUNK_BYTES - 1u)) != base) return false;
+  if (va + bytes > base + VPOOL_SLOT_BYTES) return false;
   if (!g_vpool.created) {
-    const uint32_t create[2] = {VPOOL_BUFFER_ID, VPOOL_CHUNK_BYTES * VPOOL_CHUNKS};
+    const uint32_t create[2] = {VPOOL_BUFFER_ID, VPOOL_SLOT_BYTES * VPOOL_CHUNKS};
     gpu_stream_write(r->gpu, GPU_REC_BUFFER_CREATE, create, sizeof(create));
     g_vpool.created = true;
   }
@@ -1251,7 +1255,7 @@ static bool vpool_window(Raster3d *r, const Gpu_Memory *mem, uint64_t va, uint64
     content_hash_update(&h, g_vpool.page, VPOOL_PAGE_BYTES);
     const uint64_t hash = content_hash_end(&h);
     if (!chunk->page_sync[p] || chunk->page_hash[p] != hash) {
-      const uint32_t head[3] = {VPOOL_BUFFER_ID, slot * VPOOL_CHUNK_BYTES + (uint32_t)p * VPOOL_PAGE_BYTES, VPOOL_PAGE_BYTES};
+      const uint32_t head[3] = {VPOOL_BUFFER_ID, slot * VPOOL_SLOT_BYTES + (uint32_t)p * VPOOL_PAGE_BYTES, VPOOL_PAGE_BYTES};
       uint8_t *rec = gpu_stream_begin(r->gpu, GPU_REC_BUFFER_WRITE, (uint32_t)sizeof(head) + VPOOL_PAGE_BYTES);
       memcpy(rec, head, sizeof(head));
       memcpy(rec + sizeof(head), g_vpool.page, VPOOL_PAGE_BYTES);
@@ -1261,7 +1265,7 @@ static bool vpool_window(Raster3d *r, const Gpu_Memory *mem, uint64_t va, uint64
     chunk->page_hash[p] = hash;
     chunk->page_sync[p] = stamp;
   }
-  *offset = slot * VPOOL_CHUNK_BYTES + (uint32_t)(va - base);
+  *offset = slot * VPOOL_SLOT_BYTES + (uint32_t)(va - base);
   return true;
 }
 
@@ -5462,6 +5466,12 @@ static void gpu_emit_draw(Raster_State *rs) {
         r->gpu_stats.vpool_streams++;
         continue;
       }
+      const uint64_t chunk = from & ~(uint64_t)(VPOOL_CHUNK_BYTES - 1u);
+      if (resident_id && resident_id != VPOOL_BUFFER_ID) r->gpu_stats.inline_mirror++;
+      else if (from + stream_bytes[k] > chunk + VPOOL_SLOT_BYTES) {
+        r->gpu_stats.inline_crossing++;
+        r->gpu_stats.inline_crossing_bytes += stream_bytes[k];
+      } else r->gpu_stats.inline_other++;
       stream_at[k] = pull_bytes;
       pull_bytes += (stream_bytes[k] + 7u) & ~(uint64_t)7u;
     }

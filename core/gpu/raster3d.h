@@ -207,6 +207,9 @@ typedef struct Raster3d_Gpu_Stats {
    * the frame they were last read, and first seen. */
   uint64_t vertex_pages, vertex_pages_changed, vertex_pages_new;
   uint64_t vpool_streams, vpool_upload_bytes, vpool_chunk_loads; /* the vertex pool (raster3d.c) */
+  /* Pulled streams copied into draws instead: across a pool chunk's end,
+   * beside a stream on a GPU-written mirror, or otherwise (unreadable). */
+  uint64_t inline_crossing, inline_mirror, inline_other, inline_crossing_bytes;
   /* Texture bindings by how they are filtered: the device's sampler, or the
    * shader's taps because the sample is integer, a cube, padded, the
    * format unfilterable, or a wrap mode beyond the sampler's. */

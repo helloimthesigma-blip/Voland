@@ -32,7 +32,7 @@ static int g_failures;
 /* ---- synthetic GPU memory: one flat window at GPU_BASE ------------- */
 
 #define GPU_BASE 0x100000ull
-#define GPU_BYTES 0x80000u
+#define GPU_BYTES 0x101000u /* past 2 MiB: a vertex stream across a 1 MiB boundary */
 #define PROGRAM_REGION GPU_BASE
 #define VS_OFFSET 0x0u
 #define PS_OFFSET 0x800u
@@ -53,6 +53,8 @@ static int g_failures;
 #define SSBO (GPU_BASE + 0xC000u)
 #define VS_BIG_GLOBAL_BYTES (512u << 10) /* past a draw's copied global memory (256 KiB) */
 #define VERTICES (GPU_BASE + 0x4000u)
+#define VERTICES_COPIED 0x100u /* the first eight vertices */
+#define VERTICES_CROSSING (0x200000ull - 0x40u)
 #define CBUF (GPU_BASE + 0x6000u)
 #define TIC_POOL (GPU_BASE + 0x7000u)
 #define TSC_POOL (GPU_BASE + 0x7400u)
@@ -1648,6 +1650,15 @@ static void test_gpu_vertex_stage(Raster3d *r) {
         pooled.buffer_writes);
   g_draw_twice = g_twice_resubmit = false;
   g_twice_poke = 0;
+  /* A stream across a 1 MiB boundary is pooled too (both pages). */
+  memcpy(g_gpu + (VERTICES_CROSSING - GPU_BASE), g_gpu + (VERTICES - GPU_BASE), VERTICES_COPIED);
+  g_vertices = VERTICES_CROSSING;
+  raster3d_begin_submission(r);
+  pooled = gpu_draw_once(r, FRONT_CW_REG);
+  g_vertices = VERTICES;
+  memcpy(vsi, g_seen_data + 4u * WGSL_DRAW_VS_INPUTS, sizeof(vsi));
+  CHECK(pooled.count == 1 && (vsi[1] & WGSL_VSI_RESIDENT) && pooled.buffer_writes == 2u,
+        "pooled across 1 MiB: resident %u, %u writes", vsi[1] & WGSL_VSI_RESIDENT, pooled.buffer_writes);
   r->no_vertex_pool = true;
 
   /* A triangle list of two: the first through the assembler (it prepares
