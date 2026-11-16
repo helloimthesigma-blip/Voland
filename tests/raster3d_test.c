@@ -51,6 +51,7 @@ static int g_failures;
 #define STORED_WORD 0x5a5a5a5au
 #define SSBO_DESC 0x110u      /* the storage buffer's descriptor in c[0] (NVN) */
 #define SSBO (GPU_BASE + 0xC000u)
+#define VS_BIG_GLOBAL_BYTES (512u << 10) /* past a draw's copied global memory (256 KiB) */
 #define VERTICES (GPU_BASE + 0x4000u)
 #define CBUF (GPU_BASE + 0x6000u)
 #define TIC_POOL (GPU_BASE + 0x7000u)
@@ -1706,6 +1707,14 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   const Seen_Draw vs_ldg_cpu = gpu_draw_once(r, FRONT_CW_REG);
   CHECK(vs_ldg_cpu.count == 1 && vs_ldg_cpu.last.vs_shader_id == 0, "an empty buffer: CPU vertices (vs %u)",
         vs_ldg_cpu.last.vs_shader_id);
+  /* A buffer too big to copy into the draw's data is read through a mirror
+   * (window mode) - not shaded on the CPU. */
+  put32(CBUF + SSBO_DESC + 8u, VS_BIG_GLOBAL_BYTES);
+  const Seen_Draw vs_ldg_big = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(vs_ldg_big.count == 1 && vs_ldg_big.last.vs_shader_id != 0 && vs_ldg_big.buffer_creates == 1u &&
+            vs_ldg_big.resident_binding != 0u,
+        "a %u-byte buffer: GPU vertices through a mirror (vs %u, %u buffers made, binding %u)", VS_BIG_GLOBAL_BYTES,
+        vs_ldg_big.last.vs_shader_id, vs_ldg_big.buffer_creates, vs_ldg_big.resident_binding);
   /* A pixel program that reads a storage buffer is translated too, its
    * buffer copied at WGSL_DRAW_PS_GLOBALS; its store is dropped. */
   put32(CBUF + SSBO_DESC + 8u, sizeof(ssbo));

@@ -4695,8 +4695,13 @@ static bool gpu_plan_globals(Draw_Context *ctx, Gpu_Draw *g, uint64_t *words) {
     g->global_base[k] = (uint64_t)desc[0] | (uint64_t)desc[1] << 32;
     g->global_size[k] = desc[2];
   }
-  /* GPU-written memory: read from its mirrors, nothing copied. */
-  g->vs_windows = globals_resident(found->global_count, g->global_base, g->global_size);
+  /* GPU-written memory, or more than a draw's data can copy: read from
+   * mirrors (synced from guest memory a page at a time), nothing copied.
+   * Tears of the Kingdom's skinned meshes read a 1.4 MB buffer - copied,
+   * their vertices were shaded on the CPU (gigabytes a second). */
+  uint64_t copied = 0;
+  for (uint32_t k = 0; k < found->global_count; k++) copied += ((uint64_t)g->global_size[k] + 7u) & ~(uint64_t)3u;
+  g->vs_windows = copied > GPU_GLOBAL_BYTES || globals_resident(found->global_count, g->global_base, g->global_size);
   for (uint32_t k = 0; k < found->global_count; k++) {
     const uint32_t size = g->global_size[k];
     total += ((uint64_t)size + 7u) & ~(uint64_t)3u;
