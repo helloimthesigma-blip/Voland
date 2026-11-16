@@ -81,6 +81,8 @@ const OPTIONAL_FEATURES: readonly GPUFeatureName[] = [
   "texture-compression-bc", "texture-compression-astc", "depth-clip-control",
 ];
 /* Compute warp shuffles and votes need subgroups exactly a warp wide. */
+/** Records consumed between publishing the read position to the producer. */
+const READ_PUBLISH_RECORDS = 32;
 const WARP_LANES = 32;
 
 type WaitAsync = (a: Int32Array, i: number, v: number) => { async: boolean; value: Promise<string> | string };
@@ -170,20 +172,26 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
   activeExecutor = executor;
   attachShaderCache();
   let yielded = performance.now();
+  const ring = new DataView(buffer); /* record headers, read in place */
   for (;;) {
     const seen = Atomics.load(words, OFF_WRITE_SIGNAL / 4);
     const write = Number(Atomics.load(wide, OFF_WRITE / 8));
     let read = Number(Atomics.load(wide, OFF_READ / 8));
+    let unpublished = 0;
     while (read < write) {
       const at = ringBase + (read % capacity);
-      const head = new DataView(buffer, at, 8);
-      const type = head.getUint32(0, true);
-      const size = head.getUint32(4, true);
+      const type = ring.getUint32(at, true);
+      const size = ring.getUint32(at + 4, true);
       if (type !== REC_PAD) executor.execute(type, new Uint8Array(buffer, at + 8, size - 8));
       read += size;
-      Atomics.store(wide, OFF_READ / 8, BigInt(read));
-      Atomics.add(words, OFF_READ_SIGNAL / 4, 1);
-      Atomics.notify(words, OFF_READ_SIGNAL / 4);
+      /* The producer learns of the space a few records at a time: a BigInt
+       * and a notify per record were a GPU-worker cost of their own. */
+      if (++unpublished >= READ_PUBLISH_RECORDS || read >= write) {
+        Atomics.store(wide, OFF_READ / 8, BigInt(read));
+        Atomics.add(words, OFF_READ_SIGNAL / 4, 1);
+        Atomics.notify(words, OFF_READ_SIGNAL / 4);
+        unpublished = 0;
+      }
     }
     executor.flush();
     if (Number(Atomics.load(wide, OFF_WRITE / 8)) === write) {

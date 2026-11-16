@@ -92,7 +92,8 @@ import {
   VERTEX_HEADER_BYTES,
   parseClear,
   parseCopy,
-  parseDraw,
+  parseDrawInto,
+  createDrawScratch,
   parsePresent,
   parseTextureCreate,
   parseTextureWrite,
@@ -452,6 +453,7 @@ export class GpuExecutor {
   private shaderSerial = 0;
   private readonly stringCodes = new Map<string, number>(); /* formats and sample types as small numbers */
   private readonly signature: number[] = [];
+  private readonly drawScratch = createDrawScratch();
   private readonly dynamicOffset = new Uint32Array(1);
   private readonly scratchTextureIds: number[] = [];
   private readonly scratchFiltered: boolean[] = [];
@@ -545,7 +547,7 @@ export class GpuExecutor {
       case REC_TEXTURE_WRITE_LEVEL: this.textureWriteLevel(view, payload); break;
       case REC_SHADER: this.shader(view, payload); break;
       case REC_CLEAR: this.clear(parseClear(view)); break;
-      case REC_DRAW: this.draw(parseDraw(view), view, payload); break;
+      case REC_DRAW: this.draw(parseDrawInto(view, this.drawScratch), view, payload); break;
       case REC_COPY: this.copy(parseCopy(view)); break;
       case REC_PRESENT: this.present(parsePresent(view)); break;
       case REC_BUFFER_CREATE: this.bufferCreate(view.getUint32(0, true), view.getUint32(4, true)); break;

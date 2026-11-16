@@ -413,6 +413,101 @@ export function parseDraw(v: DataView): Draw {
   };
 }
 
+type Mutable<T> = { -readonly [K in keyof T]: T[K] };
+
+/** A Draw the executor parses every draw record into (parseDrawInto): one
+ * object, its arrays and targets reused - a fresh Draw per record was a
+ * quarter of the GPU worker's allocations (Super Mario Odyssey: ~110k
+ * draws a second). Its contents last until the next record. */
+export interface DrawScratch {
+  readonly draw: Mutable<Draw>;
+  readonly targetPool: Mutable<Target>[];
+  /** targetsByCount[n]: the first n of targetPool, so a draw's target list
+   * is never resized (an array cut to fewer elements gives back its store). */
+  readonly targetsByCount: (readonly Target[])[];
+}
+
+function emptyTarget(): Mutable<Target> {
+  return { id: 0, writeMask: 0, blend: false, colorOp: 0, colorSrc: 0, colorDst: 0, alphaOp: 0, alphaSrc: 0, alphaDst: 0 };
+}
+
+export function createDrawScratch(): DrawScratch {
+  const targetPool = Array.from({ length: MAX_TARGETS }, emptyTarget);
+  const targetsByCount = Array.from({ length: MAX_TARGETS + 1 }, (_, n) => targetPool.slice(0, n));
+  const face = (): Mutable<StencilFace> => ({ fail: 0, depthFail: 0, pass: 0, compare: 0 });
+  const draw: Mutable<Draw> = {
+    shaderId: 0, targets: targetsByCount[0] ?? [], depthId: 0, depthTest: false, depthWrite: false, depthCompare: 0,
+    stencil: false, stencilFront: face(), stencilBack: face(), stencilReadMask: 0, stencilWriteMask: 0, stencilRef: 0,
+    blendConstant: [0, 0, 0, 0], scissor: [0, 0, 0, 0], varyingCount: 0, flatMask: 0, bindingCount: 0, vertexCount: 0,
+    vsShaderId: 0, vertexInputCount: 0, cullMode: 0, frontFace: 0, indexCount: 0, flags: 0, depthBias: 0,
+    depthBiasSlope: 0, depthBiasClamp: 0, indexBuffer: 0, indexOffset: 0, baseVertex: 0,
+  };
+  return { draw, targetPool, targetsByCount };
+}
+
+function readStencilFace(v: DataView, at: number, out: Mutable<StencilFace>): void {
+  out.fail = u32(v, at);
+  out.depthFail = u32(v, at + 4);
+  out.pass = u32(v, at + 8);
+  out.compare = u32(v, at + 12);
+}
+
+/** parseDraw into `scratch` (the executor's own, not an argument it shares). */
+export function parseDrawInto(v: DataView, scratch: DrawScratch): Draw {
+  const d = scratch.draw;
+  const targetCount = Math.min(u32(v, 4), MAX_TARGETS);
+  for (let i = 0; i < targetCount; i++) {
+    const at = 8 + TARGET_BYTES * i;
+    const t = scratch.targetPool[i] as Mutable<Target>;
+    t.id = u32(v, at);
+    t.writeMask = u32(v, at + 4);
+    t.blend = u32(v, at + 8) !== 0;
+    t.colorOp = u32(v, at + 12);
+    t.colorSrc = u32(v, at + 16);
+    t.colorDst = u32(v, at + 20);
+    t.alphaOp = u32(v, at + 24);
+    t.alphaSrc = u32(v, at + 28);
+    t.alphaDst = u32(v, at + 32);
+  }
+  d.targets = scratch.targetsByCount[targetCount] ?? [];
+  let at = 8 + TARGET_BYTES * MAX_TARGETS;
+  d.shaderId = u32(v, 0);
+  d.depthId = u32(v, at);
+  d.depthTest = u32(v, at + 4) !== 0;
+  d.depthWrite = u32(v, at + 8) !== 0;
+  d.depthCompare = u32(v, at + 12);
+  d.stencil = u32(v, at + 16) !== 0;
+  at += 20;
+  readStencilFace(v, at, d.stencilFront as Mutable<StencilFace>);
+  readStencilFace(v, at + STENCIL_FACE_BYTES, d.stencilBack as Mutable<StencilFace>);
+  at += 2 * STENCIL_FACE_BYTES;
+  d.stencilReadMask = u32(v, at);
+  d.stencilWriteMask = u32(v, at + 4);
+  d.stencilRef = u32(v, at + 8);
+  const blend = d.blendConstant as number[], scissor = d.scissor as number[];
+  for (let i = 0; i < 4; i++) {
+    blend[i] = v.getFloat32(at + 12 + 4 * i, true);
+    scissor[i] = v.getInt32(at + 28 + 4 * i, true);
+  }
+  d.varyingCount = u32(v, at + 44);
+  d.flatMask = u32(v, at + 48);
+  d.bindingCount = u32(v, at + 52);
+  d.vertexCount = u32(v, at + 56);
+  d.vsShaderId = u32(v, at + 60);
+  d.vertexInputCount = u32(v, at + 64);
+  d.cullMode = u32(v, at + 68);
+  d.frontFace = u32(v, at + 72);
+  d.indexCount = u32(v, at + 76);
+  d.flags = u32(v, at + 80);
+  d.depthBias = v.getInt32(at + 84, true);
+  d.depthBiasSlope = v.getFloat32(at + 88, true);
+  d.depthBiasClamp = v.getFloat32(at + 92, true);
+  d.indexBuffer = u32(v, at + 96);
+  d.indexOffset = u32(v, at + 100);
+  d.baseVertex = v.getInt32(at + 104, true);
+  return d;
+}
+
 export function parseCopy(v: DataView): Copy {
   return {
     srcId: u32(v, 0), dstId: u32(v, 4), srcRect: i32s(v, 8, 4), dstRect: i32s(v, 24, 4), filter: u32(v, 40),
