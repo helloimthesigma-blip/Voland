@@ -1212,15 +1212,21 @@ typedef struct Vpool_Chunk {
   uint32_t page_sync[VPOOL_PAGES]; /* submission + 1 it was last synced in; 0 = never uploaded */
 } Vpool_Chunk;
 
+/* Hints from a chunk's address to its slot, checked before use: the scan
+ * of every slot on each lookup was 6% of Super Mario Odyssey's GPU thread. */
+#define VPOOL_HINTS 256u
+_Static_assert(VPOOL_CHUNKS < 255u && IPOOL_CHUNKS <= VPOOL_CHUNKS, "a hint holds slot + 1 in a byte");
+
 typedef struct Vpool {
   uint32_t buffer_id, chunk_count;
   bool created;
   uint64_t tick;
   Vpool_Chunk chunks[VPOOL_CHUNKS];
+  uint8_t hint[VPOOL_HINTS]; /* slot + 1, 0: none */
 } Vpool;
 
-static Vpool g_vpool = {VPOOL_BUFFER_ID, VPOOL_CHUNKS, false, 0, {{0}}};
-static Vpool g_ipool = {IPOOL_BUFFER_ID, IPOOL_CHUNKS, false, 0, {{0}}};
+static Vpool g_vpool = {VPOOL_BUFFER_ID, VPOOL_CHUNKS, false, 0, {{0}}, {0}};
+static Vpool g_ipool = {IPOOL_BUFFER_ID, IPOOL_CHUNKS, false, 0, {{0}}, {0}};
 static int g_vpool_env_off = -1; /* VOLAND_NO_VPOOL; -1: not read yet */
 static uint8_t g_vpool_page[VPOOL_PAGE_BYTES];
 
@@ -1229,6 +1235,7 @@ static void vpool_reset(void) {
   for (uint32_t k = 0; k < 2u; k++) {
     pools[k]->created = false;
     for (uint32_t c = 0; c < pools[k]->chunk_count; c++) pools[k]->chunks[c].used = false;
+    memset(pools[k]->hint, 0, sizeof(pools[k]->hint));
   }
 }
 
@@ -1245,6 +1252,8 @@ static bool vpool_window(Vpool *pool, Raster3d *r, const Gpu_Memory *mem, uint64
     pool->created = true;
   }
   Vpool_Chunk *chunk = NULL, *victim = NULL;
+  uint8_t *hint = &pool->hint[(base / VPOOL_CHUNK_BYTES) % VPOOL_HINTS];
+  if (*hint && pool->chunks[*hint - 1u].used && pool->chunks[*hint - 1u].va == base) chunk = &pool->chunks[*hint - 1u];
   for (uint32_t c = 0; c < pool->chunk_count && !chunk; c++) {
     Vpool_Chunk *e = &pool->chunks[c];
     if (e->used && e->va == base) chunk = e;
@@ -1259,6 +1268,7 @@ static bool vpool_window(Vpool *pool, Raster3d *r, const Gpu_Memory *mem, uint64
   }
   chunk->last_used = ++pool->tick;
   const uint32_t slot = (uint32_t)(chunk - pool->chunks);
+  *hint = (uint8_t)(slot + 1u);
   const uint32_t stamp = r->submission + 1u;
   for (uint64_t p = (va - base) / VPOOL_PAGE_BYTES; p <= (va + bytes - 1u - base) / VPOOL_PAGE_BYTES; p++) {
     if (chunk->page_sync[p] == stamp) continue;
