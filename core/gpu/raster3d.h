@@ -357,6 +357,7 @@ typedef struct Raster3d {
   uint32_t gpu_pool_epoch;
   struct {
     uint32_t epoch, at, words;
+    uint64_t source; /* constant-buffer keys: the slot's read count it came from (0: unknown) */
   } gpu_pool_last[RASTER_GPU_POOL_KEYS]; /* each constant-buffer slot's / global buffer's last chunk */
   Raster3d_Gpu_Stats gpu_stats;
   /* GPU mode: mipmapped textures get mip chains and pixel programs pick

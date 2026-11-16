@@ -1813,6 +1813,7 @@ static bool compute_output_overlaps(uint64_t lo, uint64_t hi) {
 typedef struct Cbuf_Held {
   uint64_t va;
   uint32_t size, submission;
+  uint64_t reads; /* reads into this slot so far: its bytes are unchanged while this is */
 } Cbuf_Held;
 static Cbuf_Held g_cbuf_held[2][SM_CBUF_SLOTS];
 
@@ -1857,6 +1858,7 @@ static void env_setup(Draw_Context *ctx, uint32_t stage, const Sm_Program *progr
       continue;
     }
     __atomic_store_n(&held->va, 0u, __ATOMIC_RELAXED); /* dst changes now */
+    held->reads++;
     if (!ctx->mem->read(ctx->mem->user, b->address[group][slot], dst, want)) {
       /* The binding outruns its mapping: bind what is mapped. A program's
        * own constants sit just after its code, bound 64 KiB wide; failing
@@ -3553,6 +3555,7 @@ static uint32_t gpu_pool_put(Raster3d *r, uint32_t key, const uint32_t *words, u
   r->gpu_pool_last[key].epoch = r->gpu_pool_epoch;
   r->gpu_pool_last[key].at = at;
   r->gpu_pool_last[key].words = n;
+  r->gpu_pool_last[key].source = 0; /* gpu_pool_put_cbuf names the source */
   st->pool_bytes += bytes;
   if (r->gpu) {
     const Gpu_Rec_Pool_Write head = {at * 4u, (uint32_t)bytes, at == 0 ? GPU_POOL_WRAP : 0u, 0u};
@@ -3561,6 +3564,23 @@ static uint32_t gpu_pool_put(Raster3d *r, uint32_t key, const uint32_t *words, u
     memcpy(p + sizeof(head), words, (size_t)bytes);
     gpu_stream_end(r->gpu);
   }
+  return at;
+}
+
+/* gpu_pool_put for constant-buffer slot `slot` of `stage`: when the slot
+ * was not read again since the key's last chunk came from it (it was
+ * held, env_setup), that chunk is still its contents - no compare. The
+ * compare of every bound constant buffer per draw was 9% of Tears of the
+ * Kingdom's GPU thread. */
+static uint32_t gpu_pool_put_cbuf(Raster3d *r, uint32_t key, uint32_t stage, uint32_t slot, const uint32_t *words, uint32_t n) {
+  const uint64_t source = g_cbuf_held[stage][slot].reads + 1u; /* +1: 0 means unknown */
+  if (r->gpu_pool_last[key].source == source && r->gpu_pool_last[key].epoch == r->gpu_pool_epoch &&
+      r->gpu_pool_last[key].words == n) {
+    r->gpu_stats.pool_reused_bytes += (uint64_t)n * 4u;
+    return r->gpu_pool_last[key].at;
+  }
+  const uint32_t at = gpu_pool_put(r, key, words, n);
+  r->gpu_pool_last[key].source = source;
   return at;
 }
 
@@ -5459,7 +5479,7 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
     if (!penv->cbuf[s] || !penv->cbuf_size[s]) continue;
     const uint32_t n = cbuf_words_read(ctx->ps, penv, s);
     if (!n) continue;
-    data[WGSL_DRAW_CBUF_TABLE + 2u * s] = gpu_pool_put(r, s, (const uint32_t *)(const void *)penv->cbuf[s], n);
+    data[WGSL_DRAW_CBUF_TABLE + 2u * s] = gpu_pool_put_cbuf(r, s, 1u, s, (const uint32_t *)(const void *)penv->cbuf[s], n);
     data[WGSL_DRAW_CBUF_TABLE + 2u * s + 1u] = n;
   }
   if (g->vs_mode) {
@@ -5470,7 +5490,7 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
       const uint32_t n = cbuf_words_read(ctx->vs, venv, s);
       if (!n) continue;
       data[WGSL_DRAW_VS_CBUF_TABLE + 2u * s] =
-          gpu_pool_put(r, GPU_POOL_KEY_VS_CBUF + s, (const uint32_t *)(const void *)venv->cbuf[s], n);
+          gpu_pool_put_cbuf(r, GPU_POOL_KEY_VS_CBUF + s, 0u, s, (const uint32_t *)(const void *)venv->cbuf[s], n);
       data[WGSL_DRAW_VS_CBUF_TABLE + 2u * s + 1u] = n;
     }
     if (!g->vs_windows)
