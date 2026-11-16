@@ -184,3 +184,22 @@ buffer of 1 MiB chunks (120 of them, under the 128 MiB default binding
 limit), LRU between frames, a stream inside one chunk read from the pool
 (the existing BUFFER_CREATE / BUFFER_WRITE records and the resident
 binding), the rest inline as today.
+
+Built (2026-11), then reshaped by what the games did:
+- Tears of the Kingdom's meshes (~400 KB) often crossed a 1 MiB chunk end
+  (3.2 GB inline per 20 s). A slot now holds its 1 MiB chunk plus the
+  first half of the next (80 slots of 1.5 MiB, still 120 MiB). 2 MiB slots
+  (60) fixed TOTK but halved the distinct data held. Super Mario Odyssey
+  then reloaded chunks (0 -> 6,900 loads per 600 frames).
+- Guest index buffers are read from a pool too (stream v16,
+  GPU_DRAW_POOLED_INDICES), but a separate one (48 slots, bound only as an
+  index buffer). Sharing the vertex pool evicted SMO's vertex chunks
+  (18,900 loads, 2 GB re-uploaded per 600 frames).
+- A pooled triangle list's indices past the first batch are not walked on
+  the CPU at all, only scanned for their range (gpu_index_fast): SMO pools
+  ~1.3 M indices a frame.
+- Lookups start from a per-chunk slot hint (VPOOL_HINTS) instead of
+  scanning every slot.
+- Constant buffers are read once per submission and again only after a
+  GPU-side write (raster3d_note_gpu_write). This is the same idea for
+  constants: SMO read ~10.7 GB of them per 600 frames, mostly unchanged.
