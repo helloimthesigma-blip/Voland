@@ -3945,7 +3945,7 @@ bool raster3d_writeback(Raster3d *r, const Gpu_Memory *mem, uint32_t id, const u
 
 /* The address index over gpu_surfaces (Raster3d.gpu_surface_head). */
 #define SURFACE_HASH_MULTIPLIER 0x9E3779B97F4A7C15ull
-#define SURFACE_HASH_SHIFT 52u /* 64 - log2(RASTER_GPU_SURFACE_BUCKETS) */
+#define SURFACE_HASH_SHIFT 51u /* 64 - log2(RASTER_GPU_SURFACE_BUCKETS) */
 #define SURFACE_ADDRESS_GRAIN 8u /* targets start at least 256 bytes apart */
 static uint32_t surface_bucket(uint64_t address) {
   return (uint32_t)(((address >> SURFACE_ADDRESS_GRAIN) * SURFACE_HASH_MULTIPLIER) >> SURFACE_HASH_SHIFT);

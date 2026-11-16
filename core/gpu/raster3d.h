@@ -79,8 +79,9 @@ struct Gpu_Stream;
 /* GPU mode (raster3d_set_gpu): render targets as GPU textures, shaders. */
 /* Render targets live only on the GPU: dropping one loses its pixels.
  * MK8DX keeps well over 64 (light-probe faces and their mips at 32x32
- * and below, plus the frame's 1080p targets). */
-#define RASTER_GPU_SURFACES 2048u
+ * and below, plus the frame's 1080p targets) - in a race over 2048, which
+ * dropped and re-made ~800 targets a second at that size. */
+#define RASTER_GPU_SURFACES 4096u
 /* GPU mode: render targets' bytes past which a new one first evicts the
  * least recently used targets idle for RASTER_GPU_SURFACE_IDLE_FRAMES. A
  * game that draws a frame's target at a new address each frame (Super Mario
@@ -96,7 +97,7 @@ struct Gpu_Stream;
  * they re-uploaded 20x as much (21.7GB per 300 presents vs 1.1GB).
  * Render targets are not counted: they hold pixels nothing else has. */
 #define RASTER_GPU_TEXTURE_BUDGET_BYTES ((uint64_t)2048 * 1024 * 1024)
-#define RASTER_GPU_SURFACE_BUCKETS 4096u /* the address index over them (a power of two) */
+#define RASTER_GPU_SURFACE_BUCKETS 8192u /* the address index over them (a power of two) */
 #define RASTER_GPU_SHADERS 1024u
 #define RASTER_GPU_GATHERS 32u/* 3D textures and cube maps assembled from render targets */
 /* Pool chunk keys: each stage's constant-buffer slots, then each stage's
