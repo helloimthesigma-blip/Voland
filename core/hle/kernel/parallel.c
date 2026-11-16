@@ -367,6 +367,11 @@ static void host_stall(Core *core) {
   nanosleep(&pause, NULL);
 }
 
+/* Whether the GPU thread poked the devices (Scheduler.device_poke), clearing it. */
+static bool devices_poked(Scheduler *sched) {
+  return __atomic_load_n(&sched->device_poke, __ATOMIC_RELAXED) && __atomic_exchange_n(&sched->device_poke, 0u, __ATOMIC_ACQ_REL);
+}
+
 static void run_free_on_core(Parallel *p, Core *core) {
   Scheduler *sched = p->sched;
   const CPU_Backend *backend = p->backend;
@@ -403,7 +408,7 @@ static void run_free_on_core(Parallel *p, Core *core) {
           stop_free_run(p, idle);
           continue;
         }
-        if (p->devices && sched->ticks >= sched->device_wake_at) p->devices(p->devices_ctx);
+        if (p->devices && (sched->ticks >= sched->device_wake_at || devices_poked(sched))) p->devices(p->devices_ctx);
         pthread_cond_broadcast(&p->core_cv);
         /* Held at the pacing limit (wall time): wait for work, or until the
          * wall clock has moved on (with a pace hook) or the burst ends,
@@ -444,7 +449,7 @@ static void run_free_on_core(Parallel *p, Core *core) {
     scheduler_wake_off_core_waiters(sched, thread);
     p->stats.cycles += backend->get_cycles_consumed(thread->thread.cpu_state);
     (void)scheduler_finish_run(sched, backend, thread, start_ticks, exit_reason);
-    if (p->devices && sched->ticks >= sched->device_wake_at) p->devices(p->devices_ctx);
+    if (p->devices && (sched->ticks >= sched->device_wake_at || devices_poked(sched))) p->devices(p->devices_ctx);
     pthread_cond_broadcast(&p->core_cv);
   }
 }

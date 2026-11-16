@@ -108,6 +108,11 @@ typedef struct Scheduler {
    * SCHEDULER_WAIT_FOREVER. Set by the Emulator before each tick: when
    * every thread waits, time jumps here instead of reporting deadlock. */
   uint64_t device_wake_at;
+  /* Set (atomically) by the GPU thread when a syncpoint moves: the devices
+   * run at the next chance instead of at device_wake_at, so a guest thread
+   * waiting on that fence wakes within a core's idle poll rather than at
+   * the next vsync or audio period (parallel.c). */
+  uint32_t device_poke;
   /* Wall-clock pacing (emulator_set_pacing): idle jumps never take virtual
    * time past this (wall time plus a small lead); SCHEDULER_WAIT_FOREVER
    * = no limit. Host-side events (GPU fences from the GPU worker) arrive in

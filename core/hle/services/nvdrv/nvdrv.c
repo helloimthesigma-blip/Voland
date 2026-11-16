@@ -658,6 +658,8 @@ static _Thread_local bool t_submit_promised;
 static void gpu_syncpoint_increment(void *user, uint32_t id) {
   Nvdrv_State *s = (Nvdrv_State *)user;
   if (id == 0 || id >= SYNCPOINT_COUNT) return;
+  /* Waiters on it wake at the next device update: ask for one now. */
+  if (s->hle && s->hle->scheduler) __atomic_store_n(&s->hle->scheduler->device_poke, 1u, __ATOMIC_RELEASE);
   if (t_submit_promised && id == t_submit_syncpoint &&
       (int32_t)(t_submit_fence - syncpoint_min(&s->syncpoints, id)) > 0) {
     (void)syncpoint_increment_min(&s->syncpoints, id, t_submit_fence);
