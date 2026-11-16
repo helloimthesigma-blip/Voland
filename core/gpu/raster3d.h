@@ -212,6 +212,8 @@ typedef struct Raster3d_Gpu_Stats {
   uint64_t inline_crossing, inline_mirror, inline_other, inline_crossing_bytes;
   uint64_t pooled_index_bytes; /* guest index bytes draws read from the index pool */
   uint64_t fast_index_draws;   /* of those, the indices past the first batch taken by range alone */
+  uint64_t cbuf_read_bytes, cbuf_texture_slot_bytes; /* constant buffers read per draw (env_setup); of those, the bindless texture slot */
+  uint64_t cbuf_held_bytes; /* bytes a draw found already read this submission (not read again) */
   /* Texture bindings by how they are filtered: the device's sampler, or the
    * shader's taps because the sample is integer, a cube, padded, the
    * format unfilterable, or a wrap mode beyond the sampler's. */
@@ -404,6 +406,9 @@ typedef struct Raster3d_Draw {
 } Raster3d_Draw;
 
 void raster3d_begin_submission(Raster3d *r);
+/* GPU-side work (an inline upload, a copy, a report) wrote guest memory at
+ * GPU address `va`: constant buffers held from it are read again. */
+void raster3d_note_gpu_write(Raster3d *r, uint64_t va, uint64_t size);
 void raster3d_clear(Raster3d *r, const uint32_t *regs, const struct Gpu_Memory *mem, uint32_t clear);
 /* A compute dispatch (gpu/compute.h) on the interpreter: every block of
  * the grid, its groups interleaved at barriers, global memory through

@@ -632,6 +632,8 @@ static bool gpu_access(void *user, uint64_t gpu_va, void *buffer, uint64_t size,
 
 static bool gpu_read(void *user, uint64_t gpu_va, void *out, uint64_t size) { return gpu_access(user, gpu_va, out, size, false); }
 static bool gpu_write(void *user, uint64_t gpu_va, const void *src, uint64_t size) {
+  const Nvdrv_State *s = (const Nvdrv_State *)user;
+  if (s->renderer) raster3d_note_gpu_write(s->renderer, gpu_va, size);
   return gpu_access(user, gpu_va, (void *)(uintptr_t)src, size, true);
 }
 

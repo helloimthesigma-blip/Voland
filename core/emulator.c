@@ -1229,7 +1229,7 @@ static void report_stream(Emulator* emulator) {
            "pool %.1f written %.1f reused; surfaces created %llu, draws %llu, vertices on the CPU: topology %llu bindless %llu globals %llu "
            "small %llu window %llu; textures sampler %llu, shader-filtered: integer %llu cube %llu padded %llu "
            "format %llu wrap %llu; vertex pages %llu (changed %llu, new %llu); vertex pool %llu streams, %.1f MiB "
-           "uploaded, %llu chunks loaded; inline streams: crossing %llu (%.1f MiB) mirror %llu other %llu; fast index draws %llu",
+           "uploaded, %llu chunks loaded; inline streams: crossing %llu (%.1f MiB) mirror %llu other %llu; fast index draws %llu; cbufs read %.1f MiB (texture slot %.1f, already held %.1f)",
            (unsigned long long)(now->texture_uploads - was->texture_uploads),
            (double)(now->upload_bytes - was->upload_bytes - (now->surface_upload_bytes - was->surface_upload_bytes)) / mib,
            (unsigned long long)(now->hashed_new - was->hashed_new),
@@ -1263,7 +1263,10 @@ static void report_stream(Emulator* emulator) {
            (double)(now->inline_crossing_bytes - was->inline_crossing_bytes) / mib,
            (unsigned long long)(now->inline_mirror - was->inline_mirror),
            (unsigned long long)(now->inline_other - was->inline_other),
-           (unsigned long long)(now->fast_index_draws - was->fast_index_draws));
+           (unsigned long long)(now->fast_index_draws - was->fast_index_draws),
+           (double)(now->cbuf_read_bytes - was->cbuf_read_bytes) / mib,
+           (double)(now->cbuf_texture_slot_bytes - was->cbuf_texture_slot_bytes) / mib,
+           (double)(now->cbuf_held_bytes - was->cbuf_held_bytes) / mib);
   emulator->stream_stats_reported = *now;
 }
 

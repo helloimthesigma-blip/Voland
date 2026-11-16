@@ -184,8 +184,11 @@ static float clamp01(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); 
 
 size_t raster3d_storage_bytes(void) { return STORAGE_BYTES; }
 
+static void cbuf_held_reset(void);
+
 void raster3d_init(Raster3d *r, uint8_t *storage, size_t bytes) {
   memset(r, 0, sizeof(*r));
+  cbuf_held_reset(); /* a new renderer counts submissions from 0 again */
   r->gpu_surface_budget = RASTER_GPU_SURFACE_BUDGET;
   if (!storage || bytes < STORAGE_BYTES) return;
   /* Align the base for the structs carved out of it. */
@@ -1801,6 +1804,30 @@ static bool compute_output_overlaps(uint64_t lo, uint64_t hi) {
 }
 
 /* Binds the constant buffers `program` reads from `group`. */
+/* What each stage's constant-buffer slot holds in r->cbuf_data: the bytes
+ * of GPU address `va`, `size` long, read in submission `submission` (va
+ * 0: nothing). Within a submission only GPU-side writes change them
+ * (raster3d_note_gpu_write drops the slots they overlap); the guest CPU
+ * may write between submissions. Re-reading every bound constant buffer
+ * each draw was ~10 GB per 600 frames in Super Mario Odyssey. */
+typedef struct Cbuf_Held {
+  uint64_t va;
+  uint32_t size, submission;
+} Cbuf_Held;
+static Cbuf_Held g_cbuf_held[2][SM_CBUF_SLOTS];
+
+static void cbuf_held_reset(void) { memset(g_cbuf_held, 0, sizeof(g_cbuf_held)); }
+
+void raster3d_note_gpu_write(Raster3d *r, uint64_t va, uint64_t size) {
+  (void)r;
+  for (uint32_t stage = 0; stage < 2u; stage++)
+    for (uint32_t slot = 0; slot < SM_CBUF_SLOTS; slot++) {
+      Cbuf_Held *h = &g_cbuf_held[stage][slot];
+      const uint64_t held = __atomic_load_n(&h->va, __ATOMIC_RELAXED);
+      if (held && va < held + h->size && held < va + size) __atomic_store_n(&h->va, 0u, __ATOMIC_RELAXED);
+    }
+}
+
 static void env_setup(Draw_Context *ctx, uint32_t stage, const Sm_Program *program, const Raster3d_Bindings *b,
                       uint32_t group) {
   Sm_Env *env = &ctx->env[stage];
@@ -1821,6 +1848,15 @@ static void env_setup(Draw_Context *ctx, uint32_t stage, const Sm_Program *progr
     uint32_t want = program->cbuf_extent[slot];
     if (slot == env->texture_cbuf_slot || !want || want > size) want = size;
     uint8_t *dst = ctx->r->cbuf_data + ((size_t)stage * SM_CBUF_SLOTS + slot) * CBUF_SLOT_BYTES;
+    Cbuf_Held *held = &g_cbuf_held[stage][slot];
+    if (__atomic_load_n(&held->va, __ATOMIC_RELAXED) == b->address[group][slot] && held->size >= want &&
+        held->submission == ctx->r->submission) {
+      ctx->r->gpu_stats.cbuf_held_bytes += want;
+      env->cbuf[slot] = dst;
+      env->cbuf_size[slot] = want;
+      continue;
+    }
+    __atomic_store_n(&held->va, 0u, __ATOMIC_RELAXED); /* dst changes now */
     if (!ctx->mem->read(ctx->mem->user, b->address[group][slot], dst, want)) {
       /* The binding outruns its mapping: bind what is mapped. A program's
        * own constants sit just after its code, bound 64 KiB wide; failing
@@ -1835,6 +1871,11 @@ static void env_setup(Draw_Context *ctx, uint32_t stage, const Sm_Program *progr
       ctx->r->gpu_stats.compute_fed_cbufs++;
     env->cbuf[slot] = dst;
     env->cbuf_size[slot] = want;
+    held->size = want;
+    held->submission = ctx->r->submission;
+    __atomic_store_n(&held->va, b->address[group][slot], __ATOMIC_RELAXED);
+    ctx->r->gpu_stats.cbuf_read_bytes += want;
+    if (slot == env->texture_cbuf_slot) ctx->r->gpu_stats.cbuf_texture_slot_bytes += want;
   }
 }
 
@@ -3472,6 +3513,7 @@ void raster3d_set_gpu(Raster3d *r, Gpu_Stream *stream) {
   r->gpu = stream;
   gpu_mirror_reset(NULL); /* the old stream's buffers went with it */
   vpool_reset();
+  cbuf_held_reset(); /* a restore replaced guest memory */
   r->gpu_pool_used = GPU_POOL_WORDS; /* the next draw starts a new epoch */
   g_stale_reads = stream && getenv("VOLAND_STALE_READS");
   if (stream) log_info("[gpu] WebGPU renderer: draws stream to the GPU worker");

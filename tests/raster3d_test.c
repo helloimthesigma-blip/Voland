@@ -1148,6 +1148,16 @@ static void stream_wait(void *user, volatile int32_t *word, int32_t expected) {
   stream_drain((Seen_Draw *)user);
 }
 
+/* The 32-bit word at byte `offset` of the last draw's pooled pixel-stage
+ * constant buffer `slot` (its pool offset is in the data's CBUF_TABLE). */
+static uint32_t pooled_cbuf_word(uint32_t slot, uint32_t offset) {
+  uint32_t at = 0, word = 0;
+  memcpy(&at, g_seen_data + 4u * (WGSL_DRAW_CBUF_TABLE + 2u * slot), sizeof(at));
+  at *= 4u; /* the table holds word offsets */
+  if (at + offset + 4u <= GPU_POOL_BYTES) memcpy(&word, g_seen_pool + at + offset, sizeof(word));
+  return word;
+}
+
 /* One culled-state triangle in GPU mode; what the stream carries. */
 static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_t topology, uint32_t count);
 static Seen_Draw gpu_draw_once(Raster3d *r, uint32_t front_face_reg) {
@@ -1159,6 +1169,8 @@ static uint32_t g_ps_override; /* gpu_draw_topology: this pixel program instead 
 static bool g_draw_twice;      /* gpu_draw_topology: the same draw again */
 static bool g_twice_resubmit;  /* ... in a new submission */
 static uint64_t g_twice_poke;  /* ... after this guest address took 7.0f (0: none) */
+static bool g_twice_noted;     /* ... and the poke reported as a GPU-side write (raster3d_note_gpu_write) */
+static uint32_t g_twice_word;  /* ... this 32-bit word instead of 7.0f (0: the float) */
 static uint32_t g_twice_ps;    /* ... with this pixel program, every channel written (0: the same draw) */
 static bool g_gpu_rt_bl;       /* gpu_draw_topology: into RT_BL (block linear) instead of RT */
 static uint64_t g_gpu_rt_offset; /* ... this far past RT_BL */
@@ -1193,7 +1205,9 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
   else draw_arrays(r, topology, count);
   if (g_draw_twice) {
     if (g_twice_resubmit) raster3d_begin_submission(r);
-    if (g_twice_poke) putf(g_twice_poke, 7.0f);
+    if (g_twice_poke && g_twice_word) put32(g_twice_poke, g_twice_word);
+    else if (g_twice_poke) putf(g_twice_poke, 7.0f);
+    if (g_twice_poke && g_twice_noted) raster3d_note_gpu_write(r, g_twice_poke, 4u);
     if (g_twice_ps) {
       g_regs[0x801 + 16u * 5u] = g_twice_ps;
       g_regs[0x680] = 0x1111;
@@ -1829,6 +1843,23 @@ static void test_gpu_vertex_stage(Raster3d *r) {
   CHECK(ps_again.count == 2u && ps_again.pool_writes_before_last == 0u,
         "pool: the same draw again writes nothing (%u draws, %u writes before the second)", ps_again.count,
         ps_again.pool_writes_before_last);
+  /* Constant buffers read once per submission: a second draw finds the
+   * descriptor's bytes held (the guest CPU writes between submissions),
+   * unless a GPU-side write reported the change. */
+  g_twice_poke = CBUF + SSBO_DESC; /* the buffer's address: 4 bytes on */
+  g_twice_word = (uint32_t)SSBO + 4u;
+  const Seen_Draw held = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(held.count == 2u && pooled_cbuf_word(0u, SSBO_DESC) == (uint32_t)SSBO, "cbuf held within a submission (%x)",
+        pooled_cbuf_word(0u, SSBO_DESC));
+  put32(CBUF + SSBO_DESC, (uint32_t)SSBO);
+  g_twice_noted = true;
+  const Seen_Draw noted = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(noted.count == 2u && pooled_cbuf_word(0u, SSBO_DESC) == (uint32_t)SSBO + 4u,
+        "cbuf read again after a GPU-side write (%x)", pooled_cbuf_word(0u, SSBO_DESC));
+  put32(CBUF + SSBO_DESC, (uint32_t)SSBO);
+  g_twice_noted = false;
+  g_twice_word = 0;
+  g_twice_poke = 0;
   g_draw_twice = false;
   const float changed = 0.75f;
   memcpy(g_gpu + (SSBO - GPU_BASE) + 4u, &changed, sizeof(changed));
