@@ -656,7 +656,9 @@ static void print_cold_profile(uint32_t top) {
     budget += g_cold_budget[i];
   }
   if (!total) return;
-  fprintf(stderr, "  interpreted block starts: %llu (%llu with a compiled block that did not fit the budget)\n",
+  /* The logger, not stderr: a browser run (VOLAND_JIT_FALLBACKS via ?env=)
+   * captures only logged lines from the core's threads. */
+  log_warn("[jit]   interpreted block starts: %llu (%llu with a compiled block that did not fit the budget)",
           (unsigned long long)total, (unsigned long long)budget);
   for (uint32_t n = 0; n < top; n++) {
     uint32_t best = COLD_SLOTS;
@@ -664,7 +666,7 @@ static void print_cold_profile(uint32_t top) {
       if (g_cold_count[i] && (best == COLD_SLOTS || g_cold_count[i] > g_cold_count[best])) best = i;
     }
     if (best == COLD_SLOTS) return;
-    fprintf(stderr, "  %12llu  %010llx  (%llu over budget)\n", (unsigned long long)g_cold_count[best],
+    log_warn("[jit]   cold block %12llu  %010llx  (%llu over budget)", (unsigned long long)g_cold_count[best],
             (unsigned long long)(g_cold_pc[best] & ~1ull), (unsigned long long)g_cold_budget[best]);
     g_cold_count[best] = 0;
   }
@@ -678,7 +680,7 @@ void jit_print_fallback_profile(uint32_t top) {
       if (g_fallback_count[i] && (best == FALLBACK_SLOTS || g_fallback_count[i] > g_fallback_count[best])) best = i;
     }
     if (best == FALLBACK_SLOTS) return;
-    fprintf(stderr, "  %12llu  %08x%s\n", (unsigned long long)g_fallback_count[best], g_fallback_key[best] & ~1u,
+    log_warn("[jit]   fallback %12llu  %08x%s", (unsigned long long)g_fallback_count[best], g_fallback_key[best] & ~1u,
             has_fast_path(g_fallback_key[best]) ? "  (fast path's exact arm)" : "");
     g_fallback_count[best] = 0;
   }
