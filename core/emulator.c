@@ -1879,10 +1879,12 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
     const uint64_t pc = emulator->cpu_backend->get_pc(th->thread.cpu_state);
     uint64_t offset = 0;
     const char *module = module_of(emulator, pc, &offset);
-    log_warn("[threads] %llu (handle 0x%x, prio %u) %s%s%s pc %s+0x%llx (last core %u, ideal %u, mask 0x%llx, run %llu, "
-             "cycles %llu, host ms %llu)",
+    /* The absolute pc too: a profile names compiled regions by it (jit_compile.c "j<pc>"). */
+    log_warn("[threads] %llu (handle 0x%x, prio %u) %s%s%s pc %s+0x%llx = 0x%llx (last core %u, ideal %u, mask 0x%llx, "
+             "run %llu, cycles %llu, host ms %llu)",
              (unsigned long long)th->thread_id, th->handle, th->thread.priority, k_state[th->state],
-             th->on_core ? " on core" : "", th->held ? " held" : "", module, (unsigned long long)offset, th->last_core,
+             th->on_core ? " on core" : "", th->held ? " held" : "", module, (unsigned long long)offset,
+             (unsigned long long)pc, th->last_core,
              th->thread.preferred_core, (unsigned long long)th->core_mask, (unsigned long long)th->last_run,
              (unsigned long long)th->cycles_run, (unsigned long long)(th->run_ns / EMULATOR_NS_PER_MS));
     if (th->budget_runs || th->other_runs) { /* VOLAND_PC_HIST */
