@@ -840,6 +840,8 @@ static void helper_and_continue(Ctx *c) {
   br(c, LEVEL_DISPATCH);
 }
 
+static void emit_tlb_recheck(Ctx *c);
+
 /* Control goes to `target`, a direct branch: within the region if it is
  * a region block and its instructions fit the budget, else out. */
 static void branch_to(Ctx *c, uint64_t target) {
@@ -875,6 +877,11 @@ static void branch_to(Ctx *c, uint64_t target) {
     br(c, LEVEL_DISPATCH + c->dispatch_targets - (uint32_t)m);
     return;
   }
+  /* Backward (a loop): the translations are rechecked each time round, as
+   * another core's TLB invalidation reaches this one at once on hardware
+   * - a loop that sees new data by a plain dependent load, without a
+   * fence, must not keep using a page the other core remapped. */
+  if (!c->discover && cpu_multicore() && (uint32_t)m <= c->current_block) emit_tlb_recheck(c);
   if (c->block_count > 1u) {
     i32c(c, (uint32_t)m);
     lset(c, L_IDX);
@@ -1986,9 +1993,9 @@ static bool shared_walk(void) {
  * Serially that is exact: mappings change only in SVCs, which leave
  * compiled code. With guest threads on several host threads another core
  * may remap while a region runs: the next region sees the new generation,
- * and so does this one after each fence (emit_tlb_recheck) - where the
- * guest synchronizes with the thread that remapped, and must then see
- * the new mapping. JIT_NO_TLB=1: no cache. */
+ * and so does this one after each fence and on each backward branch
+ * (emit_tlb_recheck), as hardware's TLB invalidation reaches every core
+ * at once. JIT_NO_TLB=1: no cache. */
 #define TLB_EMPTY ((uint64_t)1 << 63) /* a page base no address matches */
 #define TLB_CARRIED_R 1u /* Ctx.tlb_carried: g_carried[0], [1], [2] */
 #define TLB_CARRIED_W 2u
@@ -5346,7 +5353,6 @@ static bool c_vector_load_store(Ctx *c, uint32_t insn) {
  * on several host threads (cpu_multicore(), docs/PARALLEL.md): the
  * interpreter's ordering rules, inline. Each core compiles its own code,
  * and the mode never changes while cores exist. */
-static void emit_tlb_recheck(Ctx *c);
 static void emit_multicore_fence(Ctx *c) {
   if (!cpu_multicore()) return;
   op(c, WASM_ATOMIC_PREFIX);

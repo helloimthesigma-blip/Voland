@@ -3,8 +3,9 @@
  * (jit_compile.c emit_tlb_recheck): a guest thread reads a word (its
  * page's translation now cached), spins on a flag with LDAR, and reads the
  * word again. Meanwhile another host thread maps that page to other
- * physical memory and then sets the flag. After the acquire the second
- * read must see the new mapping, although the region never exited - the
+ * physical memory and then sets the flag. After the acquire (or, spinning
+ * on a plain load, the next time round the loop) the second read must see
+ * the new mapping, although the region never exited - the
  * cached translation reached the old physical page (Tears of the Kingdom's
  * loader corrupted memory that way).
  *
@@ -50,6 +51,10 @@
  *   0x0c ldr w2, [x0]    ; must read the new page
  *   0x10 svc #0 */
 static const uint32_t k_program[] = {0xB9400001u, 0x88DFFC83u, 0x34FFFFE3u, 0xB9400002u, 0xD4000001u};
+/* The same with a plain load of the flag (no fence: the loop's back edge
+ * must recheck - another core's TLB invalidation needs no barrier here). */
+static const uint32_t k_program_plain[] = {0xB9400001u, 0xB9400083u, 0x34FFFFE3u, 0xB9400002u, 0xD4000001u};
+#define PLAIN_GVA (CODE_GVA + 0x100u)
 
 static VMM_Context *g_vmm;
 static volatile bool g_done;
@@ -75,7 +80,7 @@ static void *remapper(void *arg) {
   return NULL;
 }
 
-static void run_once(const CPU_Backend *cpu, CPU_State *s) {
+static void run_once(const CPU_Backend *cpu, CPU_State *s, uint64_t entry) {
   CHECK_OK(vmm_unmap(g_vmm, DATA_GVA, VMM_PAGE_SIZE));
   CHECK_OK(vmm_map(g_vmm, DATA_GVA, DATA_PA_OLD, VMM_PAGE_SIZE, VMM_PERM_RW));
   const uint32_t zero = 0;
@@ -84,7 +89,7 @@ static void run_once(const CPU_Backend *cpu, CPU_State *s) {
   cpu->set_reg(s, 4, FLAG_GVA);
   cpu->set_reg(s, 1, 0);
   cpu->set_reg(s, 2, 0);
-  cpu->set_pc(s, CODE_GVA);
+  cpu->set_pc(s, entry);
   g_done = false;
   pthread_t other;
   CHECK(pthread_create(&other, NULL, remapper, NULL) == 0);
@@ -108,6 +113,7 @@ int main(void) {
   CHECK_OK(vmm_map(g_vmm, DATA_GVA, DATA_PA_OLD, VMM_PAGE_SIZE, VMM_PERM_RW));
   CHECK_OK(vmm_map(g_vmm, FLAG_GVA, FLAG_PA, VMM_PAGE_SIZE, VMM_PERM_RW));
   CHECK_OK(vmm_write_physical(g_vmm, CODE_PA, k_program, sizeof(k_program)));
+  CHECK_OK(vmm_write_physical(g_vmm, CODE_PA + (PLAIN_GVA - CODE_GVA), k_program_plain, sizeof(k_program_plain)));
   const uint32_t old_word = OLD_WORD, new_word = NEW_WORD;
   CHECK_OK(vmm_write_physical(g_vmm, DATA_PA_OLD, &old_word, sizeof(old_word)));
   CHECK_OK(vmm_write_physical(g_vmm, DATA_PA_NEW, &new_word, sizeof(new_word)));
@@ -120,7 +126,8 @@ int main(void) {
   CPU_State *s = cpu->create(g_vmm, NULL);
   CHECK(s != NULL);
   cpu->set_svc_handler(s, on_svc);
-  for (uint32_t r = 0; r < RUNS; r++) run_once(cpu, s); /* compiled from the first runs on */
+  for (uint32_t r = 0; r < RUNS; r++) run_once(cpu, s, CODE_GVA); /* compiled from the first runs on */
+  for (uint32_t r = 0; r < RUNS; r++) run_once(cpu, s, PLAIN_GVA);
   cpu->destroy(s);
   cpu_set_multicore(false);
   vmm_destroy(g_vmm);

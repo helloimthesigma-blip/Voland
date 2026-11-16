@@ -205,8 +205,11 @@ entry's read-and-write walk is the same code.
     while a region runs. The next region sees the new generation, and so
     does this one after every fence (`emit_tlb_recheck`: LDAR/STLR,
     LDAXR, DMB/DSB, and the interpreter helper, which runs the A32
-    backend's exclusives and barriers). There the guest has synchronized
-    with the thread that remapped and must see the new mapping. Until
+    backend's exclusives and barriers) and on every backward branch. On
+    hardware the remapping core's TLB invalidation reaches every core
+    before it goes on, barrier or not; guests also order by plain
+    dependent loads, so fences alone left about one boot in 15 crashing.
+    Until
     2026-11-16 a region kept its entries until it exited. A guest thread
     spinning in one region on another thread's signal then used a page
     that thread had unmapped and mapped again, through the old physical
@@ -220,8 +223,8 @@ entry's read-and-write walk is the same code.
   - `tests/jit_tlb_test.c` remaps a page between two regions, serially
     and in multicore mode.
   - `tests/jit_tlb_fence_test.c` remaps a page from another host thread
-    while an A64 region spins on an LDAR flag; it fails without the
-    recheck.
+    while an A64 region spins on a flag, by LDAR and by a plain load; each
+    fails without its recheck.
 - Page-crossing accesses go to `jit_helper_read`, `jit_helper_store` or
   `jit_helper_write`, which are all-or-nothing, exactly like the
   interpreter's `interp_read`/`interp_write`.
