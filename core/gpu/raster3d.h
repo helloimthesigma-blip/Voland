@@ -80,8 +80,10 @@ struct Gpu_Stream;
 /* Render targets live only on the GPU: dropping one loses its pixels.
  * MK8DX keeps well over 64 (light-probe faces and their mips at 32x32
  * and below, plus the frame's 1080p targets) - in a race over 2048, which
- * dropped and re-made ~800 targets a second at that size. */
-#define RASTER_GPU_SURFACES 4096u
+ * dropped and re-made ~800 targets a second at that size. Super Mario
+ * Odyssey's Metro Kingdom keeps ~7000 (small probe targets): at 4096 it
+ * dropped and re-made ~5000 a window and ran at 0.16 fps. */
+#define RASTER_GPU_SURFACES 16384u
 /* GPU mode: render targets' bytes past which a new one first evicts the
  * least recently used targets idle for RASTER_GPU_SURFACE_IDLE_FRAMES. A
  * game that draws a frame's target at a new address each frame (Super Mario
