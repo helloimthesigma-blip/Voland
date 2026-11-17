@@ -1839,6 +1839,10 @@ static const char *module_of(const Emulator *emulator, uint64_t pc, uint64_t *of
 
 #define DUMP_BACKTRACE_DEPTH 24u
 #define DUMP_WAIT_HANDLES 4u
+/* AArch32 sp and lr in the register file, and how far up the stack to look. */
+#define DUMP_A32_SP 13u
+#define DUMP_A32_LR 14u
+#define DUMP_A32_STACK_WORDS 256u
 
 void emulator_dump_threads(Emulator *emulator, bool backtrace) {
   if (!emulator || !emulator->program_loaded) return;
@@ -1942,6 +1946,24 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
                (unsigned long long)rf->x[20], (unsigned long long)rf->x[21], (unsigned long long)rf->x[22],
                (unsigned long long)rf->x[23], (unsigned long long)rf->x[24], (unsigned long long)rf->x[25],
                (unsigned long long)rf->x[26], (unsigned long long)rf->x[27], (unsigned long long)rf->x[28], at_x26);
+    if (!emulator->process.npdm.is_64bit_instruction) {
+      /* AArch32 code keeps no frame-pointer chain to walk: lr, then the
+       * stack words that point into a module - return addresses, plus
+       * some stale ones, so read it as candidates. */
+      uint64_t off = 0;
+      const char *m = module_of(emulator, rf->x[DUMP_A32_LR], &off);
+      log_warn("[threads]     lr %s+0x%llx", m, (unsigned long long)off);
+      uint32_t found = 0;
+      for (uint32_t w = 0; w < DUMP_A32_STACK_WORDS && found < DUMP_BACKTRACE_DEPTH; w++) {
+        uint32_t word = 0;
+        if (!error_is_ok(vmm_read32(emulator->vmm, rf->x[DUMP_A32_SP] + (uint64_t)w * sizeof(word), &word))) break;
+        m = module_of(emulator, word, &off);
+        if (m[0] == '?') continue;
+        log_warn("[threads]     sp+0x%x %s+0x%llx", (unsigned)(w * sizeof(word)), m, (unsigned long long)off);
+        found++;
+      }
+      continue;
+    }
     uint64_t fp = rf->x[29], lr = rf->x[30];
     for (uint32_t depth = 0; depth < DUMP_BACKTRACE_DEPTH; depth++) {
       uint64_t off = 0;
