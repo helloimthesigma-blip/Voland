@@ -4214,16 +4214,20 @@ static Raster3d_Gpu_Surface *gpu_surface_get(Raster3d *r, const Surface_Desc *d,
 #define PARTIAL_SURFACE_LOG_LIMIT 32u
 #define PARTIAL_SURFACE_CHECKED_SLOTS 1024u
 #define PARTIAL_SURFACE_ADDRESS_SHIFT 8u /* textures start at 256-byte (and coarser) boundaries */
+#define PARTIAL_SURFACE_SCAN_LIMIT 8192u
 static void gpu_note_partial_surface(Raster3d *r, const Tex_Header *h) {
   static uint64_t seen[PARTIAL_SURFACE_LOG_LIMIT]; /* one line per shape pair */
-  static uint32_t logged;
-  if (logged >= PARTIAL_SURFACE_LOG_LIMIT) return;
+  static uint32_t logged, scans;
+  if (logged >= PARTIAL_SURFACE_LOG_LIMIT || scans >= PARTIAL_SURFACE_SCAN_LIMIT) return;
   /* Each texture address once (diagnostics): the surface scan per bind was
-   * a tenth of Super Mario Odyssey's GPU thread. */
+   * a tenth of Super Mario Odyssey's GPU thread. A scene with more texture
+   * addresses than slots (its Sand Kingdom) evicts them in turn, so the
+   * scans are counted too. */
   static uint64_t checked[PARTIAL_SURFACE_CHECKED_SLOTS];
   uint64_t *slot = &checked[(h->address >> PARTIAL_SURFACE_ADDRESS_SHIFT) % PARTIAL_SURFACE_CHECKED_SLOTS];
   if (*slot == h->address) return;
   *slot = h->address;
+  scans++;
   for (uint32_t i = 0; i < RASTER_GPU_SURFACES; i++) {
     const Raster3d_Gpu_Surface *s = &r->gpu_surfaces[i];
     if (!s->in_use || h->address < s->address || h->address >= s->address + s->guest_bytes) continue;
