@@ -21,7 +21,7 @@ were measured.
 | Super Mario Odyssey | opening, Cap Kingdom; arriving in every kingdom from Cascade to the Moon | 35-59 by scene (~43 at the Cap Kingdom start, ~50 in Cascade, ~59 on Metro's rooftop); a kingdom's first seconds stutter while its shaders compile | 37-40 (cutscenes) | the camera tutorial needs the right stick pushed up |
 | Nine Sols | title, opening cinematic, gameplay, dialogue | ~45 (the first cave) | ~52 | |
 | Super Smash Bros. Ultimate | matches on about ten stages, opening movie, save states in a fight | 58-60 on lighter stages, ~31-35 on busy ones (Mario Circuit, Boxing Ring) | ~60 | none known |
-| Mario Kart 8 Deluxe (32-bit) | Grand Prix races (Mushroom Cup, Special Cup), menus, Mii select | ~54 in a race (full speed) | ~60 | none known |
+| Mario Kart 8 Deluxe (32-bit) | Grand Prix races (Mushroom Cup, Special Cup), menus, Mii select | ~54 in a race (full speed) | ~60 | a rare crash between Grand Prix races (seen once in 12) |
 | Animal Crossing: New Horizons | opening, naming, arrival on the island | ~29 at the island arrival | ~55 (intro) | some of the island's sea renders black in patches; generating the island takes a few minutes |
 | Tears of the Kingdom | the opening descent, the first cave | ~15 (full speed) | - | the picture is over-exposed; about one boot in 15 crashes while loading |
 
