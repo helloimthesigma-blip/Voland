@@ -18,7 +18,7 @@ were measured.
 | Celeste | title, file select, levels (Forsaken City, Celestial Resort, Mirror Temple, The Summit, Core) | ~59 | ~59 | none known |
 | Hollow Knight | new game through the intro into King's Pass; saved games; Greenpath, Queen's Station, Crystal Peak | ~51-57 (Crossroads: ~51 walking, ~54 in a fight, ~57 standing) | ~60 | none known |
 | Hollow Knight: Silksong | boot to gameplay, saves, video cutscenes | ~59 (Bone Bottom) | ~58 | none known |
-| Super Mario Odyssey | opening, Cap Kingdom; arriving in the Sand and Metro Kingdoms | 35-59 by scene (~43 at the Cap Kingdom start, ~36 arriving in Sand, ~59 on Metro's rooftop) | 37-40 (cutscenes) | the camera tutorial needs the right stick pushed up |
+| Super Mario Odyssey | opening, Cap Kingdom; arriving in every kingdom from Cascade to the Moon | 35-59 by scene (~43 at the Cap Kingdom start, ~50 in Cascade, ~59 on Metro's rooftop); a kingdom's first seconds stutter while its shaders compile | 37-40 (cutscenes) | the camera tutorial needs the right stick pushed up |
 | Nine Sols | title, opening cinematic, gameplay, dialogue | ~45 (the first cave) | ~52 | |
 | Super Smash Bros. Ultimate | matches, opening movie, save states in a fight | 58-60 on lighter stages, ~31-35 on busy ones (Mario Circuit, Boxing Ring) | ~60 | none known |
 | Mario Kart 8 Deluxe (32-bit) | whole races, menus, Mii select | ~54 in a race (full speed) | ~60 | none known |
