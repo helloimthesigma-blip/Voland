@@ -47,6 +47,7 @@
 #define AM_MESSAGE_PERFORMANCE_MODE_CHANGED 31u
 #define AM_MESSAGE_EXIT_REQUESTED 4u
 #define AM_FOCUS_IN_FOCUS 1u
+#define AM_FOCUS_OUT_OF_FOCUS 2u /* a library applet is in front */
 #define AM_OPERATION_MODE_HANDHELD 0u
 #define AM_DISPLAY_WIDTH 1280u
 #define AM_DISPLAY_HEIGHT 720u
@@ -161,6 +162,10 @@ const Am_Text_Request *am_text_request(const Am_State *state);
 /* Answers it: `accepted` false is the player cancelling. Completes the
  * keyboard applet (its state event fires; PopOutData returns the text). */
 void am_text_respond(Am_State *state, HLE_Context *context, const char *utf8, bool accepted);
+
+/* A controller is there for the title to read (hid_update): controller
+ * setup, which stays open while none is, answers and closes. */
+void am_controller_available(Am_State *state, HLE_Context *context);
 
 /* Queues an applet message and signals the message event. */
 void am_push_message(Am_State *state, HLE_Context *context, uint32_t message);

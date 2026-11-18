@@ -428,6 +428,8 @@ async function boot(): Promise<BootResult | null> {
           unplugControllers: (ms: number) => {
             unpluggedUntil = performance.now() + ms;
           },
+          setEnv: (name: string, value: string) =>
+            cpuWorker.postMessage({ type: "set-env", name, value } satisfies MainToCPUMessage),
         };
         /* ?gpucompute=0: compute dispatches stay on the CPU. */
         if (new URLSearchParams(location.search).get("gpucompute") === "0") {

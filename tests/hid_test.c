@@ -104,9 +104,11 @@ static void set_slot(uint32_t slot, uint32_t buttons, int16_t lx, int16_t ly, bo
   input_region_write_end(g_region, slot);
 }
 
-static void sample(void) {
-  hid_update(&g_emu.hid, &g_emu.hle, g_region, g_ticks);
+/* True when the sample found a controller plugged in (hid_update). */
+static bool sample(void) {
+  const bool plugged = hid_update(&g_emu.hid, &g_emu.hle, g_region, g_ticks);
   g_ticks += HID_TICKS_PER_SAMPLE;
+  return plugged;
 }
 
 static uint64_t npad_gva(uint32_t index) { return g_shmem_gva + HID_NPAD_SECTION_OFFSET + index * HID_NPAD_ENTRY_BYTES; }
@@ -242,7 +244,7 @@ static void test_shared_memory_and_npads(void) {
 
   /* 200Hz: a second update inside the period writes nothing. */
   const uint64_t sampling = g_emu.hid.sampling_number;
-  hid_update(&g_emu.hid, &g_emu.hle, g_region, g_ticks - 1);
+  CHECK(!hid_update(&g_emu.hid, &g_emu.hle, g_region, g_ticks - 1));
   CHECK(g_emu.hid.sampling_number == sampling);
 
   /* Twenty more samples: the LIFO caps at 17 with consecutive numbers. */
@@ -260,17 +262,18 @@ static void test_shared_memory_and_npads(void) {
   CHECK(svc(SVC_RESET_SIGNAL, style_event, 0, 0, 0, NULL) == 0);
   const uint64_t before_torn = g_emu.hid.sampling_number;
   input_region_write_begin(g_region, 0);
-  sample();
+  CHECK(!sample());
   CHECK(g_emu.hid.sampling_number == before_torn && !event->signaled);
   CHECK(rd32(npad_gva(0) + HID_NPAD_STYLE_SET) == HID_STYLE_FULL_KEY);
   input_region_write_end(g_region, 0);
-  sample();
+  CHECK(sample());
   CHECK(g_emu.hid.sampling_number == before_torn + 1 && !event->signaled);
   CHECK(read_lifo(0, LIFO_FULL_KEY, states, 1) == 1 && states[0].attributes == HID_ATTR_IS_CONNECTED);
 
-  /* Disconnect: style 0, colors say NoController, event signalled. */
+  /* Disconnect: style 0, colors say NoController, event signalled, and
+   * the sample reports that no controller is plugged in. */
   set_slot(0, 0, 0, 0, false);
-  sample();
+  CHECK(!sample());
   CHECK(rd32(npad_gva(0) + HID_NPAD_STYLE_SET) == 0 && rd32(npad_gva(0) + HID_NPAD_FULL_KEY_COLOR) == 2u);
   CHECK(event->signaled);
 
@@ -278,7 +281,7 @@ static void test_shared_memory_and_npads(void) {
   const struct { uint32_t style, pad; uint64_t aruid; } handheld = {HID_STYLE_HANDHELD, 0, 0};
   CHECK(call(hid, 100, &handheld, sizeof(handheld), &pid).result == 0);
   set_slot(0, INPUT_BUTTON_X, 0, 0, true);
-  sample();
+  CHECK(sample());
   CHECK(rd32(npad_gva(0) + HID_NPAD_STYLE_SET) == 0);
   CHECK(rd32(npad_gva(HID_NPAD_HANDHELD_INDEX) + HID_NPAD_STYLE_SET) == HID_STYLE_HANDHELD);
   CHECK(read_lifo(HID_NPAD_HANDHELD_INDEX, LIFO_HANDHELD, states, 1) == 1);

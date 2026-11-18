@@ -1291,6 +1291,67 @@ static void test_software_keyboard(void) {
   CHECK(dom(oe, applet, 101, NULL, 0, NULL, 0).result == AM_RESULT_NO_DATA_IN_CHANNEL);
 }
 
+/* Controller setup stays open until a controller is there for the title
+ * to read (am_controller_available), then answers one player on No1. The
+ * title is out of focus meanwhile, and told so both ways. */
+static void test_controller_applet(void) {
+  const uint32_t oe = service("appletOE");
+  Test_Ipc_Message control;
+  memset(&control, 0, sizeof(control));
+  control.framing = TEST_IPC_CONTROL;
+  control.command_id = IPC_CONTROL_CONVERT_CURRENT_OBJECT_TO_DOMAIN;
+  CHECK(ipc_fixture_send(&g_emu, oe, &control, g_reply) == 0);
+  const uint64_t pid = 0;
+  Test_Ipc_Message pid_msg;
+  memset(&pid_msg, 0, sizeof(pid_msg));
+  pid_msg.send_pid = true;
+  Test_Ipc_Reply r = dom(oe, 1, 0, &pid, sizeof(pid), &pid_msg, 0);
+  const uint32_t proxy = r.object_ids[0];
+  r = dom(oe, proxy, 11, NULL, 0, NULL, 0);
+  const uint32_t creator = r.object_ids[0];
+  r = dom(oe, proxy, 0, NULL, 0, NULL, 0);
+  const uint32_t getter = r.object_ids[0];
+  const uint32_t create_in[2] = {AM_APPLET_CONTROLLER, 0};
+  r = dom(oe, creator, 0, create_in, sizeof(create_in), NULL, 0);
+  CHECK(r.result == 0 && r.object_count == 1);
+  const uint32_t applet = r.object_ids[0];
+  while (dom(oe, getter, 1, NULL, 0, NULL, 4).result == 0) {} /* drain the messages */
+  am_controller_available(&g_emu.am, &g_emu.hle); /* not started: nothing to answer */
+  CHECK(g_emu.am.message_count == 0);
+  CHECK(dom(oe, applet, 10, NULL, 0, NULL, 0).result == 0); /* Start */
+  r = dom(oe, applet, 1, NULL, 0, NULL, 4);
+  CHECK(test_le32(r.data) == 0); /* open: no controller yet */
+  CHECK(dom(oe, applet, 101, NULL, 0, NULL, 0).result == AM_RESULT_NO_DATA_IN_CHANNEL);
+  r = dom(oe, getter, 1, NULL, 0, NULL, 4);
+  CHECK(r.result == 0 && test_le32(r.data) == AM_MESSAGE_FOCUS_STATE_CHANGED);
+  r = dom(oe, getter, 9, NULL, 0, NULL, 4);
+  CHECK(r.data[0] == AM_FOCUS_OUT_OF_FOCUS);
+
+  am_controller_available(&g_emu.am, &g_emu.hle);
+  r = dom(oe, applet, 1, NULL, 0, NULL, 4);
+  CHECK(test_le32(r.data) == 1); /* completed */
+  r = dom(oe, getter, 1, NULL, 0, NULL, 4);
+  CHECK(r.result == 0 && test_le32(r.data) == AM_MESSAGE_FOCUS_STATE_CHANGED);
+  r = dom(oe, getter, 9, NULL, 0, NULL, 4);
+  CHECK(r.data[0] == AM_FOCUS_IN_FOCUS);
+  CHECK(dom(oe, applet, 30, NULL, 0, NULL, 0).result == 0); /* GetResult */
+  r = dom(oe, applet, 101, NULL, 0, NULL, 0);
+  CHECK(r.result == 0 && r.object_count == 1);
+  r = dom(oe, r.object_ids[0], 0, NULL, 0, NULL, 0);
+  Test_Ipc_Message rd;
+  memset(&rd, 0, sizeof(rd));
+  rd.receives[0] = (Test_Ipc_Buffer){SCRATCH(0xB900), 12, 0};
+  rd.receive_count = 1;
+  const uint64_t offset = 0;
+  CHECK(dom(oe, r.object_ids[0], 11, &offset, sizeof(offset), &rd, 0).result == 0);
+  /* ControllerSupportResultInfo: one player, npad No1, success. */
+  CHECK(rd32(SCRATCH(0xB900)) == 1 && rd32(SCRATCH(0xB904)) == 0 && rd32(SCRATCH(0xB908)) == 0);
+  /* Answered once. */
+  am_controller_available(&g_emu.am, &g_emu.hle);
+  CHECK(dom(oe, applet, 101, NULL, 0, NULL, 0).result == AM_RESULT_NO_DATA_IN_CHANNEL);
+  CHECK(g_emu.am.message_count == 0);
+}
+
 /* MiiEdit's AppendMii ("Create a Mii") over a domain session: the applet
  * reports a created Mii at database index 0, and the Mii database then
  * lists it (SourceFlag_Database) before the six default Miis. */
@@ -1664,6 +1725,7 @@ int main(void) {
   test_sdk_startup_services();
   test_sdk_behaviours();
   test_software_keyboard();
+  test_controller_applet();
   test_mii_edit_append();
   test_acc();
   emulator_destroy(&g_emu);

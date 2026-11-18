@@ -41,6 +41,9 @@ export interface VolandDebug {
   /** Every controller reads as unplugged for `ms` (how a title takes a
    * controller leaving and coming back). */
   readonly unplugControllers: (ms: number) => void;
+  /** A core debug environment variable (as ?env=NAME=VALUE, but mid-run;
+   * VOLAND_LOG_LEVEL=debug|info switches the core's log level). */
+  readonly setEnv: (name: string, value: string) => void;
 }
 
 declare global {

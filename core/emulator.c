@@ -1123,8 +1123,10 @@ static void update_devices(Emulator* emulator) {
   nvdrv_bound_gpu_latency(&emulator->nvdrv, emulator->scheduler.ticks, gpu_max_latency_ticks());
   /* Controllers (§18): the input region into hid's shared memory. */
   const Memory_Layout* layout = layout_get();
-  hid_update(&emulator->hid, &emulator->hle, layout ? (const void*)(uintptr_t)layout->input_region_base : NULL,
-             emulator->scheduler.ticks);
+  if (hid_update(&emulator->hid, &emulator->hle, layout ? (const void*)(uintptr_t)layout->input_region_base : NULL,
+                 emulator->scheduler.ticks)) {
+    am_controller_available(&emulator->am, &emulator->hle);
+  }
   /* Display (§13): vsync composites queued buffers into the §6 slots. */
   vi_update(&emulator->vi, &emulator->hle, emulator->scheduler.ticks);
   report_stream(emulator);

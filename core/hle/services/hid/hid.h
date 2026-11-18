@@ -166,7 +166,11 @@ Error hid_register(Hid_State *state, SM_Registry *registry);
 /* Samples the input region into shared memory if a 200Hz period of
  * virtual time has passed since the last sample (always on the first
  * call). `input_region` is the §18 region base. No-op until the guest has
- * created the applet resource. */
-void hid_update(Hid_State *state, HLE_Context *context, const void *input_region, uint64_t now_ticks);
+ * created the applet resource.
+ * True when the title has a controller to read: this call sampled one
+ * that is plugged in (its npad is up to date), or there is nothing to
+ * wait for (no applet resource, no input region). False while every
+ * controller is unplugged, and on calls that do not sample. */
+bool hid_update(Hid_State *state, HLE_Context *context, const void *input_region, uint64_t now_ticks);
 
 #endif /* SWITCH_HLE_SERVICES_HID_HID_H */

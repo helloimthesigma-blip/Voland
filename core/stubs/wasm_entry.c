@@ -536,6 +536,11 @@ EXPORT void emulator_setenv_ffi(uint64_t name, uint64_t value)
   const char *now = getenv(key);
   log_info("[env] %s=%s%s", key, now ? now : "(unset)", failed ? " (setenv failed)" : "");
   interp_pc_log_reload();
+  /* VOLAND_LOG_LEVEL=trace|debug|info: the log's minimum level, also
+   * mid-run (the browser's default drops DEBUG, common/log.c). */
+  if (now && !strcmp(key, "VOLAND_LOG_LEVEL")) {
+    log_set_minimum_level(!strcmp(now, "trace") ? LOG_LEVEL_TRACE : !strcmp(now, "debug") ? LOG_LEVEL_DEBUG : LOG_LEVEL_INFO);
+  }
 }
 
 /* Wall-clock time for the next program (time service, §12). */

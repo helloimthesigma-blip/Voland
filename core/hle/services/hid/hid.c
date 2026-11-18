@@ -238,9 +238,9 @@ static void push_touch(HLE_Context *c, Hid_State *s, const Input_Touch_State *to
   s->touch_count = count;
 }
 
-void hid_update(Hid_State *s, HLE_Context *c, const void *input_region, uint64_t now_ticks) {
-  if (!s->shared_memory) return;
-  if (s->sampled_once && now_ticks - s->last_sample_ticks < HID_TICKS_PER_SAMPLE) return;
+bool hid_update(Hid_State *s, HLE_Context *c, const void *input_region, uint64_t now_ticks) {
+  if (!s->shared_memory) return true;
+  if (s->sampled_once && now_ticks - s->last_sample_ticks < HID_TICKS_PER_SAMPLE) return false;
 
   /* Which npad each input slot drives, and in which style. */
   Input_Controller_State inputs[HID_NPAD_COUNT];
@@ -248,14 +248,16 @@ void hid_update(Hid_State *s, HLE_Context *c, const void *input_region, uint64_t
   uint32_t styles[HID_NPAD_COUNT];
   memset(has_input, 0, sizeof(has_input));
   memset(styles, 0, sizeof(styles));
+  bool plugged = !input_region;
   const uint32_t player = player_style(s->supported_styles);
   for (uint32_t slot = 0; slot < HID_PLAYER_SLOTS && input_region; slot++) {
     Input_Controller_State in;
     /* A read torn by a write in progress is not a disconnect (a title
      * told its controller left for one sample may stop the game): the
      * sample waits for the next call. */
-    if (!input_region_read_slot(input_region, slot, &in)) return;
+    if (!input_region_read_slot(input_region, slot, &in)) return false;
     if (!input_state_is_connected(&in)) continue;
+    plugged = true;
     uint32_t index = slot, style = player;
     if (slot == 0 && (!(s->supported_ids & 1u) || !player) && (s->supported_ids & HID_ID_BIT_HANDHELD) &&
         (s->supported_styles & HID_STYLE_HANDHELD)) {
@@ -274,6 +276,7 @@ void hid_update(Hid_State *s, HLE_Context *c, const void *input_region, uint64_t
   for (uint32_t i = 0; i < HID_NPAD_COUNT; i++) {
     Hid_Npad *npad = &s->npads[i];
     if (npad->style != styles[i]) {
+      log_info("[hid] npad %u style 0x%x -> 0x%x", i, npad->style, styles[i]);
       npad->style = styles[i];
       write_npad_header(c, s, i, npad->style);
       if (npad->style_event) hle_signal_event(c, npad->style_event);
@@ -284,6 +287,7 @@ void hid_update(Hid_State *s, HLE_Context *c, const void *input_region, uint64_t
   memset(&touch, 0, sizeof(touch));
   /* A torn read skips this sample rather than reporting a release. */
   if (!input_region || input_region_read_touch(input_region, &touch)) push_touch(c, s, &touch);
+  return plugged;
 }
 
 /* ------------------------------------------------------------------ */

@@ -68,7 +68,25 @@ static HLE_ServiceResult cmd_receive_message(HLE_Context *c, Service_Object *sel
   }
 
 AM_VALUE_COMMAND(cmd_get_operation_mode, ipc_response_push_u32, AM_OPERATION_MODE_HANDHELD)
-AM_VALUE_COMMAND(cmd_get_focus_state, ipc_response_push_u32, AM_FOCUS_IN_FOCUS)
+
+/* Controller setup is in front of the title while it waits for a
+ * controller (am_controller_available). */
+static bool controller_setup_open(const Am_State *s) {
+  for (uint32_t i = 0; i < AM_APPLET_CAPACITY; i++) {
+    const Am_Applet *applet = &s->applets[i];
+    if (applet->in_use && applet->applet_id == AM_APPLET_CONTROLLER && applet->started && !applet->completed) return true;
+  }
+  return false;
+}
+
+static HLE_ServiceResult cmd_get_focus_state(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                             IPC_Response *res) {
+  (void)c;
+  (void)req;
+  (void)ipc_response_push_u32(res, controller_setup_open(state_of(self)) ? AM_FOCUS_OUT_OF_FOCUS : AM_FOCUS_IN_FOCUS);
+  return HLE_RESULT_SUCCESS;
+}
+
 AM_VALUE_COMMAND(cmd_get_aruid, ipc_response_push_u64, AM_APPLET_RESOURCE_USER_ID)
 AM_VALUE_COMMAND(cmd_get_settings_platform_region, ipc_response_push_u32, 1u) /* Global */
 AM_VALUE_COMMAND(cmd_get_previous_program_index, ipc_response_push_u32, UINT32_MAX) /* -1: none */
@@ -559,6 +577,7 @@ static uint32_t utf8_to_utf16(const char *in, uint16_t *out, uint32_t max_units)
 #define SWKBD_INITIAL_SIZE 0x3C4u
 #define SWKBD_ARG_MIN_BYTES 0x3C8u
 
+#define AM_CONTROLLER_RESULT_BYTES 12u
 #define AM_MII_EDIT_OUTPUT_BYTES 0x20u
 #define AM_MII_EDIT_SUCCESS 0u
 #define AM_MII_EDIT_CANCEL 1u
@@ -623,6 +642,19 @@ void am_text_respond(Am_State *s, HLE_Context *c, const char *utf8, bool accepte
   }
   (void)applet_push_out(s, c, applet, out, sizeof(out));
   applet_complete(c, applet, 0);
+}
+
+void am_controller_available(Am_State *s, HLE_Context *c) {
+  for (uint32_t i = 0; i < AM_APPLET_CAPACITY; i++) {
+    Am_Applet *applet = &s->applets[i];
+    if (!applet->in_use || applet->applet_id != AM_APPLET_CONTROLLER || !applet->started || applet->completed) continue;
+    /* ControllerSupportResultInfo {s8 player count, pad[3], u32 selected
+     * npad id (0 = player 1), u32 result}. */
+    const uint8_t info[AM_CONTROLLER_RESULT_BYTES] = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+    (void)applet_push_out(s, c, applet, info, sizeof(info));
+    applet_complete(c, applet, 0);
+    am_push_message(s, c, AM_MESSAGE_FOCUS_STATE_CHANGED); /* the title is in front again */
+  }
 }
 
 static HLE_ServiceResult cmd_create_library_applet(HLE_Context *c, Service_Object *self, const IPC_Request *req,
@@ -699,11 +731,12 @@ static HLE_ServiceResult cmd_applet_start(HLE_Context *c, Service_Object *self, 
                 s->storages[applet->in[k]].size, head[0], head[1], head[2], head[3], head[4], head[5], head[6], head[7],
                 head[8], head[9], head[10], head[11]);
     }
-    /* ControllerSupportResultInfo {s8 player count, pad[3], u32 selected
-     * npad id (0 = player 1), u32 result}. */
-    uint8_t info[12] = {1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
-    (void)applet_push_out(s, c, applet, info, sizeof(info));
-    break;
+    /* Stays open until a controller is plugged in, as the console's does
+     * (am_controller_available), and the title is out of focus meanwhile:
+     * Mario Kart 8 Deluxe stops the race when its controller leaves and
+     * resumes only when told it is back in focus. */
+    am_push_message(s, c, AM_MESSAGE_FOCUS_STATE_CHANGED);
+    return HLE_RESULT_SUCCESS;
   }
   case AM_APPLET_PLAYER_SELECT: {
     /* {u64 result (0 = selected), AccountUid} */
