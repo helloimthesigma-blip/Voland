@@ -199,6 +199,8 @@ void hle_svc_set_heap_size(HLE_Context *context, CPU_State *cpu_state) {
     return;
   }
   if (requested > heap->size) {
+    log_warn("[svc] SetHeapSize(%llx): larger than the heap region (%llx)", (unsigned long long)requested,
+             (unsigned long long)heap->size);
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
     return;
   }
@@ -266,12 +268,16 @@ void hle_svc_map_physical_memory(HLE_Context *context, CPU_State *cpu_state) {
     return;
   }
   if (!address_region_contains(&context->process->address_space.alias, base, size)) {
+    log_warn("[svc] MapPhysicalMemory(%llx, %llx): outside the alias region", (unsigned long long)base,
+             (unsigned long long)size);
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
     return;
   }
   for (uint64_t at = base; at < base + size;) {
     VMM_Region_Info info;
     if (!error_is_ok(vmm_query(context->vmm, at, &info))) {
+      log_warn("[svc] MapPhysicalMemory(%llx, %llx): %llx cannot be queried", (unsigned long long)base,
+               (unsigned long long)size, (unsigned long long)at);
       regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
       return;
     }
@@ -298,6 +304,8 @@ void hle_svc_unmap_physical_memory(HLE_Context *context, CPU_State *cpu_state) {
     return;
   }
   if (!address_region_contains(&context->process->address_space.alias, base, size)) {
+    log_warn("[svc] UnmapPhysicalMemory(%llx, %llx): outside the alias region", (unsigned long long)base,
+             (unsigned long long)size);
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
     return;
   }
@@ -505,6 +513,8 @@ void hle_svc_map_process_memory(HLE_Context *context, CPU_State *cpu_state) {
   }
   const Address_Space *as = &context->process->address_space;
   if (!address_region_contains(&as->aslr, dst, size) || !address_region_contains(&as->aslr, src, size)) {
+    log_warn("[svc] MapProcessMemory(%llx, %llx, %llx): outside the ASLR region", (unsigned long long)dst,
+             (unsigned long long)src, (unsigned long long)size);
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
     return;
   }
@@ -676,6 +686,8 @@ void hle_svc_map_shared_memory(HLE_Context *context, CPU_State *cpu_state) {
   const Address_Space *as = &process->address_space;
   if (!address_region_contains(&as->aslr, addr, size) || overlaps_region(&as->heap, addr, size) ||
       overlaps_region(&as->alias, addr, size) || overlaps_region(&as->stack, addr, size)) {
+    /* No warning: the SDK picks shared-memory addresses at random in the
+     * ASLR region and tries again where one is refused. */
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
     return;
   }
@@ -702,6 +714,8 @@ void hle_svc_unmap_shared_memory(HLE_Context *context, CPU_State *cpu_state) {
   if (!object) return;
   const int index = find_shared_mapping(process, addr, size, object);
   if (index < 0) {
+    log_warn("[svc] UnmapSharedMemory(%llx, %llx): no such mapping of that object", (unsigned long long)addr,
+             (unsigned long long)size);
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
     return;
   }
