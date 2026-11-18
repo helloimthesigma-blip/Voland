@@ -202,6 +202,33 @@ void scheduler_block(Scheduler *sched, Sched_Thread *thread, Wait_Kind kind, uin
  * registers to the caller, who sets e.g. the WaitSynchronization index). */
 void scheduler_wake(Scheduler *sched, Sched_Thread *thread, uint32_t result);
 
+/* Diagnostics for freezes: each thread's latest kernel mutex and condvar
+ * events (svc_thread.c), printed by the thread dump for threads stuck on
+ * a mutex and for the thread its word names as owner. Kept beside the
+ * scheduler, not in Sched_Thread, so save states do not change. */
+#define SCHEDULER_SYNC_HISTORY 16u
+typedef enum Sync_Event {
+  SYNC_NONE = 0,
+  SYNC_LOCK_WAIT,    /* ArbitrateLock blocked: mutex, its word */
+  SYNC_LOCK_SKIP,    /* ArbitrateLock returned at once (the word moved on): mutex, its word */
+  SYNC_RELEASE,      /* ArbitrateUnlock or a condvar wait released a mutex: mutex, the word written */
+  SYNC_HANDED,       /* a release gave it the mutex: mutex, the word written */
+  SYNC_COND_WAIT,    /* WaitProcessWideKeyAtomic blocked: key, its mutex's low word */
+  SYNC_COND_TAKEN,   /* signalled, its mutex was free and is now its own: mutex, the tag */
+  SYNC_COND_TO_LOCK, /* signalled, its mutex is held: now waits on the mutex; mutex, the word */
+  SYNC_TIMEOUT,      /* a timed wait expired: its address, the wait kind */
+  SYNC_SIGNAL,       /* SignalProcessWideKey: key, threads woken */
+  SYNC_ADDR_WAIT,    /* WaitForAddress blocked: address, its word */
+  SYNC_ADDR_SIGNAL,  /* SignalToAddress: address, threads woken */
+} Sync_Event;
+void scheduler_note_sync(Scheduler *sched, const Sched_Thread *thread, Sync_Event event, uint64_t address,
+                         uint32_t value);
+/* Logs `thread`'s sync history, oldest first, each line prefixed `label`. */
+void scheduler_log_sync(const Scheduler *sched, const Sched_Thread *thread, const char *label);
+/* Logs the process's latest SCHEDULER_SYNC_TIMELINE sync events, all threads, oldest first. */
+#define SCHEDULER_SYNC_TIMELINE 128u
+void scheduler_log_sync_timeline(const Scheduler *sched);
+
 /* Runs this short (in cycles) that end in a yield or a short sleep are
  * polls: the thread is waiting for work, not doing it (Unity's job
  * workers: ~2k cycles a turn, then SleepThread(25us)). Longer runs are

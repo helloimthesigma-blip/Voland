@@ -24,6 +24,7 @@
 #ifdef SWITCH_CPU_BACKEND_JIT
 #include "cpu/backends/jit/jit.h"
 #endif
+#include "hle/kernel/svc_thread.h"
 #include "hle/kernel/thread.h"
 
 #include <stdio.h>
@@ -1879,6 +1880,7 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
   }
   if (emulator->nvdrv.engine_pending_count)
     log_warn("[threads] nvdec completions pending: %u", emulator->nvdrv.engine_pending_count);
+  scheduler_log_sync_timeline(&emulator->scheduler);
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
     const Sched_Thread *th = &emulator->scheduler.threads[i];
     if (th->state == THREAD_STATE_FREE || th->state == THREAD_STATE_DEAD || !th->thread.cpu_state) continue;
@@ -1936,6 +1938,15 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
                       (int)handle_table_type_of(&emulator->process.handles, th->wait_handles[h]));
       log_warn("[threads]   wait kind %d, wake_at %llu, address 0x%llx (= 0x%x), handles%s", (int)th->wait,
                (unsigned long long)th->wake_at, (unsigned long long)th->wait_address, word, handles);
+      /* Stuck on a mutex: how it and the owner the word names got here. */
+      if (th->wait == WAIT_ARBITER_LOCK) {
+        scheduler_log_sync(&emulator->scheduler, th, "  sync");
+        for (uint32_t o = 0; o < SCHEDULER_MAX_THREADS; o++) {
+          const Sched_Thread *owner = &emulator->scheduler.threads[o];
+          if (owner->state != THREAD_STATE_FREE && owner->handle == (word & ~HLE_MUTEX_HAS_WAITERS))
+            scheduler_log_sync(&emulator->scheduler, owner, "  sync of owner");
+        }
+      }
     }
     if (!backtrace) continue;
     const CPU_Register_File *rf = emulator->cpu_backend->get_register_file(th->thread.cpu_state);

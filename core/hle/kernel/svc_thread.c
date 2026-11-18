@@ -375,12 +375,16 @@ static bool store_word(HLE_Context *c, uint64_t address, uint32_t value) {
 }
 
 /* Releases the mutex at `address` to its best waiter (or to nobody). */
-static uint32_t release_mutex(HLE_Context *c, uint64_t address) {
+static uint32_t release_mutex(HLE_Context *c, Sched_Thread *self, uint64_t address) {
   uint32_t waiters = 0;
   Sched_Thread *next = best_waiter(c->scheduler, WAIT_ARBITER_LOCK, address, &waiters);
   const uint32_t value = next ? (next->wait_tag | (waiters > 1u ? HLE_MUTEX_HAS_WAITERS : 0u)) : 0u;
   if (!store_word(c, address, value)) return HLE_RESULT_INVALID_MEMORY_STATE;
-  if (next) scheduler_wake(c->scheduler, next, HLE_RESULT_SUCCESS);
+  if (self) scheduler_note_sync(c->scheduler, self, SYNC_RELEASE, address, value);
+  if (next) {
+    scheduler_note_sync(c->scheduler, next, SYNC_HANDED, address, value);
+    scheduler_wake(c->scheduler, next, HLE_RESULT_SUCCESS);
+  }
   return HLE_RESULT_SUCCESS;
 }
 
@@ -392,10 +396,14 @@ void hle_svc_arbitrate_lock(HLE_Context *c, CPU_State *s) {
   uint32_t value = 0;
   if (!error_is_ok(vmm_read32(c->vmm, address, &value))) { r->x[0] = HLE_RESULT_INVALID_MEMORY_STATE; return; }
   r->x[0] = HLE_RESULT_SUCCESS;
-  if (value != (owner | HLE_MUTEX_HAS_WAITERS)) return; /* the lock changed hands already */
-  if (!thread_from_handle(c, s, owner)) { r->x[0] = HLE_RESULT_INVALID_HANDLE; return; }
   Sched_Thread *self = current(c, s);
+  if (value != (owner | HLE_MUTEX_HAS_WAITERS)) { /* the lock changed hands already */
+    if (self) scheduler_note_sync(c->scheduler, self, SYNC_LOCK_SKIP, address, value);
+    return;
+  }
+  if (!thread_from_handle(c, s, owner)) { r->x[0] = HLE_RESULT_INVALID_HANDLE; return; }
   if (!self) return;
+  scheduler_note_sync(c->scheduler, self, SYNC_LOCK_WAIT, address, value);
   self->wait_address = address;
   self->wait_tag = tag;
   scheduler_block(c->scheduler, self, WAIT_ARBITER_LOCK, SCHEDULER_WAIT_FOREVER);
@@ -405,7 +413,7 @@ void hle_svc_arbitrate_unlock(HLE_Context *c, CPU_State *s) {
   CPU_Register_File *r = regs(c, s);
   const uint64_t address = r->x[0];
   if (address & 3u) { r->x[0] = HLE_RESULT_INVALID_POINTER; return; }
-  r->x[0] = release_mutex(c, address);
+  r->x[0] = release_mutex(c, current(c, s), address);
 }
 
 void hle_svc_wait_process_wide_key_atomic(HLE_Context *c, CPU_State *s) {
@@ -419,11 +427,12 @@ void hle_svc_wait_process_wide_key_atomic(HLE_Context *c, CPU_State *s) {
    * decide whether to call SignalProcessWideKey. In the other order it can
    * read 0 and the wakeup is lost. */
   if (!store_word(c, key, 1u)) { r->x[0] = HLE_RESULT_INVALID_MEMORY_STATE; return; }
-  const uint32_t released = release_mutex(c, mutex);
+  Sched_Thread *self = current(c, s);
+  const uint32_t released = release_mutex(c, self, mutex);
   if (released != HLE_RESULT_SUCCESS) { r->x[0] = released; return; }
   if (timeout == 0) { r->x[0] = HLE_RESULT_TIMED_OUT; return; }
-  Sched_Thread *self = current(c, s);
   if (!self) { r->x[0] = HLE_RESULT_TIMED_OUT; return; }
+  scheduler_note_sync(c->scheduler, self, SYNC_COND_WAIT, key, (uint32_t)mutex);
   self->wait_address = key;
   self->mutex_address = mutex;
   self->wait_tag = tag;
@@ -453,14 +462,18 @@ void hle_svc_signal_process_wide_key(HLE_Context *c, CPU_State *s) {
       continue;
     }
     if (value == 0) {
+      scheduler_note_sync(c->scheduler, t, SYNC_COND_TAKEN, t->mutex_address, t->wait_tag);
       scheduler_wake(c->scheduler, t, HLE_RESULT_SUCCESS);
       continue;
     }
+    scheduler_note_sync(c->scheduler, t, SYNC_COND_TO_LOCK, t->mutex_address, value);
     t->wait = WAIT_ARBITER_LOCK; /* now waiting for the mutex, forever */
     t->wait_address = t->mutex_address;
     t->wake_at = SCHEDULER_WAIT_FOREVER;
   }
   if (!best_waiter(c->scheduler, WAIT_CONDITION, key, NULL)) (void)store_word(c, key, 0u);
+  Sched_Thread *self = current(c, s);
+  if (self) scheduler_note_sync(c->scheduler, self, SYNC_SIGNAL, key, (uint32_t)woken);
   r->x[0] = HLE_RESULT_SUCCESS;
 }
 
@@ -495,6 +508,7 @@ void hle_svc_wait_for_address(HLE_Context *c, CPU_State *s) {
   Sched_Thread *self = current(c, s);
   if (!self) { r->x[0] = HLE_RESULT_TIMED_OUT; return; }
   self->wait_address = address;
+  scheduler_note_sync(c->scheduler, self, SYNC_ADDR_WAIT, address, raw);
   scheduler_block(c->scheduler, self, WAIT_ADDRESS, timeout < 0 ? SCHEDULER_WAIT_FOREVER : (uint64_t)timeout);
 }
 
@@ -537,6 +551,8 @@ void hle_svc_signal_to_address(HLE_Context *c, CPU_State *s) {
     scheduler_wake(c->scheduler, t, HLE_RESULT_SUCCESS);
     woken++;
   }
+  Sched_Thread *self = current(c, s);
+  if (self) scheduler_note_sync(c->scheduler, self, SYNC_ADDR_SIGNAL, address, (uint32_t)woken);
   r->x[0] = HLE_RESULT_SUCCESS;
 }
 

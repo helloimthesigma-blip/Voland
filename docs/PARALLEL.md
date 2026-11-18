@@ -569,6 +569,18 @@ core nothing changes.
   the JIT) runs three host threads of LDREX/STREX and LDAEX/STLEX
   increments under random budgets: without the compare-and-swap it
   loses about a third of them.
+- **A full fence follows every AArch32 store-exclusive** with several
+  cores, stored or not - more than the architecture asks. Without it Mario
+  Kart 8 Deluxe froze about once in two Grand Prix cups: a job worker
+  took subsdk0's mutex through the SDK's STREX fast path just after
+  handing it on through the kernel (ArbitrateUnlock), then went idle
+  without releasing it; the main thread waited on it for ever. With the
+  fence 10 cups ran clean (and 10 more with a logging hook in the same
+  place whose atomic loads made the same barrier). Which guest ordering it
+  supplies is not pinned down; the thread dump's sync history
+  (`scheduler_note_sync`: each thread's latest mutex and condvar events,
+  plus a process-wide timeline) is the tool for the next such freeze.
+  AArch64's store-exclusives are unchanged.
 - **The exclusive monitor** is still cleared at every `run()` entry, and
   the grace rule (keep running up to 64 instructions past the budget
   while a monitor is held) still applies per core.

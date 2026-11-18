@@ -367,6 +367,15 @@ static Interp_Status store_exclusive_shared(A32_State *a, uint32_t address, uint
     pass = interp_compare_and_swap(host, a->s.exclusive_value, v, size);
     interp_exclusive_release(seq, a->s.exclusive_seq, pass);
   }
+  /* A full fence after every store-exclusive, whether it stored or not.
+   * Without it Mario Kart 8 Deluxe froze about once in two Grand Prix
+   * cups on three cores: a worker took a mutex (subsdk0's, through the
+   * SDK's STREX fast path) moments after handing it on through the kernel,
+   * and went idle without ever releasing it, the main thread waiting on it
+   * for ever. With the fence: 10 cups clean (and 10 with a logging hook
+   * here whose atomic loads made the same barrier). Which ordering of the
+   * guest's it supplies is not yet pinned down. */
+  __atomic_thread_fence(__ATOMIC_SEQ_CST);
   a->s.exclusive_valid = false;
   a32_set_reg(a, rd, pass ? 0u : 1u);
   return INTERP_CONTINUE;
