@@ -324,6 +324,9 @@ async function boot(): Promise<BootResult | null> {
 
   /* Debugging (tools/perf.mjs --dump-targets-at): the GPU worker's render
    * targets, read back on request. Nothing calls it in normal use. */
+  /* Diagnostics (__VOLAND_DEBUG__.unplugControllers): until then every
+   * controller reads as unplugged. */
+  let unpluggedUntil = 0;
   let debugTargetsResolve: ((targets: readonly DebugTargetImage[]) => void) | null = null;
   (globalThis as unknown as { __volandDebug?: { dumpTargets: () => Promise<readonly DebugTargetImage[]> } }).__volandDebug = {
     dumpTargets: (): Promise<readonly DebugTargetImage[]> =>
@@ -422,6 +425,9 @@ async function boot(): Promise<BootResult | null> {
             cpuWorker.postMessage({ type: "dump-threads", backtrace } satisfies MainToCPUMessage),
           setCpuSpeed: (percent: number) =>
             cpuWorker.postMessage({ type: "set-cpu-speed", percent } satisfies MainToCPUMessage),
+          unplugControllers: (ms: number) => {
+            unpluggedUntil = performance.now() + ms;
+          },
         };
         /* ?gpucompute=0: compute dispatches stay on the CPU. */
         if (new URLSearchParams(location.search).get("gpucompute") === "0") {
@@ -479,6 +485,7 @@ async function boot(): Promise<BootResult | null> {
       touchTarget: canvas,
       guestFps: () => window.__VOLAND_STATS__?.fps ?? 0,
       bindings: getBindings,
+      unplugged: () => performance.now() < unpluggedUntil,
       onConnectionChange: (change) => {
         const msg: MainToCPUMessage = change.connected
           ? { type: "controller-connected", index: change.slot, profileId: change.profileId }

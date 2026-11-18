@@ -79,6 +79,8 @@ export interface InputLoopOptions {
   readonly guestFps?: () => number;
   /** The player's current control bindings (read every frame). */
   readonly bindings?: () => Bindings;
+  /** Diagnostics: while true, every controller reads as unplugged. */
+  readonly unplugged?: () => boolean;
 }
 
 export interface ScreenBox {
@@ -179,7 +181,9 @@ export function startInputLoop(options: InputLoopOptions): () => void {
   const tick = (): void => {
     const now = performance.now();
     const holdMs = minimumHoldMs(options.guestFps?.() ?? 0);
+    const unplugged = options.unplugged?.() ?? false;
     const states = collectSlotStates(options.getGamepads(), keyboardActive, pressedKeys, currentBindings()).map((state, slot) => {
+      if (unplugged) return DISCONNECTED;
       const held = applyMinimumHold(holds[slot] ?? new Map(), state.buttons, now, holdMs);
       holds[slot] = held.state;
       return held.buttons === state.buttons ? state : { ...state, buttons: held.buttons };

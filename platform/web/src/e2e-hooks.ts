@@ -38,6 +38,9 @@ export interface VolandDebug {
   readonly dumpThreads: (backtrace: boolean) => void;
   /** The virtual CPU clock, % of the Switch's (as ?cpuspeed=N, but mid-run). */
   readonly setCpuSpeed: (percent: number) => void;
+  /** Every controller reads as unplugged for `ms` (how a title takes a
+   * controller leaving and coming back). */
+  readonly unplugControllers: (ms: number) => void;
 }
 
 declare global {

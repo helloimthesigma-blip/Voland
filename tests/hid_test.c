@@ -255,8 +255,20 @@ static void test_shared_memory_and_npads(void) {
   for (uint32_t i = 1; i < n; i++) CHECK(states[i - 1].sampling - states[i].sampling == 1);
   CHECK(states[0].buttons == INPUT_BUTTON_B && states[1].buttons == 0);
 
-  /* Disconnect: style 0, colors say NoController, event signalled. */
+  /* A read torn by a write in progress is not a disconnect: the sample
+   * waits for the write to land, and the style never changes. */
   CHECK(svc(SVC_RESET_SIGNAL, style_event, 0, 0, 0, NULL) == 0);
+  const uint64_t before_torn = g_emu.hid.sampling_number;
+  input_region_write_begin(g_region, 0);
+  sample();
+  CHECK(g_emu.hid.sampling_number == before_torn && !event->signaled);
+  CHECK(rd32(npad_gva(0) + HID_NPAD_STYLE_SET) == HID_STYLE_FULL_KEY);
+  input_region_write_end(g_region, 0);
+  sample();
+  CHECK(g_emu.hid.sampling_number == before_torn + 1 && !event->signaled);
+  CHECK(read_lifo(0, LIFO_FULL_KEY, states, 1) == 1 && states[0].attributes == HID_ATTR_IS_CONNECTED);
+
+  /* Disconnect: style 0, colors say NoController, event signalled. */
   set_slot(0, 0, 0, 0, false);
   sample();
   CHECK(rd32(npad_gva(0) + HID_NPAD_STYLE_SET) == 0 && rd32(npad_gva(0) + HID_NPAD_FULL_KEY_COLOR) == 2u);
