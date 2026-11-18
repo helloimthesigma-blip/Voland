@@ -232,6 +232,7 @@ static void finish(const Builder *b, const char *name, bool float_compare) {
   desc.target_int_mask = 1u; /* raw register bits out (rgba32uint) */
   desc.hw_sample_mask = g_hw_sample_mask;
   g_hw_sample_mask = 0;
+  desc.planar_mask = g_vector_3d ? 0u : ~0u; /* as a draw's: only a 3D texture's samples blend slices */
   const Wgsl_Result r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   if (!r.ok) fprintf(stderr, "[wgsl_test] %s: %s\n", name, r.reason);
   CHECK(r.ok);
@@ -501,6 +502,23 @@ static void vector_texture_hw(void) {
   emit(&b, EXIT());
   g_hw_sample_mask = 1u;
   finish(&b, "texture_hw", true);
+}
+
+/* TEXS 2D DC beside a hardware sampler: a sample with a depth reference
+ * is filtered in the shader (the sampler here compares nothing, so the
+ * texel comes back as it is). */
+static void vector_texture_hw_shadow(void) {
+  Builder b;
+  begin(&b);
+  put_varying(0, 0.3f, 0.6f, 0.0f, 0.0f);
+  put_varying(1, 1.0f, 2.0f, 0.0f, 0.0f);
+  emit(&b, IPA(4, SM_ATTR_GENERIC, 0, (uint32_t)RZ));
+  emit(&b, IPA(5, SM_ATTR_GENERIC + 4u, 0, (uint32_t)RZ));
+  emit(&b, IPA(6, SM_ATTR_GENERIC + 16u, 0, (uint32_t)RZ)); /* depth reference 1.0 */
+  emit(&b, TEXS(0, 2, 4, 6, 4, 4, 0));
+  emit(&b, EXIT());
+  g_hw_sample_mask = 1u;
+  finish(&b, "texture_hw_shadow", true);
 }
 
 /* TEXS 2D LL: the explicit level picks level 1 (see g_mip_vector). */
@@ -808,6 +826,7 @@ int main(int argc, char **argv) {
   vector_pset();
   vector_texture_3d();
   vector_texture_hw();
+  vector_texture_hw_shadow();
   vector_texture_lod();
   vector_shfl();
   vector_kill();

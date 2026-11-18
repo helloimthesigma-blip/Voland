@@ -11,7 +11,10 @@
  * executor derives a GPURenderPipelineDescriptor from.
  */
 
-export const SHADER_CACHE_VERSION = 2; /* 2: draws read constant buffers from the pool (stream version 9) */
+/* 2: draws read constant buffers from the pool (stream version 9).
+ * 3: texture helpers follow each texture's use, which changed the text of
+ *    nearly every shader: the old entries would be prewarmed for nothing. */
+export const SHADER_CACHE_VERSION = 3;
 const CACHE_DIRECTORY = "shader-cache";
 /* Bounds per title: the newest entries win. */
 const MAX_SHADERS = 4096;

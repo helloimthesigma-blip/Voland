@@ -69,6 +69,7 @@ typedef struct Tr {
   uint8_t reg_used[SM_REGISTERS / 8u];
   uint32_t cbuf_slots;
   uint32_t textures_used;
+  uint32_t textures_shadow; /* ... sampled against a depth reference somewhere */
   bool uses_local;
   bool indirect;    /* a reachable BRX: every word is a block (find_indirect_blocks) */
   bool straight;    /* no branches or flow stacks: blocks run in order, no dispatch loop */
@@ -592,8 +593,17 @@ static const char *const k_prelude[] = {
 
 /* Per-texture helpers (texture.c's texel_at / tex_sample / tex_gather /
  * tex_fetch); %1$u = index, %2$s = the WGSL sample type, %3$s = the texel
- * -> u32 conversion, %4$s = whether bilinear filtering applies. */
-static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool hw) {
+ * -> u32 conversion, %4$s = whether bilinear filtering applies.
+ *
+ * Every call of these is inlined where the GPU's compiler builds the
+ * pipeline, so their size is what a first draw waits for (Mario Kart 8
+ * Deluxe: ten textures a pixel shader, two seconds a pipeline on Apple's
+ * compiler, a minute or more at a course's first frames). Hence one wrap
+ * per row and column rather than per texel, one exit, the slice blend
+ * only where the texture can be 3D (`planar` rules it out), and no
+ * filtering in the shader beside a hardware sampler (`hw`) unless a
+ * sample compares depth (`shadowed`), which that sampler cannot. */
+static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool hw, bool planar, bool shadowed) {
   const char *type = sample_type == WGSL_SAMPLE_UINT ? "u32" : (sample_type == WGSL_SAMPLE_SINT ? "i32" : "f32");
   const char *conv = sample_type == WGSL_SAMPLE_UINT ? "v" : "bitcast<vec4<u32>>(v)";
   const bool filterable = sample_type == WGSL_SAMPLE_FLOAT;
@@ -608,16 +618,19 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
           "  return max(vec2<i32>(i32(s & 0xffffu) >> lv, i32(s >> 16u) >> lv), vec2<i32>(1));\n"
           "}\n",
           i, pw + WGSL_TEXP_SIZE, i);
+  /* The texel at wrapped coordinates (wrapi's; negative: the border). */
   out_add(o,
-          "fn t%u_texel(x: i32, y: i32, l: u32, lv: u32) -> vec4<u32> {\n"
-          "  let dm = t%u_size(lv); let wr = D[%uu];\n"
-          "  let wx = wrapi(x, dm.x, wr & 15u); let wy = wrapi(y, dm.y, (wr >> 4u) & 15u);\n"
+          "fn t%u_raw(wx: i32, wy: i32, l: u32, lv: u32) -> vec4<u32> {\n"
           "  if (wx < 0 || wy < 0) { return vec4<u32>(D[%uu], D[%uu], D[%uu], D[%uu]); }\n"
           "  let v = textureLoad(T%u, vec2<i32>(wx, wy), min(l, textureNumLayers(T%u) - 1u), lv);\n"
           "  return %s;\n"
+          "}\n"
+          "fn t%u_texel(x: i32, y: i32, l: u32, lv: u32) -> vec4<u32> {\n"
+          "  let dm = t%u_size(lv); let wr = D[%uu];\n"
+          "  return t%u_raw(wrapi(x, dm.x, wr & 15u), wrapi(y, dm.y, (wr >> 4u) & 15u), l, lv);\n"
           "}\n",
-          i, i, pw + WGSL_TEXP_WRAP, pw + WGSL_TEXP_BORDER, pw + WGSL_TEXP_BORDER + 1u, pw + WGSL_TEXP_BORDER + 2u,
-          pw + WGSL_TEXP_BORDER + 3u, i, i, conv);
+          i, pw + WGSL_TEXP_BORDER, pw + WGSL_TEXP_BORDER + 1u, pw + WGSL_TEXP_BORDER + 2u, pw + WGSL_TEXP_BORDER + 3u, i,
+          i, conv, i, i, pw + WGSL_TEXP_WRAP, i);
   /* Coordinates -> texel space (resolve_coords): (u, v, layer). */
   out_add(o,
           "fn t%u_coords(c: vec3<f32>, layer: f32) -> vec3<f32> {\n"
@@ -633,7 +646,7 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
   if (hw)
     snprintf(hw_tap, sizeof(hw_tap),
              "  if (!shadow) { let uv = (q0.xy + vec2<f32>(off)) / vec2<f32>(textureDimensions(T%u));\n"
-             "    return swz(bitcast<vec4<u32>>(textureSampleLevel(T%u, S%u, uv, l, lf)), sw); }\n",
+             "    o = bitcast<vec4<u32>>(textureSampleLevel(T%u, S%u, uv, l, lf)); } else\n",
              i, i, i);
   /* Level selection: `lod` is the instruction's (explicit, or implicit
    * from derivatives plus biases); the sampler clamps it, the texture's
@@ -646,60 +659,90 @@ static void emit_texture_helpers(Out *o, uint32_t i, uint8_t sample_type, bool h
           "  return 0.5 * log2(r) + F(D[%uu]);\n"
           "}\n",
           i, i, pw + WGSL_TEXP_LOD_BIAS);
-  out_add(o,
-          "fn t%u_sample2(c: vec3<f32>, layer: f32, dref: f32, shadow: bool, off: vec2<i32>, lod: f32) -> vec4<u32> {\n"
-          "  let fl = D[%uu]; let sw = D[%uu]; let cf = D[%uu];\n"
-          "  let q0 = t%u_coords(c, layer); let l = u32(q0.z);\n"
-          "  let nl = textureNumLevels(T%u); var lf = 0.0; var lv = 0u; var lin = (fl & %uu) != 0u;\n"
-          "  if (nl > 1u) { let lc = clamp(lod, F(D[%uu]), F(D[%uu]));\n"
-          "    lf = clamp(lc, 0.0, f32(nl - 1u)); lv = u32(floor(lf + 0.5)); if (lc > 0.0) { lin = (fl & %uu) != 0u; } }\n"
-          "  var q = q0; if (lv > 0u) { q = vec3<f32>(q0.xy * vec2<f32>(t%u_size(lv)) /\n"
-          "    vec2<f32>(t%u_size(0u)), q0.z); }\n"
-          "  let cmp = shadow && (fl & %uu) != 0u;\n"
-          "%s"
-          "  if (!%s || !lin) {\n"
-          "    var tx = t%u_texel(i32(floor(q.x)) + off.x, i32(floor(q.y)) + off.y, l, lv);\n"
-          "    if (cmp) { let r = select(0u, 0x3f800000u, tcmp(cf, dref, F(tx.x))); tx = vec4<u32>(r, r, r, tx.w); }\n"
-          "    return swz(tx, sw);\n"
-          "  }\n"
-          "  let x = q.x - 0.5; let y = q.y - 0.5; let fx = floor(x); let fy = floor(y);\n"
-          "  let ax = x - fx; let ay = y - fy; let x0 = i32(fx) + off.x; let y0 = i32(fy) + off.y;\n"
-          "  let t00 = t%u_texel(x0, y0, l, lv); let t10 = t%u_texel(x0 + 1, y0, l, lv);\n"
-          "  var t01 = t%u_texel(x0, y0 + 1, l, lv); var t11 = t%u_texel(x0 + 1, y0 + 1, l, lv);\n"
-          "  if (t%u_size(lv).y <= 1) { t01 = t00; t11 = t10; }\n"
-          "  var a = bitcast<vec4<f32>>(t00); var b = bitcast<vec4<f32>>(t10);\n"
-          "  var cc = bitcast<vec4<f32>>(t01); var d = bitcast<vec4<f32>>(t11);\n"
-          "  if (cmp) {\n"
-          "    a = vec4<f32>(select(0.0, 1.0, tcmp(cf, dref, a.x))); b = vec4<f32>(select(0.0, 1.0, tcmp(cf, dref, b.x)));\n"
-          "    cc = vec4<f32>(select(0.0, 1.0, tcmp(cf, dref, cc.x))); d = vec4<f32>(select(0.0, 1.0, tcmp(cf, dref, d.x)));\n"
-          "  }\n"
-          "  let top = a + (b - a) * ax; let bottom = cc + (d - cc) * ax;\n"
-          "  return swz(bitcast<vec4<u32>>(top + (bottom - top) * ay), sw);\n"
-          "}\n",
-          i, pw + WGSL_TEXP_FLAGS, pw + WGSL_TEXP_SWIZZLE, pw + WGSL_TEXP_COMPARE, i, i, WGSL_TEXP_LINEAR,
-          pw + WGSL_TEXP_MIN_LOD, pw + WGSL_TEXP_MAX_LOD, WGSL_TEXP_MIN_LINEAR, i, i, WGSL_TEXP_DEPTH_COMPARE, hw_tap,
-          filterable ? "true" : "false", i, i, i, i, i, i);
+  if (hw && !shadowed) {
+    out_add(o,
+            "fn t%u_sample2(c: vec3<f32>, layer: f32, dref: f32, shadow: bool, off: vec2<i32>, lod: f32) -> vec4<u32> {\n"
+            "  let q0 = t%u_coords(c, layer); let l = u32(q0.z);\n"
+            "  let nl = textureNumLevels(T%u); var lf = 0.0;\n"
+            "  if (nl > 1u) { lf = clamp(clamp(lod, F(D[%uu]), F(D[%uu])), 0.0, f32(nl - 1u)); }\n"
+            "  let uv = (q0.xy + vec2<f32>(off)) / vec2<f32>(textureDimensions(T%u));\n"
+            "  return swz(bitcast<vec4<u32>>(textureSampleLevel(T%u, S%u, uv, l, lf)), D[%uu]);\n"
+            "}\n",
+            i, i, i, pw + WGSL_TEXP_MIN_LOD, pw + WGSL_TEXP_MAX_LOD, i, i, i, pw + WGSL_TEXP_SWIZZLE);
+  } else {
+    out_add(o,
+            "fn t%u_sample2(c: vec3<f32>, layer: f32, dref: f32, shadow: bool, off: vec2<i32>, lod: f32) -> vec4<u32> {\n"
+            "  let fl = D[%uu]; let sw = D[%uu]; let cf = D[%uu];\n"
+            "  let q0 = t%u_coords(c, layer); let l = u32(q0.z);\n"
+            "  let nl = textureNumLevels(T%u); var lf = 0.0; var lv = 0u; var lin = (fl & %uu) != 0u;\n"
+            "  if (nl > 1u) { let lc = clamp(lod, F(D[%uu]), F(D[%uu]));\n"
+            "    lf = clamp(lc, 0.0, f32(nl - 1u)); lv = u32(floor(lf + 0.5)); if (lc > 0.0) { lin = (fl & %uu) != 0u; } }\n"
+            "  var q = q0; if (lv > 0u) { q = vec3<f32>(q0.xy * vec2<f32>(t%u_size(lv)) /\n"
+            "    vec2<f32>(t%u_size(0u)), q0.z); }\n"
+            "  let cmp = shadow && (fl & %uu) != 0u;\n"
+            "  var o: vec4<u32>;\n"
+            "%s"
+            "  {\n"
+            "    let near = !%s || !lin; let h = select(0.5, 0.0, near);\n"
+            "    let x = q.x - h; let y = q.y - h; let fx = floor(x); let fy = floor(y);\n"
+            "    let x0 = i32(fx) + off.x; let y0 = i32(fy) + off.y;\n"
+            "    let dm = t%u_size(lv); let wr = D[%uu]; let mx = wr & 15u; let my = (wr >> 4u) & 15u;\n"
+            "    let wx0 = wrapi(x0, dm.x, mx); let wy0 = wrapi(y0, dm.y, my);\n"
+            "    let t00 = t%u_raw(wx0, wy0, l, lv);\n"
+            "    if (near) {\n"
+            "      o = t00;\n"
+            "      if (cmp) { let r = select(0u, 0x3f800000u, tcmp(cf, dref, F(t00.x))); o = vec4<u32>(r, r, r, t00.w); }\n"
+            "    } else {\n"
+            "      let wx1 = wrapi(x0 + 1, dm.x, mx); let wy1 = wrapi(y0 + 1, dm.y, my);\n"
+            "      let t10 = t%u_raw(wx1, wy0, l, lv);\n"
+            "      var t01 = t%u_raw(wx0, wy1, l, lv); var t11 = t%u_raw(wx1, wy1, l, lv);\n"
+            "      if (dm.y <= 1) { t01 = t00; t11 = t10; }\n"
+            "      var a = bitcast<vec4<f32>>(t00); var b = bitcast<vec4<f32>>(t10);\n"
+            "      var cc = bitcast<vec4<f32>>(t01); var d = bitcast<vec4<f32>>(t11);\n"
+            "      if (cmp) {\n"
+            "        a = vec4<f32>(select(0.0, 1.0, tcmp(cf, dref, a.x))); b = vec4<f32>(select(0.0, 1.0, tcmp(cf, dref, b.x)));\n"
+            "        cc = vec4<f32>(select(0.0, 1.0, tcmp(cf, dref, cc.x))); d = vec4<f32>(select(0.0, 1.0, tcmp(cf, dref, d.x)));\n"
+            "      }\n"
+            "      let ax = x - fx; let ay = y - fy;\n"
+            "      let top = a + (b - a) * ax; let bottom = cc + (d - cc) * ax;\n"
+            "      o = bitcast<vec4<u32>>(top + (bottom - top) * ay);\n"
+            "    }\n"
+            "  }\n"
+            "  return swz(o, sw);\n"
+            "}\n",
+            i, pw + WGSL_TEXP_FLAGS, pw + WGSL_TEXP_SWIZZLE, pw + WGSL_TEXP_COMPARE, i, i, WGSL_TEXP_LINEAR,
+            pw + WGSL_TEXP_MIN_LOD, pw + WGSL_TEXP_MAX_LOD, WGSL_TEXP_MIN_LINEAR, i, i, WGSL_TEXP_DEPTH_COMPARE, hw_tap,
+            filterable ? "true" : "false", i, pw + WGSL_TEXP_WRAP, i, i, i, i);
+  }
   /* 3D textures arrive as layers (their slices): blend the two around r
    * (texture.c tex_sample's arithmetic), or take the nearest. */
-  out_add(o,
-          "fn t%u_sample(c: vec3<f32>, layer: f32, dref: f32, shadow: bool, off: vec2<i32>, lod: f32) -> vec4<u32> {\n"
-          "  let fl = D[%uu];\n"
-          "  if ((fl & %uu) == 0u) { return t%u_sample2(c, layer, dref, shadow, off, lod); }\n"
-          "  let n = i32(textureNumLayers(T%u)); let wm = (D[%uu] >> 8u) & 15u;\n"
-          "  let w = select(c.z, c.z * f32(n), (fl & %uu) != 0u);\n"
-          "  if ((fl & %uu) == 0u) {\n"
-          "    let z = max(wrapi(i32(clamp(floor(w), -1073741824.0, 1073741824.0)), n, wm), 0);\n"
-          "    return t%u_sample2(vec3<f32>(c.xy, 0.0), f32(z), dref, shadow, off, lod);\n"
-          "  }\n"
-          "  let z = w - 0.5; let z0f = floor(z); let az = z - z0f;\n"
-          "  let zi = i32(clamp(z0f, -1073741824.0, 1073741824.0));\n"
-          "  var z0 = wrapi(zi, n, wm); var z1 = wrapi(zi + 1, n, wm);\n"
-          "  if (z0 < 0) { z0 = 0; } if (z1 < 0) { z1 = n - 1; }\n"
-          "  let a = bitcast<vec4<f32>>(t%u_sample2(vec3<f32>(c.xy, 0.0), f32(z0), dref, shadow, off, lod));\n"
-          "  let b = bitcast<vec4<f32>>(t%u_sample2(vec3<f32>(c.xy, 0.0), f32(z1), dref, shadow, off, lod));\n"
-          "  return bitcast<vec4<u32>>(a + (b - a) * az);\n"
-          "}\n",
-          i, pw + WGSL_TEXP_FLAGS, WGSL_TEXP_3D, i, i, pw + WGSL_TEXP_WRAP, WGSL_TEXP_SCALE, WGSL_TEXP_LINEAR, i, i, i);
+  if (planar) {
+    out_add(o,
+            "fn t%u_sample(c: vec3<f32>, layer: f32, dref: f32, shadow: bool, off: vec2<i32>, lod: f32) -> vec4<u32> {\n"
+            "  return t%u_sample2(c, layer, dref, shadow, off, lod);\n"
+            "}\n",
+            i, i);
+  } else {
+    out_add(o,
+            "fn t%u_sample(c: vec3<f32>, layer: f32, dref: f32, shadow: bool, off: vec2<i32>, lod: f32) -> vec4<u32> {\n"
+            "  let fl = D[%uu];\n"
+            "  if ((fl & %uu) == 0u) { return t%u_sample2(c, layer, dref, shadow, off, lod); }\n"
+            "  let n = i32(textureNumLayers(T%u)); let wm = (D[%uu] >> 8u) & 15u;\n"
+            "  let w = select(c.z, c.z * f32(n), (fl & %uu) != 0u);\n"
+            "  if ((fl & %uu) == 0u) {\n"
+            "    let z = max(wrapi(i32(clamp(floor(w), -1073741824.0, 1073741824.0)), n, wm), 0);\n"
+            "    return t%u_sample2(vec3<f32>(c.xy, 0.0), f32(z), dref, shadow, off, lod);\n"
+            "  }\n"
+            "  let z = w - 0.5; let z0f = floor(z); let az = z - z0f;\n"
+            "  let zi = i32(clamp(z0f, -1073741824.0, 1073741824.0));\n"
+            "  var z0 = wrapi(zi, n, wm); var z1 = wrapi(zi + 1, n, wm);\n"
+            "  if (z0 < 0) { z0 = 0; } if (z1 < 0) { z1 = n - 1; }\n"
+            "  let a = bitcast<vec4<f32>>(t%u_sample2(vec3<f32>(c.xy, 0.0), f32(z0), dref, shadow, off, lod));\n"
+            "  let b = bitcast<vec4<f32>>(t%u_sample2(vec3<f32>(c.xy, 0.0), f32(z1), dref, shadow, off, lod));\n"
+            "  return bitcast<vec4<u32>>(a + (b - a) * az);\n"
+            "}\n",
+            i, pw + WGSL_TEXP_FLAGS, WGSL_TEXP_3D, i, i, pw + WGSL_TEXP_WRAP, WGSL_TEXP_SCALE, WGSL_TEXP_LINEAR, i, i, i);
+  }
   out_add(o,
           "fn t%u_gather(c: vec3<f32>, layer: f32, comp: u32, dref: f32, shadow: bool, off: vec2<i32>) -> vec4<u32> {\n"
           "  let fl = D[%uu]; let sw = D[%uu]; let cf = D[%uu];\n"
@@ -860,6 +903,7 @@ static void emit_texs(Tr *t, const Sm_Insn *in, uint32_t pc) {
   } else {
     EMIT("let tc = vec3<f32>(%s, %s, %s); let tl = %s; ", x.s, y.s, z.s, layer.s);
     const Ex l = lod_expr(t, b, mode, lod, ex("tc"), ex("tl"));
+    if (shadow) t->textures_shadow |= 1u << b;
     EMIT("let tx = t%u_sample(tc, tl, %s, %s, vec2<i32>(0), %s); ", b, dref.s, shadow ? "true" : "false", l.s);
   }
   write_scalar(t, w, comps, n, !BIT(w, SM_TEXS_F32_BIT));
@@ -999,6 +1043,7 @@ static void emit_tex_vector(Tr *t, const Sm_Insn *in, uint32_t pc) {
                             : lod_zero          ? LOD_ZERO
                                                 : LOD_AUTO;
       const Ex l = lod_expr(t, b, mode, lod_value, ex("tc"), ex("tl"));
+      if (dc) t->textures_shadow |= 1u << b;
       EMIT("let tx = t%u_sample(tc, tl, %s, %s, %s, %s); ", b, dref.s, dc ? "true" : "false", off.s, l.s);
     }
   }
@@ -2949,7 +2994,8 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   for (uint32_t i = 0; i < desc->texture_count && i < WGSL_MAX_TEXTURES; i++)
     if ((t->textures_used >> i) & 1u)
       emit_texture_helpers(&head, i, desc->sample_type[i],
-                           ((desc->hw_sample_mask >> i) & 1u) && desc->sample_type[i] == WGSL_SAMPLE_FLOAT);
+                           ((desc->hw_sample_mask >> i) & 1u) && desc->sample_type[i] == WGSL_SAMPLE_FLOAT,
+                           (desc->planar_mask >> i) & 1u, (t->textures_shadow >> i) & 1u);
   if (t->compute) {
     emit_compute_head(t, &head);
   } else if (t->vertex) {
@@ -3130,6 +3176,7 @@ uint64_t wgsl_desc_hash(const Wgsl_Program_Desc *desc, const Sm_Program *program
   MIX(&desc->target_sint_mask, sizeof(desc->target_sint_mask));
   MIX(&desc->mrt, sizeof(desc->mrt));
   MIX(&desc->hw_sample_mask, sizeof(desc->hw_sample_mask));
+  MIX(&desc->planar_mask, sizeof(desc->planar_mask));
   MIX(&desc->stage, sizeof(desc->stage));
   if (desc->stage == SM_STAGE_VERTEX) {
     MIX(&desc->vertex_pull, sizeof(desc->vertex_pull));

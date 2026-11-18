@@ -172,6 +172,10 @@ typedef struct Wgsl_Program_Desc {
    * filterable and its wrap modes are WebGPU's (repeat, mirror, clamp to
    * edge), so the result is the reference's (filtering weights aside). */
   uint32_t hw_sample_mask;
+  /* Bit per texture: not a 3D texture (WGSL_TEXP_3D never set for it), so
+   * its samples carry no slice blend - a third of the code otherwise, and
+   * of the time the GPU's compiler takes over the pipeline. */
+  uint32_t planar_mask;
   /* Varyings: generic input vector v arrives at location varying_location[v]
    * (0xff: not passed); flat_mask bit per location (not interpolated). */
   uint8_t varying_location[SM_ATTR_GENERIC_COUNT];

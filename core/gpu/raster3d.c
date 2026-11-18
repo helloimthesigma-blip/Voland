@@ -5040,6 +5040,7 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
   memset(d->binding_of, WGSL_NO_BINDING, sizeof(d->binding_of));
   d->texture_count = 0;
   d->hw_sample_mask = 0;
+  d->planar_mask = 0;
   d->varying_count = g->locations;
   d->flat_mask = g->flat_mask;
   d->perspective_mask = 0;
@@ -5364,6 +5365,7 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
   }
   texture_id[b] = id;
   desc->sample_type[b] = (uint8_t)sample_type;
+  if (h.type != TEX_TYPE_3D) desc->planar_mask |= 1u << b;
   uint32_t *p = data + WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEX_PARAM_WORDS * b;
   const bool cube = h.type == TEX_TYPE_CUBE || h.type == TEX_TYPE_CUBE_ARRAY;
   p[WGSL_TEXP_FLAGS] = ((h.normalized || cube) ? WGSL_TEXP_SCALE : 0u) |
@@ -5408,6 +5410,7 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
   memset(desc->binding_of, WGSL_NO_BINDING, sizeof(desc->binding_of));
   desc->texture_count = 0;
   desc->hw_sample_mask = 0;
+  desc->planar_mask = 0;
   uint32_t *data = r->gpu_data;
   memset(data, 0, WGSL_DRAW_CONSTANT_WORDS * 4u);
   uint32_t handles[WGSL_MAX_TEXTURES];
@@ -5429,6 +5432,7 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
     g->vs_desc.texture_count = desc->texture_count;
     memcpy(g->vs_desc.sample_type, desc->sample_type, sizeof(desc->sample_type));
     g->vs_desc.hw_sample_mask = desc->hw_sample_mask;
+    g->vs_desc.planar_mask = desc->planar_mask;
     g->vs_shader_id = gpu_shader_for(r, ctx->vs, &g->vs_desc);
     if (g->vs_shader_id == GPU_SHADER_FAILED) return false;
   }
@@ -6964,6 +6968,7 @@ static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute
   memset(desc.binding_of, WGSL_NO_BINDING, sizeof(desc.binding_of));
   desc.texture_count = 0;
   desc.hw_sample_mask = 0;
+  desc.planar_mask = 0;
   uint32_t handles[WGSL_MAX_TEXTURES], texture_id[WGSL_MAX_TEXTURES], sampler_state[WGSL_MAX_TEXTURES];
   for (uint32_t i = 0; i < probe.count; i++) {
     uint32_t b = 0;
