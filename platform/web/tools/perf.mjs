@@ -71,11 +71,12 @@
  * - --drive FILE: after the warm-up, take commands appended to FILE (one
  *   per line) before measuring - to steer a game by eye, e.g. through
  *   menus to the scene to profile: "press KEY MS" (hold KEY for MS wall
- *   milliseconds), "shot FILE.png", "slices N" (wait for N more guest slices), "threads" (guest threads to the log), "stats", "click TESTID" (e.g.
+ *   milliseconds), "shot FILE.png", "slices N" (wait for N more guest slices), "threads" (guest threads to the log), "stats" (totals since load: slices, virtual time, presents, file reads, GPU waits), "click TESTID" (e.g.
  *   state-save, state-load), "status TESTID" (prints its text), "select TESTID VALUE" (a
  *   setting, e.g. frame-skip 2), "cpuspeed PERCENT" (the virtual CPU
  *   clock, as ?cpuspeed=), "measure S" (fps and virtual-time rate over S
- *   wall seconds), "cheat NAME" (switch on the running cheat whose name
+ *   wall seconds), "profile-start" / "profile-stop" (the CPU and GPU
+ *   workers sampled between the two; top self times to the log), "cheat NAME" (switch on the running cheat whose name
  *   contains NAME, the rest of the line), "export-saves FILE" (the Saves
  *   panel's backup tar, for --restore-saves), "sleep MS", "go"
  *   (measure now). Each
@@ -115,6 +116,8 @@ const TICKS_PER_SECOND = 19_200_000;
 const STALL_DUMP_MS = 60_000; /* frames stopped this long while warming up: dump threads once */
 const SHOT_TIMEOUT_MS = 180_000;
 const ALLOC_SAMPLING_BYTES = 1024; /* --alloc: one sample per this many bytes allocated */
+const DRIVE_PROFILE_INTERVAL_US = 1000; /* the drive file's "profile-start": the sampling interval */
+const DRIVE_PROFILE_TOP = 14; /* ... and how many functions "profile-stop" lists per worker */
 const BROWSER_CLOSE_WAIT_MS = 10_000;
 const HARDWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"];
 const SOFTWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"];
@@ -694,6 +697,7 @@ async function main() {
       /* Commands appended to the drive file, until "go". */
       const { readFileSync } = await import("node:fs");
       let done = 0;
+      let driveProfile = null; /* "profile-start": the CDP connection and its worker sessions */
       console.log(`drive: waiting for commands in ${opts.drive}`);
       for (;;) {
         let lines = [];
@@ -756,11 +760,46 @@ async function main() {
           note = `${await dumpTargets(page, arg, arg2 ?? "t")} render targets`;
         } else if (cmd === "stats") {
           const now = await sample();
-          note = `slices ${now.perf.slices} virtual ${(now.perf.ticks / TICKS_PER_SECOND).toFixed(1)} s presents ${now.presents} fps ${now.fps}`;
+          /* Totals since load, so two "stats" bracket a stall: game-file
+           * reads, the producer's waits on the GPU worker (a full ring, the
+           * GPU thread's lock, times it was too far behind) and time
+           * between bursts. */
+          note = `slices ${now.perf.slices} virtual ${(now.perf.ticks / TICKS_PER_SECOND).toFixed(1)} s presents ${now.presents} ` +
+                 `files ${now.perf.fileReads} reads ${(now.perf.fileReadBytes / 1048576).toFixed(0)} MiB ${(now.perf.fileReadMs / 1000).toFixed(1)} s ` +
+                 `gpu waits ${now.perf.gpuStalls} ${((now.perf.streamWaitMs ?? 0) / 1000).toFixed(1)} s lock ${((now.perf.gpuLockMs ?? 0) / 1000).toFixed(1)} s ` +
+                 `behind ${now.perf.gpuLatencyStalls ?? 0} yield ${(now.perf.yieldMs / 1000).toFixed(1)} s fps ${now.fps}`;
+        } else if (cmd === "profile-start") {
+          /* profile-start ... profile-stop: the CPU and GPU workers sampled
+           * between the two, e.g. around the "press" that spans a load. */
+          try {
+            if (!driveProfile) {
+              const cdp = await Cdp.connect(opts.debugPort);
+              driveProfile = { cdp, sessions: await attachToWorkers(cdp, baseUrl, [/cpu\.worker/, /gpu\.worker/]) };
+            }
+            for (const session of driveProfile.sessions) {
+              await driveProfile.cdp.send("Profiler.enable", {}, session);
+              await driveProfile.cdp.send("Profiler.setSamplingInterval", { interval: DRIVE_PROFILE_INTERVAL_US }, session);
+              await driveProfile.cdp.send("Profiler.start", {}, session);
+            }
+          } catch (e) {
+            note = `failed: ${e}`; /* the run goes on unprofiled */
+          }
+        } else if (cmd === "profile-stop" && driveProfile) {
+          mkdirSync(opts.outDir, { recursive: true });
+          for (const [i, worker] of ["cpu", "gpu"].entries()) {
+            const { profile } = await driveProfile.cdp.send("Profiler.stop", {}, driveProfile.sessions[i]);
+            const file = join(opts.outDir, `drive-${done + 1}-${worker}-worker.cpuprofile`);
+            writeFileSync(file, JSON.stringify(profile));
+            console.log(`drive: ${worker} worker profile (self time), saved to ${file}:`);
+            for (const line of summariseProfile(profile, DRIVE_PROFILE_TOP)) console.log(`  ${line}`);
+          }
         }
         done++;
         console.log(`drive: ${done} done ${lines[done - 1]} ${note}`);
-        if (cmd === "go") break;
+        if (cmd === "go") {
+          driveProfile?.cdp.close();
+          break;
+        }
       }
       s = await sample();
     }
