@@ -5,7 +5,7 @@
  * input gets §1.6's dumping-guide error. "Run the demo" loads Voland's own
  * hand-written homebrew (public/demo/hello.nro, from tests/guest/hello.s).
  */
-import { For, Match, Show, Switch, createEffect, createSignal, onCleanup, onMount } from "solid-js";
+import { For, Match, Show, Switch, createEffect, createMemo, createSignal, onCleanup, onMount } from "solid-js";
 import { registerRestart } from "../restart";
 import { Portal } from "solid-js/web";
 import { SYSTEM_FILES, systemFileName } from "@bindings/load";
@@ -279,10 +279,12 @@ function LoadPanel(props: LoadPanelProps) {
   /* After a crash or a hang: the newest save state of the running game. */
   const [crashState, setCrashState] = createSignal<SavestateInfo | null>(null);
   const [reportCopied, setReportCopied] = createSignal(false);
+  /* By the stop itself: the guest's status goes on changing after it (its
+   * detail, its counters), and "Report copied" would be taken back. */
+  const stopped = createMemo(() => guest().runState === "crashed" || guest().runState === "deadlock");
   createEffect(() => {
     const s = state();
-    const stopped = guest().runState === "crashed" || guest().runState === "deadlock";
-    if (s.kind !== "loaded" || !stopped) {
+    if (s.kind !== "loaded" || !stopped()) {
       setCrashState(null);
       return;
     }
