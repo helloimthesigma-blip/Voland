@@ -215,6 +215,13 @@ export type MainToGPUMessage =
       /* Diagnostics (?writestaging=0): buffer writes under pending commands
        * submit the batch first instead of copying in command order. */
       readonly noWriteStaging: boolean;
+      /* Diagnostics (?lookahead=0): pipelines are built as the draws ask,
+       * not ahead of them from the records the stream already holds. */
+      readonly noLookAhead: boolean;
+      /* Diagnostics (?shadersalt=N, N > 0): every shader is new to
+       * the GPU's compiler and the persistent shader cache stays out of
+       * it - a title's first visit to each scene, as often as wanted. */
+      readonly shaderSalt: number;
     }
   | { readonly type: "resize"; readonly width: number; readonly height: number }
   /* The title that just loaded (lifecycle): its persistent shader cache

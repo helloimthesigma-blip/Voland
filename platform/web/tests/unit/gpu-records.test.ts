@@ -6,7 +6,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { DRAW_BYTES, createDrawScratch, parseDraw, parseDrawInto } from "../../bindings/gpu-records.ts";
+import {
+  DRAW_BYTES, DRAW_SHADER_AT, DRAW_VS_SHADER_AT, createDrawScratch, parseDraw, parseDrawInto,
+} from "../../bindings/gpu-records.ts";
 
 /** A draw record whose every word is distinct (word i = i * 7 + seed), with `targets` targets. */
 function record(targets: number, seed: number): DataView {
@@ -32,4 +34,12 @@ test("parseDrawInto reuses one object and its target arrays", () => {
   assert.equal(second, first);
   assert.equal(second.targets, firstTargets);
   assert.equal(second.targets.length, 2);
+});
+
+test("a draw names its shaders where DRAW_SHADER_AT and DRAW_VS_SHADER_AT say", () => {
+  const v = record(3, 11);
+  const d = parseDraw(v);
+  assert.equal(v.getUint32(DRAW_SHADER_AT, true), d.shaderId);
+  assert.equal(v.getUint32(DRAW_VS_SHADER_AT, true), d.vsShaderId);
+  assert.notEqual(d.shaderId, d.vsShaderId);
 });

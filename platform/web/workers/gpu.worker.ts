@@ -143,6 +143,9 @@ async function readbackSurfaces(after: number, surfaces: readonly GpuReadbackSur
   self.postMessage(reply, pixels.filter((p): p is ArrayBuffer => p !== null));
 }
 
+/* Pipelines are built ahead of the draws the stream holds (?lookahead=0: as the draws ask). */
+let lookAhead = true;
+
 async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, headerBase: number): Promise<void> {
   const buffer = memory.buffer;
   const words = new Int32Array(buffer, headerBase, 12);
@@ -175,14 +178,33 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
   const ring = new DataView(buffer); /* record headers, read in place */
   for (;;) {
     const seen = Atomics.load(words, OFF_WRITE_SIGNAL / 4);
-    const write = Number(Atomics.load(wide, OFF_WRITE / 8));
+    let write = Number(Atomics.load(wide, OFF_WRITE / 8));
     let read = Number(Atomics.load(wide, OFF_READ / 8));
     let unpublished = 0;
+    if (lookAhead) executor.scanAhead(buffer, ringBase, capacity, read, write);
     while (read < write) {
       const at = ringBase + (read % capacity);
       const type = ring.getUint32(at, true);
       const size = ring.getUint32(at + 4, true);
-      if (type !== REC_PAD) executor.execute(type, new Uint8Array(buffer, at + 8, size - 8));
+      if (type !== REC_PAD) {
+        const payload = new Uint8Array(buffer, at + 8, size - 8);
+        for (let wait = executor.execute(type, payload); wait; wait = executor.execute(type, payload)) {
+          /* The draw's pipeline is being built (scanAhead). What came before
+           * goes to the GPU, the producer gets its space - what it writes
+           * meanwhile is scanned too, and builds alongside. */
+          executor.flush();
+          Atomics.store(wide, OFF_READ / 8, BigInt(read));
+          Atomics.add(words, OFF_READ_SIGNAL / 4, 1);
+          Atomics.notify(words, OFF_READ_SIGNAL / 4);
+          unpublished = 0;
+          const began = performance.now();
+          await wait;
+          yielded = performance.now();
+          executor.noteAheadWait(yielded - began);
+          write = Number(Atomics.load(wide, OFF_WRITE / 8));
+          executor.scanAhead(buffer, ringBase, capacity, read, write);
+        }
+      }
       read += size;
       /* The producer learns of the space a few records at a time: a BigInt
        * and a notify per record were a GPU-worker cost of their own. */
@@ -411,6 +433,11 @@ self.addEventListener("message", (event: MessageEvent<MainToGPUMessage>) => {
   if (event.data.type === "init") {
     if (event.data.trivialShaders) (globalThis as { TRIVIAL_SHADERS?: boolean }).TRIVIAL_SHADERS = true;
     if (event.data.noWriteStaging) (globalThis as { NO_WRITE_STAGING?: boolean }).NO_WRITE_STAGING = true;
+    lookAhead = !event.data.noLookAhead;
+    if (event.data.shaderSalt) {
+      (globalThis as { SHADER_SALT?: number }).SHADER_SALT = event.data.shaderSalt;
+      cacheAttached = true; /* a first visit every time: nothing kept, nothing built from what was */
+    }
     init(event.data.canvas, event.data.memory, event.data.layout).catch((e: unknown) => {
       const err: GPUToMainMessage = {
         type: "error",

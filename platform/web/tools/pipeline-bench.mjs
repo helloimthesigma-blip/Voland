@@ -18,8 +18,8 @@
  *     [--replace HASH=FILE]  the shader's text from FILE instead, to try a
  *                     change to the translator's output (repeatable)
  *     [--salt N]      a first-time build whatever the system has kept: a
- *                     branch never taken, on N, opens each pixel shader
- *                     (the timings are right, the pictures would be too)
+ *                     branch never taken, on N, opens each shader (the
+ *                     timings are right, the pictures would be too)
  *     [--parallel K]  K builds in flight at a time (default 1)
  *     [--top N]       rows printed (default 20)
  *     [--dump DIR]    the WGSL of the printed rows, as DIR/<hash>.wgsl
@@ -73,7 +73,10 @@ async function benchInPage({ last, skip, only, replace, salt, parallel }) {
   const DRAW_FLAGS_WORD = 1; /* core/gpu/wgsl.h WGSL_DRAW_FLAGS: a few low bits, never a salt */
   const SALT_BASE = 0x5a000000;
   const salted = (code) =>
-    salt > 0 ? code.replace(/(@fragment fn fs\([^{]*\{\n)/, `$1  if (D[${DRAW_FLAGS_WORD}u] == ${SALT_BASE + salt}u) { discard; }\n`) : code;
+    salt > 0
+      ? code.replace(/(@fragment fn fs\([^{]*\{\n)/, `$1  if (D[${DRAW_FLAGS_WORD}u] == ${SALT_BASE + salt}u) { discard; }\n`)
+        .replace(/(@vertex fn vs\([^{]*-> VOut \{\n)/, `$1  if (D[${DRAW_FLAGS_WORD}u] == ${SALT_BASE + salt}u) { return VOut(); }\n`)
+      : code;
   const root = await navigator.storage.getDirectory();
   let dir;
   try {

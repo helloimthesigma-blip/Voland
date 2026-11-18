@@ -183,6 +183,9 @@ export const STENCIL_FACE_BYTES = 16;
 /* Version 3 adds the GPU vertex stage's four words (vs shader, inputs, cull, front face);
  * version 4 the index count and a flags word (version 5: DRAW_VERTEX_PULL). */
 export const DRAW_BYTES = 4 + 4 + TARGET_BYTES * MAX_TARGETS + 16 + 4 + STENCIL_FACE_BYTES * 2 + 12 + 16 + 16 + 16 + 16 + 8 + 24;
+/** Where a draw record names its shaders, for a reader that wants no more of it. */
+export const DRAW_SHADER_AT = 0;
+export const DRAW_VS_SHADER_AT = 4 + 4 + TARGET_BYTES * MAX_TARGETS + 16 + 4 + STENCIL_FACE_BYTES * 2 + 12 + 16 + 16 + 16;
 /* Draw flags: no vertices; the indices are guest vertex ids and the vertex
  * stage decodes its inputs from the data binding (core/gpu/gpu_records.h). */
 export const DRAW_VERTEX_PULL = 1;

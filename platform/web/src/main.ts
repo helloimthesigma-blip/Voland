@@ -262,7 +262,9 @@ async function boot(): Promise<BootResult | null> {
         gpuWorker.postMessage(
           { type: "init", canvas: offscreen, memory, layout,
             trivialShaders: new URLSearchParams(location.search).get("trivialshaders") === "1",
-            noWriteStaging: new URLSearchParams(location.search).get("writestaging") === "0" } satisfies MainToGPUMessage,
+            noWriteStaging: new URLSearchParams(location.search).get("writestaging") === "0",
+            noLookAhead: new URLSearchParams(location.search).get("lookahead") === "0",
+            shaderSalt: Number(new URLSearchParams(location.search).get("shadersalt")) || 0 } satisfies MainToGPUMessage,
           [offscreen],
         );
         startVideoWorker(memory, layout);

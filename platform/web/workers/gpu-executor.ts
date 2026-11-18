@@ -64,6 +64,8 @@ import {
   DRAW_UNCLIPPED_DEPTH,
   DRAW_VERTEX_PULL,
   DRAW_BYTES,
+  DRAW_SHADER_AT,
+  DRAW_VS_SHADER_AT,
   FRONT_CCW,
   type Draw,
   type Target,
@@ -126,6 +128,25 @@ const TRACE_PRESENTS = 6;
 const PREWARM_MAX = 512;
 /** Live render pipelines kept (least recently used go first). */
 const PIPELINE_LIMIT = 1200;
+/* Diagnostics (?shadersalt=N): each pixel shader opens with a branch on
+ * the draw's flags word (core/gpu/wgsl.h WGSL_DRAW_FLAGS: a few low bits)
+ * that is never taken, so the GPU's compiler has seen none of them. */
+const SALT_WORD = 1;
+const SALT_BASE = 0x5a000000;
+/** Pipelines the stream is about to draw with are built ahead of the
+ * draws (scanAhead), this many at a time: the GPU's compiler takes a
+ * quarter of a second or more over a new pixel shader, one after another
+ * when the draws ask - but several at once when asked ahead (Mario Kart's
+ * courses: sixty new pipelines in 48 s one by one, 12 s six at a time). */
+const AHEAD_IN_FLIGHT = 6;
+/** No more than this many wait to be built ahead (the scan stops predicting). */
+const AHEAD_PENDING_LIMIT = 256;
+/** A shader the scan saw defined is watched for this many presents ... */
+const AHEAD_SHADER_PRESENTS = 3;
+/** ... and this many of its draws: their pipelines are the ones not built yet. */
+const AHEAD_SHADER_DRAWS = 64;
+/** What the scan remembers (textures made ahead, pipelines not yet drawn with) is dropped past this. */
+const AHEAD_STATE_LIMIT = 4096;
 const MAX_TEXTURES = 16; /* core/gpu/wgsl.h WGSL_MAX_TEXTURES: samplers bind at 1 + MAX_TEXTURES + i */
 
 export interface PresentTarget {
@@ -210,6 +231,21 @@ interface DrawWindow {
   readonly writable: boolean;
 }
 
+/** What a pipeline's identity takes from a texture. */
+interface TexKind {
+  readonly format: GPUTextureFormat;
+  readonly sampleType: GPUTextureSampleType;
+  readonly render: boolean;
+}
+
+/** A shader the scan has seen defined (scanAhead). */
+interface AheadShader {
+  readonly hash: string;
+  readonly module: GPUShaderModule;
+  readonly present: number; /* the scan's present count when it was defined */
+  draws: number;            /* draws still predicted for it */
+}
+
 interface CachedPipeline {
   readonly pipeline: GPURenderPipeline;
   readonly layout: GPUBindGroupLayout;
@@ -224,6 +260,8 @@ export interface ExecutorStats {
   pipelines: number;
   /** Pipelines built ahead of use from the persistent cache. */
   prewarmed: number;
+  /** Pipelines built ahead of the draws the stream holds (scanAhead). */
+  ahead: number;
   /** Live pipelines dropped to stay under PIPELINE_LIMIT. */
   pipelinesEvicted: number;
   presents: number;
@@ -389,7 +427,7 @@ function sameNumbers(a: readonly number[], b: readonly number[]): boolean {
 }
 
 export class GpuExecutor {
-  readonly stats: ExecutorStats = { draws: 0, dispatches: 0, passes: 0, submits: 0, pipelines: 0, prewarmed: 0, pipelinesEvicted: 0, presents: 0, errors: 0, shadows: 0, copies: 0 };
+  readonly stats: ExecutorStats = { draws: 0, dispatches: 0, passes: 0, submits: 0, pipelines: 0, prewarmed: 0, ahead: 0, pipelinesEvicted: 0, presents: 0, errors: 0, shadows: 0, copies: 0 };
   private readonly textures = new Map<number, Tex>();
   private readonly shaders = new Map<number, GPUShaderModule>();
   /* Per-session shader ids -> WGSL content hash; modules shared by hash. */
@@ -481,6 +519,22 @@ export class GpuExecutor {
    * GPU process compiles them, which can hold up the page's frames. */
   private newPipelines = 0;
   private newModules = 0;
+  /* Look-ahead (scanAhead): the stream offset scanned to, what the records
+   * between the executor and there define, and the pipelines being built. */
+  private aheadAt = 0;
+  private aheadPresents = 0;
+  private readonly aheadShaders = new Map<number, AheadShader>();
+  private readonly aheadTextures = new Map<number, TexKind | null>(); /* null: destroyed, or not creatable */
+  private readonly aheadPending = new Map<string, Promise<void>>();
+  private readonly aheadSpecs = new Map<string, PipelineSpec>(); /* built ahead, not drawn with yet */
+  private aheadRunning = 0;
+  private readonly aheadWaiters: (() => void)[] = [];
+  private readonly aheadScratch = createDrawScratch();
+  private aheadRing: DataView | null = null;
+  private aheadBuilt = 0; /* since the last present, for the log */
+  private aheadWaitMs = 0;
+  /* Set by a draw whose pipeline is still being built: execute() hands it to the caller. */
+  private awaiting: Promise<void> | null = null;
   /* Draws' constant buffers and global memory (stream version 9). */
   private readonly pool: GPUBuffer;
   /* Pool chunks not yet written: poolGather[0, poolGathered) for the pool at poolGatherAt. */
@@ -537,8 +591,10 @@ export class GpuExecutor {
     this.poolGathered = 0;
   }
 
-  /** One record (the payload after the 8-byte record header). */
-  execute(type: number, payload: Uint8Array): void {
+  /** One record (the payload after the 8-byte record header). A promise:
+   * the record is a draw whose pipeline is being built ahead (scanAhead)
+   * and nothing was done - execute it again once the promise settles. */
+  execute(type: number, payload: Uint8Array): Promise<void> | null {
     const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
     switch (type) {
       case REC_TEXTURE_CREATE: this.textureCreate(view); break;
@@ -558,6 +614,9 @@ export class GpuExecutor {
       case REC_TEXTURE_REINTERPRET: this.textureReinterpret(view.getUint32(0, true), view.getUint32(4, true)); break;
       default: this.warnOnce(`record ${type}`, `unknown GPU record type ${type}`); break;
     }
+    const wait = this.awaiting;
+    this.awaiting = null;
+    return wait;
   }
 
   /** Submits everything recorded so far. */
@@ -751,6 +810,13 @@ export class GpuExecutor {
     }
   }
 
+  /** The format a texture asked for as `format` gets on this device. */
+  private deviceFormat(format: GPUTextureFormat, usage: number): GPUTextureFormat {
+    if (format === "rg11b10ufloat" && (usage & USAGE_RENDER) && !this.device.features.has("rg11b10ufloat-renderable")) return "rgba16float";
+    if (format === "depth32float-stencil8" && !this.device.features.has("depth32float-stencil8")) return "depth24plus-stencil8";
+    return format;
+  }
+
   private textureCreate(v: DataView): void {
     const c = parseTextureCreate(v);
     let format = FORMATS[c.format] ?? null;
@@ -758,15 +824,9 @@ export class GpuExecutor {
       this.warnOnce(`format ${c.format}`, `GPU texture format ${c.format} unknown`);
       return;
     }
-    let fallback = false;
-    if (format === "rg11b10ufloat" && (c.usage & USAGE_RENDER) && !this.device.features.has("rg11b10ufloat-renderable")) {
-      format = "rgba16float";
-      fallback = true;
-    }
-    if (format === "depth32float-stencil8" && !this.device.features.has("depth32float-stencil8")) {
-      format = "depth24plus-stencil8";
-      fallback = true;
-    }
+    const asked = format;
+    format = this.deviceFormat(asked, c.usage);
+    const fallback = format !== asked;
     const old = this.textures.get(c.id);
     if (old) {
       this.pendingDestroy.push(old.texture);
@@ -1040,7 +1100,8 @@ export class GpuExecutor {
     this.uploadedBytes += w.dataBytes;
   }
 
-  private shader(v: DataView, payload: Uint8Array): void {
+  /** A shader record's WGSL, as it is compiled (debug switches applied). */
+  private shaderCode(v: DataView, payload: Uint8Array): string {
     const id = v.getUint32(0, true);
     const bytes = v.getUint32(4, true);
     let code = new TextDecoder().decode(payload.slice(8, 8 + bytes));
@@ -1048,7 +1109,6 @@ export class GpuExecutor {
       code = code.replace(/@fragment fn fs\((.*?)\)( -> FOut)? \{[\s\S]*$/, (_m, args: string, ret: string | undefined) =>
         ret ? `@fragment fn fs(${args}) -> FOut { var fo: FOut; return fo; }` : `@fragment fn fs(${args}) { }`);
     }
-    if ((globalThis as { PRINT_SHADER?: number }).PRINT_SHADER === id) console.log(`shader ${id}:\n${code}`);
     if ((globalThis as { SOLID_SHADERS?: number[] }).SOLID_SHADERS?.includes(id) && !code.includes("@builtin(frag_depth)")) {
       code = code.replace(/@fragment fn fs\((.*)\) -> FOut \{[\s\S]*$/, (_m, args: string) =>
         `@fragment fn fs(${args}) -> FOut { var fo: FOut; fo.c0 = vec4<f32>(1.0, 0.0, 1.0, 1.0); return fo; }`);
@@ -1057,7 +1117,16 @@ export class GpuExecutor {
       code = code.replace(/@fragment fn fs\((.*)\) -> FOut \{[\s\S]*$/, (_m, args: string) =>
         `@fragment fn fs(${args}) -> FOut { var fo: FOut; discard; return fo; }`);
     }
-    const hash = wgslHash(code);
+    const salt = (globalThis as { SHADER_SALT?: number }).SHADER_SALT;
+    if (salt) {
+      code = code.replace(/(@fragment fn fs\([^{]*\{\n)/, `$1  if (D[${SALT_WORD}u] == ${SALT_BASE + salt}u) { discard; }\n`)
+        .replace(/(@vertex fn vs\([^{]*-> VOut \{\n)/, `$1  if (D[${SALT_WORD}u] == ${SALT_BASE + salt}u) { return VOut(); }\n`);
+    }
+    return code;
+  }
+
+  /** The module of WGSL `code` (one per distinct text). */
+  private moduleOf(hash: string, code: string): GPUShaderModule {
     let module = this.modulesByHash.get(hash);
     if (!module) {
       module = this.device.createShaderModule({ code });
@@ -1065,6 +1134,15 @@ export class GpuExecutor {
       this.newModules++;
       this.shaderBytes += code.length;
     }
+    return module;
+  }
+
+  private shader(v: DataView, payload: Uint8Array): void {
+    const id = v.getUint32(0, true);
+    const code = this.shaderCode(v, payload);
+    if ((globalThis as { PRINT_SHADER?: number }).PRINT_SHADER === id) console.log(`shader ${id}:\n${code}`);
+    const hash = wgslHash(code);
+    const module = this.moduleOf(hash, code);
     this.shaders.set(id, module);
     this.shaderHashes.set(id, hash);
     this.shaderSerials.set(id, ++this.shaderSerial);
@@ -1119,6 +1197,152 @@ export class GpuExecutor {
         await new Promise((resolve) => setTimeout(resolve, 0));
       }
     })();
+  }
+
+  /* ---- pipelines built ahead of their draws ---- */
+
+  /** Reads the records the executor has yet to reach - stream offsets
+   * [`read`, `write`) of the ring at `ringBase` - and starts building the
+   * pipelines their draws will ask for: several build at once, where draws
+   * that ask one by one each wait out the GPU's compiler (AHEAD_IN_FLIGHT).
+   * Only draws with a shader defined in those records are looked at, so a
+   * settled scene costs a walk over the record headers. A wrong guess
+   * (the state it was made from changed before the draw) wastes one build;
+   * a draw whose pipeline is not ready waits for it (execute()). */
+  scanAhead(buffer: ArrayBufferLike, ringBase: number, capacity: number, read: number, write: number): void {
+    if (read >= this.aheadAt) { /* caught up: the executor's own state is the stream's */
+      this.aheadAt = read;
+      this.aheadTextures.clear();
+    }
+    if (this.aheadTextures.size > AHEAD_STATE_LIMIT) this.aheadTextures.clear();
+    if (this.aheadSpecs.size > AHEAD_STATE_LIMIT) this.aheadSpecs.clear();
+    if (!this.aheadRing || this.aheadRing.buffer !== buffer) this.aheadRing = new DataView(buffer);
+    const ring = this.aheadRing;
+    let at = this.aheadAt;
+    while (at < write) {
+      const record = ringBase + (at % capacity);
+      const type = ring.getUint32(record, true);
+      const size = ring.getUint32(record + 4, true);
+      const body = record + 8;
+      if (type === REC_DRAW) {
+        if (this.aheadShaders.size && this.aheadPending.size < AHEAD_PENDING_LIMIT) {
+          const fs = this.aheadShaders.get(ring.getUint32(body + DRAW_SHADER_AT, true));
+          const vs = this.aheadShaders.get(ring.getUint32(body + DRAW_VS_SHADER_AT, true));
+          if ((fs && fs.draws > 0) || (vs && vs.draws > 0)) {
+            if (fs) fs.draws--;
+            if (vs) vs.draws--;
+            const payload = new Uint8Array(buffer, body, size - 8);
+            this.predictDraw(new DataView(buffer, body, size - 8), payload);
+          }
+        }
+      } else if (type === REC_SHADER) {
+        const payload = new Uint8Array(buffer, body, size - 8);
+        const view = new DataView(buffer, body, size - 8);
+        const id = view.getUint32(0, true);
+        const code = this.shaderCode(view, payload);
+        const hash = wgslHash(code);
+        this.aheadShaders.delete(id); /* newest last: the order they are dropped in */
+        this.aheadShaders.set(id, { hash, module: this.moduleOf(hash, code), present: this.aheadPresents, draws: AHEAD_SHADER_DRAWS });
+      } else if (type === REC_TEXTURE_CREATE) {
+        const c = parseTextureCreate(new DataView(buffer, body, size - 8));
+        const asked = FORMATS[c.format];
+        const format = asked ? this.deviceFormat(asked, c.usage) : null;
+        this.aheadTextures.set(c.id, format ? { format, sampleType: sampleTypeOf(format), render: (c.usage & USAGE_RENDER) !== 0 } : null);
+      } else if (type === REC_TEXTURE_DESTROY) {
+        this.aheadTextures.set(ring.getUint32(body, true), null);
+      } else if (type === REC_PRESENT) {
+        this.aheadPresents++;
+        for (const [id, s] of this.aheadShaders) {
+          if (s.present + AHEAD_SHADER_PRESENTS > this.aheadPresents) break;
+          this.aheadShaders.delete(id);
+        }
+      }
+      at += size;
+    }
+    this.aheadAt = at;
+  }
+
+  /** Time the stream stood still for a pipeline being built ahead (the log's). */
+  noteAheadWait(ms: number): void { this.aheadWaitMs += ms; }
+
+  /** Texture `id` as the scan knows it (undefined: no such texture). */
+  private aheadKind(id: number): TexKind | undefined {
+    const ahead = this.aheadTextures.get(id);
+    if (ahead !== undefined) return ahead ?? undefined;
+    const t = this.textures.get(id);
+    return t ? { format: t.format, sampleType: t.sampleType, render: t.renderView !== null } : undefined;
+  }
+
+  /** Starts on the pipeline the draw record `v` will ask for, as draw()
+   * and drawSpec() would name it once the records before it have run. */
+  private predictDraw(v: DataView, payload: Uint8Array): void {
+    const d = parseDrawInto(v, this.aheadScratch);
+    const fs = this.aheadShaders.get(d.shaderId), vs = d.vsShaderId ? this.aheadShaders.get(d.vsShaderId) : undefined;
+    const module = fs?.module ?? this.shaders.get(d.shaderId);
+    const wgsl = fs?.hash ?? this.shaderHashes.get(d.shaderId);
+    const vsModule = d.vsShaderId ? vs?.module ?? this.shaders.get(d.vsShaderId) : module;
+    const vsWgsl = d.vsShaderId ? vs?.hash ?? this.shaderHashes.get(d.vsShaderId) : "";
+    if (!module || !vsModule || wgsl === undefined || vsWgsl === undefined) return;
+    const textures: TexKind[] = [], filtered: boolean[] = [];
+    const windows: { readonly binding: number; readonly writable: boolean }[] = [];
+    let at = DRAW_BYTES;
+    for (let i = 0; i < d.bindingCount && at + BINDING_BYTES <= payload.byteLength; i++) {
+      const kind = v.getUint32(at, true);
+      const binding = v.getUint32(at + 4, true);
+      const bytes = v.getUint32(at + 8, true);
+      const texture = v.getUint32(at + 12, true);
+      at += BINDING_BYTES;
+      if (kind === BIND_DATA) {
+        at += bytes;
+      } else if (kind === BIND_TEXTURE) {
+        const t = this.aheadKind(texture);
+        if (!t) return;
+        textures.push(t);
+        filtered.push((bytes & BIND_FILTERED) !== 0);
+      } else if (kind === BIND_BUFFER && binding !== VS_RESIDENT_BINDING) {
+        windows.push({ binding, writable: (bytes & BIND_WRITABLE) !== 0 });
+      }
+    }
+    const attachment = (id: number): GPUTextureFormat | null => {
+      const t = id ? this.aheadKind(id) : undefined;
+      return t?.render ? t.format : null;
+    };
+    const spec = this.specOf(d, wgsl, vsWgsl, textures, filtered, d.targets.map((t) => attachment(t.id)),
+      attachment(d.depthId) ?? undefined, windows);
+    const key = specKey(spec);
+    if (this.pipelines.has(key) || this.aheadPending.has(key)) return;
+    const built = this.aheadSlot().then(() => {
+      const { desc, layout } = this.pipelineDescriptor(spec, module, vsModule);
+      return this.device.createRenderPipelineAsync(desc).then((pipeline) => {
+        this.pipelines.set(key, { pipeline, layout });
+        this.evictPipelines();
+        this.aheadSpecs.set(key, spec);
+        this.stats.pipelines++;
+        this.stats.ahead++;
+        this.newPipelines++;
+        this.aheadBuilt++;
+      });
+    }).catch(() => undefined) /* not a valid pipeline: the draw builds it, and the device says why */
+      .then(() => {
+        this.aheadPending.delete(key);
+        this.aheadRelease();
+      });
+    this.aheadPending.set(key, built);
+  }
+
+  /** Resolves when one more pipeline may build ahead (AHEAD_IN_FLIGHT at a time). */
+  private aheadSlot(): Promise<void> {
+    if (this.aheadRunning < AHEAD_IN_FLIGHT) {
+      this.aheadRunning++;
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => this.aheadWaiters.push(resolve));
+  }
+
+  private aheadRelease(): void {
+    const next = this.aheadWaiters.shift();
+    if (next) next(); /* the slot passes to the next in line */
+    else this.aheadRunning--;
   }
 
   /* ---- passes ---- */
@@ -1297,10 +1521,18 @@ export class GpuExecutor {
   private drawSpec(d: Draw, textures: readonly Tex[], filtered: readonly boolean[],
                    colorFormats: readonly (GPUTextureFormat | null)[], depth: Tex | undefined,
                    windows: readonly DrawWindow[]): PipelineSpec {
+    return this.specOf(d, this.shaderHashes.get(d.shaderId) ?? `id${d.shaderId}`,
+      d.vsShaderId ? this.shaderHashes.get(d.vsShaderId) ?? `id${d.vsShaderId}` : "", textures, filtered, colorFormats, depth?.format, windows);
+  }
+
+  /** ... of a draw with these shaders (their WGSL hashes), textures and attachment formats. */
+  private specOf(d: Draw, wgsl: string, vsWgsl: string, textures: readonly Pick<Tex, "sampleType">[], filtered: readonly boolean[],
+                 colorFormats: readonly (GPUTextureFormat | null)[], depthFormat: GPUTextureFormat | undefined,
+                 windows: readonly Pick<DrawWindow, "binding" | "writable">[]): PipelineSpec {
     return {
-      wgsl: this.shaderHashes.get(d.shaderId) ?? `id${d.shaderId}`,
+      wgsl,
       vs: d.vsShaderId ? {
-        wgsl: this.shaderHashes.get(d.vsShaderId) ?? `id${d.vsShaderId}`,
+        wgsl: vsWgsl,
         inputs: d.vertexInputCount, cull: d.cullMode, front: d.frontFace,
         ...((d.flags & DRAW_VERTEX_PULL) !== 0 ? { pull: true } : {}),
       } : null,
@@ -1311,8 +1543,8 @@ export class GpuExecutor {
         writeMask: t.writeMask,
         blend: t.blend ? [t.colorOp, t.colorSrc, t.colorDst, t.alphaOp, t.alphaSrc, t.alphaDst] : null,
       })),
-      depth: depth ? {
-        format: depth.format, compare: (globalThis as { DEPTH_CMP?: Readonly<Record<number, number>> }).DEPTH_CMP?.[d.shaderId] ?? d.depthCompare,
+      depth: depthFormat ? {
+        format: depthFormat, compare: (globalThis as { DEPTH_CMP?: Readonly<Record<number, number>> }).DEPTH_CMP?.[d.shaderId] ?? d.depthCompare,
         write: d.depthWrite,
         test: (globalThis as { DEPTH_OFF_SHADERS?: number[] }).DEPTH_OFF_SHADERS?.includes(d.shaderId) ? false : d.depthTest,
         stencil: d.stencil ? {
@@ -1395,7 +1627,7 @@ export class GpuExecutor {
 
   private drawPipeline(d: Draw, module: GPUShaderModule, textures: readonly Tex[], filtered: readonly boolean[],
                        colorFormats: readonly (GPUTextureFormat | null)[], depth: Tex | undefined,
-                       windows: readonly DrawWindow[]): CachedPipeline {
+                       windows: readonly DrawWindow[]): CachedPipeline | null {
     const fast = this.drawPipelineKey(d, textures, filtered, colorFormats, depth, windows);
     const hit = fast === null ? undefined : this.fastPipelines.get(fast);
     if (hit) {
@@ -1408,7 +1640,13 @@ export class GpuExecutor {
     }
     const spec = this.drawSpec(d, textures, filtered, colorFormats, depth, windows);
     const key = specKey(spec);
+    const pending = this.aheadPending.get(key);
+    if (pending) { /* being built (scanAhead): the caller waits rather than have it built twice */
+      this.awaiting = pending;
+      return null;
+    }
     const made = this.slowDrawPipeline(d, module, spec, key);
+    if (this.aheadSpecs.delete(key)) this.cacheStore?.recordPipeline(spec); /* built ahead and now used: worth keeping */
     if (fast !== null) {
       if (this.fastPipelines.size >= FAST_PIPELINE_LIMIT) this.fastPipelines.clear();
       this.fastPipelines.set(fast, { key, made });
@@ -1693,8 +1931,9 @@ export class GpuExecutor {
       this.touched.add(t.texture);
       textures.push(attached ? this.shadowOf(id, t) : t);
     }
-    const { pipeline, layout } = this.drawPipeline(d, module, textures, filtered, colorFormats, depthId ? depthTex : undefined,
-      windows);
+    const made = this.drawPipeline(d, module, textures, filtered, colorFormats, depthId ? depthTex : undefined, windows);
+    if (!made) return; /* execute() says what to wait for; nothing of this draw is recorded yet */
+    const { pipeline, layout } = made;
     /* Vertices and data (a flush may happen in between: stage both first). */
     if (this.vertexUsed + stride + Math.ceil(vertices.byteLength / 16) * 16 + indexBytes > VERTEX_BUFFER_BYTES ||
         Math.ceil(this.dataUsed / DATA_ALIGN) * DATA_ALIGN + Math.max(data?.byteLength ?? 0, DATA_WINDOW_BYTES) > DATA_BUFFER_BYTES) {
@@ -2005,9 +2244,12 @@ export class GpuExecutor {
     if (this.newPipelines || this.newModules) {
       /* Wall-clock time, to line a page stall up with a burst of builds. */
       this.host.log("info", `new GPU programs at ${((performance.timeOrigin + performance.now()) / 1000).toFixed(1)}: ` +
-        `${this.newPipelines} pipelines, ${this.newModules} shader modules (present ${this.stats.presents})`);
+        `${this.newPipelines} pipelines, ${this.newModules} shader modules (present ${this.stats.presents})` +
+        (this.aheadBuilt ? `; ${this.aheadBuilt} pipelines built ahead, ${(this.aheadWaitMs / 1000).toFixed(1)} s waiting for them` : ""));
       this.newPipelines = 0;
       this.newModules = 0;
+      this.aheadBuilt = 0;
+      this.aheadWaitMs = 0;
     }
     if (this.stats.presents % MEMORY_REPORT_PRESENTS === 0) this.reportMemory();
     this.host.presented(width, height);
