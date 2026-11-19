@@ -81,6 +81,8 @@
  *   panel's backup tar, for --restore-saves), "sleep MS", "go"
  *   (measure now). Each
  *   command prints "drive: N done ...". "targets DIR [PREFIX]" writes every render target as .pam; "pageshot FILE" the whole page; "dom FILE" its HTML.
+ * - --headed: a visible browser window (someone can take over the game
+ *   from a drive file that never says "go").
  * - --restore-saves BACKUP.tar imports a saves backup (the Saves panel's
  *   "Back up saves" file) before the game loads, so a run can start from
  *   any save point.
@@ -125,7 +127,7 @@ const SOFTWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swift
 function parseArgs(argv) {
   const opts = {
     game: "", clock: "slices", warmupSlices: 860_000, seconds: 30, profile: 0, alloc: 0, port: 0, debugPort: 0,
-    build: true, software: false, urlParams: "", outDir: tmpdir(), browserArgs: [], presses: [], shot: "", restoreSaves: "", phases: [], json: "", expectJitAsync: false,
+    build: true, software: false, headed: false, urlParams: "", outDir: tmpdir(), browserArgs: [], presses: [], shot: "", restoreSaves: "", phases: [], json: "", expectJitAsync: false,
   };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
@@ -150,6 +152,7 @@ function parseArgs(argv) {
     else if (a === "--no-build") opts.build = false;
     else if (a === "--expect-jit-async") opts.expectJitAsync = true;
     else if (a === "--software") opts.software = true;
+    else if (a === "--headed") opts.headed = true;
     else if (a === "--user-data-dir") opts.userDataDir = next();
     else if (a === "--url-params") opts.urlParams = next();
     else if (a === "--out-dir") opts.outDir = next();
@@ -399,7 +402,7 @@ async function main() {
   const baseUrl = `http://localhost:${opts.port}/`;
   const launch = {
     channel: "chromium",
-    headless: true,
+    headless: !opts.headed,
     args: [...(opts.software ? SOFTWARE_GPU_ARGS : HARDWARE_GPU_ARGS), `--remote-debugging-port=${opts.debugPort}`,
            ...opts.browserArgs],
   };
