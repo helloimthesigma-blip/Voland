@@ -4,29 +4,29 @@ A Nintendo Switch emulator that runs in your browser. A C11 core compiled to
 WebAssembly, its own ARM64 → WebAssembly JIT, and a WebGPU renderer. Nothing
 to install, no keys, and most games need no firmware.
 
-> **Status:** Phase 4 (First Boot). Hollow Knight, Silksong and Celeste play from boot into gameplay; six more games boot and play in places but run slower or have known faults (table below). Opus audio (voices and music some games stream) now decodes, checked in Tears of the Kingdom; the heavier games are still slow. Per-game details are in [NEW_GAMES.md](docs/NEW_GAMES.md), the full task list in [DESIGN.md §25](docs/DESIGN.md#25-development-phases).
+> **Status:** Phase 4 (First Boot). All nine games we test play at full or near-full speed during actual play on an M4 Mac mini: Hollow Knight, Silksong, Celeste and Nine Sols, plus Mario Odyssey, Mario Kart 8 Deluxe, Smash Bros. Ultimate, Animal Crossing and Tears of the Kingdom. Recent work removed render-pass and draw overheads that slowed Mario Kart's later courses and parts of Mario Odyssey. Still open: Tears of the Kingdom's over-exposed picture and low frame rate, rare Mario Kart freezes, and Animal Crossing's black sea patches. The full task list is in [DESIGN.md §25](docs/DESIGN.md#25-development-phases), per-game details in [NEW_GAMES.md](docs/NEW_GAMES.md).
 
 ### Where each game stands
 
-Measured in Chrome on an M4 Mac mini with default settings. fps is frames
-the game presented per second of real time, and the scene matters a lot:
-title screens are much lighter than gameplay, so both are given where they
-were measured.
+Measured in Chrome on an M4 Mac mini with default settings, **during play**
+(in a level, a race or a fight, not on title screens). "Speed" is how fast
+the game world runs against real time: 100% is full speed, below that the
+game is in slow motion. fps is the frames shown per second; a game's own
+cap is 60 unless noted.
 
-| Game | What has been played | Gameplay fps | Title / menus fps | Known problems |
+| Game | Where it was measured | Speed | fps | Known problems |
 |---|---|---|---|---|
-| Celeste | title, file select, levels (Forsaken City, Celestial Resort, Mirror Temple, The Summit, Core) | ~59 | ~59 | none known |
-| Hollow Knight | new game through the intro into King's Pass; saved games; Greenpath, Queen's Station, Crystal Peak | ~51-57 (Crossroads: ~51 walking, ~54 in a fight, ~57 standing) | ~60 | none known |
-| Hollow Knight: Silksong | boot to gameplay, saves, video cutscenes | ~59 (Bone Bottom) | ~58 | none known |
-| Super Mario Odyssey | opening, Cap Kingdom; arriving in every kingdom from Cascade to the Moon | 35-59 by scene (~43 at the Cap Kingdom start, ~50 in Cascade, ~59 on Metro's rooftop); a kingdom's first seconds stutter while its shaders compile | 37-40 (cutscenes) | the camera tutorial needs the right stick pushed up |
-| Nine Sols | title, opening cinematic, gameplay, dialogue | ~45 (the first cave) | ~52 | |
-| Super Smash Bros. Ultimate | matches on about ten stages, opening movie, save states in a fight | 58-60 on lighter stages, ~31-35 on busy ones (Mario Circuit, Boxing Ring) | ~60 | none known |
-| Mario Kart 8 Deluxe (32-bit) | Grand Prix races (Mushroom, Special and Lightning Cups), menus, Mii select | ~54 in a race (full speed) | ~60 | the first visit to a course pauses while its shaders are built (about 25 s before the first race, from about 70 s); rare crashes or freezes during Grand Prix runs |
-| Animal Crossing: New Horizons | opening, naming, arrival on the island | ~29 at the island arrival | ~55 (intro) | some of the island's sea renders black in patches; generating the island takes a few minutes |
-| Tears of the Kingdom | the opening descent, the first cave | ~15 (full speed) | - | the picture is over-exposed; about one boot in 15 crashes while loading |
+| Hollow Knight | Greenpath, City of Tears | 100% | 49-57 | none known |
+| Hollow Knight: Silksong | Bellhart, Bonetown | 100% | 57-58 | none known |
+| Celeste | Chapter 3 (Celestial Resort) | 100% | 60 | none known |
+| Nine Sols | the first cave | 100% | 45 | |
+| Super Mario Odyssey | ten kingdoms, walking (Cap, Cascade, Sand, Wooded, Lake, Seaside, Snow, Luncheon, Bowser's, Moon) and New Donk City | 92-100% in most, 82-99% in Luncheon | 37-60 by kingdom | a kingdom's first seconds stutter while its shaders compile; the camera tutorial needs the right stick pushed up |
+| Mario Kart 8 Deluxe (32-bit) | Grand Prix races, all four races of a cup | 98-100% | 45-58 in races | the first visit to a course pauses while its shaders are built (about 25 s before the first race); rare crashes or freezes during Grand Prix runs |
+| Super Smash Bros. Ultimate | Battlefield fights | 94-100% | 32-59 (depends on the fight) | none known |
+| Animal Crossing: New Horizons | arrival on the island | 100% | 29 (the game's cap is 30) | some of the island's sea renders black in patches; generating the island takes a few minutes |
+| Tears of the Kingdom | the cave beneath Hyrule Castle, Great Sky Island | 100% | 12-13 (the game's cap is 30) | the picture is over-exposed (Link and Zelda nearly white in the cave); about one boot in 15 crashes while loading |
 
-"(Oct.)" marks numbers measured in October 2026, before later speed work, and not
-re-measured since. On an M1 Mac, Silksong gameplay runs at about 33 fps.
+On an M1 Mac, Silksong gameplay runs at about 33 fps.
 Only macOS has been tested. Phones: Chrome on Android (64-bit, with WebGPU) should run it - the page fits a phone and plays with a paired controller (there are no touch controls) - but it has only been checked in Chrome's phone emulation, and a phone must grant the fixed 5.25 GB of memory. iPhones and iPads cannot run it yet, in Safari or Chrome: every iOS browser, Chrome included, uses Safari's engine, which lacks the 64-bit WebAssembly memory Voland needs, and iOS allows a tab far less than 5.25 GB. The numbers come from `platform/web/tools/perf.mjs`,
 which loads a game in Chrome, plays a scripted input sequence and reports fps,
 so you can rerun them with your own game files.
