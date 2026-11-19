@@ -1417,6 +1417,16 @@ flowchart TD
     CS --> W --> UP2
 ```
 
+**As built (deviation, 2026-11-19):** the transcode runs on the CPU, not in
+a compute shader, and targets BC1 / BC3, not BC7, with no OPFS cache. Where
+the device samples BCn but not ASTC, `gpu_texture_bc` (core/gpu/raster3d.c)
+takes the decoded RGBA8 image (`core/gpu/astc`), box-filters its mip levels
+and encodes each with `core/gpu/bc_encode` (a range fit: BC1 when every texel
+is opaque, else BC3). Tears of the Kingdom's ASTC set as RGBA8 passed the
+GPU texture budget every frame (1 fps); as BC it runs at full speed. A device
+with neither family still gets RGBA8. BC7 and a cache remain open; ETC2 is
+not needed for the browsers we target (Android Chrome has ASTC).
+
 ### GPU backend interface
 
 Two tiers, not four backends — hand-written Metal and D3D12 backends **do not exist and will not**:
