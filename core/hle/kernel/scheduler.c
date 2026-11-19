@@ -42,12 +42,17 @@ uint64_t scheduler_ns_to_ticks(uint64_t ns) {
   return (ns / 625u) * 12u + ((ns % 625u) * 12u) / 625u;
 }
 
+#define SYNC_A32_LINK 14u
+#define SYNC_A64_LINK 30u
+
 /* scheduler_note_sync's history: per thread slot, a ring. Static: one
  * process at a time, and nothing here belongs in a save state. */
 typedef struct Sync_Record {
   uint64_t tick;
   uint64_t address;
   uint64_t thread_id;
+  uint64_t pc, r14, x30;  /* the thread's, when it made the call (the link register: r14 on A32, x30 on A64) */
+  uint64_t cycles;        /* its guest cycles at the start of that run: equal for two events of one run */
   uint32_t value;
   Sync_Event event;
 } Sync_Record;
@@ -67,7 +72,11 @@ void scheduler_note_sync(Scheduler *sched, const Sched_Thread *thread, Sync_Even
                          uint32_t value) {
   const size_t i = (size_t)(thread - sched->threads);
   if (i >= SCHEDULER_MAX_THREADS) return;
-  const Sync_Record record = {sched->ticks, address, thread->thread_id, value, event};
+  const CPU_Register_File *regs =
+      sched->backend && thread->thread.cpu_state ? sched->backend->get_register_file(thread->thread.cpu_state) : NULL;
+  const Sync_Record record = {sched->ticks, address, thread->thread_id, regs ? regs->pc : 0u,
+                              regs ? regs->x[SYNC_A32_LINK] : 0u, regs ? regs->x[SYNC_A64_LINK] : 0u,
+                              thread->cycles_run, value, event};
   g_sync[i][g_sync_next[i] % SCHEDULER_SYNC_HISTORY] = record;
   g_sync_next[i]++;
   /* The timeline leaves out condvar waits (with their mutex releases) and
@@ -101,8 +110,10 @@ void scheduler_log_sync(const Scheduler *sched, const Sched_Thread *thread, cons
   const uint32_t n = g_sync_next[i] < SCHEDULER_SYNC_HISTORY ? g_sync_next[i] : SCHEDULER_SYNC_HISTORY;
   for (uint32_t k = g_sync_next[i] - n; k != g_sync_next[i]; k++) {
     const Sync_Record *r = &g_sync[i][k % SCHEDULER_SYNC_HISTORY];
-    log_warn("[threads] %s %llu: %s 0x%llx 0x%x at tick %llu", label, (unsigned long long)thread->thread_id,
-             sync_name(r->event), (unsigned long long)r->address, r->value, (unsigned long long)r->tick);
+    log_warn("[threads] %s %llu: %s 0x%llx 0x%x at tick %llu (pc 0x%llx r14 0x%llx x30 0x%llx, run from cycle %llu)",
+             label, (unsigned long long)thread->thread_id, sync_name(r->event), (unsigned long long)r->address,
+             r->value, (unsigned long long)r->tick, (unsigned long long)r->pc, (unsigned long long)r->r14,
+             (unsigned long long)r->x30, (unsigned long long)r->cycles);
   }
 }
 
