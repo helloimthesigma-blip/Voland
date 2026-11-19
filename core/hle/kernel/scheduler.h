@@ -220,13 +220,18 @@ typedef enum Sync_Event {
   SYNC_SIGNAL,       /* SignalProcessWideKey: key, threads woken */
   SYNC_ADDR_WAIT,    /* WaitForAddress blocked: address, its word */
   SYNC_ADDR_SIGNAL,  /* SignalToAddress: address, threads woken */
+  SYNC_COND_RELEASE, /* a condvar wait released its mutex: mutex, the word written */
+  SYNC_COND_WAIT_TIMED, /* WaitProcessWideKeyAtomic with a timeout blocked: key, its mutex's low word */
 } Sync_Event;
 void scheduler_note_sync(Scheduler *sched, const Sched_Thread *thread, Sync_Event event, uint64_t address,
                          uint32_t value);
 /* Logs `thread`'s sync history, oldest first, each line prefixed `label`. */
 void scheduler_log_sync(const Scheduler *sched, const Sched_Thread *thread, const char *label);
-/* Logs the process's latest SCHEDULER_SYNC_TIMELINE sync events, all threads, oldest first. */
+/* Logs the process's latest SCHEDULER_SYNC_TIMELINE sync events, all threads, oldest first,
+ * then the history of each thread waiting for good that took part in the
+ * last SCHEDULER_SYNC_RECENT_TICKS of it. */
 #define SCHEDULER_SYNC_TIMELINE 128u
+#define SCHEDULER_SYNC_RECENT_TICKS 19200000ull /* one second of virtual time */
 void scheduler_log_sync_timeline(const Scheduler *sched);
 
 /* Runs this short (in cycles) that end in a yield or a short sleep are

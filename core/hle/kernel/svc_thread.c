@@ -375,12 +375,12 @@ static bool store_word(HLE_Context *c, uint64_t address, uint32_t value) {
 }
 
 /* Releases the mutex at `address` to its best waiter (or to nobody). */
-static uint32_t release_mutex(HLE_Context *c, Sched_Thread *self, uint64_t address) {
+static uint32_t release_mutex(HLE_Context *c, Sched_Thread *self, uint64_t address, Sync_Event event) {
   uint32_t waiters = 0;
   Sched_Thread *next = best_waiter(c->scheduler, WAIT_ARBITER_LOCK, address, &waiters);
   const uint32_t value = next ? (next->wait_tag | (waiters > 1u ? HLE_MUTEX_HAS_WAITERS : 0u)) : 0u;
   if (!store_word(c, address, value)) return HLE_RESULT_INVALID_MEMORY_STATE;
-  if (self) scheduler_note_sync(c->scheduler, self, SYNC_RELEASE, address, value);
+  if (self) scheduler_note_sync(c->scheduler, self, event, address, value);
   if (next) {
     scheduler_note_sync(c->scheduler, next, SYNC_HANDED, address, value);
     scheduler_wake(c->scheduler, next, HLE_RESULT_SUCCESS);
@@ -413,7 +413,7 @@ void hle_svc_arbitrate_unlock(HLE_Context *c, CPU_State *s) {
   CPU_Register_File *r = regs(c, s);
   const uint64_t address = r->x[0];
   if (address & 3u) { r->x[0] = HLE_RESULT_INVALID_POINTER; return; }
-  r->x[0] = release_mutex(c, current(c, s), address);
+  r->x[0] = release_mutex(c, current(c, s), address, SYNC_RELEASE);
 }
 
 void hle_svc_wait_process_wide_key_atomic(HLE_Context *c, CPU_State *s) {
@@ -428,11 +428,11 @@ void hle_svc_wait_process_wide_key_atomic(HLE_Context *c, CPU_State *s) {
    * read 0 and the wakeup is lost. */
   if (!store_word(c, key, 1u)) { r->x[0] = HLE_RESULT_INVALID_MEMORY_STATE; return; }
   Sched_Thread *self = current(c, s);
-  const uint32_t released = release_mutex(c, self, mutex);
+  const uint32_t released = release_mutex(c, self, mutex, SYNC_COND_RELEASE);
   if (released != HLE_RESULT_SUCCESS) { r->x[0] = released; return; }
   if (timeout == 0) { r->x[0] = HLE_RESULT_TIMED_OUT; return; }
   if (!self) { r->x[0] = HLE_RESULT_TIMED_OUT; return; }
-  scheduler_note_sync(c->scheduler, self, SYNC_COND_WAIT, key, (uint32_t)mutex);
+  scheduler_note_sync(c->scheduler, self, timeout < 0 ? SYNC_COND_WAIT : SYNC_COND_WAIT_TIMED, key, (uint32_t)mutex);
   self->wait_address = key;
   self->mutex_address = mutex;
   self->wait_tag = tag;

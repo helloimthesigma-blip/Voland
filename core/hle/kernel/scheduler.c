@@ -57,7 +57,7 @@ static Sync_Record g_sync_timeline[SCHEDULER_SYNC_TIMELINE];
 static uint32_t g_sync_timeline_next;
 static const char *const k_sync_names[] = {"-", "lock-wait", "lock-skip", "release", "handed", "cond-wait",
                                            "cond-taken", "cond-to-lock", "timeout", "signal", "addr-wait",
-                                           "addr-signal"};
+                                           "addr-signal", "cond-release", "cond-wait-timed"};
 
 static const char *sync_name(Sync_Event e) {
   return (size_t)e < sizeof(k_sync_names) / sizeof(k_sync_names[0]) ? k_sync_names[e] : "?";
@@ -70,20 +70,28 @@ void scheduler_note_sync(Scheduler *sched, const Sched_Thread *thread, Sync_Even
   const Sync_Record record = {sched->ticks, address, thread->thread_id, value, event};
   g_sync[i][g_sync_next[i] % SCHEDULER_SYNC_HISTORY] = record;
   g_sync_next[i]++;
-  /* The timeline leaves out timed condvar polling (one thread's would fill it). */
-  if (event == SYNC_TIMEOUT || event == SYNC_COND_WAIT) return;
+  /* The timeline leaves out condvar waits (with their mutex releases) and
+   * timeouts: one thread's timed polling would fill it. */
+  if (event == SYNC_TIMEOUT || event == SYNC_COND_WAIT_TIMED || event == SYNC_COND_RELEASE) return;
   g_sync_timeline[g_sync_timeline_next % SCHEDULER_SYNC_TIMELINE] = record;
   g_sync_timeline_next++;
 }
 
 void scheduler_log_sync_timeline(const Scheduler *sched) {
-  (void)sched;
   const uint32_t n = g_sync_timeline_next < SCHEDULER_SYNC_TIMELINE ? g_sync_timeline_next : SCHEDULER_SYNC_TIMELINE;
   log_warn("[threads] the latest %u sync events:", n);
   for (uint32_t k = g_sync_timeline_next - n; k != g_sync_timeline_next; k++) {
     const Sync_Record *r = &g_sync_timeline[k % SCHEDULER_SYNC_TIMELINE];
     log_warn("[threads]   %llu %s 0x%llx 0x%x at tick %llu", (unsigned long long)r->thread_id, sync_name(r->event),
              (unsigned long long)r->address, r->value, (unsigned long long)r->tick);
+  }
+  if (!n) return;
+  const uint64_t last = g_sync_timeline[(g_sync_timeline_next - 1u) % SCHEDULER_SYNC_TIMELINE].tick;
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    const Sched_Thread *t = &sched->threads[i];
+    if (t->state != THREAD_STATE_WAITING || t->wake_at != SCHEDULER_WAIT_FOREVER || !g_sync_next[i]) continue;
+    const Sync_Record *latest = &g_sync[i][(g_sync_next[i] - 1u) % SCHEDULER_SYNC_HISTORY];
+    if (latest->tick + SCHEDULER_SYNC_RECENT_TICKS >= last) scheduler_log_sync(sched, t, "  recent");
   }
 }
 

@@ -1938,6 +1938,16 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
                       (int)handle_table_type_of(&emulator->process.handles, th->wait_handles[h]));
       log_warn("[threads]   wait kind %d, wake_at %llu, address 0x%llx (= 0x%x), handles%s", (int)th->wait,
                (unsigned long long)th->wake_at, (unsigned long long)th->wait_address, word, handles);
+      /* Two or more threads stuck on one condvar key for good: how each got there. */
+      if (th->wait == WAIT_CONDITION && th->wake_at == SCHEDULER_WAIT_FOREVER) {
+        uint32_t others = 0;
+        for (uint32_t o = 0; o < SCHEDULER_MAX_THREADS; o++) {
+          const Sched_Thread *t = &emulator->scheduler.threads[o];
+          others += t != th && t->state == THREAD_STATE_WAITING && t->wait == WAIT_CONDITION &&
+                    t->wait_address == th->wait_address;
+        }
+        if (others) scheduler_log_sync(&emulator->scheduler, th, "  sync");
+      }
       /* Stuck on a mutex: how it and the owner the word names got here. */
       if (th->wait == WAIT_ARBITER_LOCK) {
         scheduler_log_sync(&emulator->scheduler, th, "  sync");
