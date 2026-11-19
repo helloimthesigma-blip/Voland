@@ -24,7 +24,7 @@ cap is 60 unless noted.
 | Mario Kart 8 Deluxe (32-bit) | Grand Prix races, all four races of a cup | 98-100% | 45-58 in races | the first visit to a course pauses while its shaders are built (about 25 s before the first race); rare crashes or freezes during Grand Prix runs |
 | Super Smash Bros. Ultimate | Battlefield fights | 94-100% | 32-59 (depends on the fight) | none known |
 | Animal Crossing: New Horizons | arrival on the island | 100% | 29 (the game's cap is 30) | some of the island's sea renders black in patches; generating the island takes a few minutes |
-| Tears of the Kingdom | the cave beneath Hyrule Castle, Great Sky Island | 100% | 12-13 (the game's cap is 30) | white specks around Link and some hard-edged dark patches in the cave; about one boot in 15 crashes while loading |
+| Tears of the Kingdom | the cave beneath Hyrule Castle, Great Sky Island | 100% | 12-13 (the game's cap is 30) | some hard-edged dark patches in the cave; about one boot in 15 crashes while loading |
 
 On an M1 Mac, Silksong gameplay runs at about 33 fps.
 Only macOS has been tested. Phones: Chrome on Android (64-bit, with WebGPU) should run it - the page fits a phone and plays with a paired controller (there are no touch controls) - but it has only been checked in Chrome's phone emulation, and a phone must grant the fixed 5.25 GB of memory. iPhones and iPads cannot run it yet, in Safari or Chrome: every iOS browser, Chrome included, uses Safari's engine, which lacks the 64-bit WebAssembly memory Voland needs, and iOS allows a tab far less than 5.25 GB. The numbers come from `platform/web/tools/perf.mjs`,
