@@ -413,7 +413,7 @@ self.addEventListener("message", (event: MessageEvent<MainToGPUMessage>) => {
     executor.debugTargets().then((targets) => {
       log("info", `debug-dump-targets: ${targets.length} target(s)`);
       const reply: GPUToMainMessage = { type: "debug-targets", targets };
-      self.postMessage(reply, targets.map((t) => t.rgba.buffer));
+      self.postMessage(reply, targets.flatMap((t) => (t.floats ? [t.rgba.buffer, t.floats.buffer] : [t.rgba.buffer])));
     }).catch((e: unknown) => log("error", `debug-dump-targets: ${String(e)}`));
     return;
   }

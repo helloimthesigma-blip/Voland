@@ -171,6 +171,8 @@ export interface DebugTarget {
   readonly width: number;
   readonly height: number;
   readonly rgba: Uint8Array;
+  /** Float formats: the unclamped RGBA values (debugging over-bright scenes). */
+  readonly floats?: Float32Array | undefined;
 }
 /* Save-state readback: surfaces per submit (bounds the staging buffers alive at once). */
 const READBACK_BATCH = 16;
@@ -681,6 +683,7 @@ export class GpuExecutor {
       await buffer.mapAsync(GPUMapMode.READ);
       const dv = new DataView(buffer.getMappedRange());
       const rgba = new Uint8Array(t.width * t.height * 4);
+      const floats = texel === 4 && t.format !== "rg11b10ufloat" ? undefined : new Float32Array(t.width * t.height * 4);
       for (let y = 0; y < t.height; y++)
         for (let x = 0; x < t.width; x++) {
           const at = y * bytesPerRow + x * texel, o = (y * t.width + x) * 4;
@@ -692,11 +695,14 @@ export class GpuExecutor {
           if (t.format === "rgba16float") c = [0, 2, 4, 6].map((k) => debugHalf(dv.getUint16(at + k, true)));
           else if (t.format === "r16float") { const v = debugHalf(dv.getUint16(at, true)); c = [v, v, v, 1]; }
           else { const w = dv.getUint32(at, true); c = [debugSmall(w & 2047, 6), debugSmall((w >> 11) & 2047, 6), debugSmall(w >>> 22, 5), 1]; }
-          for (let k = 0; k < 4; k++) rgba[o + k] = debugByte(c[k] ?? 0);
+          for (let k = 0; k < 4; k++) {
+            rgba[o + k] = debugByte(c[k] ?? 0);
+            if (floats) floats[o + k] = c[k] ?? 0;
+          }
         }
       buffer.unmap();
       buffer.destroy();
-      out.push({ id, format: t.format, width: t.width, height: t.height, rgba });
+      out.push({ id, format: t.format, width: t.width, height: t.height, rgba, floats });
     }
     return out;
   }

@@ -239,6 +239,8 @@ export interface DebugTargetImage {
   readonly width: number;
   readonly height: number;
   readonly rgba: Uint8Array;
+  /** Float formats: the unclamped RGBA values. */
+  readonly floats?: Float32Array | undefined;
 }
 
 export type GPUToMainMessage =

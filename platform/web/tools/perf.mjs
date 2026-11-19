@@ -292,14 +292,19 @@ class Cdp {
 }
 
 /* CDP sessions on the workers whose URLs match `patterns` (in order). */
-/** Every GPU render target as DIR/PREFIX-tex<id>-<w>x<h>-<format>.pam (RGBA8; float formats clamped). */
+/** Every GPU render target as DIR/PREFIX-tex<id>-<w>x<h>-<format>.pam (RGBA8; float formats clamped, and
+ * unclamped as .f32). */
 async function dumpTargets(page, dir, prefix) {
   const targets = await page.evaluate(async () => {
     const list = await globalThis.__volandDebug.dumpTargets();
     return list.map((t) => {
       let bin = "";
       for (let i = 0; i < t.rgba.length; i += 0x8000) bin += String.fromCharCode(...t.rgba.subarray(i, i + 0x8000));
-      return { id: t.id, format: t.format, width: t.width, height: t.height, b64: btoa(bin) };
+      /* Float formats: the unclamped values too (DIR/*.f32, little-endian RGBA float32). */
+      let fbin = "";
+      const fbytes = t.floats ? new Uint8Array(t.floats.buffer, t.floats.byteOffset, t.floats.byteLength) : new Uint8Array(0);
+      for (let i = 0; i < fbytes.length; i += 0x8000) fbin += String.fromCharCode(...fbytes.subarray(i, i + 0x8000));
+      return { id: t.id, format: t.format, width: t.width, height: t.height, b64: btoa(bin), f64: btoa(fbin) };
     });
   });
   mkdirSync(dir, { recursive: true });
@@ -307,6 +312,7 @@ async function dumpTargets(page, dir, prefix) {
     const header = `P7\nWIDTH ${t.width}\nHEIGHT ${t.height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n`;
     writeFileSync(`${dir}/${prefix}-tex${t.id}-${t.width}x${t.height}-${t.format}.pam`,
       Buffer.concat([Buffer.from(header), Buffer.from(t.b64, "base64")]));
+    if (t.f64) writeFileSync(`${dir}/${prefix}-tex${t.id}-${t.width}x${t.height}-${t.format}.f32`, Buffer.from(t.f64, "base64"));
   }
   return targets.length;
 }
