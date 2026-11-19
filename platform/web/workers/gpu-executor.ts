@@ -250,6 +250,10 @@ interface AheadShader {
 interface CachedPipeline {
   readonly pipeline: GPURenderPipeline;
   readonly layout: GPUBindGroupLayout;
+  /* GpuExecutor.pipelineUses when last used (eviction drops the oldest), and
+   * whether evicted: a draw's fast lookup then needs no string-keyed map. */
+  used?: number;
+  evicted?: boolean;
 }
 
 export interface ExecutorStats {
@@ -454,6 +458,7 @@ export class GpuExecutor {
   private readonly modulesByHash = new Map<string, GPUShaderModule>();
   private cacheStore: ShaderCacheStore | null = null;
   private readonly pipelines = new Map<string, CachedPipeline>();
+  private pipelineUses = 0;
   private readonly shadows = new Map<string, Tex>();
   /* Shadow copies (by key) still equal to their attachment: the attachment's
    * id. Mario Kart 8 Deluxe's later courses sample a bound attachment in ~900
@@ -1218,7 +1223,10 @@ export class GpuExecutor {
       this.pipelines.set(key, { pipeline: this.device.createRenderPipeline(desc), layout });
       this.stats.prewarmed++;
       void this.device.popErrorScope().then((error) => {
-        if (error) this.pipelines.delete(key); /* not valid here (another adapter's formats): built on demand */
+        if (!error) return;
+        const p = this.pipelines.get(key);
+        if (p) p.evicted = true;
+        this.pipelines.delete(key); /* not valid here (another adapter's formats): built on demand */
       });
     };
     /* Synchronous creation, a batch per turn of the event loop so the
@@ -1522,12 +1530,11 @@ export class GpuExecutor {
   private cached(key: string, make: () => CachedPipeline): CachedPipeline {
     const hit = this.pipelines.get(key);
     if (hit) {
-      /* Most recently used last: the map's order is the eviction order. */
-      this.pipelines.delete(key);
-      this.pipelines.set(key, hit);
+      hit.used = ++this.pipelineUses;
       return hit;
     }
     const made = make();
+    made.used = ++this.pipelineUses;
     this.pipelines.set(key, made);
     this.evictPipelines();
     this.stats.pipelines++;
@@ -1537,10 +1544,14 @@ export class GpuExecutor {
 
   /** Chrome's GPU process fell over near 1,900 live pipelines: past
    * PIPELINE_LIMIT the least recently used go (rebuilt if drawn with again). */
+  /** Least recently used first, down to PIPELINE_LIMIT (rare: a sort only when over it). */
   private evictPipelines(): void {
-    for (const key of this.pipelines.keys()) {
+    if (this.pipelines.size <= PIPELINE_LIMIT) return;
+    const byAge = [...this.pipelines].sort((a, b) => (a[1].used ?? 0) - (b[1].used ?? 0));
+    for (const [key, p] of byAge) {
       if (this.pipelines.size <= PIPELINE_LIMIT) break;
       this.pipelines.delete(key);
+      p.evicted = true;
       this.stats.pipelinesEvicted++;
     }
   }
@@ -1672,13 +1683,12 @@ export class GpuExecutor {
                        windows: readonly DrawWindow[]): CachedPipeline | null {
     const fast = this.drawPipelineKey(d, textures, filtered, colorFormats, depth, windows);
     const hit = fast === null ? undefined : this.fastPipelines.get(fast);
-    if (hit) {
-      const live = this.pipelines.get(hit.key);
-      if (live === hit.made) {
-        this.pipelines.delete(hit.key); /* most recently used last (evictPipelines) */
-        this.pipelines.set(hit.key, live);
-        return live;
-      }
+    /* Per draw: no string-keyed lookup (Super Mario Odyssey's Seaside
+     * Kingdom draws ~4800 times a frame; the map's reordering by its long
+     * keys was the GPU worker's heaviest function). */
+    if (hit && !hit.made.evicted) {
+      hit.made.used = ++this.pipelineUses;
+      return hit.made;
     }
     const spec = this.drawSpec(d, textures, filtered, colorFormats, depth, windows);
     const key = specKey(spec);
