@@ -2447,6 +2447,13 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
     const uint32_t write = (regs[REG_SINGLE_CT_WRITE] & 1u) ? regs[REG_CT_WRITE] : regs[REG_CT_WRITE + i];
     for (uint32_t c = 0; c < 4; c++)
       if ((write >> (4u * c)) & 1u) t->write_mask |= 1u << c;
+    /* A target the pixel program writes no component of (its header's
+     * output map) keeps its contents. Tears of the Kingdom's half-res
+     * lighting pass binds its depth as target 7 while sampling it, and
+     * writing (0, 0, 0, 1) there put every pixel at infinite distance:
+     * NaN on characters, the whole picture over-bright. */
+    const uint32_t src = rs->mrt ? i : 0u;
+    if (ctx->ps && !((ctx->ps->header.omap_target >> (4u * src)) & 0xfu)) t->write_mask = 0;
     if (!t->write_mask) continue;
     t->surface = surface_get(r, &d, ctx->mem, true);
     t->blend = (regs[REG_BLEND_ENABLE + i] & 1u) != 0 && t->format->kind != KIND_UINT && t->format->kind != KIND_SINT;
