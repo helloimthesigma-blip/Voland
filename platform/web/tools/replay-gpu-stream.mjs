@@ -353,12 +353,13 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
         const n = dv.getUint32(4, true), ids = [];
         for (let k = 0; k < n && k < 8; k++) {
           const id = dv.getUint32(8 + 36 * k, true), t = ex.textures.get(id);
-          ids.push(id && globalThis.TRACE_SIZES ? `${id}(${t ? `${t.format} ${t.width}x${t.height}` : "missing"})` : id);
+          const mask = dv.getUint32(12 + 36 * k, true).toString(16);
+          ids.push(id && globalThis.TRACE_SIZES ? `${id}(${t ? `${t.format} ${t.width}x${t.height}` : "missing"} mask ${mask})` : id);
         }
         if (globalThis.TRACE_SIZES) { const t = ex.textures.get(dv.getUint32(296, true)); ids.push(`depth(${t ? `${t.format} ${t.width}x${t.height}` : "-"})`); }
-        /* The sampled textures: Gpu_Rec_Binding {kind, binding, bytes, id} from byte 432 (binding_count at 400). */
+        /* The sampled textures: Gpu_Rec_Binding {kind, binding, bytes, id} from byte 456, sizeof(Gpu_Rec_Draw) (binding_count at 400). */
         const tex = [];
-        for (let k = 0, at = 432; k < dv.getUint32(400, true) && at + 16 <= payload.byteLength; k++) {
+        for (let k = 0, at = 456; k < dv.getUint32(400, true) && at + 16 <= payload.byteLength; k++) {
           const kind = dv.getUint32(at, true);
           if (kind === 2) tex.push(dv.getUint32(at + 12, true));
           if (kind === 1 && globalThis.CB_DUMP && (globalThis.CB_DUMP.shader === dv.getUint32(0, true) || globalThis.CB_DUMP.shader === dv.getUint32(408, true))) {
@@ -395,7 +396,7 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
         console.log(`shape ${records} shader ${dv.getUint32(0, true)} vs ${dv.getUint32(8 + 36 * 8 + 4 * 13 + 4 * 4 + 4 * 4 + 4 * 4 + 4 * 4, true)} targets ${ids.join(",")} depth ${dv.getUint32(296, true)} test ${dv.getUint32(300, true)} write ${dv.getUint32(304, true)} cmp ${dv.getUint32(308, true)} tex ${tex.join(",")} vtx ${dv.getUint32(404, true)} vsid ${dv.getUint32(408, true)} inputs ${dv.getUint32(412, true)} cull ${dv.getUint32(416, true)} idx ${dv.getUint32(424, true)} flags ${dv.getUint32(428, true).toString(16)} scissor ${[0, 1, 2, 3].map((k) => dv.getInt32(376 + 4 * k, true)).join(",")} mask0 ${dv.getUint32(12, true).toString(16)} blend0 ${dv.getUint32(16, true)} factors0 ${[20, 24, 28, 32, 36, 40].map((o) => dv.getUint32(o, true)).join(",")} stencil ${dv.getUint32(312, true)} front ${[0, 1, 2, 3].map((k) => dv.getUint32(316 + 4 * k, true)).join(",")} back ${[0, 1, 2, 3].map((k) => dv.getUint32(332 + 4 * k, true)).join(",")} masks ${dv.getUint32(348, true)},${dv.getUint32(352, true)} ref ${dv.getUint32(356, true)}`);
         /* Transformed vertices (no vertex stage): the first ones' x, y (NDC), z and 1/w after the bindings. */
         if (dv.getUint32(408, true) === 0 && dv.getUint32(404, true) > 0) {
-          let vat = 432;
+          let vat = 456;
           for (let k = 0; k < dv.getUint32(400, true); k++) vat += 16 + (dv.getUint32(vat, true) === 1 ? dv.getUint32(vat + 8, true) : 0);
           const stride = 16 + 16 * dv.getUint32(392, true), first = [];
           const shown = globalThis.TRACE_VERTEX_WORDS ? 6 : 3;
@@ -404,7 +405,7 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
           console.log(`  vertices ${first.join(" | ")}`);
           if (globalThis.TRACE_VERTEX_WORDS) {
             const kinds = [];
-            for (let k = 0, at2 = 432 + (dv.getUint32(432, true) === 0 ? 16 : 0); k < dv.getUint32(400, true); k++) {
+            for (let k = 0, at2 = 456 + (dv.getUint32(456, true) === 0 ? 16 : 0); k < dv.getUint32(400, true); k++) {
               kinds.push(`${dv.getUint32(at2, true)}:${dv.getUint32(at2 + 4, true)}:${dv.getUint32(at2 + 8, true)}:${dv.getUint32(at2 + 12, true)}`);
               at2 += 16 + (dv.getUint32(at2, true) === 1 ? dv.getUint32(at2 + 8, true) : 0);
             }
