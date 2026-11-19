@@ -629,6 +629,36 @@ static void test_atomics(void) {
   CHECK(minimum == -4, "RED.MIN.S32: %d", minimum);
 }
 
+/* LDG.E sizes: .128 (6) and .U.128 (7) both fill four registers; .64 two.
+ * Tears of the Kingdom's lighting loads its exposure pair as two .U.128
+ * vectors - read as one word, green and blue kept stale registers and the
+ * picture turned red. */
+static void test_global_load_sizes(void) {
+  for (uint32_t i = 0; i < 16u; i++) {
+    const float v = (float)(i + 1u);
+    memcpy(g_global + 4u * i, &v, 4);
+  }
+  static const struct { uint32_t size, words; } cases[] = {{5, 2}, {6, 4}, {7, 4}};
+  for (uint32_t k = 0; k < 3u; k++) {
+    Builder b;
+    begin(&b, SM_STAGE_VERTEX);
+    emit(&b, MOV32I(2, 16));
+    emit(&b, MOV32I(3, 0));
+    for (uint32_t r = 8; r < 12u; r++) emit(&b, MOV32I(r, 0xdeadbeefu));
+    emit(&b, op_top(0xeed0) | GUARD | ((uint64_t)cases[k].size << 48) | (1ull << 45) | ra(2) | rd(8)); /* LDG.E R8, [R2] */
+    emit(&b, EXIT());
+    load(&b);
+    sm_thread_reset(&g_thread, 1);
+    Sm_Env env = make_env();
+    env.global_read = global_read;
+    CHECK(sm_run(&g_prog, &env, &g_thread), "LDG size %u runs", cases[k].size);
+    for (uint32_t w = 0; w < 4u; w++) {
+      const uint32_t want = w < cases[k].words ? f_bits((float)(5u + w)) : 0xdeadbeefu;
+      CHECK(g_thread.r[8 + w][0] == want, "LDG size %u word %u: %08x", cases[k].size, w, g_thread.r[8 + w][0]);
+    }
+  }
+}
+
 /* Screen-space derivatives the way nouveau builds them: SHFL.BFLY to the
  * quad neighbour, then FSWZADD with QUADOP(SUB, SUBR, SUB, SUBR) for
  * dFdx and QUADOP(SUB, SUB, SUBR, SUBR) for dFdy; SHFL.IDX broadcasts a
@@ -839,6 +869,7 @@ int main(void) {
   test_lea();
   test_iscadd_carry();
   test_atomics();
+  test_global_load_sizes();
   test_derivatives();
   test_conditional_exit();
   test_half_precision();

@@ -999,13 +999,14 @@ static uint32_t lop3(uint32_t lut, uint32_t a, uint32_t b, uint32_t c) {
 }
 
 /* Memory access sizes (LDG/LDL/LDC "size" fields): 0 u8, 1 s8, 2 u16,
- * 3 s16, 4 32, 5 64, 6 128. Returns bytes. */
+ * 3 s16, 4 32, 5 64, 6 128, 7 unaligned 128. Returns bytes. */
 static uint32_t access_bytes(uint32_t size) {
   switch (size) {
   case 0: case 1: return 1;
   case 2: case 3: return 2;
   case 5: return 8;
-  case 6: return 16;
+  case 6: /* .128 */
+  case 7: return 16; /* .U.128 (TOTK's lighting loads its exposure pair so) */
   default: return 4;
   }
 }

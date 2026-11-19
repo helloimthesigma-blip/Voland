@@ -1149,7 +1149,8 @@ static uint32_t access_bytes(uint32_t size) {
   case 0: case 1: return 1;
   case 2: case 3: return 2;
   case 5: return 8;
-  case 6: return 16;
+  case 6: /* .128 */
+  case 7: return 16; /* .U.128 (TOTK's lighting loads its exposure pair so) */
   default: return 4;
   }
 }
