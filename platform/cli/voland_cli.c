@@ -1949,6 +1949,8 @@ static int run(int argc, char **argv) {
       char numbered[1024];
       snprintf(numbered, sizeof(numbered), "%s.%llu.ppm", frame_path, (unsigned long long)slices);
       (void)dump_frame(numbered);
+      /* The frame count VOLAND_DUMP_SURFACES numbers frames by. */
+      fprintf(stderr, "voland-cli: slice %llu frame %llu\n", (unsigned long long)slices, (unsigned long long)emu.renderer.texture_epoch);
     }
   }
 
