@@ -101,7 +101,10 @@ struct Gpu_Stream;
 #define RASTER_GPU_TEXTURE_BUDGET_BYTES ((uint64_t)2048 * 1024 * 1024)
 #define RASTER_GPU_SURFACE_BUCKETS 8192u /* the address index over them (a power of two) */
 #define RASTER_GPU_SHADERS 1024u
-#define RASTER_GPU_GATHERS 32u/* 3D textures and cube maps assembled from render targets */
+/* 3D textures and cube maps assembled from render targets. Mario Kart 8
+ * Deluxe's later courses use more than 32 a frame: a 32-slot ring rebuilt
+ * one GPU texture per miss, ~26000 in under a minute. */
+#define RASTER_GPU_GATHERS 128u
 /* Pool chunk keys: each stage's constant-buffer slots, then each stage's
  * global buffers (at least WGSL_MAX_GLOBALS; raster3d.c checks). */
 #define RASTER_GPU_POOL_GLOBALS 8u
