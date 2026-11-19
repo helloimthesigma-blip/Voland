@@ -128,45 +128,62 @@ export async function listMods(titleId: string): Promise<readonly ModInfo[]> {
   return result;
 }
 
-export async function setModEnabled(titleId: string, name: string, enabled: boolean): Promise<void> {
-  const dir = await titleDirectory(titleId, true);
-  if (!dir) return;
-  const config = await readConfig(dir);
-  const disabled = config.disabled.filter((n) => n !== name);
-  await writeConfig(dir, { ...config, disabled: enabled ? disabled : [...disabled, name] });
+/* Config changes run one at a time: each reads, changes and writes the
+ * whole file, so two at once (quick clicks) would lose one of them. */
+let configTail: Promise<void> = Promise.resolve();
+function serially(change: () => Promise<void>): Promise<void> {
+  const run = configTail.then(change);
+  configTail = run.catch(() => undefined);
+  return run;
+}
+
+export function setModEnabled(titleId: string, name: string, enabled: boolean): Promise<void> {
+  return serially(async () => {
+    const dir = await titleDirectory(titleId, true);
+    if (!dir) return;
+    const config = await readConfig(dir);
+    const disabled = config.disabled.filter((n) => n !== name);
+    await writeConfig(dir, { ...config, disabled: enabled ? disabled : [...disabled, name] });
+  });
 }
 
 /** Moves `name` one place up (delta -1) or down (+1) in priority. */
-export async function moveMod(titleId: string, name: string, delta: number): Promise<void> {
-  const dir = await titleDirectory(titleId, true);
-  if (!dir) return;
-  const config = await readConfig(dir);
-  const order = orderedNames(await modNames(dir), config.order);
-  const at = order.indexOf(name);
-  const to = at + delta;
-  if (at < 0 || to < 0 || to >= order.length) return;
-  const next = order.slice();
-  next.splice(at, 1);
-  next.splice(to, 0, name);
-  await writeConfig(dir, { ...config, order: next });
+export function moveMod(titleId: string, name: string, delta: number): Promise<void> {
+  return serially(async () => {
+    const dir = await titleDirectory(titleId, true);
+    if (!dir) return;
+    const config = await readConfig(dir);
+    const order = orderedNames(await modNames(dir), config.order);
+    const at = order.indexOf(name);
+    const to = at + delta;
+    if (at < 0 || to < 0 || to >= order.length) return;
+    const next = order.slice();
+    next.splice(at, 1);
+    next.splice(to, 0, name);
+    await writeConfig(dir, { ...config, order: next });
+  });
 }
 
-export async function removeMod(titleId: string, name: string): Promise<void> {
-  const dir = await titleDirectory(titleId, false);
-  if (!dir) return;
-  await dir.removeEntry(name, { recursive: true }).catch(() => undefined);
-  const config = await readConfig(dir);
-  const sources = { ...config.sources };
-  delete sources[name];
-  await writeConfig(dir, { order: config.order.filter((n) => n !== name), disabled: config.disabled.filter((n) => n !== name), sources });
+export function removeMod(titleId: string, name: string): Promise<void> {
+  return serially(async () => {
+    const dir = await titleDirectory(titleId, false);
+    if (!dir) return;
+    await dir.removeEntry(name, { recursive: true }).catch(() => undefined);
+    const config = await readConfig(dir);
+    const sources = { ...config.sources };
+    delete sources[name];
+    await writeConfig(dir, { order: config.order.filter((n) => n !== name), disabled: config.disabled.filter((n) => n !== name), sources });
+  });
 }
 
 /** Records that mod `name` came from a repository entry. */
-export async function recordModSource(titleId: string, name: string, source: ModSource): Promise<void> {
-  const dir = await titleDirectory(titleId, true);
-  if (!dir) return;
-  const config = await readConfig(dir);
-  await writeConfig(dir, { ...config, sources: { ...config.sources, [name]: source } });
+export function recordModSource(titleId: string, name: string, source: ModSource): Promise<void> {
+  return serially(async () => {
+    const dir = await titleDirectory(titleId, true);
+    if (!dir) return;
+    const config = await readConfig(dir);
+    await writeConfig(dir, { ...config, sources: { ...config.sources, [name]: source } });
+  });
 }
 
 /** A folder or archive name made safe as one OPFS component. Pure. */
