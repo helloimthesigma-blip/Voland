@@ -13,6 +13,7 @@
 #include <string.h>
 
 #include "common/log.h"
+#include "gpu/bc_encode.h"
 #include "gpu/block_linear.h"
 #include "gpu/gpu_channel.h"
 #include "gpu/gpu_mirror.h"
@@ -4447,6 +4448,144 @@ static uint64_t gpu_decoded_bytes(uint32_t format, uint32_t width, uint32_t heig
   return levels > 1u ? base + base / 3u : base;
 }
 
+/* ---- ASTC re-encoded as BC (a device with BCn but not ASTC) ---- */
+
+#define BC_BAND_BYTES ((size_t)1 << 20) /* encoded block rows per batch of records */
+#define RGBA8_BYTES 4u
+static uint8_t g_bc_band[BC_BAND_BYTES];
+
+static bool image_is_astc(const Tex_Image *img) {
+  for (uint32_t i = 0; i < GPU_ASTC_FOOTPRINTS; i++)
+    if (k_astc_formats[i] == img->header.format) return true;
+  return false;
+}
+
+/* `src` (w x h RGBA8, rows of `stride` bytes) at half size, each texel the
+ * mean of its 2x2 (edges repeat), packed into `dst`. */
+static void box_half(const uint8_t *src, uint32_t w, uint32_t h, size_t stride, uint8_t *dst) {
+  const uint32_t dw = w > 1u ? w / 2u : 1u, dh = h > 1u ? h / 2u : 1u;
+  for (uint32_t y = 0; y < dh; y++)
+    for (uint32_t x = 0; x < dw; x++)
+      for (uint32_t c = 0; c < RGBA8_BYTES; c++) {
+        uint32_t sum = 0;
+        for (uint32_t j = 0; j < 2u; j++)
+          for (uint32_t i = 0; i < 2u; i++) {
+            const uint32_t sx = 2u * x + i < w ? 2u * x + i : w - 1u, sy = 2u * y + j < h ? 2u * y + j : h - 1u;
+            sum += src[(size_t)sy * stride + (size_t)sx * RGBA8_BYTES + c];
+          }
+        dst[((size_t)y * dw + x) * RGBA8_BYTES + c] = (uint8_t)((sum + 2u) / 4u);
+      }
+}
+
+/* One level as BC1 (opaque) or BC3 blocks, written a band of block rows at
+ * a time. */
+static void bc_encode_level(Raster3d *r, uint32_t id, uint32_t level, uint32_t layer, const uint8_t *src, uint32_t w,
+                            uint32_t h, size_t stride, bool alpha) {
+  const uint32_t cols = (w + BC_BLOCK_DIM - 1u) / BC_BLOCK_DIM, rows = (h + BC_BLOCK_DIM - 1u) / BC_BLOCK_DIM;
+  const uint32_t block = alpha ? BC3_BLOCK_BYTES : BC1_BLOCK_BYTES, row_bytes = cols * block;
+  uint32_t band = (uint32_t)(BC_BAND_BYTES / row_bytes);
+  if (band == 0) band = 1;
+  for (uint32_t by0 = 0; by0 < rows; by0 += band) {
+    const uint32_t n = rows - by0 < band ? rows - by0 : band;
+    for (uint32_t by = 0; by < n; by++)
+      for (uint32_t bx = 0; bx < cols; bx++) {
+        uint8_t px[BC_BLOCK_TEXELS][4];
+        for (uint32_t j = 0; j < BC_BLOCK_DIM; j++)
+          for (uint32_t i = 0; i < BC_BLOCK_DIM; i++) {
+            const uint32_t x = bx * BC_BLOCK_DIM + i, y = (by0 + by) * BC_BLOCK_DIM + j;
+            memcpy(px[j * BC_BLOCK_DIM + i], src + (size_t)(y < h ? y : h - 1u) * stride + (size_t)(x < w ? x : w - 1u) * RGBA8_BYTES,
+                   RGBA8_BYTES);
+          }
+        uint8_t *out = g_bc_band + (size_t)by * row_bytes + (size_t)bx * block;
+        if (alpha) bc3_encode_block(px, out);
+        else bc1_encode_block(px, out);
+      }
+    gpu_write_level_rows(r, id, level, layer, BC_BLOCK_DIM, BC_BLOCK_DIM, cols, by0, n, row_bytes, g_bc_band);
+  }
+}
+
+/* An ASTC texture decoded here (the device samples BCn but not ASTC),
+ * re-encoded as BC1 when opaque, else BC3: an eighth or a quarter of an
+ * RGBA8 copy. Tears of the Kingdom's ASTC set as RGBA8 passed
+ * RASTER_GPU_TEXTURE_BUDGET_BYTES every frame - 2 GB of uploads a frame,
+ * 1 fps. The levels below 0 are box-filtered here (the consumer builds no
+ * mips for block formats). 0: not such a texture (the RGBA8 path). */
+static uint32_t gpu_texture_bc(Raster3d *r, Raster3d_Texture *t, bool srgb8) {
+  const Tex_Image *img = &t->image;
+  const Tex_Type type = img->header.type;
+  if (!(r->gpu_compression & GPU_COMPRESSION_BC) || (r->gpu_compression & GPU_COMPRESSION_ASTC) || !image_is_astc(img) ||
+      !(img->rgba8 || srgb8) || img->width % BC_BLOCK_DIM || img->height % BC_BLOCK_DIM ||
+      (type != TEX_TYPE_2D && type != TEX_TYPE_2D_NO_MIPMAP && type != TEX_TYPE_2D_ARRAY && type != TEX_TYPE_CUBE &&
+       type != TEX_TYPE_CUBE_ARRAY))
+    return 0;
+  const uint32_t levels = gpu_texture_levels(r, img, false), layers = img->layers ? img->layers : 1u;
+  /* Two levels of mips at a time in the staging buffer (level k from k - 1). */
+  const uint32_t w1 = img->width > 1u ? img->width / 2u : 1u, h1 = img->height > 1u ? img->height / 2u : 1u;
+  const size_t l1_bytes = (size_t)w1 * h1 * RGBA8_BYTES;
+  if (levels > 1u && l1_bytes + l1_bytes / 4u + RGBA8_BYTES > RASTER_MAX_SURFACE_BYTES) return 0;
+  /* Uploaded and unchanged: its decoded copy was released, so this comes
+   * before anything reads the texels. */
+  const bool bc_format = t->gpu_format == GPU_FMT_BC1_UNORM || t->gpu_format == GPU_FMT_BC1_SRGB ||
+                         t->gpu_format == GPU_FMT_BC3_UNORM || t->gpu_format == GPU_FMT_BC3_SRGB;
+  if (t->gpu_id && bc_format && t->gpu_hash == t->raw_hash && t->gpu_width == img->width && t->gpu_height == img->height &&
+      t->gpu_layers == layers && t->gpu_levels == levels)
+    return t->gpu_id;
+  if (!img->texels) return 0;
+  bool alpha = false;
+  for (uint32_t l = 0; l < layers && !alpha; l++)
+    for (uint32_t y = 0; y < img->height && !alpha; y++) {
+      const uint8_t *row = img->texels + img->layer_bytes * l + (size_t)y * img->row_bytes;
+      for (uint32_t x = 0; x < img->width; x++)
+        if (row[x * RGBA8_BYTES + 3u] != UINT8_MAX) {
+          alpha = true;
+          break;
+        }
+    }
+  const uint32_t format = alpha ? (srgb8 ? GPU_FMT_BC3_SRGB : GPU_FMT_BC3_UNORM) : (srgb8 ? GPU_FMT_BC1_SRGB : GPU_FMT_BC1_UNORM);
+  const bool same = t->gpu_id && t->gpu_width == img->width && t->gpu_height == img->height && t->gpu_layers == layers &&
+                    t->gpu_format == format && t->gpu_levels == levels;
+  if (same && t->gpu_hash == t->raw_hash) return t->gpu_id;
+  if (!same) {
+    uint64_t bytes = 0;
+    for (uint32_t v = 0; v < levels; v++) {
+      const uint32_t w = img->width >> v ? img->width >> v : 1u, h = img->height >> v ? img->height >> v : 1u;
+      bytes += (uint64_t)((w + BC_BLOCK_DIM - 1u) / BC_BLOCK_DIM) * ((h + BC_BLOCK_DIM - 1u) / BC_BLOCK_DIM) *
+               (alpha ? BC3_BLOCK_BYTES : BC1_BLOCK_BYTES);
+    }
+    gpu_destroy(r, t->gpu_id);
+    t->gpu_id = gpu_new_id(r);
+    gpu_create(r, t->gpu_id, format, img->width, img->height, layers, GPU_USAGE_SAMPLED, levels);
+    gpu_texture_account(r, t, bytes * layers);
+    t->gpu_width = img->width;
+    t->gpu_height = img->height;
+    t->gpu_layers = layers;
+    t->gpu_format = format;
+    t->gpu_levels = levels;
+  }
+  uint8_t *buf[2] = {r->staging, r->staging + ((l1_bytes + RGBA8_BYTES - 1u) & ~(size_t)(RGBA8_BYTES - 1u))};
+  for (uint32_t l = 0; l < layers; l++) {
+    const uint8_t *src = img->texels + img->layer_bytes * l;
+    size_t stride = img->row_bytes;
+    uint32_t w = img->width, h = img->height;
+    bc_encode_level(r, t->gpu_id, 0, l, src, w, h, stride, alpha);
+    for (uint32_t v = 1; v < levels; v++) {
+      uint8_t *dst = buf[(v - 1u) % 2u];
+      box_half(src, w, h, stride, dst);
+      w = w > 1u ? w / 2u : 1u;
+      h = h > 1u ? h / 2u : 1u;
+      src = dst;
+      stride = (size_t)w * RGBA8_BYTES;
+      bc_encode_level(r, t->gpu_id, v, l, src, w, h, stride, alpha);
+    }
+  }
+  t->gpu_hash = t->raw_hash;
+  r->gpu_stats.texture_uploads++;
+  r->gpu_stats.textures_bc_encoded++;
+  t->pool_bytes = 0;
+  t->image.texels = NULL;
+  return t->gpu_id;
+}
+
 static uint32_t gpu_texture(Raster3d *r, Raster3d_Texture *t) {
   if (t->native) return t->gpu_id; /* gpu_texture_native uploaded it with the load */
   const Tex_Image *img = &t->image;
@@ -4456,6 +4595,8 @@ static uint32_t gpu_texture(Raster3d *r, Raster3d_Texture *t) {
   /* sRGB A8B8G8R8 (and BCn/ASTC expanded to it): the bytes as they are,
    * decoded to linear by the sampler, not by tex_texel into RGBA32F. */
   const bool srgb8 = !img->rgba8 && image_is_srgb8(img);
+  const uint32_t bc = gpu_texture_bc(r, t, srgb8);
+  if (bc) return bc;
   const uint32_t format = img->rgba8 ? GPU_FMT_RGBA8_UNORM
                           : srgb8   ? GPU_FMT_RGBA8_SRGB
                           : half    ? GPU_FMT_RGBA16_FLOAT

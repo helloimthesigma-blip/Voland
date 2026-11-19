@@ -1978,14 +1978,14 @@ static int run(int argc, char **argv) {
     fprintf(stderr,
             "voland-cli: GPU stream: %llu records (%llu MB); %llu draws, %llu triangles, %llu shaders, %llu untranslated "
             "draws, %llu texture uploads (%llu MB), %llu surfaces, %llu presents, %llu copies, %llu MB re-hashed; "
-            "textures %llu MB on the GPU, %llu dropped over budget\n",
+            "textures %llu MB on the GPU, %llu dropped over budget, %llu ASTC re-encoded as BC\n",
             (unsigned long long)g_gpu_records, (unsigned long long)(g_gpu_stream.bytes >> 20),
             (unsigned long long)gs->draws, (unsigned long long)gs->triangles, (unsigned long long)gs->shaders,
             (unsigned long long)gs->untranslated_draws, (unsigned long long)gs->texture_uploads,
             (unsigned long long)(gs->upload_bytes >> 20), (unsigned long long)gs->surfaces,
             (unsigned long long)gs->presents, (unsigned long long)gs->copies,
             (unsigned long long)(gs->hashed_bytes >> 20), (unsigned long long)(emu.renderer.gpu_texture_bytes >> 20),
-            (unsigned long long)gs->texture_budget_drops);
+            (unsigned long long)gs->texture_budget_drops, (unsigned long long)gs->textures_bc_encoded);
     fprintf(stderr,
             "voland-cli: GPU texture re-hash: %llu whole hashes; MB new %llu, unsampled %llu, sample changed %llu, "
             "periodic %llu, forced by writes %llu\n",
