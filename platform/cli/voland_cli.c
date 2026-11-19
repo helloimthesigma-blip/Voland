@@ -1208,8 +1208,9 @@ static void dump_saves(Emulator *emu, const char *dir) {
 }
 
 /* --gpu-stream: the ring the GPU-mode producer writes, drained into a file
- * whenever it fills and after every slice. */
-#define CLI_GPU_RING_BYTES ((uint64_t)4 * 1024 * 1024)
+ * whenever it fills and after every slice. The browser's size, so the same
+ * draws fit a record (TOTK's 2.3 MB draws were dropped at 4 MiB). */
+#define CLI_GPU_RING_BYTES LAYOUT_GPU_RING_SIZE
 static _Alignas(8) uint8_t g_gpu_header[GPU_STREAM_HEADER_BYTES];
 static _Alignas(8) uint8_t g_gpu_ring[CLI_GPU_RING_BYTES];
 static Gpu_Stream g_gpu_stream;
@@ -1797,7 +1798,21 @@ static int run(int argc, char **argv) {
         emu.renderer.on_program_decoded = program_decoded;
         for (uint32_t i = 0; i < RASTER_PROGRAMS; i++) emu.renderer.programs[i].valid = false;
       }
-      if (job.gpu_stream_path[0] && !g_gpu_file) {
+      if (job.gpu_stream_path[0] && g_gpu_null) {
+        /* GPU mode already (into /dev/null): record from here, everything
+         * the consumer would hold created again, so the file replays alone. */
+        gpu_stream_publish(&g_gpu_stream);
+        gpu_stream_drain();
+        fclose(g_gpu_file);
+        g_gpu_file = fopen(job.gpu_stream_path, "wb");
+        if (!g_gpu_file) _exit(EXIT_USAGE);
+        g_gpu_null = false;
+        g_gpu_bytes = g_gpu_records = g_gpu_presents = 0;
+        raster3d_gpu_forget(&emu.renderer);
+        gpu_stream_init(&g_gpu_stream, g_gpu_header, g_gpu_ring, CLI_GPU_RING_BYTES, gpu_stream_wait, NULL);
+        raster3d_set_gpu(&emu.renderer, &g_gpu_stream);
+        memset(&emu.renderer.gpu_stats, 0, sizeof(emu.renderer.gpu_stats));
+      } else if (job.gpu_stream_path[0] && !g_gpu_file) {
         /* GPU mode from here: targets drawn before exist only in guest
          * memory, so the first frames may miss what was not redrawn. */
         g_gpu_file = fopen(job.gpu_stream_path, "wb");

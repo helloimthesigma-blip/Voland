@@ -3521,6 +3521,27 @@ void raster3d_set_gpu(Raster3d *r, Gpu_Stream *stream) {
   if (stream) log_info("[gpu] WebGPU renderer: draws stream to the GPU worker");
 }
 
+static void gpu_vertex_map_reset(void);
+
+void raster3d_gpu_forget(Raster3d *r) {
+  if (!r->ready) return;
+  for (uint32_t i = 0; i < RASTER_TEXTURES; i++) {
+    Raster3d_Texture *t = &r->textures[i];
+    t->gpu_id = 0;
+    t->gpu_bytes = 0;
+    t->valid = false;
+  }
+  r->gpu_texture_bytes = 0;
+  memset(r->gpu_surfaces, 0, sizeof(r->gpu_surfaces));
+  memset(r->gpu_surface_head, 0, sizeof(r->gpu_surface_head));
+  memset(r->gpu_surface_next, 0, sizeof(r->gpu_surface_next));
+  r->gpu_surface_bytes = 0;
+  memset(r->gpu_gathers, 0, sizeof(r->gpu_gathers));
+  r->gpu_gather_next = 0;
+  memset(r->gpu_shaders, 0, GPU_SHADERS_BYTES);
+  gpu_vertex_map_reset();
+}
+
 /* The pool (gpu_records.h): a draw's chunks all fit in the epoch they
  * start in when this much room is left (both stages' constant buffers and
  * global buffers at their largest). */

@@ -469,6 +469,10 @@ void raster3d_flush(Raster3d *r, const struct Gpu_Memory *mem);
  * work, assembly, clipping and culling stay on this side, pixel programs
  * are translated to WGSL (gpu/wgsl.h). NULL returns to software. */
 void raster3d_set_gpu(Raster3d *r, struct Gpu_Stream *stream);
+/* GPU mode: forgets every texture, render target and shader the stream's
+ * consumer holds, so a new stream (a recording started mid-run) re-creates
+ * them all. Render targets reload from guest memory. */
+void raster3d_gpu_forget(Raster3d *r);
 /* GPU mode: block-compressed formats (GPU_COMPRESSION_* of gpu_records.h)
  * the GPU samples itself - textures in them upload as they are, every mip
  * level, instead of being decoded on the CPU. */
