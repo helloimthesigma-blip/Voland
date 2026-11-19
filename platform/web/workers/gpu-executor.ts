@@ -68,6 +68,7 @@ import {
   DRAW_VS_SHADER_AT,
   FRONT_CCW,
   type Draw,
+  type StencilFace,
   type Target,
   FORMATS,
   PRESENT_FLIP_X,
@@ -272,6 +273,15 @@ export interface ExecutorStats {
   copies: number;
 }
 
+/* Whether a draw's stencil test can change the stencil buffer: a write
+ * mask, and an operation other than keep on some face (Tears of the
+ * Kingdom's deferred passes test stencil without writing it). */
+function stencilWrites(d: Draw): boolean {
+  if (!d.stencil || (d.stencilWriteMask & 0xff) === 0) return false;
+  const writes = (f: StencilFace): boolean => f.fail !== 0 || f.depthFail !== 0 || f.pass !== 0; /* 0: STENCIL_OPS keep */
+  return writes(d.stencilFront) || writes(d.stencilBack);
+}
+
 /* Records that may change a texture's contents: a copy of an attachment
  * made before one of them is not trusted after it. */
 const TEXTURE_CHANGING_RECORDS: ReadonlySet<number> = new Set([
@@ -451,6 +461,9 @@ export class GpuExecutor {
    * frame and left Chrome's GPU process encoding passes. A draw that writes
    * the attachment, and any record that changes textures, ends the hold. */
   private readonly shadowHolds = new Map<string, number>();
+  /* Diagnostics: why each shadow key's last hold ended, and new copies by that reason since the last report. */
+  private readonly shadowReleased = new Map<string, string>();
+  private readonly shadowCopiesBy = new Map<string, number>();
   /* Diagnostics (the memory report): render targets made and destroyed, and
    * destroys of ids never made (a lost or reordered create). */
   private renderCreates = 0;
@@ -616,7 +629,10 @@ export class GpuExecutor {
    * and nothing was done - execute it again once the promise settles. */
   execute(type: number, payload: Uint8Array): Promise<void> | null {
     const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
-    if (TEXTURE_CHANGING_RECORDS.has(type)) this.shadowHolds.clear();
+    if (TEXTURE_CHANGING_RECORDS.has(type) && this.shadowHolds.size) {
+      for (const key of this.shadowHolds.keys()) this.shadowReleased.set(key, `record ${type}`);
+      this.shadowHolds.clear();
+    }
     switch (type) {
       case REC_TEXTURE_CREATE: this.textureCreate(view); break;
       case REC_TEXTURE_DESTROY: this.textureDestroy(view.getUint32(0, true)); break;
@@ -808,6 +824,7 @@ export class GpuExecutor {
   /** Rebuilds `t`'s mip chain from level 0, in the encoder (after earlier
    * passes, before later ones). */
   private buildMips(t: Tex): void {
+    for (const key of this.shadowHolds.keys()) this.shadowReleased.set(key, "mips");
     this.shadowHolds.clear();
     this.mipsStale.delete(t.texture);
     this.touched.add(t.texture);
@@ -1823,6 +1840,9 @@ export class GpuExecutor {
       this.stats.shadowsReused++;
       return s;
     }
+    const why = !s ? "first" : this.shadowHolds.has(key) ? "other attachment" : this.shadowReleased.get(key) ?? "record";
+    const tag = `${why} (${key})`;
+    this.shadowCopiesBy.set(tag, (this.shadowCopiesBy.get(tag) ?? 0) + 1);
     this.materialize(id);
     this.touched.add(t.texture);
     if (!s) {
@@ -1836,8 +1856,12 @@ export class GpuExecutor {
     return s;
   }
 
-  private releaseShadowHolds(id: number): void {
-    for (const [key, held] of this.shadowHolds) if (held === id) this.shadowHolds.delete(key);
+  private releaseShadowHolds(id: number, why: string): void {
+    for (const [key, held] of this.shadowHolds) {
+      if (held !== id) continue;
+      this.shadowHolds.delete(key);
+      this.shadowReleased.set(key, why);
+    }
   }
 
   /* What the current pass already has set, so a draw sends only what
@@ -1969,9 +1993,9 @@ export class GpuExecutor {
     if (this.shadowHolds.size) {
       for (let i = 0; i < d.targets.length; i++) {
         const target = d.targets[i] as Target;
-        if (target.writeMask !== 0 && colorIds[i]) this.releaseShadowHolds(target.id);
+        if (target.writeMask !== 0 && colorIds[i]) this.releaseShadowHolds(target.id, "colour write");
       }
-      if (depthId && (d.depthWrite || d.stencil)) this.releaseShadowHolds(depthId);
+      if (depthId && (d.depthWrite || stencilWrites(d))) this.releaseShadowHolds(depthId, d.depthWrite ? "depth write" : "stencil write");
     }
     const made = this.drawPipeline(d, module, textures, filtered, colorFormats, depthId ? depthTex : undefined, windows);
     if (!made) return; /* execute() says what to wait for; nothing of this draw is recorded yet */
@@ -2330,9 +2354,11 @@ export class GpuExecutor {
       `pool ${mb(this.poolBytes)}; ${this.bufferWrites} writes), ${this.submits} submits, ` +
       `${this.stats.draws - this.reportedStats.draws} draws, ${this.stats.passes - this.reportedStats.passes} passes, ` +
       `${this.stats.copies - this.reportedStats.copies} copies, ${this.stats.shadowsReused} shadows reused in all, ${this.stats.dispatches - this.reportedStats.dispatches} dispatches ` +
-      `(passes ended by ${[...this.passEnds].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r} ${n}`).join(", ")}); textures by format: ` +
+      `(passes ended by ${[...this.passEnds].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r} ${n}`).join(", ")}; ` +
+      `shadow copies after ${[...this.shadowCopiesBy].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r} ${n}`).join(", ")}); textures by format: ` +
       [...byFormat].sort((a, b) => b[1] - a[1]).map(([f, n]) => `${f} ${mb(n)} MB`).join(", "));
     this.passEnds.clear();
+    this.shadowCopiesBy.clear();
     this.reportedStats = { draws: this.stats.draws, passes: this.stats.passes, copies: this.stats.copies, dispatches: this.stats.dispatches };
     this.uploadedBytes = 0;
     this.bufferBytes = 0;
