@@ -267,8 +267,17 @@ export interface ExecutorStats {
   presents: number;
   errors: number;
   shadows: number;
+  /** Draws that sampled a bound attachment from a copy still current (no new copy). */
+  shadowsReused: number;
   copies: number;
 }
+
+/* Records that may change a texture's contents: a copy of an attachment
+ * made before one of them is not trusted after it. */
+const TEXTURE_CHANGING_RECORDS: ReadonlySet<number> = new Set([
+  REC_TEXTURE_CREATE, REC_TEXTURE_DESTROY, REC_TEXTURE_WRITE, REC_TEXTURE_WRITE_LEVEL, REC_CLEAR, REC_COPY, REC_PRESENT,
+  REC_COMPUTE, REC_TEXTURE_REINTERPRET,
+]);
 
 const FULLSCREEN_VS = /* wgsl */ `
 @vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
@@ -427,7 +436,7 @@ function sameNumbers(a: readonly number[], b: readonly number[]): boolean {
 }
 
 export class GpuExecutor {
-  readonly stats: ExecutorStats = { draws: 0, dispatches: 0, passes: 0, submits: 0, pipelines: 0, prewarmed: 0, ahead: 0, pipelinesEvicted: 0, presents: 0, errors: 0, shadows: 0, copies: 0 };
+  readonly stats: ExecutorStats = { draws: 0, dispatches: 0, passes: 0, submits: 0, pipelines: 0, prewarmed: 0, ahead: 0, pipelinesEvicted: 0, presents: 0, errors: 0, shadows: 0, shadowsReused: 0, copies: 0 };
   private readonly textures = new Map<number, Tex>();
   private readonly shaders = new Map<number, GPUShaderModule>();
   /* Per-session shader ids -> WGSL content hash; modules shared by hash. */
@@ -436,6 +445,12 @@ export class GpuExecutor {
   private cacheStore: ShaderCacheStore | null = null;
   private readonly pipelines = new Map<string, CachedPipeline>();
   private readonly shadows = new Map<string, Tex>();
+  /* Shadow copies (by key) still equal to their attachment: the attachment's
+   * id. Mario Kart 8 Deluxe's later courses sample a bound attachment in ~900
+   * draws a frame; a copy each, each ending the pass, made ~1000 passes a
+   * frame and left Chrome's GPU process encoding passes. A draw that writes
+   * the attachment, and any record that changes textures, ends the hold. */
+  private readonly shadowHolds = new Map<string, number>();
   /* Diagnostics (the memory report): render targets made and destroyed, and
    * destroys of ids never made (a lost or reordered create). */
   private renderCreates = 0;
@@ -515,6 +530,11 @@ export class GpuExecutor {
   private shaderBytes = 0; /* WGSL text of the modules created */
   private submits = 0;
   private bufferWrites = 0; /* writeBuffer calls: each is a round trip to the GPU process */
+  /* Why open passes ended since the last memory report (diagnostics: a
+   * pass is a Metal encoder in the GPU process). */
+  private passEnds = new Map<string, number>();
+  /* The stats at the last memory report: what the next one counts since. */
+  private reportedStats: Pick<ExecutorStats, "draws" | "passes" | "copies" | "dispatches"> = { draws: 0, passes: 0, copies: 0, dispatches: 0 };
   /* Pipelines and shader modules first built since the last present: the
    * GPU process compiles them, which can hold up the page's frames. */
   private newPipelines = 0;
@@ -596,6 +616,7 @@ export class GpuExecutor {
    * and nothing was done - execute it again once the promise settles. */
   execute(type: number, payload: Uint8Array): Promise<void> | null {
     const view = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+    if (TEXTURE_CHANGING_RECORDS.has(type)) this.shadowHolds.clear();
     switch (type) {
       case REC_TEXTURE_CREATE: this.textureCreate(view); break;
       case REC_TEXTURE_DESTROY: this.textureDestroy(view.getUint32(0, true)); break;
@@ -700,7 +721,7 @@ export class GpuExecutor {
   }
 
   flush(): void {
-    this.endPass();
+    this.endPass("flush");
     this.writePoolGather();
     if (!this.encoder) return;
     const t0 = performance.now();
@@ -756,7 +777,7 @@ export class GpuExecutor {
     } else if (depth) {
       this.beginPass(`|${id}`, [], this.depthAttachment(t, depth.depth, depth.stencil), [t.width, t.height]);
     }
-    this.endPass();
+    this.endPass("clear");
   }
 
   private warnOnce(key: string, message: string): void {
@@ -787,9 +808,10 @@ export class GpuExecutor {
   /** Rebuilds `t`'s mip chain from level 0, in the encoder (after earlier
    * passes, before later ones). */
   private buildMips(t: Tex): void {
+    this.shadowHolds.clear();
     this.mipsStale.delete(t.texture);
     this.touched.add(t.texture);
-    this.endPass();
+    this.endPass("mips");
     const entries: GPUBindGroupLayoutEntry[] = [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: "unfilterable-float", viewDimension: "2d" } },
     ];
@@ -901,7 +923,7 @@ export class GpuExecutor {
        * times a frame; a submit for each doubled the submits). */
       if (this.encoder && this.writeStagingUsed + bytes <= WRITE_STAGING_BYTES &&
           !(globalThis as { NO_WRITE_STAGING?: boolean }).NO_WRITE_STAGING) {
-        this.endPass();
+        this.endPass("buffer-write");
         this.writeBuffer(this.writeStaging, this.writeStagingUsed, payload, BUFFER_WRITE_BYTES, bytes);
         this.encoder.copyBufferToBuffer(this.writeStaging, this.writeStagingUsed, b, offset, bytes);
         this.writeStagingUsed += bytes;
@@ -1007,7 +1029,7 @@ export class GpuExecutor {
       this.flush();
     }
     const dataOffset = this.stageData(data ?? new Uint8Array(16), DATA_WINDOW_BYTES);
-    this.endPass();
+    this.endPass("compute");
     const group = this.device.createBindGroup({
       layout: cached.layout,
       entries: [
@@ -1051,7 +1073,7 @@ export class GpuExecutor {
       return;
     }
     this.materialize(srcId);
-    this.endPass();
+    this.endPass("copy");
     const bytesPerRow = Math.ceil((src.width * texelBytes(src.format)) / COPY_ROW_ALIGN) * COPY_ROW_ALIGN;
     const size = bytesPerRow * src.height;
     if (!this.reinterpretBuffer || this.reinterpretBuffer.size < size) {
@@ -1359,8 +1381,11 @@ export class GpuExecutor {
     return depth === String(id) || (colors ?? "").split(",").includes(String(id));
   }
 
-  private endPass(): void {
-    if (this.pass) this.pass.end();
+  private endPass(reason: string): void {
+    if (this.pass) {
+      this.passEnds.set(reason, (this.passEnds.get(reason) ?? 0) + 1);
+      this.pass.end();
+    }
     this.pass = null;
     this.passKey = "";
     this.passColorIds = null;
@@ -1398,7 +1423,7 @@ export class GpuExecutor {
 
   private beginPass(key: string, colors: readonly (GPURenderPassColorAttachment | null)[],
                     depth: GPURenderPassDepthStencilAttachment | null, size: readonly [number, number]): GPURenderPassEncoder {
-    this.endPass();
+    this.endPass("targets");
     const desc: GPURenderPassDescriptor = { colorAttachments: [...colors] };
     if (depth) desc.depthStencilAttachment = depth;
     this.pass = this.ensureEncoder().beginRenderPass(desc);
@@ -1792,18 +1817,27 @@ export class GpuExecutor {
 
   /** A copy of attachment `t` for a draw that also samples it. */
   private shadowOf(id: number, t: Tex): Tex {
-    this.materialize(id);
-    this.touched.add(t.texture);
     const key = `${t.format}:${t.width}x${t.height}x${t.layers}`;
     let s = this.shadows.get(key);
+    if (s && this.shadowHolds.get(key) === id) { /* still what the attachment holds: no copy, the pass goes on */
+      this.stats.shadowsReused++;
+      return s;
+    }
+    this.materialize(id);
+    this.touched.add(t.texture);
     if (!s) {
       s = this.makeTex(t.format, t.width, t.height, t.layers, false, false);
       this.shadows.set(key, s);
     }
-    this.endPass();
+    this.shadowHolds.set(key, id);
+    this.endPass("shadow");
     this.stats.shadows++;
     this.ensureEncoder().copyTextureToTexture({ texture: t.texture }, { texture: s.texture }, [t.width, t.height, t.layers]);
     return s;
+  }
+
+  private releaseShadowHolds(id: number): void {
+    for (const [key, held] of this.shadowHolds) if (held === id) this.shadowHolds.delete(key);
   }
 
   /* What the current pass already has set, so a draw sends only what
@@ -1931,6 +1965,14 @@ export class GpuExecutor {
       this.touched.add(t.texture);
       textures.push(attached ? this.shadowOf(id, t) : t);
     }
+    /* What this draw writes no longer matches a copy of it. */
+    if (this.shadowHolds.size) {
+      for (let i = 0; i < d.targets.length; i++) {
+        const target = d.targets[i] as Target;
+        if (target.writeMask !== 0 && colorIds[i]) this.releaseShadowHolds(target.id);
+      }
+      if (depthId && (d.depthWrite || d.stencil)) this.releaseShadowHolds(depthId);
+    }
     const made = this.drawPipeline(d, module, textures, filtered, colorFormats, depthId ? depthTex : undefined, windows);
     if (!made) return; /* execute() says what to wait for; nothing of this draw is recorded yet */
     const { pipeline, layout } = made;
@@ -1973,7 +2015,7 @@ export class GpuExecutor {
         const used = this.passBuffers.get(w.buffer);
         conflict = used !== undefined && used !== w.writable;
       }
-      if (conflict) this.endPass();
+      if (conflict) this.endPass("storage");
     }
     const pass = this.passFor(colorIds, depthId);
     if (!pass) return;
@@ -2083,7 +2125,7 @@ export class GpuExecutor {
         if (type === "i32") return bits | 0;
         return new DataView(new Uint32Array([bits]).buffer).getFloat32(0, true);
       });
-      if (this.attachedNow(c.colorId)) this.endPass();
+      if (this.attachedNow(c.colorId)) this.endPass("clear-attached");
       this.pendingColor.set(c.colorId, { r: value[0] ?? 0, g: value[1] ?? 0, b: value[2] ?? 0, a: value[3] ?? 0 });
       return;
     }
@@ -2107,7 +2149,7 @@ export class GpuExecutor {
     const depth = (c.flags & CLEAR_DEPTH) && hasDepth(t.format) ? c.depth : null;
     const stencil = (c.flags & CLEAR_STENCIL) && hasStencil(t.format) ? c.stencil : null;
     if (whole && (stencil === null || (c.stencilMask & 0xff) === 0xff)) {
-      if (this.attachedNow(c.depthId)) this.endPass();
+      if (this.attachedNow(c.depthId)) this.endPass("clear-attached");
       const prev = this.pendingDepth.get(c.depthId);
       this.pendingDepth.set(c.depthId, { depth: depth ?? prev?.depth ?? null, stencil: stencil ?? prev?.stencil ?? null });
       return;
@@ -2182,7 +2224,7 @@ export class GpuExecutor {
         sy >= 0 && dx >= 0 && dy >= 0 && sx + sw <= src.width && sy + sh <= src.height && dx + dw <= lw &&
         dy + dh <= lh && c.dstLevel < dst.texture.mipLevelCount) {
       this.materialize(c.dstId);
-      this.endPass();
+      this.endPass("copy-region");
       this.ensureEncoder().copyTextureToTexture({ texture: src.texture, origin: { x: sx, y: sy } },
         { texture: dst.texture, mipLevel: c.dstLevel, origin: { x: dx, y: dy, z: c.dstLayer } }, [sw, sh, 1]);
       this.stats.copies++;
@@ -2285,9 +2327,13 @@ export class GpuExecutor {
       `(${sampledCount}), storage buffers ${mb(buffers)} MB (${this.buffers.size}), shadows ${this.shadows.size}, ` +
       `${this.pipelines.size} pipelines (${this.stats.pipelinesEvicted} evicted), ${this.modulesByHash.size} shader modules (${mb(this.shaderBytes)} MB of WGSL); in the last ${MEMORY_REPORT_PRESENTS} ` +
       `presents ${mb(this.uploadedBytes)} MB texture uploads, ${mb(this.bufferBytes)} MB buffer uploads (vertices ${mb(this.vertexBytes)}, data ${mb(this.dataBytes)}, ` +
-      `pool ${mb(this.poolBytes)}; ${this.bufferWrites} writes), ${this.submits} ` +
-      `submits; textures by format: ` +
+      `pool ${mb(this.poolBytes)}; ${this.bufferWrites} writes), ${this.submits} submits, ` +
+      `${this.stats.draws - this.reportedStats.draws} draws, ${this.stats.passes - this.reportedStats.passes} passes, ` +
+      `${this.stats.copies - this.reportedStats.copies} copies, ${this.stats.shadowsReused} shadows reused in all, ${this.stats.dispatches - this.reportedStats.dispatches} dispatches ` +
+      `(passes ended by ${[...this.passEnds].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r} ${n}`).join(", ")}); textures by format: ` +
       [...byFormat].sort((a, b) => b[1] - a[1]).map(([f, n]) => `${f} ${mb(n)} MB`).join(", "));
+    this.passEnds.clear();
+    this.reportedStats = { draws: this.stats.draws, passes: this.stats.passes, copies: this.stats.copies, dispatches: this.stats.dispatches };
     this.uploadedBytes = 0;
     this.bufferBytes = 0;
     this.vertexBytes = 0;
