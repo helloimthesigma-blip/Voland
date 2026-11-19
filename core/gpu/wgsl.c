@@ -1433,6 +1433,21 @@ static void emit_shfl(Tr *t, const Sm_Insn *in) {
 
 /* ---- instructions ------------------------------------------------- */
 
+
+/* An FMUL's product as the hardware rounds it. Metal contracts a multiply
+ * into a later add (one fused rounding) even across statements; OR-ing in
+ * a word that is zero at run time but unknown to the compiler (the draw
+ * flags' unused bits, read once per program; compute leaves the word 0)
+ * keeps the product as is.
+ * Its fast math also reassociates: (1 - x) + 1e-10 became (1 + 1e-10) - x,
+ * losing the guard, so adds of an immediate are kept too.
+ * Tears of the Kingdom's lighting computes 1 - x for an x rounded to
+ * exactly 1.0: fused, it came out -4e-9, its 1e-10 guard no longer kept
+ * the reciprocal finite, and characters got white NaN specks. FFMA is
+ * fused on the hardware too, so it stays contractible. */
+#define ROUNDED "rz" /* each program's first line: let rz = D[WGSL_DRAW_FLAGS] >> 1u */
+_Static_assert(WGSL_DRAW_LOWER_LEFT == 1u, "ROUNDED reads the draw flags' unused bits");
+
 static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
   const uint64_t w = in->raw;
   switch ((Sm_Op)in->op) {
@@ -1440,7 +1455,10 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
     const Ex a = fmod_an(fl(reg(t, REG_A(w))), BIT(w, 46), BIT(w, 48));
     const Ex b = fmod_an(fl(op_b(t, in)), BIT(w, 49), BIT(w, 45));
     const Ex r = ex("%s + %s", a.s, b.s);
-    EMIT("%s = U(%s%s%s); ", reg_dst(t, REG_D(w)).s, BIT(w, 50) ? "sat(" : "(", r.s, ")");
+    /* An immediate operand: rounded too, or Metal folds two constants'
+     * adds into one (ROUNDED). */
+    EMIT("%s = U(%s%s%s)%s; ", reg_dst(t, REG_D(w)).s, BIT(w, 50) ? "sat(" : "(", r.s, ")",
+         in->form == SM_FORM_IMM ? " | " ROUNDED : "");
     return;
   }
   case SM_OP_FADD32I: {
@@ -1448,7 +1466,7 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
     float bf;
     memcpy(&bf, &in->imm, sizeof(bf));
     const Ex b = fmod_an(imm_f(bf), BIT(w, 57), BIT(w, 53));
-    EMIT("%s = U(%s + %s); ", reg_dst(t, REG_D(w)).s, a.s, b.s);
+    EMIT("%s = U(%s + %s) | %s; ", reg_dst(t, REG_D(w)).s, a.s, b.s, ROUNDED);
     return;
   }
   case SM_OP_FMUL: {
@@ -1456,15 +1474,15 @@ static void emit_insn(Tr *t, const Sm_Insn *in, uint32_t pc) {
     const float k = scale[BITS(w, 41, 3)] * (BIT(w, 48) ? -1.0f : 1.0f);
     const Ex a = fl(reg(t, REG_A(w))), b = fl(op_b(t, in));
     const bool fmz = BITS(w, FMUL_MODE_BIT, 2) == MUL_MODE_FMZ;
-    EMIT("%s = U(%s(%s(%s, %s) * %s)); ", reg_dst(t, REG_D(w)).s, BIT(w, 50) ? "sat" : "", fmz ? "fmul_fmz" : "fmul_ieee", a.s,
-         b.s, imm_f(k).s);
+    EMIT("%s = U(%s(%s(%s, %s) * %s)) | %s; ", reg_dst(t, REG_D(w)).s, BIT(w, 50) ? "sat" : "", fmz ? "fmul_fmz" : "fmul_ieee",
+         a.s, b.s, imm_f(k).s, ROUNDED);
     return;
   }
   case SM_OP_FMUL32I: {
     const Ex a = fl(reg(t, REG_A(w)));
     const bool fmz = BITS(w, FFMA_MODE_BIT, 2) == MUL_MODE_FMZ;
-    EMIT("%s = U(%s(%s(%s, F(0x%xu)))); ", reg_dst(t, REG_D(w)).s, BIT(w, 55) ? "sat" : "", fmz ? "fmul_fmz" : "fmul_ieee", a.s,
-         in->imm);
+    EMIT("%s = U(%s(%s(%s, F(0x%xu)))) | %s; ", reg_dst(t, REG_D(w)).s, BIT(w, 55) ? "sat" : "", fmz ? "fmul_fmz" : "fmul_ieee",
+         a.s, in->imm, ROUNDED);
     return;
   }
   case SM_OP_FFMA: {
@@ -3031,6 +3049,7 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
     if ((t->reg_used[r / 8u] >> (r % 8u)) & 1u) out_add(&head, "  var r%u: u32;\n", r);
   out_add(&head, "  var _d: u32;\n  var p0: bool; var p1: bool; var p2: bool; var p3: bool; var p4: bool; var p5: bool; "
                  "var p6: bool;\n  var ccz: bool; var ccs: bool; var ccc: bool; var cco: bool;\n");
+  out_add(&head, "  let %s = D[%uu] >> 1u;\n", ROUNDED, WGSL_DRAW_FLAGS); /* zero, opaque (ROUNDED) */
   for (uint32_t s = 0; s < SM_CBUF_SLOTS; s++)
     if ((t->cbuf_slots >> s) & 1u)
       out_add(&head, "  let cbB%u = D[%uu]; let cbN%u = D[%uu];\n", s, t->cbt + 2u * s, s, t->cbt + 2u * s + 1u);
