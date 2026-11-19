@@ -1189,7 +1189,12 @@ export class GpuExecutor {
 
   private shader(v: DataView, payload: Uint8Array): void {
     const id = v.getUint32(0, true);
-    const code = this.shaderCode(v, payload);
+    /* Debugging (replay-gpu-stream.mjs PATCH_SHADER): text substitutions ("|||"-separated pairs) in one
+     * program, e.g. to output intermediate registers. */
+    const patch = (globalThis as { PATCH_SHADER?: { id: number; find: string; replace: string } }).PATCH_SHADER;
+    const finds = patch?.id === id ? patch.find.split("|||") : [];
+    const replaces = patch?.replace.split("|||") ?? [];
+    const code = finds.reduce((c, f, k) => c.replace(f, replaces[k] ?? ""), this.shaderCode(v, payload));
     if ((globalThis as { PRINT_SHADER?: number }).PRINT_SHADER === id) console.log(`shader ${id}:\n${code}`);
     const hash = wgslHash(code);
     const module = this.moduleOf(hash, code);

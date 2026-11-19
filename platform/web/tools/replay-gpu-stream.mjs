@@ -113,6 +113,10 @@ if (process.env.DISCARD_SHADERS) await page.evaluate((t) => { globalThis.DISCARD
 if (process.env.DEPTH_OFF_SHADERS) await page.evaluate((t) => { globalThis.DEPTH_OFF_SHADERS = t; }, process.env.DEPTH_OFF_SHADERS.split(",").map(Number));
 if (process.env.TRACE_PIXEL) await page.evaluate((t) => { globalThis.TRACE_PIXEL = t; }, process.env.TRACE_PIXEL.split(",").map(Number));
 if (process.env.PRINT_SHADER) await page.evaluate((n) => { globalThis.PRINT_SHADER = n; }, Number(process.env.PRINT_SHADER));
+/* PATCH_SHADER=id with PATCH_FIND / PATCH_REPLACE ("|||"-separated lists): that program's WGSL with each find's first
+ * occurrence replaced (diagnostics: output intermediate registers). */
+if (process.env.PATCH_SHADER) await page.evaluate((t) => { globalThis.PATCH_SHADER = t; }, { id: Number(process.env.PATCH_SHADER), find: process.env.PATCH_FIND ?? "", replace: process.env.PATCH_REPLACE ?? "" });
+if (process.env.CB_HEX) await page.evaluate(() => { globalThis.CB_HEX = true; });
 if (process.env.CB_DUMP) await page.evaluate((t) => { globalThis.CB_DUMP = { shader: t[0], slot: t[1], words: t[2] }; }, process.env.CB_DUMP.split(",").map(Number));
 if (process.env.CB_TABLE) await page.evaluate((n) => { globalThis.CB_TABLE = n; }, Number(process.env.CB_TABLE));
 if (process.env.TRACE_WRITES) await page.evaluate((t) => { globalThis.TRACE_WRITES = t; }, process.env.TRACE_WRITES.split(",").map(Number));
@@ -124,8 +128,9 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
   const wanted = new Set(at);
   const targetsAt = new Set(dumpTargets);
   const a = await navigator.gpu.requestAdapter();
+  /* As gpu.worker.ts: a stream recorded with VOLAND_GPU_COMPRESSION uploads BCn / ASTC as they are. */
   const features = ["rg11b10ufloat-renderable", "depth32float-stencil8", "float32-filterable", "float32-blendable",
-    "subgroups", "depth-clip-control"].filter((f) => a.features.has(f));
+    "texture-compression-bc", "texture-compression-astc", "subgroups", "depth-clip-control"].filter((f) => a.features.has(f));
   const device = await a.requestDevice({
     requiredFeatures: features,
     requiredLimits: { // as gpu.worker.ts
@@ -321,6 +326,13 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
           if (globalThis.TRACE_WRITES.includes(dv.getUint32(8 + 36 * k, true)))
             console.log(`writes ${dv.getUint32(8 + 36 * k, true)} present ${presents} record ${records} shader ${dv.getUint32(0, true)} vs ${dv.getUint32(408, true)}`);
       }
+      if (globalThis.TRACE_SHAPES && (type === 1 || type === 13) && presents + 1 === globalThis.TRACE_SHAPES) {
+        /* Creates (Gpu_Rec_Texture_Create: id, format, width, height, layers, usage, levels) and level uploads. */
+        const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+        const u = (k) => dv.getUint32(4 * k, true);
+        console.log(type === 1 ? `create ${u(0)} format ${u(1)} ${u(2)}x${u(3)} layers ${u(4)} usage ${u(5)} levels ${u(6)}`
+          : `upload level ${u(0)} level ${u(1)} layer ${u(2)} y ${u(3)} ${u(4)}x${u(5)}`);
+      }
       if (globalThis.TRACE_SHAPES && [3, 7, 14, 15].includes(type) && presents + 1 === globalThis.TRACE_SHAPES) {
         /* Uploads (Gpu_Rec_Texture_Write: id, x, y, width, height), copies (src, dst) and reinterprets (src, dst). */
         const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
@@ -370,7 +382,9 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
             const table = globalThis.CB_TABLE ?? 212, s = globalThis.CB_DUMP.slot, base = w(table + 2 * s), size = w(table + 1 + 2 * s);
             const P = new DataView((globalThis.CB_POOL ??= new Uint8Array(16 << 20)).buffer);
             const vals = [];
-            for (let i = 0; i < Math.min(size, globalThis.CB_DUMP.words); i++) vals.push(P.getFloat32(4 * (base + i), true).toPrecision(5));
+            /* CB_HEX=1: the words' bits (addresses, integers) instead of floats. */
+            for (let i = 0; i < Math.min(size, globalThis.CB_DUMP.words); i++)
+              vals.push(globalThis.CB_HEX ? P.getUint32(4 * (base + i), true).toString(16) : P.getFloat32(4 * (base + i), true).toPrecision(5));
             console.log(`cb${s} record ${records} (${size} words): ${vals.join(" ")}`);
             const hdr = [];
             for (let i = 284; i < 360; i++) hdr.push(w(i).toString(16));
