@@ -81,6 +81,8 @@
  *   panel's backup tar, for --restore-saves), "sleep MS", "go"
  *   (measure now). Each
  *   command prints "drive: N done ...". "targets DIR [PREFIX]" writes every render target as .pam; "pageshot FILE" the whole page; "dom FILE" its HTML.
+ *   "gpurecord FILE N": the GPU stream from the next present for N presents, as a file
+ *   tools/replay-gpu-stream.mjs replays (the core re-creates everything it uses at the start).
  * - --headed: a visible browser window (someone can take over the game
  *   from a drive file that never says "go").
  * - --restore-saves BACKUP.tar imports a saves backup (the Saves panel's
@@ -99,8 +101,9 @@
  *     --max-slices N --gpu-stream /dev/null
  */
 import { execFileSync, spawn } from "node:child_process";
+import { createServer as createHttpServer } from "node:http";
 import { createServer } from "node:net";
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -288,6 +291,34 @@ class Cdp {
   }
   close() {
     this.socket.close();
+  }
+}
+
+/** gpurecord FILE N: the GPU worker POSTs the stream from the core's next
+ * recording mark for N presents in pieces (?seq=K, &end=1 last) to a local
+ * server here, which appends them to FILE. Resolves with the page's result. */
+async function recordGpu(page, file, presents) {
+  writeFileSync(file, Buffer.alloc(0));
+  let expected = 0;
+  const server = createHttpServer((req, res) => {
+    const cors = { "access-control-allow-origin": "*", "access-control-allow-methods": "POST", "access-control-allow-headers": "content-type" };
+    if (req.method === "OPTIONS") { res.writeHead(204, cors).end(); return; }
+    const seq = Number(new URL(req.url ?? "/", "http://x").searchParams.get("seq"));
+    const chunks = [];
+    req.on("data", (c) => chunks.push(c));
+    req.on("end", () => {
+      /* The worker sends one piece at a time, in order. */
+      if (seq !== expected++) { res.writeHead(409, cors).end(); return; }
+      appendFileSync(file, Buffer.concat(chunks));
+      res.writeHead(200, cors).end();
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${server.address().port}/stream`;
+  try {
+    return await page.evaluate(({ n, u }) => globalThis.__volandDebug.recordGpu(n, u), { n: presents, u: url });
+  } finally {
+    server.close();
   }
 }
 
@@ -765,6 +796,12 @@ async function main() {
           writeFileSync(arg, await page.content());
         } else if (cmd === "pageshot") {
           await page.screenshot({ path: arg, fullPage: true, timeout: SHOT_TIMEOUT_MS });
+        } else if (cmd === "nanscan") {
+          /* nanscan: render targets holding NaN or infinite texels (diagnostics). */
+          note = await page.evaluate(() => globalThis.__volandDebug.nanScan());
+        } else if (cmd === "gpurecord") {
+          const r = await recordGpu(page, arg, Number(arg2 ?? "6"));
+          note = `${(r.bytes / 1048576).toFixed(0)} MiB${r.error ? ` (${r.error})` : ""}`;
         } else if (cmd === "targets") {
           note = `${await dumpTargets(page, arg, arg2 ?? "t")} render targets`;
         } else if (cmd === "stats") {

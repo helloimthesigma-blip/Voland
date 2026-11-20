@@ -332,11 +332,30 @@ async function boot(): Promise<BootResult | null> {
    * controller reads as unplugged. */
   let unpluggedUntil = 0;
   let debugTargetsResolve: ((targets: readonly DebugTargetImage[]) => void) | null = null;
-  (globalThis as unknown as { __volandDebug?: { dumpTargets: () => Promise<readonly DebugTargetImage[]> } }).__volandDebug = {
+  /* tools/perf.mjs gpurecord: the GPU worker arms first, then the core marks the stream at its next present. */
+  let debugRecordResolve: ((result: { readonly bytes: number; readonly error: string }) => void) | null = null;
+  let debugNanResolve: ((report: string) => void) | null = null;
+  (globalThis as unknown as {
+    __volandDebug?: {
+      dumpTargets: () => Promise<readonly DebugTargetImage[]>;
+      recordGpu: (presents: number, url: string) => Promise<{ readonly bytes: number; readonly error: string }>;
+      nanScan: () => Promise<string>;
+    };
+  }).__volandDebug = {
     dumpTargets: (): Promise<readonly DebugTargetImage[]> =>
       new Promise((resolve) => {
         debugTargetsResolve = resolve;
         gpuWorker.postMessage({ type: "debug-dump-targets" } satisfies MainToGPUMessage);
+      }),
+    nanScan: (): Promise<string> =>
+      new Promise((resolve) => {
+        debugNanResolve = resolve;
+        gpuWorker.postMessage({ type: "debug-nan-scan" } satisfies MainToGPUMessage);
+      }),
+    recordGpu: (presents: number, url: string): Promise<{ readonly bytes: number; readonly error: string }> =>
+      new Promise((resolve) => {
+        debugRecordResolve = resolve;
+        gpuWorker.postMessage({ type: "debug-gpu-record", presents, url } satisfies MainToGPUMessage);
       }),
   };
 
@@ -345,6 +364,20 @@ async function boot(): Promise<BootResult | null> {
       if (msg.type === "debug-targets") {
         debugTargetsResolve?.(msg.targets);
         debugTargetsResolve = null;
+        return;
+      }
+      if (msg.type === "debug-nan-scanned") {
+        debugNanResolve?.(msg.report);
+        debugNanResolve = null;
+        return;
+      }
+      if (msg.type === "debug-gpu-record-armed") {
+        cpuWorker.postMessage({ type: "debug-gpu-record" } satisfies MainToCPUMessage);
+        return;
+      }
+      if (msg.type === "debug-gpu-recorded") {
+        debugRecordResolve?.({ bytes: msg.bytes, error: msg.error });
+        debugRecordResolve = null;
         return;
       }
       if (msg.type === "gpu-readback") {

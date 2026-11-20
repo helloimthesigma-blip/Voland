@@ -42,7 +42,15 @@ enum {
    * format, same size and texel bytes) takes the old one's texels bit for
    * bit, as the guest's memory would hold them. */
   GPU_REC_TEXTURE_REINTERPRET, /* u32 source id, u32 destination id */
+  /* Version 17: a point in the stream the consumer does nothing at
+   * (GPU_MARK_*), for tools that watch the stream. */
+  GPU_REC_MARK, /* u32 GPU_MARK_* */
 };
+
+/* GPU_REC_MARK kinds. RECORDING: what follows creates again everything it
+ * uses, so the stream from here replays on its own (a browser recording
+ * starts here: raster3d_gpu_record). */
+enum { GPU_MARK_RECORDING = 1 };
 
 /* The pool (version 9): a read-only storage buffer of GPU_POOL_BYTES every
  * draw binds at WGSL_POOL_BINDING. Its writes only ever append, from offset

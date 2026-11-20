@@ -105,6 +105,8 @@ if (process.env.TRACE_SHAPES) await page.evaluate((n) => { globalThis.TRACE_SHAP
 if (process.env.TRACE_VERTEX_WORDS) await page.evaluate(() => { globalThis.TRACE_VERTEX_WORDS = true; });
 if (process.env.TEX_NAN) await page.evaluate((t) => { globalThis.TEX_NAN = t; }, process.env.TEX_NAN.split(/[:,]/).map(Number));
 if (process.env.TEX_INFO) await page.evaluate((t) => { globalThis.TEX_INFO = t; }, process.env.TEX_INFO.split(",").map(Number));
+/* NAN_SCAN=P1,P2,...: after those presents, each float render target holding NaN or infinite texels (count, first texel). */
+if (process.env.NAN_SCAN) await page.evaluate((t) => { globalThis.NAN_SCAN = t; }, process.env.NAN_SCAN.split(",").map(Number));
 if (process.env.TRACE_TARGET) await page.evaluate((n) => { globalThis.TRACE_TARGET = n; }, Number(process.env.TRACE_TARGET));
 if (process.env.SYNC_DRAWS) await page.evaluate(() => { globalThis.SYNC_DRAWS = true; });
 if (process.env.NO_CULL) await page.evaluate(() => { globalThis.NO_CULL = true; });
@@ -241,6 +243,19 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
       presents++;
       if ((every && presents % every === 0) || wanted.has(presents)) readback(presents, false);
       if (targetsAt.has(presents)) dumpAll(presents);
+      if (globalThis.NAN_SCAN?.includes(presents)) {
+        const at = presents;
+        pending.push(ex.debugTargets(1).then((list) => {
+          console.log(`nan scan ${at}: ${list.filter((t) => t.floats).length} float targets of ${list.length}`);
+          for (const t of list) {
+            if (!t.floats) continue;
+            let bad = 0, first = -1;
+            for (let i = 0; i < t.floats.length; i++)
+              if (!Number.isFinite(t.floats[i])) { bad++; if (first < 0) first = i >> 2; }
+            if (bad) console.log(`nan scan ${at}: texture ${t.id} ${t.format} ${t.width}x${t.height}: ${bad} non-finite (first texel ${first % t.width},${Math.floor(first / t.width)})`);
+          }
+        }));
+      }
       if (targetsAt.has(presents) && globalThis.TEX_INFO)
         for (const id of globalThis.TEX_INFO) {
           const t = ex.textures.get(id);

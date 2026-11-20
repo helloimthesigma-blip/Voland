@@ -86,6 +86,7 @@ EXPORT uint32_t emulator_set_gpu_async_ffi(uint32_t on);
 EXPORT uint32_t emulator_set_render_workers_ffi(uint32_t count);
 EXPORT void emulator_dump_threads_ffi(uint32_t backtrace);
 EXPORT void emulator_set_gpu_compute_ffi(uint32_t on);
+EXPORT void emulator_gpu_record_ffi(void);
 EXPORT void emulator_set_poll_coalescing_ffi(uint32_t on);
 EXPORT void emulator_set_free_running_ffi(uint32_t on);
 EXPORT void emulator_set_pin_ideal_cores_ffi(uint32_t on);
@@ -577,6 +578,13 @@ EXPORT void emulator_set_gpu_compute_ffi(uint32_t on)
   if (!g_initialised) return;
   gpu_thread_drain(&g_emulator.gpu_thread);
   g_emulator.renderer.no_gpu_compute = on == 0;
+}
+
+/* Diagnostics (tools/perf.mjs gpurecord): the GPU stream replays alone from
+ * the next present's GPU_MARK_RECORDING, which the GPU worker records from. */
+EXPORT void emulator_gpu_record_ffi(void)
+{
+  if (g_initialised) raster3d_gpu_record(&g_emulator.renderer);
 }
 
 /* Every guest thread's state to the log (diagnostics; emulator_dump_threads). */

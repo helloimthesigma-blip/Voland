@@ -5,7 +5,7 @@
  */
 
 export const GPU_STREAM_MAGIC = 0x55504756;
-export const GPU_STREAM_VERSION = 16;
+export const GPU_STREAM_VERSION = 17;
 export const GPU_STREAM_HEADER_BYTES = 56;
 export const GPU_STREAM_RECORD_HEADER_BYTES = 8;
 export const OFF_MAGIC = 0;
@@ -50,6 +50,10 @@ export const POOL_WRAP = 1; /* restarts at 0: submit what reads the old contents
 /* Version 11: a render target re-described over the same bytes takes the
  * old one's texels bit for bit (u32 source id, u32 destination id). */
 export const REC_TEXTURE_REINTERPRET = 15;
+/* Version 17: a point the consumer does nothing at (u32 GPU_MARK_*); a
+ * browser recording starts at MARK_RECORDING (gpu.worker.ts). */
+export const REC_MARK = 16;
+export const MARK_RECORDING = 1;
 
 /* GPU_FMT_* by index. */
 export const FORMATS: readonly (GPUTextureFormat | null)[] = [

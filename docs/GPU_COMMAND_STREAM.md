@@ -1,4 +1,4 @@
-# GPU command stream (version 16)
+# GPU command stream (version 17)
 
 The CPU worker's records for the GPU worker's WebGPU renderer (DESIGN.md
 §13). Producer: `core/gpu/raster3d.c` in GPU mode (`raster3d_set_gpu`,
@@ -77,6 +77,7 @@ means none.
 | 13 | TEXTURE_WRITE_LEVEL | id, mip level, layer, y, width, height (texels, whole blocks), bytes per block row, data bytes; then the block rows (version 8) |
 | 14 | POOL_WRITE | byte offset, bytes, flags (`GPU_POOL_WRAP`), reserved; then the bytes, appended to the pool (version 9) |
 | 15 | TEXTURE_REINTERPRET | source id, destination id: the destination takes the source's texels bit for bit (version 11) |
+| 16 | MARK | u32 kind: the consumer does nothing; MARK_RECORDING (1) = everything used after it is created again after it (version 17) |
 
 ### DRAW
 
@@ -326,6 +327,26 @@ Gathers, cube or 3D, copy again only when a source target was drawn into
 or re-created since. Version 11 copies have no level word and parse as
 level 0. A copy into a level above 0 must be a plain texture copy (same
 format and size); other copies draw into level 0.
+
+### Array layers from targets
+
+No format change: the same gather serves a 2D (or cube) array whose layers
+are separate render targets, one layer stride apart. TOTK's deferred
+lighting draws diffuse and specular light as two targets of one pass and
+samples them as the two layers of one array; bound alone, the first target
+served both layers and torch light washed cave walls out.
+
+### Recording marks (version 17)
+
+MARK is a record the consumer skips. `raster3d_gpu_record` asks for
+MARK_RECORDING after the next PRESENT: raster3d then forgets every texture,
+surface, gather and shader it had sent and destroys its mirrors (those
+destroys come before the mark), so the records after the mark create
+again everything they use. The browser's GPU worker records from there
+(`tools/perf.mjs` drive command `gpurecord FILE N`, posted to a local
+server in pieces) into the file layout `tools/replay-gpu-stream.mjs`
+replays - a recording of the browser's own run, with whatever the guest
+read back from the GPU, where a native recording runs without a GPU.
 
 ### Draws on GPU mirrors (version 14)
 

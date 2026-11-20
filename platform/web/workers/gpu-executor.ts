@@ -38,6 +38,7 @@ import {
   POOL_WRITE_BYTES,
   REC_POOL_WRITE,
   REC_TEXTURE_REINTERPRET,
+  REC_MARK,
   BIND_SAMPLER,
   BIND_TEXTURE,
   BUFFER_WRITE_BYTES,
@@ -665,6 +666,7 @@ export class GpuExecutor {
       case REC_COMPUTE: this.compute(view, payload); break;
       case REC_POOL_WRITE: this.poolWrite(view, payload); break;
       case REC_TEXTURE_REINTERPRET: this.textureReinterpret(view.getUint32(0, true), view.getUint32(4, true)); break;
+      case REC_MARK: break; /* for the stream's watchers (a recording's start) */
       default: this.warnOnce(`record ${type}`, `unknown GPU record type ${type}`); break;
     }
     const wait = this.awaiting;
@@ -676,14 +678,14 @@ export class GpuExecutor {
   readonly prof = { write: 0, finish: 0, submit: 0 };
   /** Debugging (perf.mjs --dump-targets-at): every colour render target as
    * RGBA8 (float formats clamped to [0, 1]). Not on any per-frame path. */
-  async debugTargets(): Promise<DebugTarget[]> {
+  async debugTargets(minTexels = DEBUG_MIN_TEXELS): Promise<DebugTarget[]> {
     this.flush();
     this.traceFrame = true;
     this.tracePresents = TRACE_PRESENTS;
     const out: DebugTarget[] = [];
     for (const [id, t] of this.textures) {
       const texel = DEBUG_TEXEL_BYTES[t.format];
-      if (!t.renderView || !texel || t.width * t.height < DEBUG_MIN_TEXELS) continue;
+      if (!t.renderView || !texel || t.width * t.height < minTexels) continue;
       const bytesPerRow = Math.ceil((t.width * texel) / 256) * 256;
       const buffer = this.device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
       const enc = this.device.createCommandEncoder();

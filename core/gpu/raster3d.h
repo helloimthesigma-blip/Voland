@@ -360,6 +360,7 @@ typedef struct Raster3d {
    * restarted at 0 in a new epoch when a draw might not fit. */
   uint32_t *gpu_pool;
   uint32_t gpu_pool_used; /* words */
+  uint32_t gpu_record_requested; /* atomic: raster3d_gpu_record */
   uint32_t gpu_pool_epoch;
   struct {
     uint32_t epoch, at, words;
@@ -474,6 +475,10 @@ void raster3d_set_gpu(Raster3d *r, struct Gpu_Stream *stream);
  * consumer holds, so a new stream (a recording started mid-run) re-creates
  * them all. Render targets reload from guest memory. */
 void raster3d_gpu_forget(Raster3d *r);
+/* At the next present: everything the consumer holds is forgotten (and
+ * created again as draws need it) and a GPU_MARK_RECORDING follows, so a
+ * tool can record the stream from there and replay it alone. Any thread. */
+void raster3d_gpu_record(Raster3d *r);
 /* GPU mode: block-compressed formats (GPU_COMPRESSION_* of gpu_records.h)
  * the GPU samples itself - textures in them upload as they are, every mip
  * level, instead of being decoded on the CPU. */

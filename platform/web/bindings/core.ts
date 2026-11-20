@@ -70,6 +70,7 @@ export interface SwitchCoreExports {
   readonly _emulator_set_render_workers_ffi: (count: number) => number; /* workers in effect */
   readonly _emulator_dump_threads_ffi:     (backtrace: number) => void;
   readonly _emulator_set_gpu_compute_ffi:  (on: number) => void;
+  readonly _emulator_gpu_record_ffi:  () => void;
   readonly _emulator_set_poll_coalescing_ffi: (on: number) => void;
   readonly _emulator_set_pin_ideal_cores_ffi: (on: number) => void;
   readonly _emulator_set_free_placement_ffi: (on: number) => void;

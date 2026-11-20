@@ -85,6 +85,8 @@ export type MainToCPUMessage =
   | { readonly type: "set-render-workers"; readonly count: number }
   | { readonly type: "dump-threads"; readonly backtrace: boolean }
   | { readonly type: "set-gpu-compute"; readonly on: boolean }
+  /* Diagnostics (tools/perf.mjs gpurecord): the stream replays alone from the next present (raster3d_gpu_record). */
+  | { readonly type: "debug-gpu-record" }
   /* The renderer: the GPU worker's WebGPU renderer (draws stream through the
    * gpu_ring region) or the software reference renderer. */
   | { readonly type: "set-gpu-mode"; readonly on: boolean }
@@ -229,6 +231,10 @@ export type MainToGPUMessage =
   | { readonly type: "title"; readonly titleId: string }
   /* Debugging only (perf.mjs --dump-targets-at): read back every render target. */
   | { readonly type: "debug-dump-targets" }
+  /* Diagnostics: render targets holding NaN or infinite texels (debug-nan-scanned). */
+  | { readonly type: "debug-nan-scan" }
+  /* Diagnostics: records from the next recording mark until `presents` presents, POSTed to `url` in pieces. */
+  | { readonly type: "debug-gpu-record"; readonly presents: number; readonly url: string }
   /* Save states: read back these surfaces after running the stream up to
    * `after` (gpu-readback-request, relayed). */
   | { readonly type: "gpu-readback"; readonly after: number; readonly surfaces: readonly GpuReadbackSurface[] };
@@ -254,5 +260,8 @@ export type GPUToMainMessage =
    * says so instead of letting frames go black. */
   | { readonly type: "gpu-trouble"; readonly reason: "out-of-memory" | "device-lost"; readonly detail: string }
   | { readonly type: "debug-targets"; readonly targets: readonly DebugTargetImage[] }
+  | { readonly type: "debug-gpu-record-armed" }
+  | { readonly type: "debug-nan-scanned"; readonly report: string }
+  | { readonly type: "debug-gpu-recorded"; readonly bytes: number; readonly error: string }
   /* Rows of width * bytesPerPixel per surface, in request order (null: unreadable). */
   | { readonly type: "gpu-readback"; readonly pixels: readonly (ArrayBuffer | null)[] };

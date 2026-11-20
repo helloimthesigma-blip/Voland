@@ -28,7 +28,10 @@ import {
   OFF_RING_BASE,
   OFF_WRITE,
   OFF_WRITE_SIGNAL,
+  MARK_RECORDING,
+  REC_MARK,
   REC_PAD,
+  REC_PRESENT,
 } from "@bindings/gpu-records";
 import { type MemoryLayout, toByteOffset } from "@bindings/layout";
 import type { GPUToMainMessage, GpuReadbackSurface, MainToGPUMessage } from "@bindings/protocol";
@@ -126,6 +129,72 @@ function attachShaderCache(): void {
   }).catch((e: unknown) => log("warn", `shader cache unavailable: ${e instanceof Error ? e.message : String(e)}`));
 }
 
+/* Diagnostics (debug-gpu-record, tools/perf.mjs gpurecord): the records
+ * from the next MARK_RECORDING until `presents` presents, in the replay
+ * file's layout (u32 type, u32 payload bytes, the payload), POSTed to `url`
+ * a piece at a time (?seq=N, &end=1 on the last). */
+const RECORD_PIECE_BYTES = 32 << 20;
+const RECORD_HEADER_BYTES = 8;
+
+class StreamRecorder {
+  private started = false;
+  private seen = 0;
+  private pieces: Uint8Array[] = [];
+  private pieceBytes = 0;
+  private seq = 0;
+  private sent = 0;
+  private error = "";
+  private posting: Promise<void> = Promise.resolve();
+
+  constructor(private readonly url: string, private readonly presents: number) {}
+
+  /** One record; true once the recording has all its presents. */
+  take(type: number, payload: Uint8Array): boolean {
+    if (!this.started) {
+      if (type !== REC_MARK || payload.length < 4 || new DataView(payload.buffer, payload.byteOffset, 4).getUint32(0, true) !== MARK_RECORDING) return false;
+      this.started = true;
+      log("info", `GPU recording: from the mark, ${this.presents} present(s)`);
+    }
+    const piece = new Uint8Array(RECORD_HEADER_BYTES + payload.length);
+    const header = new DataView(piece.buffer);
+    header.setUint32(0, type, true);
+    header.setUint32(4, payload.length, true);
+    piece.set(payload, RECORD_HEADER_BYTES);
+    this.pieces.push(piece);
+    this.pieceBytes += piece.length;
+    const done = type === REC_PRESENT && ++this.seen >= this.presents;
+    if (done || this.pieceBytes >= RECORD_PIECE_BYTES) this.post(done);
+    return done;
+  }
+
+  private post(last: boolean): void {
+    const pieces = this.pieces;
+    const bytes = this.pieceBytes;
+    const seq = this.seq++;
+    this.pieces = [];
+    this.pieceBytes = 0;
+    this.posting = this.posting.then(async () => {
+      if (this.error) return;
+      const body = new Uint8Array(bytes);
+      let at = 0;
+      for (const p of pieces) {
+        body.set(p, at);
+        at += p.length;
+      }
+      const res = await fetch(`${this.url}?seq=${seq}${last ? "&end=1" : ""}`, { method: "POST", body, headers: { "content-type": "application/octet-stream" } });
+      if (res.ok) this.sent += bytes;
+      else this.error = `piece ${seq}: HTTP ${res.status}`;
+    }).catch((e: unknown) => { this.error = e instanceof Error ? e.message : String(e); });
+    if (!last) return;
+    void this.posting.then(() => {
+      log(this.error ? "warn" : "info", `GPU recording: ${this.sent} bytes${this.error ? `; ${this.error}` : ""}`);
+      const reply: GPUToMainMessage = { type: "debug-gpu-recorded", bytes: this.sent, error: this.error };
+      self.postMessage(reply);
+    });
+  }
+}
+let recorder: StreamRecorder | null = null;
+
 /** How far the stream consumer has run (bytes; 0 before it starts). */
 let streamRead = (): number => 0;
 
@@ -188,6 +257,7 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
       const size = ring.getUint32(at + 4, true);
       if (type !== REC_PAD) {
         const payload = new Uint8Array(buffer, at + 8, size - 8);
+        if (recorder?.take(type, payload)) recorder = null;
         for (let wait = executor.execute(type, payload); wait; wait = executor.execute(type, payload)) {
           /* The draw's pipeline is being built (scanAhead). What came before
            * goes to the GPU, the producer gets its space - what it writes
@@ -406,6 +476,27 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
 }
 
 self.addEventListener("message", (event: MessageEvent<MainToGPUMessage>) => {
+  if (event.data.type === "debug-nan-scan") {
+    const executor = activeExecutor;
+    if (!executor) return;
+    executor.debugTargets(1).then((targets) => {
+      const bad = targets.flatMap((t) => {
+        if (!t.floats) return [];
+        let n = 0;
+        for (const v of t.floats) if (!Number.isFinite(v)) n++;
+        return n ? [`${t.id} ${t.format} ${t.width}x${t.height}: ${n}`] : [];
+      });
+      const reply: GPUToMainMessage = { type: "debug-nan-scanned", report: `${targets.length} targets; ${bad.length ? bad.join("; ") : "no NaN"}` };
+      self.postMessage(reply);
+    }).catch((e: unknown) => log("error", `debug-nan-scan: ${String(e)}`));
+    return;
+  }
+  if (event.data.type === "debug-gpu-record") {
+    recorder = new StreamRecorder(event.data.url, event.data.presents);
+    const reply: GPUToMainMessage = { type: "debug-gpu-record-armed" };
+    self.postMessage(reply);
+    return;
+  }
   if (event.data.type === "debug-dump-targets") {
     const executor = activeExecutor;
     log("info", `debug-dump-targets: ${executor ? "reading back" : "no WebGPU executor"}`);

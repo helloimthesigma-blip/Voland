@@ -6379,10 +6379,23 @@ bool raster3d_gpu_present(Raster3d *r, uint64_t cpu_address, uint32_t width, uin
   p.flags = flags;
   gpu_stream_write(r->gpu, GPU_REC_PRESENT, &p, sizeof(p));
   __atomic_fetch_add((uint32_t *)(void *)(r->gpu->header + GPU_STREAM_OFF_PRESENTS), 1u, __ATOMIC_RELAXED);
+  if (__atomic_exchange_n(&r->gpu_record_requested, 0u, __ATOMIC_ACQ_REL)) {
+    /* The old resources' destroys come before the mark, the new ones' creates after it. */
+    gpu_mirror_reset(r->gpu);
+    raster3d_gpu_forget(r);
+    vpool_reset();
+    cbuf_held_reset();
+    r->gpu_pool_used = GPU_POOL_WORDS;
+    const uint32_t kind = GPU_MARK_RECORDING;
+    gpu_stream_write(r->gpu, GPU_REC_MARK, &kind, sizeof(kind));
+    log_info("[gpu] recording mark after present %llu", (unsigned long long)r->gpu_stats.presents + 1u);
+  }
   gpu_stream_publish(r->gpu);
   r->gpu_stats.presents++;
   return true;
 }
+
+void raster3d_gpu_record(Raster3d *r) { __atomic_store_n(&r->gpu_record_requested, 1u, __ATOMIC_RELEASE); }
 
 bool raster3d_gpu_copy(Raster3d *r, const Gpu_Memory *mem, const Raster3d_Surface_Ref *src,
                        const Raster3d_Surface_Ref *dst, const int32_t src_rect[4], const int32_t dst_rect[4],

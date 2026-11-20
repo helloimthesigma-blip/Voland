@@ -1573,6 +1573,11 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
     return;
   }
 
+  if (msg.type === "debug-gpu-record") {
+    core?._emulator_gpu_record_ffi();
+    log("info", "GPU recording: the stream is marked at the next present");
+    return;
+  }
   if (msg.type === "set-gpu-compute") {
     gpuCompute = msg.on;
     core?._emulator_set_gpu_compute_ffi(gpuCompute ? 1 : 0);
