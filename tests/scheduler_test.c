@@ -5,7 +5,8 @@
  * (exclusive monitor fast path, ArbitrateLock/Unlock slow path),
  * WaitSynchronization on thread handles, SleepThread and virtual time,
  * OutputDebugString and ExitProcess, and Horizon's TLS preemption disable
- * (no preemption inside the region, SVC 0x36 after it). Run at several slice budgets so
+ * (no preemption inside the region, SVC 0x36 after it), and the SDK's
+ * auto-clear light event on the address arbiter. Run at several slice budgets so
  * preemption lands in different places, including inside critical
  * sections.
  */
@@ -15,6 +16,7 @@
 #include "guest_fixture.h"
 #include "guest/condvar.inc"
 #include "guest/events.inc"
+#include "guest/lightevent.inc"
 #include "guest/preemptoff.inc"
 #include "guest/threads.inc"
 
@@ -36,6 +38,7 @@ int main(void) {
       {"condvar", k_guest_condvar, sizeof(k_guest_condvar), "sum 125250, timeouts ok"},
       {"events", k_guest_events, sizeof(k_guest_events), "signal, reset, timeout, close ok"},
       {"preemptoff", k_guest_preemptoff, sizeof(k_guest_preemptoff), "preemptoff: counter 600"},
+      {"lightevent", k_guest_lightevent, sizeof(k_guest_lightevent), "lightevent: 20 rounds ok"},
   };
   static const uint64_t budgets[] = {7, 31, 100, 997, 100000};
   for (size_t p = 0; p < sizeof(programs) / sizeof(programs[0]); p++)

@@ -2031,6 +2031,7 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
       }
     }
     if (!backtrace) continue;
+    scheduler_log_sync(&emulator->scheduler, th, "  history"); /* what it last waited on and was handed */
     const CPU_Register_File *rf = emulator->cpu_backend->get_register_file(th->thread.cpu_state);
     uint32_t at_x26 = 0;
     if (th->state == THREAD_STATE_RUNNABLE) (void)vmm_read32(emulator->vmm, rf->x[26], &at_x26);

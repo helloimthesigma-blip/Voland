@@ -531,9 +531,13 @@ void hle_svc_signal_to_address(HLE_Context *c, CPU_State *s) {
       if (count <= 0) {
         new_value = waiters > 0 ? value - 2 : value + 1;
       } else if (waiters > 0) {
-        /* Atmosphère's count of waiters after the first, capped at count + 1. */
-        const uint32_t others = waiters - 1u < (uint32_t)count + 1u ? waiters - 1u : (uint32_t)count + 1u;
-        new_value = others == 0 ? value + 1 : (others <= (uint32_t)count ? value - 1 : value);
+        /* Every waiter woken: value - 1 (the SDK's light event: "has
+         * waiters" -> clear, since a woken waiter does not consume the
+         * word). Some left waiting: unchanged. Leaving value + 1 after
+         * waking the only waiter left the event signalled, so its next
+         * Wait returned at once (TOTK's loader read a request off a
+         * stack frame already gone). */
+        new_value = waiters <= (uint32_t)count ? value - 1 : value;
       }
     }
     /* Only if it still holds `value` (another core may have changed it). */
