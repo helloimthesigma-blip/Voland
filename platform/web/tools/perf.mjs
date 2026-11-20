@@ -65,6 +65,7 @@
  * - --alloc S: after the measurement, samples the GPU worker's allocations
  *   (CDP HeapProfiler) for S seconds and prints the sites that allocate the
  *   most - what its garbage collector is busy with.
+ * - --profile-top N (with --profile-all): each worker's N top functions, with their share.
  * - --profile-all (with --profile): also samples every other worker (the
  *   core's pthreads: parallel guest cores, renderer workers) and prints
  *   their merged self time - where parallel mode's time goes.
@@ -149,6 +150,7 @@ function parseArgs(argv) {
     else if (a === "--seconds") opts.seconds = Number(next());
     else if (a === "--profile") opts.profile = Number(next());
     else if (a === "--profile-all") opts.profileAll = true;
+    else if (a === "--profile-top") opts.profileTop = Number(next());
     else if (a === "--alloc") opts.alloc = Number(next());
     else if (a === "--port") opts.port = Number(next());
     else if (a === "--debug-port") opts.debugPort = Number(next());
@@ -1041,7 +1043,8 @@ async function main() {
             busy += us;
             total += us;
           }
-          const top = [...own.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n]) => n).join(", ");
+          const top = [...own.entries()].sort((a, b) => b[1] - a[1]).slice(0, opts.profileTop ?? 4)
+            .map(([n, us]) => (opts.profileTop ? `${n} ${((100 * us) / (opts.profile * 1e6)).toFixed(1)}%` : n)).join(", ");
           perWorker.push(`  worker ${i} (${s.url.split("/").pop()}): busy ${((100 * busy) / (opts.profile * 1e6)).toFixed(0)}%${top ? `: ${top}` : ""}`);
         }
         console.log(`\nPer worker (${opts.profile} s):`);
