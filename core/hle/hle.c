@@ -187,7 +187,7 @@ static void dispatch_svc(HLE_Context *context, CPU_State *cpu_state, uint32_t sw
 
   context->svc_call_count++;
   if (swi < HLE_SVC_COUNT) context->svc_counts[swi]++;
-  const uint64_t arg0 = regs->x[0], arg1 = regs->x[1]; /* for the failure log below */
+  const uint64_t arg0 = regs->x[0], arg1 = regs->x[1], arg2 = regs->x[2]; /* for the failure logs below */
 
   /* Handlers below that call vmm_guest_to_host bracket each individual
    * call in its own vmm_borrow_scope_begin/end, right where it happens
@@ -293,6 +293,12 @@ static void dispatch_svc(HLE_Context *context, CPU_State *cpu_state, uint32_t sw
   if ((uint32_t)regs->x[0] == HLE_RESULT_INVALID_HANDLE)
     log_debug("[hle] SVC 0x%02x (%s) -> InvalidHandle at PC 0x%016llx (x0 %llx, x1 %llx)", swi, svc_name(swi),
               (unsigned long long)regs->pc, (unsigned long long)arg0, (unsigned long long)arg1);
+  /* A bad range from a game that runs on hardware is ours (a memory map
+   * that differs from the kernel's): rare, and the game usually aborts. */
+  else if ((uint32_t)regs->x[0] == HLE_RESULT_INVALID_MEMORY_RANGE && context->bad_range_logs++ < HLE_BAD_RANGE_LOG_LIMIT)
+    log_warn("[hle] SVC 0x%02x (%s) -> InvalidMemoryRange at PC 0x%016llx (x0 %llx, x1 %llx, x2 %llx)", swi,
+             svc_name(swi), (unsigned long long)regs->pc, (unsigned long long)arg0, (unsigned long long)arg1,
+             (unsigned long long)arg2);
   else if ((uint32_t)regs->x[0] != HLE_RESULT_SUCCESS && (uint32_t)regs->x[0] != HLE_RESULT_TIMED_OUT)
     log_debug("[hle] SVC 0x%02x (%s) -> 0x%x at PC 0x%016llx (x0 %llx, x1 %llx)", swi, svc_name(swi),
               (uint32_t)regs->x[0], (unsigned long long)regs->pc, (unsigned long long)arg0, (unsigned long long)arg1);

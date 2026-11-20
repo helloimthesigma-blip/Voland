@@ -1321,6 +1321,22 @@ static void watch_word_registers(Emulator* emulator, const CPU_Register_File* rf
 }
 
 /* `ran`: the thread whose run just ended, or UINT32_MAX. */
+/* Code addresses on a thread's stack: its callers - candidates, some
+ * stale - where x29/x30 are scratch (Tears of the Kingdom's decompressor). */
+#define STACK_SCAN_WORDS 512u
+#define STACK_SCAN_HITS 16u
+static void log_code_on_stack(Emulator* emulator, uint64_t sp, const char* tag) {
+  uint32_t found = 0;
+  for (uint32_t w = 0; w < STACK_SCAN_WORDS && found < STACK_SCAN_HITS; w++) {
+    uint64_t word = 0, offset = 0;
+    if (!error_is_ok(vmm_read64(emulator->vmm, sp + w * sizeof(word), &word))) break;
+    const char* module = module_of(emulator, word, &offset);
+    if (module[0] == '?') continue;
+    found++;
+    log_warn("[%s]     stack+0x%03x %s+0x%llx", tag, w * (uint32_t)sizeof(word), module, (unsigned long long)offset);
+  }
+}
+
 static void watch_word(Emulator* emulator, uint32_t ran) {
   static int parsed;
   static uint64_t gva[WATCH_WORD_MAX], last[WATCH_WORD_MAX];
@@ -1359,6 +1375,7 @@ static void watch_word(Emulator* emulator, uint32_t ran) {
                i == ran ? ", its run just ended" : th->on_core ? ", running" : "", module, (unsigned long long)offset,
                lr_module, (unsigned long long)lr_offset);
       watch_word_registers(emulator, rf);
+      log_code_on_stack(emulator, rf->sp, "watch");
     }
     last[w] = value;
     have[w] = true;
@@ -2043,6 +2060,12 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
       continue;
     }
     uint64_t fp = rf->x[29], lr = rf->x[30];
+    uint64_t lr_offset = 0;
+    if (module_of(emulator, lr, &lr_offset)[0] == '?') {
+      /* lr is not code: a leaf using x29/x30 as scratch - scan the stack. */
+      log_code_on_stack(emulator, rf->sp, "threads");
+      continue;
+    }
     for (uint32_t depth = 0; depth < DUMP_BACKTRACE_DEPTH; depth++) {
       uint64_t off = 0;
       const char *m = module_of(emulator, lr, &off);

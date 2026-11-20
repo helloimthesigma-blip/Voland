@@ -72,6 +72,7 @@ typedef void (*HLE_Debug_Output_Fn)(void *userdata, const char *text, size_t len
 #define HLE_RESULT_INVALID_SIZE 0xCA01u          /* KernelError_InvalidSize=101 */
 #define HLE_RESULT_INVALID_MEMORY_STATE 0xD401u  /* KernelError_InvalidMemoryState=106, aka InvalidCurrentMemory */
 #define HLE_RESULT_INVALID_MEMORY_RANGE 0xDC01u  /* KernelError_InvalidMemoryRange=110 */
+#define HLE_BAD_RANGE_LOG_LIMIT 32u /* InvalidMemoryRange warnings per process (hle.c) */
 #define HLE_RESULT_INVALID_NEW_MEMORY_PERMISSION 0xD801u /* KernelError_InvalidNewMemoryPermission=108 */
 /* For the IPC SVCs (svc_ipc.h); same libnx result.h source. */
 #define HLE_RESULT_OUT_OF_SESSIONS 0x0E01u     /* KernelError_OutOfSessions=7 */
@@ -116,6 +117,7 @@ struct HLE_Context
   void *debug_userdata;
   uint64_t svc_call_count;
   uint64_t svc_counts[HLE_SVC_COUNT]; /* per-SVC diagnostics (voland-cli --svc-stats) */
+  uint32_t bad_range_logs;          /* InvalidMemoryRange results logged (hle.c) */
 };
 
 /* Signals `event` and wakes every thread whose WaitSynchronization names
