@@ -174,6 +174,8 @@ export interface DebugTarget {
   /** Float formats: the unclamped RGBA values (debugging over-bright scenes). */
   readonly floats?: Float32Array | undefined;
 }
+/* A shadow taken for a copy, not a draw: no shader's series keeps it. */
+const NO_SHADOW_SERIES = -1;
 /* Save-state readback: surfaces per submit (bounds the staging buffers alive at once). */
 const READBACK_BATCH = 16;
 /* Debug readback skips small targets (probes, LUTs): later scenes have thousands. */
@@ -468,6 +470,12 @@ export class GpuExecutor {
    * frame and left Chrome's GPU process encoding passes. A draw that writes
    * the attachment, and any record that changes textures, ends the hold. */
   private readonly shadowHolds = new Map<string, number>();
+  /* The shader of the draws a hold serves: their own writes keep it. Tears
+   * of the Kingdom's tiled lighting draws 240 quads a frame with one shader,
+   * each writing its tile of a target it samples - a copy (and a pass) per
+   * quad was ~1 GB of copies and 270 pass breaks a frame. The tiles read
+   * their own pixels, so the copy from before the first serves them all. */
+  private readonly shadowSeries = new Map<string, number>();
   /* Diagnostics: why each shadow key's last hold ended, and new copies by that reason since the last report. */
   private readonly shadowReleased = new Map<string, string>();
   private readonly shadowCopiesBy = new Map<string, number>();
@@ -1854,10 +1862,11 @@ export class GpuExecutor {
   }
 
   /** A copy of attachment `t` for a draw that also samples it. */
-  private shadowOf(id: number, t: Tex): Tex {
+  private shadowOf(id: number, t: Tex, shader: number): Tex {
     const key = `${t.format}:${t.width}x${t.height}x${t.layers}`;
     let s = this.shadows.get(key);
     if (s && this.shadowHolds.get(key) === id) { /* still what the attachment holds: no copy, the pass goes on */
+      if (this.shadowSeries.get(key) !== shader) this.shadowSeries.delete(key); /* another shader: a series ends */
       this.stats.shadowsReused++;
       return s;
     }
@@ -1871,16 +1880,19 @@ export class GpuExecutor {
       this.shadows.set(key, s);
     }
     this.shadowHolds.set(key, id);
+    this.shadowSeries.set(key, shader);
     this.endPass("shadow");
     this.stats.shadows++;
     this.ensureEncoder().copyTextureToTexture({ texture: t.texture }, { texture: s.texture }, [t.width, t.height, t.layers]);
     return s;
   }
 
-  private releaseShadowHolds(id: number, why: string): void {
+  private releaseShadowHolds(id: number, why: string, shader?: number): void {
     for (const [key, held] of this.shadowHolds) {
       if (held !== id) continue;
+      if (shader !== undefined && this.shadowSeries.get(key) === shader) continue; /* the series' own write */
       this.shadowHolds.delete(key);
+      this.shadowSeries.delete(key);
       this.shadowReleased.set(key, why);
     }
   }
@@ -2008,13 +2020,13 @@ export class GpuExecutor {
       const attached = id === depthId || colorIds.includes(id);
       if (!attached) this.materialize(id);
       this.touched.add(t.texture);
-      textures.push(attached ? this.shadowOf(id, t) : t);
+      textures.push(attached ? this.shadowOf(id, t, d.shaderId) : t);
     }
     /* What this draw writes no longer matches a copy of it. */
     if (this.shadowHolds.size) {
       for (let i = 0; i < d.targets.length; i++) {
         const target = d.targets[i] as Target;
-        if (target.writeMask !== 0 && colorIds[i]) this.releaseShadowHolds(target.id, "colour write");
+        if (target.writeMask !== 0 && colorIds[i]) this.releaseShadowHolds(target.id, "colour write", d.shaderId);
       }
       if (depthId && (d.depthWrite || stencilWrites(d))) this.releaseShadowHolds(depthId, d.depthWrite ? "depth write" : "stencil write");
     }
@@ -2279,7 +2291,7 @@ export class GpuExecutor {
       this.warnOnce(`copy level ${src.format}->${dst.format}`, `GPU copy into a mip level must be a plain texture copy`);
       return;
     }
-    if (c.srcId === c.dstId) src = this.shadowOf(c.srcId, src);
+    if (c.srcId === c.dstId) src = this.shadowOf(c.srcId, src, NO_SHADOW_SERIES);
     const pass = this.passFor([c.dstId], 0);
     const type = shaderType(src.format);
     if (type !== "f32") {
