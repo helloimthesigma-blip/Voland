@@ -4,7 +4,7 @@ A Nintendo Switch emulator that runs in your browser. A C11 core compiled to
 WebAssembly, its own ARM64 → WebAssembly JIT, and a WebGPU renderer. Nothing
 to install, no keys, and most games need no firmware.
 
-> **Status:** Phase 4 (First Boot). All nine games we test play at full or near-full speed during actual play on an M4 Mac mini: Hollow Knight, Silksong, Celeste and Nine Sols, plus Mario Odyssey, Mario Kart 8 Deluxe, Smash Bros. Ultimate, Animal Crossing and Tears of the Kingdom. Recent work fixed Tears of the Kingdom's over-exposed, red-and-white picture (two shader translation bugs) and removed draw overheads in Mario Kart and Mario Odyssey. Still open: Tears of the Kingdom's low frame rate, rare Mario Kart freezes, and Animal Crossing's black sea patches. The full task list is in [DESIGN.md §25](docs/DESIGN.md#25-development-phases), per-game details in [NEW_GAMES.md](docs/NEW_GAMES.md).
+> **Status:** Phase 4 (First Boot). All nine games we test play at full or near-full speed during actual play on an M4 Mac mini: Hollow Knight, Silksong, Celeste and Nine Sols, plus Mario Odyssey, Mario Kart 8 Deluxe, Smash Bros. Ultimate, Animal Crossing and Tears of the Kingdom. Recent work fixed Tears of the Kingdom's over-exposed picture and its washed-out, flat-orange torch light in the opening cave, and removed draw overheads in Mario Kart and Mario Odyssey. Still open: Tears of the Kingdom's low frame rate, rare Mario Kart freezes, and Animal Crossing's black sea patches. The full task list is in [DESIGN.md §25](docs/DESIGN.md#25-development-phases), per-game details in [NEW_GAMES.md](docs/NEW_GAMES.md).
 
 ### Where each game stands
 
@@ -24,7 +24,7 @@ cap is 60 unless noted.
 | Mario Kart 8 Deluxe (32-bit) | Grand Prix races, all four races of a cup | 98-100% | 45-58 in races | the first visit to a course pauses while its shaders are built (about 25 s before the first race); rare crashes or freezes during Grand Prix runs |
 | Super Smash Bros. Ultimate | Battlefield fights | 94-100% | 32-59 (depends on the fight) | none known |
 | Animal Crossing: New Horizons | arrival on the island | 100% | 29 (the game's cap is 30) | some of the island's sea renders black in patches; generating the island takes a few minutes |
-| Tears of the Kingdom | the cave beneath Hyrule Castle, Great Sky Island | 100% | 12-13 (the game's cap is 30) | some hard-edged dark patches in the cave; about one boot in 15 crashes while loading |
+| Tears of the Kingdom | the cave beneath Hyrule Castle, Great Sky Island | 100% | 12-13 (the game's cap is 30) | a cyan tint on the characters' legs in the cave; about one boot in 15 crashes while loading |
 
 On an M1 Mac, Silksong gameplay runs at about 33 fps.
 Only macOS has been tested. Phones: Chrome on Android (64-bit, with WebGPU) should run it - the page fits a phone and plays with a paired controller (there are no touch controls) - but it has only been checked in Chrome's phone emulation, and a phone must grant the fixed 5.25 GB of memory. iPhones and iPads cannot run it yet, in Safari or Chrome: every iOS browser, Chrome included, uses Safari's engine, which lacks the 64-bit WebAssembly memory Voland needs, and iOS allows a tab far less than 5.25 GB. The numbers come from `platform/web/tools/perf.mjs`,
