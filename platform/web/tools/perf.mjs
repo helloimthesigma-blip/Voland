@@ -941,14 +941,16 @@ async function main() {
         const { profile } = await cdp.send("HeapProfiler.stopSampling", {}, gpuSession);
         const bySite = new Map();
         let total = 0;
-        const walk = (node) => {
+        /* A builtin (subarray, push: no url) is named with its caller - which code allocates is the question. */
+        const walk = (node, caller) => {
           const f = node.callFrame;
-          const site = `${f.functionName || "(anonymous)"} ${f.url.split("/").pop()}:${f.lineNumber + 1}`;
+          const own = `${f.functionName || "(anonymous)"} ${f.url.split("/").pop()}:${f.lineNumber + 1}`;
+          const site = f.url ? own : `${f.functionName || "(builtin)"} <- ${caller}`;
           bySite.set(site, (bySite.get(site) ?? 0) + node.selfSize);
           total += node.selfSize;
-          for (const child of node.children) walk(child);
+          for (const child of node.children) walk(child, f.url ? own : caller);
         };
-        walk(profile.head);
+        walk(profile.head, "(root)");
         console.log(`\nGPU worker allocations (${opts.alloc} s, sampled; ${(total / 1048576).toFixed(0)} MiB sampled, collected included):`);
         for (const [site, bytes] of [...bySite.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25))
           console.log(`  ${((100 * bytes) / Math.max(total, 1)).toFixed(1).padStart(5)}%  ${site}`);
@@ -982,11 +984,14 @@ async function main() {
         await sleep(opts.profile * 1000);
         const merged = new Map();
         let total = 0;
+        const perWorker = []; /* each worker's busy share and top functions: a saturated thread shows here */
         mkdirSync(opts.outDir, { recursive: true });
         for (const [i, s] of sessions.entries()) {
           const { profile } = await cdp.send("Profiler.stop", {}, s.id);
           writeFileSync(join(opts.outDir, `worker-${i}-${Date.now()}.cpuprofile`), JSON.stringify(profile));
           const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+          const own = new Map();
+          let busy = 0;
           for (let k = 0; k < profile.samples.length; k++) {
             const frame = byId.get(profile.samples[k])?.callFrame;
             const name = frame?.functionName || "(anonymous)";
@@ -995,9 +1000,15 @@ async function main() {
             if (name === "(idle)" || name === "(program)" || /futex_wait|atomic_wait|cond_timedwait|^helper_main$/.test(name)) continue;
             const us = profile.timeDeltas[k] ?? 0;
             merged.set(name, (merged.get(name) ?? 0) + us);
+            own.set(name, (own.get(name) ?? 0) + us);
+            busy += us;
             total += us;
           }
+          const top = [...own.entries()].sort((a, b) => b[1] - a[1]).slice(0, 4).map(([n]) => n).join(", ");
+          perWorker.push(`  worker ${i} (${s.url.split("/").pop()}): busy ${((100 * busy) / (opts.profile * 1e6)).toFixed(0)}%${top ? `: ${top}` : ""}`);
         }
+        console.log(`\nPer worker (${opts.profile} s):`);
+        for (const line of perWorker) console.log(line);
         console.log(`\nAll ${sessions.length} workers (${opts.profile} s, busy self time, waits left out):`);
         for (const [name, us] of [...merged.entries()].sort((a, b) => b[1] - a[1]).slice(0, 40))
           console.log(`  ${((100 * us) / total).toFixed(1).padStart(5)}%  ${(us / 1000).toFixed(0).padStart(7)} ms  ${name}`);

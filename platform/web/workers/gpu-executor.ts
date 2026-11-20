@@ -526,6 +526,7 @@ export class GpuExecutor {
   private readonly pendingColor = new Map<number, GPUColorDict>();
   private readonly pendingDepth = new Map<number, { depth: number | null; stencil: number | null }>();
   private readonly bindGroups = new Map<number, CachedBindGroup>();
+  private bindGroupsMade = 0; /* since the last memory report: cache misses */
   /* Allocation-free per-draw lookups (see KEY_SEED_A). */
   private keyA = KEY_SEED_A;
   private keyB = KEY_SEED_B;
@@ -2119,6 +2120,7 @@ export class GpuExecutor {
         entries.push({ binding: w.binding, resource: { buffer: w.buffer } });
       }
       group = this.device.createBindGroup({ layout, entries });
+      this.bindGroupsMade++;
       this.bindGroups.set(groupKey, { signature: sig.slice(), group });
     }
     const st = this.stateFor(pass);
@@ -2384,7 +2386,7 @@ export class GpuExecutor {
       `(${sampledCount}), storage buffers ${mb(buffers)} MB (${this.buffers.size}), shadows ${this.shadows.size}, ` +
       `${this.pipelines.size} pipelines (${this.stats.pipelinesEvicted} evicted), ${this.modulesByHash.size} shader modules (${mb(this.shaderBytes)} MB of WGSL); in the last ${MEMORY_REPORT_PRESENTS} ` +
       `presents ${mb(this.uploadedBytes)} MB texture uploads, ${mb(this.bufferBytes)} MB buffer uploads (vertices ${mb(this.vertexBytes)}, data ${mb(this.dataBytes)}, ` +
-      `pool ${mb(this.poolBytes)}; ${this.bufferWrites} writes), ${this.submits} submits, ` +
+      `pool ${mb(this.poolBytes)}; ${this.bufferWrites} writes), ${this.submits} submits, ${this.bindGroupsMade} bind groups made, ` +
       `${this.stats.draws - this.reportedStats.draws} draws, ${this.stats.passes - this.reportedStats.passes} passes, ` +
       `${this.stats.copies - this.reportedStats.copies} copies, ${this.stats.shadowsReused} shadows reused in all, ${this.stats.dispatches - this.reportedStats.dispatches} dispatches ` +
       `(passes ended by ${[...this.passEnds].sort((a, b) => b[1] - a[1]).map(([r, n]) => `${r} ${n}`).join(", ")}; ` +
@@ -2399,6 +2401,7 @@ export class GpuExecutor {
     this.dataBytes = 0;
     this.poolBytes = 0;
     this.submits = 0;
+    this.bindGroupsMade = 0;
     this.bufferWrites = 0;
   }
 }
