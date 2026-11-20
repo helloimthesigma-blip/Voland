@@ -1273,45 +1273,94 @@ static void report_stream(Emulator* emulator) {
   emulator->stream_stats_reported = *now;
 }
 
-/* VOLAND_WATCH_WORD=GVA (diagnostics; ?env= in the browser): the 8 guest
- * bytes there, read at every device update (before every slice in slice
- * mode); each change is logged with every thread that may have run since
- * - who overwrote a word (Tears of the Kingdom's object vtable pointer,
- * docs in the LOG). */
+/* VOLAND_WATCH_WORD=SPEC[,SPEC...] (diagnostics; ?env= in the browser), each
+ * SPEC a GVA or MODULE+0xOFFSET: the 8 guest bytes there, read at every
+ * device update (before every slice in slice mode); each change is logged
+ * with every thread that may have run since - who overwrote a word (Tears
+ * of the Kingdom's frame object, docs in the LOG). ASLR shifts the heap
+ * with the code, so a heap address keeps its offset from the main module
+ * across boots. */
+#define WATCH_WORD_MAX 4u
 #define WATCH_WORD_LOG_LIMIT 64u
+static uint64_t watch_word_address(const Emulator* emulator, const char* spec, size_t length) {
+  const char* plus = memchr(spec, '+', length);
+  const uint64_t value = strtoull(plus ? plus + 1 : spec, NULL, 0);
+  if (!plus) return value;
+  for (uint32_t m = 0; m < emulator->process.module_count; m++) {
+    const Process_Module* mod = &emulator->process.modules[m];
+    if (strlen(mod->name) == (size_t)(plus - spec) && !strncmp(mod->name, spec, (size_t)(plus - spec))) {
+      return mod->base_gva + value;
+    }
+  }
+  return 0; /* no such module */
+}
+
+/* Guest physical address of a mapped gva, or UINT64_MAX. */
+static uint64_t watch_word_physical(Emulator* emulator, uint64_t gva) {
+  void* host = NULL;
+  vmm_borrow_scope_begin(emulator->vmm);
+  const bool mapped = error_is_ok(vmm_guest_to_host(emulator->vmm, gva, 1, VMM_PERM_R, &host));
+  vmm_borrow_scope_end(emulator->vmm);
+  return mapped ? (uint64_t)((uintptr_t)host - (uintptr_t)layout_get()->guest_ram_base) : UINT64_MAX;
+}
+
+#define WATCH_WORD_REGS_PER_LINE 8u
+#define WATCH_WORD_LINE_BYTES 320u
+static void watch_word_registers(Emulator* emulator, const CPU_Register_File* rf) {
+  const uint32_t count = (uint32_t)(sizeof(rf->x) / sizeof(rf->x[0]));
+  for (uint32_t r = 0; r < count; r += WATCH_WORD_REGS_PER_LINE) {
+    char line[WATCH_WORD_LINE_BYTES];
+    int at = 0;
+    for (uint32_t k = r; k < r + WATCH_WORD_REGS_PER_LINE && k < count && at < (int)sizeof(line); k++) {
+      const uint64_t pa = watch_word_physical(emulator, rf->x[k]);
+      at += snprintf(line + at, sizeof(line) - (size_t)at, pa == UINT64_MAX ? " %llx" : " %llx@%llx",
+                     (unsigned long long)rf->x[k], (unsigned long long)pa);
+    }
+    log_warn("[watch]     x%u:%s", r, line);
+  }
+}
+
 static void watch_word(Emulator* emulator) {
   static int parsed;
-  static uint64_t gva, last;
-  static bool have;
-  static uint32_t logged;
+  static uint64_t gva[WATCH_WORD_MAX], last[WATCH_WORD_MAX];
+  static bool have[WATCH_WORD_MAX];
+  static uint32_t count, logged;
+  if (!emulator->program_loaded) return; /* MODULE+ needs the modules */
   if (!parsed) {
     parsed = 1;
     const char* spec = getenv("VOLAND_WATCH_WORD");
-    gva = spec ? strtoull(spec, NULL, 0) : 0;
-    if (gva) log_warn("[watch] watching the 8 bytes at %llx", (unsigned long long)gva);
+    while (spec && *spec && count < WATCH_WORD_MAX) {
+      const size_t length = strcspn(spec, ",");
+      gva[count] = watch_word_address(emulator, spec, length);
+      if (gva[count]) log_warn("[watch] watching the 8 bytes at %llx", (unsigned long long)gva[count++]);
+      spec += length + (spec[length] == ',');
+    }
   }
-  if (!gva || logged >= WATCH_WORD_LOG_LIMIT) return;
-  uint64_t value = 0;
-  if (!error_is_ok(vmm_read64(emulator->vmm, gva, &value))) return;
-  if (have && value == last) return;
-  logged++;
-  log_warn("[watch] %llx: %016llx -> %016llx at tick %llu", (unsigned long long)gva, (unsigned long long)last,
-           (unsigned long long)value, (unsigned long long)emulator->scheduler.ticks);
-  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS && have; i++) {
-    const Sched_Thread* th = &emulator->scheduler.threads[i];
-    if (th->state != THREAD_STATE_RUNNABLE || !th->thread.cpu_state) continue;
-    uint64_t offset = 0;
-    const uint64_t pc = emulator->cpu_backend->get_pc(th->thread.cpu_state);
-    const char* module = module_of(emulator, pc, &offset);
-    const CPU_Register_File* rf = emulator->cpu_backend->get_register_file(th->thread.cpu_state);
-    uint64_t lr_offset = 0;
-    const char* lr_module = module_of(emulator, rf->x[30], &lr_offset);
-    log_warn("[watch]   thread %llu (handle 0x%x, last core %u) at %s+0x%llx, lr %s+0x%llx",
-             (unsigned long long)th->thread_id, th->handle, th->last_core, module, (unsigned long long)offset, lr_module,
-             (unsigned long long)lr_offset);
+  for (uint32_t w = 0; w < count && logged < WATCH_WORD_LOG_LIMIT; w++) {
+    uint64_t value = 0;
+    if (!error_is_ok(vmm_read64(emulator->vmm, gva[w], &value))) continue;
+    if (have[w] && value == last[w]) continue;
+    logged++;
+    log_warn("[watch] %llx (pa %llx): %016llx -> %016llx at tick %llu", (unsigned long long)gva[w],
+             (unsigned long long)watch_word_physical(emulator, gva[w]), (unsigned long long)last[w],
+             (unsigned long long)value, (unsigned long long)emulator->scheduler.ticks);
+    for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS && have[w]; i++) {
+      const Sched_Thread* th = &emulator->scheduler.threads[i];
+      if (th->state != THREAD_STATE_RUNNABLE || !th->thread.cpu_state) continue;
+      uint64_t offset = 0;
+      const uint64_t pc = emulator->cpu_backend->get_pc(th->thread.cpu_state);
+      const char* module = module_of(emulator, pc, &offset);
+      const CPU_Register_File* rf = emulator->cpu_backend->get_register_file(th->thread.cpu_state);
+      uint64_t lr_offset = 0;
+      const char* lr_module = module_of(emulator, rf->x[30], &lr_offset);
+      log_warn("[watch]   thread %llu (handle 0x%x, last core %u) at %s+0x%llx, lr %s+0x%llx",
+               (unsigned long long)th->thread_id, th->handle, th->last_core, module, (unsigned long long)offset,
+               lr_module, (unsigned long long)lr_offset);
+      watch_word_registers(emulator, rf);
+    }
+    last[w] = value;
+    have[w] = true;
   }
-  last = value;
-  have = true;
 }
 
 static void update_devices_hook(void* emulator) { update_devices((Emulator*)emulator); }
