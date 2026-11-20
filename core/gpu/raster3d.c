@@ -4296,7 +4296,11 @@ static uint32_t gpu_new_id(Raster3d *r);
  * << block height) when the volume fits one block deep. A cube map whose
  * faces and mip levels are targets: Super Mario Odyssey renders its
  * environment probes one face and one level at a time, and samples them
- * at a level its roughness picks. Those surfaces are copied into the
+ * at a level its roughness picks. A 2D array whose layers are targets:
+ * TOTK's deferred lighting draws diffuse and specular light as two of one
+ * pass's targets and samples them as the two layers of one array (the
+ * first alone made layer 1 a copy of layer 0, and caves washed out in
+ * torch light). Those surfaces are copied into the
  * layers (and levels) of one GPU texture, which the draw samples (3D
  * textures are layered, WGSL_TEXP_3D blends slices; cube faces are layers
  * too). The copies run again only when a source was written or re-created
@@ -4319,6 +4323,10 @@ static uint32_t gpu_gather(Raster3d *r, const Tex_Header *h, const Raster3d_Gpu_
     while (levels < h->levels && levels < GATHER_MAX_LEVELS && tex_level_layout(h, levels, &l) &&
            gpu_surface_at(r, h->address + l.offset, l.width))
       levels++;
+  } else if ((h->type == TEX_TYPE_2D_ARRAY || h->type == TEX_TYPE_CUBE_ARRAY) && tex_layer_count(h) >= 2u) {
+    layers = tex_layer_count(h);
+    layer_stride = tex_layer_stride(h);
+    if (!layer_stride || !gpu_surface_at(r, h->address + layer_stride, h->width)) return 0; /* not drawn layer by layer */
   } else {
     return 0;
   }
