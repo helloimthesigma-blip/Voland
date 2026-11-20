@@ -1114,7 +1114,7 @@ static uint64_t gpu_max_latency_ticks(void) {
  * every slice; free-running mode on whichever core finds it due, under the
  * kernel lock (docs/PARALLEL.md "Free-running mode"). */
 static void report_stream(Emulator* emulator);
-static void watch_word(Emulator* emulator);
+static void watch_word(Emulator* emulator, uint32_t ran);
 static const char *module_of(const Emulator *emulator, uint64_t pc, uint64_t *offset);
 
 static void update_devices(Emulator* emulator) {
@@ -1131,7 +1131,7 @@ static void update_devices(Emulator* emulator) {
   /* Display (§13): vsync composites queued buffers into the §6 slots. */
   vi_update(&emulator->vi, &emulator->hle, emulator->scheduler.ticks);
   report_stream(emulator);
-  watch_word(emulator);
+  watch_word(emulator, UINT32_MAX);
   run_cheats(emulator);
   /* Audio (§14): queued PCM / rendered frames into the ring at 48kHz of
    * virtual time. */
@@ -1320,7 +1320,8 @@ static void watch_word_registers(Emulator* emulator, const CPU_Register_File* rf
   }
 }
 
-static void watch_word(Emulator* emulator) {
+/* `ran`: the thread whose run just ended, or UINT32_MAX. */
+static void watch_word(Emulator* emulator, uint32_t ran) {
   static int parsed;
   static uint64_t gva[WATCH_WORD_MAX], last[WATCH_WORD_MAX];
   static bool have[WATCH_WORD_MAX];
@@ -1346,15 +1347,16 @@ static void watch_word(Emulator* emulator) {
              (unsigned long long)value, (unsigned long long)emulator->scheduler.ticks);
     for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS && have[w]; i++) {
       const Sched_Thread* th = &emulator->scheduler.threads[i];
-      if (th->state != THREAD_STATE_RUNNABLE || !th->thread.cpu_state) continue;
+      if ((th->state != THREAD_STATE_RUNNABLE && i != ran) || !th->thread.cpu_state) continue;
       uint64_t offset = 0;
       const uint64_t pc = emulator->cpu_backend->get_pc(th->thread.cpu_state);
       const char* module = module_of(emulator, pc, &offset);
       const CPU_Register_File* rf = emulator->cpu_backend->get_register_file(th->thread.cpu_state);
       uint64_t lr_offset = 0;
       const char* lr_module = module_of(emulator, rf->x[30], &lr_offset);
-      log_warn("[watch]   thread %llu (handle 0x%x, last core %u) at %s+0x%llx, lr %s+0x%llx",
-               (unsigned long long)th->thread_id, th->handle, th->last_core, module, (unsigned long long)offset,
+      log_warn("[watch]   thread %llu (handle 0x%x, last core %u%s) at %s+0x%llx, lr %s+0x%llx",
+               (unsigned long long)th->thread_id, th->handle, th->last_core,
+               i == ran ? ", its run just ended" : th->on_core ? ", running" : "", module, (unsigned long long)offset,
                lr_module, (unsigned long long)lr_offset);
       watch_word_registers(emulator, rf);
     }
@@ -1364,6 +1366,7 @@ static void watch_word(Emulator* emulator) {
 }
 
 static void update_devices_hook(void* emulator) { update_devices((Emulator*)emulator); }
+static void watch_word_hook(void* emulator, uint32_t thread) { watch_word((Emulator*)emulator, thread); }
 
 static Emulator_Status status_of(Emulator* emulator, Scheduler_Status tick) {
   switch (tick) {
@@ -1596,6 +1599,9 @@ uint32_t emulator_set_host_cores(Emulator* emulator, uint32_t cores) {
   if (!emulator->parallel) return 0;
   parallel_set_device_hook(emulator->parallel, update_devices_hook, emulator);
   parallel_set_pace_hook(emulator->parallel, pace_hook);
+  /* A watched word is checked after every run too: a device update can
+   * come too late to see who wrote it. */
+  if (getenv("VOLAND_WATCH_WORD")) parallel_set_run_hook(emulator->parallel, watch_word_hook);
 #ifdef SWITCH_CPU_BACKEND_JIT
   if (emulator->cpu_backend == &CPU_BACKEND_JIT || emulator->cpu_backend == &CPU_BACKEND_A32_JIT)
     parallel_set_report_hook(emulator->parallel, report_jit);

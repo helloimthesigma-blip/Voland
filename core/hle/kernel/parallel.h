@@ -70,6 +70,10 @@ void parallel_set_device_hook(Parallel *p, void (*devices)(void *ctx), void *ctx
  * burst, not only at its start. Without it, idle cores held at the pacing
  * limit wait for the next burst and a due vsync comes up to a burst late. */
 void parallel_set_pace_hook(Parallel *p, void (*pace)(void *ctx));
+/* Diagnostics (VOLAND_WATCH_WORD): called after every guest run on any
+ * core, under the kernel lock, with the device hook's ctx and the index
+ * of the thread that ran. NULL = off. */
+void parallel_set_run_hook(Parallel *p, void (*ran)(void *ctx, uint32_t thread));
 
 /* scheduler_kernel_enter/exit in parallel mode. */
 void parallel_kernel_enter(Parallel *p, const CPU_State *state);

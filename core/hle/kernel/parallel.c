@@ -89,6 +89,10 @@ void parallel_set_pace_hook(Parallel *p, void (*pace)(void *ctx)) {
   (void)p;
   (void)pace;
 }
+void parallel_set_run_hook(Parallel *p, void (*ran)(void *ctx, uint32_t thread)) {
+  (void)p;
+  (void)ran;
+}
 Scheduler_Status parallel_run_for(Parallel *p, uint64_t host_ns, uint64_t budget) {
   (void)p;
   (void)host_ns;
@@ -180,6 +184,7 @@ struct Parallel {
   void (*devices)(void *ctx);  /* the emulator's device updates, under the kernel lock */
   void *devices_ctx;
   void (*pace)(void *ctx);     /* the emulator's pacing (parallel_set_pace_hook), ctx = devices_ctx */
+  void (*ran)(void *ctx, uint32_t thread); /* after every guest run (parallel_set_run_hook), ctx = devices_ctx */
   uint64_t free_gen;           /* a new value starts a free run */
   bool free_running;           /* cores keep running; cleared to pause them */
   uint32_t free_active;        /* cores in the free run, not yet parked */
@@ -321,6 +326,7 @@ static uint64_t run_slice_on_core(Parallel *p, Core *core) {
     }
 
     lock_kernel(p, &core->time.lock_ns);
+    if (p->ran) p->ran(p->devices_ctx, (uint32_t)(thread - sched->threads));
     p->busy--;
     core->running = -1;
     thread->on_core = false;
@@ -443,6 +449,7 @@ static void run_free_on_core(Parallel *p, Core *core) {
     host_stall(core);
 
     lock_kernel(p, &core->time.lock_ns);
+    if (p->ran) p->ran(p->devices_ctx, (uint32_t)(thread - sched->threads));
     p->busy--;
     core->running = -1;
     thread->on_core = false;
@@ -692,6 +699,8 @@ Scheduler_Status parallel_tick(Parallel *p, uint64_t budget) {
 }
 
 void parallel_set_pace_hook(Parallel *p, void (*pace)(void *ctx)) { p->pace = pace; }
+
+void parallel_set_run_hook(Parallel *p, void (*ran)(void *ctx, uint32_t thread)) { p->ran = ran; }
 
 void parallel_set_device_hook(Parallel *p, void (*devices)(void *ctx), void *ctx) {
   p->devices = devices;
