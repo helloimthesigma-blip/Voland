@@ -684,10 +684,14 @@ void hle_svc_map_shared_memory(HLE_Context *context, CPU_State *cpu_state) {
     return;
   }
   const Address_Space *as = &process->address_space;
+  /* Shared memory may go anywhere in the address space but the heap and
+   * alias regions - the stack region too. The SDK picks the address at
+   * random outside heap and alias, and gives up on this result (Silksong
+   * stopped at boot when a pick landed in the stack region); a pick over
+   * something already mapped fails below with InvalidCurrentMemory, which
+   * it tries again after. */
   if (!address_region_contains(&as->aslr, addr, size) || overlaps_region(&as->heap, addr, size) ||
-      overlaps_region(&as->alias, addr, size) || overlaps_region(&as->stack, addr, size)) {
-    /* No warning: the SDK picks shared-memory addresses at random in the
-     * ASLR region and tries again where one is refused. */
+      overlaps_region(&as->alias, addr, size)) {
     regs->x[0] = HLE_RESULT_INVALID_MEMORY_RANGE;
     return;
   }

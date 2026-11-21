@@ -184,6 +184,15 @@ static void test_shared_memory_and_npads(void) {
         HLE_RESULT_INVALID_NEW_MEMORY_PERMISSION);
   CHECK(svc(SVC_MAP_SHARED_MEMORY, shmem, as->heap.base, HID_SHARED_MEMORY_BYTES, PERM_R, NULL) ==
         HLE_RESULT_INVALID_MEMORY_RANGE);
+  CHECK(svc(SVC_MAP_SHARED_MEMORY, shmem, as->alias.base, HID_SHARED_MEMORY_BYTES, PERM_R, NULL) ==
+        HLE_RESULT_INVALID_MEMORY_RANGE);
+  /* The stack region takes shared memory (free there: its top; over the
+   * main thread's stack: InvalidCurrentMemory, which the SDK retries). */
+  const uint64_t in_stack = as->stack.base + as->stack.size - HID_SHARED_MEMORY_BYTES;
+  CHECK(svc(SVC_MAP_SHARED_MEMORY, shmem, in_stack, HID_SHARED_MEMORY_BYTES, PERM_R, NULL) == 0);
+  CHECK(svc(SVC_UNMAP_SHARED_MEMORY, shmem, in_stack, HID_SHARED_MEMORY_BYTES, 0, NULL) == 0);
+  CHECK(svc(SVC_MAP_SHARED_MEMORY, shmem, g_emu.process.main_thread_stack.base, HID_SHARED_MEMORY_BYTES, PERM_R, NULL) ==
+        HLE_RESULT_INVALID_MEMORY_STATE);
   CHECK(svc(SVC_MAP_SHARED_MEMORY, shmem, view, HID_SHARED_MEMORY_BYTES, PERM_R, NULL) == 0);
   CHECK(svc(SVC_MAP_SHARED_MEMORY, shmem, view, HID_SHARED_MEMORY_BYTES, PERM_R, NULL) == HLE_RESULT_INVALID_STATE);
   g_shmem_gva = view;
