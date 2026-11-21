@@ -4,7 +4,7 @@ A Nintendo Switch emulator that runs in your browser. A C11 core compiled to
 WebAssembly, its own ARM64 → WebAssembly JIT, and a WebGPU renderer. Nothing
 to install, no keys, and most games need no firmware.
 
-> **Status:** Phase 4 (First Boot). All nine games we test play at full or near-full speed during actual play on an M4 Mac mini: Hollow Knight, Silksong, Celeste and Nine Sols, plus Mario Odyssey, Mario Kart 8 Deluxe, Smash Bros. Ultimate, Animal Crossing and Tears of the Kingdom. Recent work fixed the crash that hit about one Tears of the Kingdom boot in 15 (a kernel synchronisation bug; 40 boots in a row have been clean since), its over-exposed picture, the shaders behind the black silhouettes and blocky light at Lookout Landing, and stale G-buffer flags that tinted legs cyan in the cave and left dark patches on floors. Still open: Tears of the Kingdom's low frame rate, rare Mario Kart freezes, and Animal Crossing's black sea patches. The full task list is in [DESIGN.md §25](docs/DESIGN.md#25-development-phases), per-game details in [NEW_GAMES.md](docs/NEW_GAMES.md).
+> **Status:** Phase 4 (First Boot). All nine games we test play at full or near-full speed during actual play on an M4 Mac mini: Hollow Knight, Silksong, Celeste and Nine Sols, plus Mario Odyssey, Mario Kart 8 Deluxe, Smash Bros. Ultimate, Animal Crossing and Tears of the Kingdom. Recent work fixed the crash that hit about one Tears of the Kingdom boot in 15 (a kernel synchronisation bug; 40 boots in a row have been clean since), its over-exposed picture, the shaders behind the black silhouettes and blocky light at Lookout Landing, and stale G-buffer flags that tinted legs cyan in the cave and left dark patches on floors (the same fix ended Animal Crossing's black sea patches). Still open: Tears of the Kingdom's low frame rate and rare Mario Kart freezes. The full task list is in [DESIGN.md §25](docs/DESIGN.md#25-development-phases), per-game details in [NEW_GAMES.md](docs/NEW_GAMES.md).
 
 ### Where each game stands
 
@@ -23,7 +23,7 @@ cap is 60 unless noted.
 | Super Mario Odyssey | ten kingdoms, walking (Cap, Cascade, Sand, Wooded, Lake, Seaside, Snow, Luncheon, Bowser's, Moon) and New Donk City | 92-100% in most, 82-99% in Luncheon | 37-60 by kingdom | a kingdom's first seconds stutter while its shaders compile; the camera tutorial needs the right stick pushed up |
 | Mario Kart 8 Deluxe (32-bit) | Grand Prix races, all four races of a cup | 98-100% | 45-58 in races | the first visit to a course pauses while its shaders are built (about 25 s before the first race); rare crashes or freezes during Grand Prix runs |
 | Super Smash Bros. Ultimate | Battlefield fights | 94-100% | 32-59 (depends on the fight) | none known |
-| Animal Crossing: New Horizons | arrival on the island | 100% | 29 (the game's cap is 30) | some of the island's sea renders black in patches; generating the island takes a few minutes |
+| Animal Crossing: New Horizons | arrival on the island | 100% | 29 (the game's cap is 30) | generating the island takes a few minutes |
 | Tears of the Kingdom | the cave beneath Hyrule Castle, Great Sky Island, Lookout Landing at night | 99-100% | 12-13 in the cave, 8-9 at Lookout Landing (the game's cap is 30) | none known besides the frame rate |
 
 On an M1 Mac, Silksong gameplay runs at about 33 fps.
@@ -84,10 +84,9 @@ Yes, and you can check that without taking our word for it:
   `grep -rn "0100[0-9A-Fa-f]\{12\}" core platform/web/src platform/web/workers`.
   The other hits are a system archive, a range limit and a comment.
 - **Its bugs are emulator bugs.** The *Known problems* column above lists
-  them, such as black patches in one game's sea and rare freezes in
-  another's Grand Prix. Each one is
-  chased down to a part of the emulator, such as shader translation or
-  kernel synchronisation. The commit history shows how the fixed ones
+  them, such as rare freezes in one game's Grand Prix. Each one is chased
+  down to a part of the emulator, such as shader translation or kernel
+  synchronisation. The commit history shows how the fixed ones
   were found and fixed, and
   [PARALLEL.md](docs/PARALLEL.md) and [NEW_GAMES.md](docs/NEW_GAMES.md)
   record the investigations.
