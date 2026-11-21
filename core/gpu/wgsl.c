@@ -2356,13 +2356,15 @@ static bool writes_predicate(uint16_t op) {
 }
 
 /* Instructions whose destination field is no register: predicate setters
- * (ISETP etc. name predicates there), stores and barriers. The def
- * searches skip them - TOTK's light-tile pass sets a predicate with an
- * FSETP whose field reads R7 between R7's load and the LDG using it. */
+ * (ISETP etc. name predicates there), stores, barriers, and EXIT/KIL (a
+ * condition code there, CC.T = 0xf reading as R15). The def searches skip
+ * them - TOTK's light-tile pass sets a predicate with an FSETP whose
+ * field reads R7 between R7's load and the LDG using it, and a lighting
+ * pass discards (KIL) between its R14/R15 address load and the LDG. */
 static bool writes_no_register(uint16_t op) {
   return op == SM_OP_ISETP || op == SM_OP_FSETP || op == SM_OP_HSETP2 || op == SM_OP_PSETP || op == SM_OP_CSETP ||
          op == SM_OP_R2P || op == SM_OP_STG || op == SM_OP_ST || op == SM_OP_STL || op == SM_OP_AST ||
-         op == SM_OP_RED || op == SM_OP_SUST || op == SM_OP_BARRIER;
+         op == SM_OP_RED || op == SM_OP_SUST || op == SM_OP_BARRIER || op == SM_OP_EXIT || op == SM_OP_KIL;
 }
 
 /* Whether `in` writes register r: REG_WRITE_NONE, REG_WRITE_ALONE (r is
