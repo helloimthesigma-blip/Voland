@@ -2270,7 +2270,11 @@ export class GpuExecutor {
     let src = this.textures.get(c.srcId);
     const dst = this.textures.get(c.dstId);
     if (this.traceFrame) console.log(`trace copy ${c.srcId}(${src?.format ?? "-"}) -> ${c.dstId}(${dst?.format ?? "-"}) ${c.srcRect.join(",")} -> ${c.dstRect.join(",")}`);
-    if (!src || !dst || !dst.renderView || isDepthFormat(src.format) || shaderType(dst.format) !== shaderType(src.format)) {
+    if (src && dst && isDepthFormat(src.format)) {
+      this.copyDepth(c, src, dst);
+      return;
+    }
+    if (!src || !dst || !dst.renderView || shaderType(dst.format) !== shaderType(src.format)) {
       this.warnOnce(`copy ${src?.format}->${dst?.format}`, `GPU copy ${src?.format ?? "?"} -> ${dst?.format ?? "?"} not supported`);
       return;
     }
@@ -2318,6 +2322,32 @@ export class GpuExecutor {
     }
     if (!pass || !this.scissor(pass, c.dstRect)) return;
     this.blit(pass, src, dst.format, c.srcRect, c.dstRect, c.filter ? 4 : 0);
+  }
+
+  /** A depth copy: WebGPU copies depth only whole (every texel of a
+   * subresource) and into depth16unorm only - which is what gathering
+   * Tears of the Kingdom's four 1024x1024 shadow cascades into one array
+   * is. Dropped before, the array its lighting samples never filled. */
+  private copyDepth(c: Copy, src: Tex, dst: Tex): void {
+    const [sx, sy, sw, sh] = [c.srcRect[0] ?? 0, c.srcRect[1] ?? 0, c.srcRect[2] ?? 0, c.srcRect[3] ?? 0];
+    const [dx, dy, dw, dh] = [c.dstRect[0] ?? 0, c.dstRect[1] ?? 0, c.dstRect[2] ?? 0, c.dstRect[3] ?? 0];
+    const lw = Math.max(1, dst.width >> c.dstLevel), lh = Math.max(1, dst.height >> c.dstLevel);
+    const whole = sx === 0 && sy === 0 && dx === 0 && dy === 0 && sw === src.width && sh === src.height &&
+      dw === sw && dh === sh && lw === sw && lh === sh;
+    if (c.srcId === c.dstId || src.format !== dst.format || dst.format !== "depth16unorm" || !whole ||
+        c.dstLevel >= dst.texture.mipLevelCount) {
+      this.warnOnce(`copy ${src.format}->${dst.format}`,
+        `GPU copy ${src.format} ${sw}x${sh} -> ${dst.format} ${dw}x${dh} (level ${c.dstLevel}) not supported`);
+      return;
+    }
+    this.materialize(c.srcId);
+    this.materialize(c.dstId);
+    this.touched.add(src.texture);
+    this.touched.add(dst.texture);
+    this.endPass("copy-depth");
+    this.ensureEncoder().copyTextureToTexture({ texture: src.texture }, { texture: dst.texture, mipLevel: c.dstLevel,
+      origin: { x: 0, y: 0, z: c.dstLayer } }, [sw, sh, 1]);
+    this.stats.copies++;
   }
 
   private present(p: Present): void {
