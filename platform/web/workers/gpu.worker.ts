@@ -20,7 +20,9 @@ import {
   COMPRESSION_BC,
   DEVICE_SUBGROUPS,
   DEVICE_FLOAT32_FILTERABLE,
+  DEVICE_LARGE_BUFFERS,
   GPU_STREAM_MAGIC,
+  LARGE_BUFFER_BYTES,
   OFF_CAPACITY,
   OFF_MAGIC,
   OFF_READ,
@@ -417,6 +419,10 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
     /* The default 8192 is below what titles allocate (Nine Sols: a
      * 4104x8196 texture); most adapters offer 16384. */
     maxTextureDimension2D: adapter.limits.maxTextureDimension2D,
+    /* Above the default 128 / 256 MiB the vertex pool may grow when a
+     * scene's meshes do not fit it (DEVICE_LARGE_BUFFERS). */
+    maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
+    maxBufferSize: adapter.limits.maxBufferSize,
   };
   const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
   /* One report per burst: an exhausted device fails every allocation. */
@@ -463,7 +469,9 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
     textureCompression: (device.features.has("texture-compression-bc") ? COMPRESSION_BC : 0) |
       (device.features.has("texture-compression-astc") ? COMPRESSION_ASTC : 0) |
       (warpSubgroups && device.features.has("subgroups" as GPUFeatureName) ? DEVICE_SUBGROUPS : 0) |
-      (device.features.has("float32-filterable") ? DEVICE_FLOAT32_FILTERABLE : 0),
+      (device.features.has("float32-filterable") ? DEVICE_FLOAT32_FILTERABLE : 0) |
+      (device.limits.maxStorageBufferBindingSize >= LARGE_BUFFER_BYTES && device.limits.maxBufferSize >= LARGE_BUFFER_BYTES
+        ? DEVICE_LARGE_BUFFERS : 0),
   };
   self.postMessage(ready);
 

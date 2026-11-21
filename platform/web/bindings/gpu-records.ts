@@ -24,6 +24,10 @@ export const COMPRESSION_ASTC = 2;
 export const DEVICE_SUBGROUPS = 4;
 /* gpu_records.h GPU_DEVICE_FLOAT32_FILTERABLE: the device has "float32-filterable". */
 export const DEVICE_FLOAT32_FILTERABLE = 8;
+/* gpu_records.h GPU_DEVICE_LARGE_BUFFERS: storage bindings and buffers of
+ * LARGE_BUFFER_BYTES (a thrashing vertex pool may grow to that size). */
+export const DEVICE_LARGE_BUFFERS = 16;
+export const LARGE_BUFFER_BYTES = 384 * 1024 * 1024;
 
 export const REC_PAD = 0;
 export const REC_TEXTURE_CREATE = 1;

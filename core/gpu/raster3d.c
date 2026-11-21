@@ -1231,6 +1231,9 @@ static void vertex_pages_note(Raster3d *r, const Gpu_Memory *mem, uint64_t va, u
 #define VPOOL_SLOT_BYTES (VPOOL_CHUNK_BYTES + VPOOL_CHUNK_BYTES / 2u)
 #define VPOOL_CHUNKS 80u /* the vertex buffer stays under WebGPU's default 128 MiB binding limit */
 #define IPOOL_CHUNKS 48u /* bound as an index buffer only: no binding limit */
+#define VPOOL_CHUNKS_LARGE (GPU_LARGE_BUFFER_BYTES / VPOOL_SLOT_BYTES) /* a pool grown on a GPU_DEVICE_LARGE_BUFFERS device */
+#define VPOOL_GROW_MARGIN 4u /* a grown pool holds the chunks a frame used plus a quarter */
+#define VPOOL_GROW_PRESENTS 60u /* a pool that loaded more chunks than it holds over this many presents thrashes */
 #define VPOOL_PAGE_BYTES 4096u
 #define VPOOL_PAGES (VPOOL_SLOT_BYTES / VPOOL_PAGE_BYTES)
 #define VPOOL_BUFFER_ID 0x7fff0000u /* above gpu_mirror's ids, which count up from 1 */
@@ -1247,18 +1250,25 @@ typedef struct Vpool_Chunk {
 /* Hints from a chunk's address to its slot, checked before use: the scan
  * of every slot on each lookup was 6% of Super Mario Odyssey's GPU thread. */
 #define VPOOL_HINTS 256u
-_Static_assert(VPOOL_CHUNKS < 255u && IPOOL_CHUNKS <= VPOOL_CHUNKS, "a hint holds slot + 1 in a byte");
+_Static_assert(VPOOL_CHUNKS_LARGE < UINT16_MAX && IPOOL_CHUNKS <= VPOOL_CHUNKS && VPOOL_CHUNKS <= VPOOL_CHUNKS_LARGE,
+               "a hint holds slot + 1 in 16 bits");
 
 typedef struct Vpool {
   uint32_t buffer_id, chunk_count;
   bool created;
   uint64_t tick;
-  Vpool_Chunk chunks[VPOOL_CHUNKS];
-  uint8_t hint[VPOOL_HINTS]; /* slot + 1, 0: none */
+  uint64_t frame_tick;      /* `tick` at this frame's start (vpool_frame) */
+  uint64_t draw_tick;       /* `tick` at this draw's start (its first window) */
+  uint64_t draw_serial;     /* Raster3d.draw_serial of that draw */
+  uint32_t loads, presents; /* chunks loaded over the last `presents` (vpool_frame) */
+  uint32_t frame_used;      /* chunks this frame has used so far */
+  uint32_t most_used;       /* the most a frame used over the last `presents` */
+  Vpool_Chunk chunks[VPOOL_CHUNKS_LARGE];
+  uint16_t hint[VPOOL_HINTS]; /* slot + 1, 0: none */
 } Vpool;
 
-static Vpool g_vpool = {VPOOL_BUFFER_ID, VPOOL_CHUNKS, false, 0, {{0}}, {0}};
-static Vpool g_ipool = {IPOOL_BUFFER_ID, IPOOL_CHUNKS, false, 0, {{0}}, {0}};
+static Vpool g_vpool = {VPOOL_BUFFER_ID, VPOOL_CHUNKS, false, 0, 0, 0, 0, 0, 0, 0, 0, {{0}}, {0}};
+static Vpool g_ipool = {IPOOL_BUFFER_ID, IPOOL_CHUNKS, false, 0, 0, 0, 0, 0, 0, 0, 0, {{0}}, {0}};
 static int g_vpool_env_off = -1; /* VOLAND_NO_VPOOL; -1: not read yet */
 static uint8_t g_vpool_page[VPOOL_PAGE_BYTES];
 
@@ -1283,24 +1293,43 @@ static bool vpool_window(Vpool *pool, Raster3d *r, const Gpu_Memory *mem, uint64
     gpu_stream_write(r->gpu, GPU_REC_BUFFER_CREATE, create, sizeof(create));
     pool->created = true;
   }
-  Vpool_Chunk *chunk = NULL, *victim = NULL;
-  uint8_t *hint = &pool->hint[(base / VPOOL_CHUNK_BYTES) % VPOOL_HINTS];
+  Vpool_Chunk *chunk = NULL, *victim = NULL, *latest = NULL;
+  uint16_t *hint = &pool->hint[(base / VPOOL_CHUNK_BYTES) % VPOOL_HINTS];
   if (*hint && pool->chunks[*hint - 1u].used && pool->chunks[*hint - 1u].va == base) chunk = &pool->chunks[*hint - 1u];
+  /* The victim: an unused slot, else the least recently used one not used
+   * this frame. When the frame has used every slot, the most recently used
+   * one an earlier draw used (never one this draw's other streams sit in):
+   * least recently used first would evict, under a frame's cyclic reuse of
+   * more chunks than the pool holds, each chunk just before the next frame
+   * needs it again - all of them reloaded every frame. */
+  if (pool->draw_serial != r->draw_serial) {
+    pool->draw_serial = r->draw_serial;
+    pool->draw_tick = pool->tick;
+  }
   for (uint32_t c = 0; c < pool->chunk_count && !chunk; c++) {
     Vpool_Chunk *e = &pool->chunks[c];
     if (e->used && e->va == base) chunk = e;
-    else if (!victim || !e->used || (victim->used && e->last_used < victim->last_used)) victim = e;
+    else if (!e->used || e->last_used <= pool->frame_tick) {
+      if (!victim || !e->used || (victim->used && e->last_used < victim->last_used)) victim = e;
+    } else if (e->last_used <= pool->draw_tick && (!latest || e->last_used > latest->last_used)) {
+      latest = e;
+    }
   }
   if (!chunk) {
-    chunk = victim;
+    chunk = victim ? victim : latest;
+    if (!chunk) return false; /* every slot holds this draw's own streams: inline */
     chunk->used = true;
     chunk->va = base;
     memset(chunk->page_sync, 0, sizeof(chunk->page_sync));
     r->gpu_stats.vpool_chunk_loads++;
+    pool->loads++;
+    pool->frame_used++;
+  } else if (chunk->last_used <= pool->frame_tick) {
+    pool->frame_used++;
   }
   chunk->last_used = ++pool->tick;
   const uint32_t slot = (uint32_t)(chunk - pool->chunks);
-  *hint = (uint8_t)(slot + 1u);
+  *hint = (uint16_t)(slot + 1u);
   const uint32_t stamp = r->submission + 1u;
   for (uint64_t p = (va - base) / VPOOL_PAGE_BYTES; p <= (va + bytes - 1u - base) / VPOOL_PAGE_BYTES; p++) {
     if (chunk->page_sync[p] == stamp) continue;
@@ -1322,6 +1351,44 @@ static bool vpool_window(Vpool *pool, Raster3d *r, const Gpu_Memory *mem, uint64
   }
   *offset = slot * VPOOL_SLOT_BYTES + (uint32_t)(va - base);
   return true;
+}
+
+/* At a present: a pool that loaded more chunks than it holds over the last
+ * VPOOL_GROW_PRESENTS presents thrashes. Once Lookout Landing in Tears of
+ * the Kingdom has streamed in, a frame touches more than 80 chunks: ~1,000
+ * chunk loads a frame, each page a 4 KiB buffer write that ended the render
+ * pass using its slot - the GPU worker spent 82% of its time collecting
+ * garbage and the game fell from 8.6 to 4-5 fps over ten minutes. On a
+ * GPU_DEVICE_LARGE_BUFFERS device such a pool grows, up to
+ * VPOOL_CHUNKS_LARGE, to the most chunks a frame used plus
+ * VPOOL_GROW_MARGIN (Lookout Landing: ~275 vertex and ~245 index chunks):
+ * its buffer is created again and every chunk loads afresh. Past the cap
+ * the victims vpool_window picks keep the reloads to about the chunks a
+ * frame uses past the pool's size. */
+static void vpool_frame(Raster3d *r) {
+  Vpool *pools[2] = {&g_vpool, &g_ipool};
+  for (uint32_t k = 0; k < 2u; k++) {
+    Vpool *pool = pools[k];
+    pool->frame_tick = pool->tick;
+    if (pool->frame_used > pool->most_used) pool->most_used = pool->frame_used;
+    pool->frame_used = 0;
+    if (++pool->presents < VPOOL_GROW_PRESENTS) continue;
+    const uint32_t loads = pool->loads, used = pool->most_used;
+    pool->presents = 0;
+    pool->loads = 0;
+    pool->most_used = 0;
+    if (loads <= pool->chunk_count || used <= pool->chunk_count || pool->chunk_count >= VPOOL_CHUNKS_LARGE ||
+        !(r->gpu_compression & GPU_DEVICE_LARGE_BUFFERS))
+      continue;
+    const uint32_t grown = used + used / VPOOL_GROW_MARGIN < VPOOL_CHUNKS_LARGE ? used + used / VPOOL_GROW_MARGIN : VPOOL_CHUNKS_LARGE;
+    log_warn("[gpu] the %s pool grows from %u to %u chunks (%u MiB): it loaded more than it holds in %u presents",
+             pool == &g_vpool ? "vertex" : "index", pool->chunk_count, grown, grown * (VPOOL_SLOT_BYTES >> 20) + grown / 2u,
+             VPOOL_GROW_PRESENTS);
+    pool->chunk_count = grown;
+    pool->created = false;
+    for (uint32_t c = 0; c < pool->chunk_count; c++) pool->chunks[c].used = false;
+    memset(pool->hint, 0, sizeof(pool->hint));
+  }
 }
 
 #define RT_FORMAT_A8B8G8R8_UNORM 0xD5u
@@ -6427,6 +6494,7 @@ bool raster3d_gpu_present(Raster3d *r, uint64_t cpu_address, uint32_t width, uin
   p.rect[3] = crop[2] ? crop[3] : (int32_t)(height < s->height ? height : s->height);
   p.flags = flags;
   gpu_stream_write(r->gpu, GPU_REC_PRESENT, &p, sizeof(p));
+  vpool_frame(r);
   __atomic_fetch_add((uint32_t *)(void *)(r->gpu->header + GPU_STREAM_OFF_PRESENTS), 1u, __ATOMIC_RELAXED);
   if (__atomic_exchange_n(&r->gpu_record_requested, 0u, __ATOMIC_ACQ_REL)) {
     /* The old resources' destroys come before the mark, the new ones' creates after it. */

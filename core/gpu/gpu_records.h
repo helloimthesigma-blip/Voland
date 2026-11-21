@@ -128,6 +128,10 @@ enum {
 /* WebGPU "float32-filterable": R32/RG32/RGBA32 float take the hardware
  * sampler's filtering instead of the shader's. */
 #define GPU_DEVICE_FLOAT32_FILTERABLE 8u
+/* Storage buffer bindings and buffers of GPU_LARGE_BUFFER_BYTES: a vertex
+ * pool that thrashes may grow to that size (raster3d.c vpool_frame). */
+#define GPU_DEVICE_LARGE_BUFFERS 16u
+#define GPU_LARGE_BUFFER_BYTES (384u << 20)
 
 #define GPU_USAGE_SAMPLED 1u
 #define GPU_USAGE_RENDER 2u /* render attachment (also copy source / destination) */
