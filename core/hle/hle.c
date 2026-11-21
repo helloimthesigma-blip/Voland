@@ -30,6 +30,8 @@ void hle_context_init(HLE_Context *context, const CPU_Backend *backend,
   context->debug_output = NULL;
   context->debug_userdata = NULL;
   context->svc_call_count = 0;
+  const char *docked = getenv("VOLAND_DOCKED");
+  context->docked = docked && docked[0] == '1';
 }
 
 static const char *svc_name(uint32_t swi)

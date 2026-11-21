@@ -590,6 +590,45 @@ static void test_set_apm_am(void) {
   r = call(getter, 9, NULL, 0, NULL);
   CHECK(r.data[0] == AM_FOCUS_IN_FOCUS);
 
+  /* Operation mode: handheld (Normal, 1280x720) unless docked (Console,
+   * Boost, 1920x1080) - am, apm and vi agree, titles pick render targets
+   * from it. */
+  for (uint32_t docked = 0; docked < 2u; docked++) {
+    g_emu.hle.docked = docked != 0;
+    r = call(getter, 5, NULL, 0, NULL);
+    CHECK(r.data[0] == (docked ? AM_OPERATION_MODE_CONSOLE : AM_OPERATION_MODE_HANDHELD));
+    r = call(getter, 6, NULL, 0, NULL);
+    CHECK(test_le32(r.data) == (docked ? AM_PERFORMANCE_MODE_BOOST : AM_PERFORMANCE_MODE_NORMAL));
+    r = call(getter, 60, NULL, 0, NULL);
+    CHECK(test_le32(r.data) == (docked ? 1920u : 1280u) && test_le32(r.data + 4) == (docked ? 1080u : 720u));
+    r = call(apm, 1, NULL, 0, NULL);
+    CHECK(test_le32(r.data) == docked);
+    const uint32_t vi = service("vi:u");
+    const uint32_t policy = 0;
+    const uint32_t display = object(vi, 0, &policy, sizeof(policy));
+    r = call(display, 1102, &policy, sizeof(policy), NULL);
+    CHECK(test_le64(r.data) == (docked ? 1920u : 1280u) && test_le64(r.data + 8) == (docked ? 1080u : 720u));
+  }
+  g_emu.hle.docked = false;
+
+  /* The user's mode (emulator_set_docked): the next device update applies
+   * it while the title has not asked; once it has, the request waits for
+   * the next process (am_init clears mode_read). Never a message. */
+  g_emu.program_loaded = true;
+  g_emu.am.mode_read = false;
+  emulator_set_docked(&g_emu, true);
+  (void)emulator_run_slice(&g_emu, 1000);
+  CHECK(g_emu.hle.docked && g_emu.dock_request == EMULATOR_DOCK_NONE);
+  r = call(getter, 5, NULL, 0, NULL);
+  CHECK(r.data[0] == AM_OPERATION_MODE_CONSOLE && g_emu.am.mode_read);
+  emulator_set_docked(&g_emu, false);
+  (void)emulator_run_slice(&g_emu, 1000);
+  CHECK(g_emu.hle.docked && g_emu.dock_request == EMULATOR_DOCK_HANDHELD && !messages->signaled);
+  g_emu.am.mode_read = false; /* the next process */
+  (void)emulator_run_slice(&g_emu, 1000);
+  CHECK(!g_emu.hle.docked && g_emu.dock_request == EMULATOR_DOCK_NONE);
+  g_emu.program_loaded = false;
+
   /* GetSaveDataSize: a non-zero capacity and journal (titles check it). */
   const uint32_t app = object(proxy, 20, NULL, 0);
   uint8_t save_args[24];

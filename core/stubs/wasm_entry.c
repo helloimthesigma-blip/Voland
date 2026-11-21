@@ -78,6 +78,7 @@ EXPORT void emulator_setenv_ffi(uint64_t name, uint64_t value);
 EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds);
 EXPORT void emulator_set_utc_offset_ffi(int32_t seconds_east);
 EXPORT void emulator_set_frame_skip_ffi(uint32_t frames);
+EXPORT void emulator_set_docked_ffi(int docked);
 EXPORT void emulator_set_gpu_mode_ffi(uint32_t on);
 EXPORT void emulator_set_gpu_compression_ffi(uint32_t mask);
 EXPORT void emulator_set_cpu_percent_ffi(uint32_t percent);
@@ -554,6 +555,12 @@ EXPORT void emulator_set_rtc_ffi(int64_t unix_seconds)
 EXPORT void emulator_set_utc_offset_ffi(int32_t seconds_east)
 {
   if (g_initialised) emulator_set_utc_offset(&g_emulator, seconds_east);
+}
+
+/* Docked or handheld (a user setting; emulator_set_docked). */
+EXPORT void emulator_set_docked_ffi(int docked)
+{
+  if (g_initialised) emulator_set_docked(&g_emulator, docked != 0);
 }
 
 /* Frame skip (a user speed setting; emulator_set_frame_skip). */

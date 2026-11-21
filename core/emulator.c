@@ -1115,11 +1115,13 @@ static uint64_t gpu_max_latency_ticks(void) {
  * kernel lock (docs/PARALLEL.md "Free-running mode"). */
 static void report_stream(Emulator* emulator);
 static void watch_word(Emulator* emulator, uint32_t ran);
+static void apply_dock_request(Emulator* emulator);
 static const char *module_of(const Emulator *emulator, uint64_t pc, uint64_t *offset);
 
 static void update_devices(Emulator* emulator) {
   /* GPU completions (§13) arrive at scheduler-tick cadence; the async
    * GPU stays within a frame of the guest's virtual time. */
+  apply_dock_request(emulator);
   nvdrv_poll_completions(&emulator->nvdrv, &emulator->hle);
   nvdrv_bound_gpu_latency(&emulator->nvdrv, emulator->scheduler.ticks, gpu_max_latency_ticks());
   /* Controllers (§18): the input region into hid's shared memory. */
@@ -2113,6 +2115,22 @@ void emulator_set_video_backend(Emulator *emulator, const Video_Backend *backend
   if (emulator) emulator->video.backend = backend;
 }
 
+void emulator_set_docked(Emulator* emulator, bool docked) {
+  if (!emulator) return;
+  const char* override = getenv("VOLAND_DOCKED"); /* tests: wins over the user's choice */
+  if (override) docked = override[0] == '1';
+  __atomic_store_n(&emulator->dock_request, docked ? EMULATOR_DOCK_DOCKED : EMULATOR_DOCK_HANDHELD, __ATOMIC_RELEASE);
+}
+
+/* emulator_set_docked's request, under the device update's kernel lock:
+ * applied while the title has not asked its mode, else kept for the next
+ * process (am_init clears mode_read). */
+static void apply_dock_request(Emulator* emulator) {
+  if (emulator->am.mode_read) return;
+  const uint32_t request = __atomic_exchange_n(&emulator->dock_request, EMULATOR_DOCK_NONE, __ATOMIC_ACQUIRE);
+  if (request != EMULATOR_DOCK_NONE) emulator->hle.docked = request == EMULATOR_DOCK_DOCKED;
+}
+
 void emulator_set_frame_skip(Emulator* emulator, uint32_t n) {
   if (!emulator) return;
   emulator->frame_skip = n > EMULATOR_MAX_FRAME_SKIP ? EMULATOR_MAX_FRAME_SKIP : n;
@@ -2347,6 +2365,11 @@ Error emulator_savestate_finish_restore(Emulator* emulator, bool applied) {
   emulator->free_placement = before->free_placement;
   emulator->scheduler.free_placement = before->free_placement;
   emulator->frame_skip = before->frame_skip;
+  /* The user's operation mode wins over the state's: a different one
+   * waits for the next process (the state's title has its mode). */
+  emulator->dock_request = before->dock_request;
+  if (emulator->hle.docked != before->hle.docked && emulator->dock_request == EMULATOR_DOCK_NONE)
+    emulator->dock_request = before->hle.docked ? EMULATOR_DOCK_DOCKED : EMULATOR_DOCK_HANDHELD;
   emulator->pacing = before->pacing;
   emulator->pacing_origin_ns = 0; /* re-anchored at the next slice */
   /* The latency ring counts this session's GPU thread calls: a state from

@@ -14,10 +14,9 @@ static HLE_ServiceResult cmd_open_session(HLE_Context *c, Service_Object *self, 
 
 static HLE_ServiceResult cmd_get_performance_mode(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                                   IPC_Response *res) {
-  (void)c;
   (void)self;
   (void)req;
-  (void)ipc_response_push_u32(res, 0); /* Normal */
+  (void)ipc_response_push_u32(res, c->docked ? APM_PERFORMANCE_MODE_BOOST : APM_PERFORMANCE_MODE_NORMAL);
   return HLE_RESULT_SUCCESS;
 }
 

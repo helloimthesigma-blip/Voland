@@ -441,10 +441,10 @@ uint64_t vi_next_wake(const Vi_State *s) {
 /* IGraphicBufferProducer.                                             */
 /* ------------------------------------------------------------------ */
 
-static void put_buffer_output(Parcel_Writer *w, const Vi_Layer *layer) {
+static void put_buffer_output(const HLE_Context *c, Parcel_Writer *w, const Vi_Layer *layer) {
   uint32_t pending = 0;
   for (uint32_t i = 0; i < VI_MAX_SLOTS; i++) pending += layer->slots[i].state == VI_SLOT_QUEUED;
-  const uint32_t out[4] = {VI_DISPLAY_WIDTH, VI_DISPLAY_HEIGHT, 0, pending};
+  const uint32_t out[4] = {hle_display_width(c), hle_display_height(c), 0, pending};
   parcel_put(w, out, sizeof(out));
 }
 
@@ -529,7 +529,7 @@ static int32_t transact(Vi_State *s, HLE_Context *c, Vi_Layer *layer, uint32_t c
   case BQ_CONNECT:
     (void)parcel_i32(r); /* has listener */
     layer->connected = true;
-    put_buffer_output(w, layer);
+    put_buffer_output(c, w, layer);
     return BQ_OK;
   case BQ_DISCONNECT:
     layer->connected = false;
@@ -590,7 +590,7 @@ static int32_t transact(Vi_State *s, HLE_Context *c, Vi_Layer *layer, uint32_t c
   case BQ_QUEUE_BUFFER: {
     const int32_t index = parcel_i32(r);
     if (index < 0 || (uint32_t)index >= VI_MAX_SLOTS || layer->slots[index].state != VI_SLOT_DEQUEUED) {
-      put_buffer_output(w, layer);
+      put_buffer_output(c, w, layer);
       return BQ_BAD_VALUE;
     }
     Vi_Slot *slot = &layer->slots[index];
@@ -608,7 +608,7 @@ static int32_t transact(Vi_State *s, HLE_Context *c, Vi_Layer *layer, uint32_t c
     frame_skip_on_queue(s, c, slot);
     slot->state = VI_SLOT_QUEUED;
     slot->queue_order = ++layer->queue_counter;
-    put_buffer_output(w, layer);
+    put_buffer_output(c, w, layer);
     return BQ_OK;
   }
   case BQ_CANCEL_BUFFER: {
@@ -622,8 +622,8 @@ static int32_t transact(Vi_State *s, HLE_Context *c, Vi_Layer *layer, uint32_t c
   case BQ_QUERY: {
     const int32_t what = parcel_i32(r);
     int32_t value = 0;
-    if (what == QUERY_WIDTH) value = VI_DISPLAY_WIDTH;
-    else if (what == QUERY_HEIGHT) value = VI_DISPLAY_HEIGHT;
+    if (what == QUERY_WIDTH) value = (int32_t)hle_display_width(c);
+    else if (what == QUERY_HEIGHT) value = (int32_t)hle_display_height(c);
     else if (what == QUERY_FORMAT) value = PIXEL_RGBA_8888;
     else if (what == QUERY_MIN_UNDEQUEUED) value = 1;
     parcel_put_i32(w, value);
@@ -726,7 +726,7 @@ static HLE_ServiceResult cmd_list_displays(HLE_Context *c, Service_Object *self,
   memset(info, 0, sizeof(info));
   memcpy(info, "Default", sizeof("Default"));
   info[0x40] = 1;
-  const uint64_t values[3] = {1, VI_DISPLAY_WIDTH, VI_DISPLAY_HEIGHT};
+  const uint64_t values[3] = {1, hle_display_width(c), hle_display_height(c)};
   memcpy(info + 0x48, values, sizeof(values));
   (void)ipc_response_push_u64(res, service_write_out(c, req, 0, info, sizeof(info)) ? 1u : 0u);
   return HLE_RESULT_SUCCESS;
@@ -734,21 +734,19 @@ static HLE_ServiceResult cmd_list_displays(HLE_Context *c, Service_Object *self,
 
 static HLE_ServiceResult cmd_get_display_resolution(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                                     IPC_Response *res) {
-  (void)c;
   (void)self;
   (void)req;
-  (void)ipc_response_push_u64(res, VI_DISPLAY_WIDTH);
-  (void)ipc_response_push_u64(res, VI_DISPLAY_HEIGHT);
+  (void)ipc_response_push_u64(res, hle_display_width(c));
+  (void)ipc_response_push_u64(res, hle_display_height(c));
   return HLE_RESULT_SUCCESS;
 }
 
 static HLE_ServiceResult cmd_get_logical_resolution(HLE_Context *c, Service_Object *self, const IPC_Request *req,
                                                     IPC_Response *res) {
-  (void)c;
   (void)self;
   (void)req;
-  (void)ipc_response_push_u32(res, VI_DISPLAY_WIDTH);
-  (void)ipc_response_push_u32(res, VI_DISPLAY_HEIGHT);
+  (void)ipc_response_push_u32(res, hle_display_width(c));
+  (void)ipc_response_push_u32(res, hle_display_height(c));
   return HLE_RESULT_SUCCESS;
 }
 

@@ -81,6 +81,8 @@ export type MainToCPUMessage =
   | { readonly type: "text-input-response"; readonly text: string; readonly accepted: boolean }
   /* Frame skip, a user setting: rasterise one of every frames + 1 frames. */
   | { readonly type: "set-frame-skip"; readonly frames: number }
+  /* Docked or handheld, a user setting: the operation mode titles see. */
+  | { readonly type: "set-docked"; readonly docked: boolean }
   | { readonly type: "set-gpu-async"; readonly on: boolean }
   | { readonly type: "set-render-workers"; readonly count: number }
   | { readonly type: "dump-threads"; readonly backtrace: boolean }

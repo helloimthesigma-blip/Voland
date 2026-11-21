@@ -2,14 +2,15 @@
  * Settings per game: a setting changed while a game runs is remembered
  * for that game and comes back each time it loads; changed with no game
  * running, it is the default for every game without its own. Today:
- * frame skip and guest CPU threads (FrameSkipSetting, ThreadsSetting).
+ * frame skip, docked mode and guest CPU threads (FrameSkipSetting,
+ * DockedSetting, ThreadsSetting).
  * Per browser; storage may be unavailable, which only forgets.
  */
-export type GameSettingKey = "frameSkip" | "hostCores";
+export type GameSettingKey = "frameSkip" | "hostCores" | "docked";
 
 const STORAGE_KEY = "voland.gameSettings.v1";
 /** The defaults' keys from before per-game settings (kept as they were). */
-const DEFAULT_KEYS: Readonly<Record<GameSettingKey, string>> = { frameSkip: "voland.frameSkip", hostCores: "voland.hostCores" };
+const DEFAULT_KEYS: Readonly<Record<GameSettingKey, string>> = { frameSkip: "voland.frameSkip", hostCores: "voland.hostCores", docked: "voland.docked" };
 
 type PerGame = Readonly<Record<string, Readonly<Partial<Record<GameSettingKey, number>>>>>;
 

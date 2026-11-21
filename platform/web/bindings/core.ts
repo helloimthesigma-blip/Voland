@@ -54,6 +54,7 @@ export interface SwitchCoreExports {
   readonly _emulator_set_rtc_ffi:          (unixSeconds: bigint) => void;
   readonly _emulator_set_utc_offset_ffi:   (secondsEast: number) => void;
   readonly _emulator_set_frame_skip_ffi:   (frames: number) => void;
+  readonly _emulator_set_docked_ffi:       (docked: number) => void;
   readonly _emulator_recent_problems_ffi: () => bigint;
   /* Compatibility report: distinct problems text, renderer counters (u64[10]). */
   readonly _emulator_distinct_problems_ffi: () => bigint;

@@ -14,6 +14,8 @@
 #include "hle/services/sm/sm.h"
 
 #define APM_PERFORMANCE_MODES 2u
+#define APM_PERFORMANCE_MODE_NORMAL 0u /* handheld */
+#define APM_PERFORMANCE_MODE_BOOST 1u  /* docked */
 #define APM_DEFAULT_CONFIGURATION 0x00010000u /* CPU 1020MHz, GPU 384MHz, EMC 1600MHz */
 
 typedef struct Apm_State {

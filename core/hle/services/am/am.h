@@ -13,7 +13,8 @@
  *
  * State Voland presents: in focus from the first message (a
  * FocusStateChanged message is queued at open so titles that wait for it
- * see it), handheld operation mode, Normal performance mode, 1280x720.
+ * see it), handheld operation mode, Normal performance mode, 1280x720 - or docked
+ * (Console, Boost, 1920x1080) with HLE_Context.docked.
  * PopLaunchParameter has no data except the preselected user.
  *
  * Library applets: storages a title pushes (PushInData, including
@@ -49,8 +50,9 @@
 #define AM_FOCUS_IN_FOCUS 1u
 #define AM_FOCUS_OUT_OF_FOCUS 2u /* a library applet is in front */
 #define AM_OPERATION_MODE_HANDHELD 0u
-#define AM_DISPLAY_WIDTH 1280u
-#define AM_DISPLAY_HEIGHT 720u
+#define AM_OPERATION_MODE_CONSOLE 1u
+#define AM_PERFORMANCE_MODE_NORMAL 0u
+#define AM_PERFORMANCE_MODE_BOOST 1u
 #define AM_APPLET_RESOURCE_USER_ID 0x51u
 
 #define AM_STORAGE_CAPACITY 32u
@@ -143,6 +145,7 @@ typedef struct Am_State {
   uint64_t next_layer_id;
   bool exit_locked;
   bool launched; /* the first proxy open queued FocusStateChanged */
+  bool mode_read; /* the title asked its operation or performance mode: emulator_set_docked waits for a restart */
   bool preselected_user_popped; /* PopLaunchParameter(PreselectedUser) is one-shot */
 
   Am_Storage storages[AM_STORAGE_CAPACITY];

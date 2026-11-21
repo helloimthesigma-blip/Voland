@@ -204,6 +204,7 @@ typedef struct Emulator
   bool free_running;   /* emulator_set_free_running; with host cores only */
   bool pin_ideal_cores; /* emulator_set_pin_ideal_cores; survives reloads */
   bool free_placement;  /* emulator_set_free_placement; survives reloads */
+  uint32_t dock_request; /* emulator_set_docked: EMULATOR_DOCK_*, applied by the next device update */
   uint32_t cpu_percent; /* emulator_set_cpu_percent (0 = default); survives reloads */
   /* Wall-clock pacing (emulator_set_pacing): virtual time never falls
    * behind wall time since the origin. */
@@ -364,6 +365,20 @@ void emulator_set_utc_offset(Emulator *emulator, int32_t seconds_east);
  * missing until the game draws it again. Capped at EMULATOR_MAX_FRAME_SKIP. */
 #define EMULATOR_MAX_FRAME_SKIP 5u
 void emulator_set_frame_skip(Emulator *emulator, uint32_t n);
+
+/* Docked or handheld (a user setting): the operation mode am/apm/vi
+ * report - docked is 1920x1080 and Boost performance, and titles render
+ * larger for it (TOTK 1600x900 instead of 1280x720). The next device
+ * update applies it while the title has not asked its mode yet; after
+ * that it waits for the next process. A real Switch docks live
+ * (OperationModeChanged): TOTK then re-creates its render targets at new
+ * sizes over memory other targets used, which our renderer does not
+ * follow yet (the world went black), so a running title keeps its mode.
+ * Survives process reloads. VOLAND_DOCKED (tests) overrides it. */
+#define EMULATOR_DOCK_NONE 0u
+#define EMULATOR_DOCK_HANDHELD 1u
+#define EMULATOR_DOCK_DOCKED 2u
+void emulator_set_docked(Emulator *emulator, bool docked);
 
 /* GPU mode (§13): draws, clears, copies and presents of GPU-rendered
  * frames stream to the GPU worker's WebGPU renderer through the layout's

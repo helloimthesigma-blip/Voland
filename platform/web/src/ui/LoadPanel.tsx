@@ -156,10 +156,14 @@ function LoadPanel(props: LoadPanelProps) {
   }
 
   async function load(file: File, gameId: string | null = null, extras: readonly File[] = []): Promise<boolean> {
-    const titleId = games().find((g) => g.id === gameId)?.titleId ?? null;
+    const entry = games().find((g) => g.id === gameId);
+    const titleId = entry?.titleId ?? null;
     const deviceMemory = (navigator as Navigator & { readonly deviceMemory?: number }).deviceMemory ?? null;
     setMemoryNote(memoryWarning(titleId ? memoryUseOf(titleId) : null, file.size, deviceMemory));
     setState({ kind: "loading", fileName: file.name });
+    /* A library game's own settings go out before it boots: the console
+     * mode only reaches a title that has not asked for it yet. */
+    if (entry && titleId) setCurrentGame({ titleId, name: entry.name });
     const outcome = await props.loadGame(file, extras);
     /* The game's own settings (frame skip, threads) apply from here. */
     setCurrentGame(outcome.success

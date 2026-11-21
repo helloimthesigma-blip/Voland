@@ -18,6 +18,7 @@ export interface MountOptions {
   readonly systemFiles:  SystemFilesApi;
   readonly setPaused:    (paused: boolean) => void;
   readonly setFrameSkip: (frames: number) => void;
+  readonly setDocked: (docked: boolean) => void;
   readonly setHostCores: (cores: number) => void;
   readonly respondText:  (text: string, accepted: boolean) => void;
 }
@@ -63,7 +64,7 @@ export function mountShell(options: MountOptions): void {
   const root = document.getElementById("app-root");
   if (!root) throw new Error("mountShell: #app-root missing from index.html");
 
-  render(() => <App adapterLabel={options.adapterLabel} cpuBackend={options.cpuBackend} guestRamMiB={options.guestRamMiB} loadGame={options.loadGame} addToSdCard={options.addToSdCard} clearSdCard={options.clearSdCard} systemFiles={options.systemFiles} setPaused={options.setPaused} setFrameSkip={options.setFrameSkip} setHostCores={options.setHostCores} respondText={options.respondText} />, root);
+  render(() => <App adapterLabel={options.adapterLabel} cpuBackend={options.cpuBackend} guestRamMiB={options.guestRamMiB} loadGame={options.loadGame} addToSdCard={options.addToSdCard} clearSdCard={options.clearSdCard} systemFiles={options.systemFiles} setPaused={options.setPaused} setFrameSkip={options.setFrameSkip} setDocked={options.setDocked} setHostCores={options.setHostCores} respondText={options.respondText} />, root);
 
   attachCanvasToScreen();
 

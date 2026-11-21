@@ -99,6 +99,13 @@ typedef void (*HLE_Debug_Output_Fn)(void *userdata, const char *text, size_t len
 
 #define HLE_SVC_COUNT 0x80u /* SVC numbers are 7-bit on Horizon */
 
+/* The console's two operation modes: what am/apm/vi report and the
+ * display size titles render for (they pick render targets from it). */
+#define HLE_HANDHELD_WIDTH 1280u
+#define HLE_HANDHELD_HEIGHT 720u
+#define HLE_DOCKED_WIDTH 1920u
+#define HLE_DOCKED_HEIGHT 1080u
+
 struct HLE_Context
 {
   const CPU_Backend *cpu_backend;
@@ -118,7 +125,15 @@ struct HLE_Context
   uint64_t svc_call_count;
   uint64_t svc_counts[HLE_SVC_COUNT]; /* per-SVC diagnostics (voland-cli --svc-stats) */
   uint32_t bad_range_logs;          /* InvalidMemoryRange results logged (hle.c) */
+  bool docked; /* operation mode: docked (1920x1080, Boost) or handheld (1280x720, Normal); emulator_set_docked, VOLAND_DOCKED=1 */
 };
+
+static inline uint32_t hle_display_width(const HLE_Context *context) {
+  return context->docked ? HLE_DOCKED_WIDTH : HLE_HANDHELD_WIDTH;
+}
+static inline uint32_t hle_display_height(const HLE_Context *context) {
+  return context->docked ? HLE_DOCKED_HEIGHT : HLE_HANDHELD_HEIGHT;
+}
 
 /* Signals `event` and wakes every thread whose WaitSynchronization names
  * it (svc_thread.c). Services call this; so does SignalEvent. */

@@ -397,6 +397,8 @@ let loadedTitleId: string | null = null;
 let paused = false;
 /** The user's frame skip (set-frame-skip); applied to every core load. */
 let frameSkip = 0;
+/** Docked or handheld (set-docked); applied to every core load. */
+let docked = false;
 /** The renderer the main thread chose (set-gpu-mode); applied to every core load. */
 let gpuMode = false;
 /** Block-compressed formats the GPU samples (set-gpu-compression). */
@@ -1281,6 +1283,7 @@ function loadGame(file: File): CPUToMainMessage {
   loadingCore._emulator_set_rtc_ffi(BigInt(Math.floor(Date.now() / 1000)));
   loadingCore._emulator_set_utc_offset_ffi(-new Date().getTimezoneOffset() * SECONDS_PER_MINUTE);
   loadingCore._emulator_set_frame_skip_ffi(frameSkip);
+  loadingCore._emulator_set_docked_ffi(docked ? 1 : 0);
   loadingCore._emulator_set_gpu_mode_ffi(gpuMode ? 1 : 0);
   loadingCore._emulator_set_gpu_compression_ffi(gpuCompression);
   applyGpuAsync(loadingCore);
@@ -1599,6 +1602,12 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   if (msg.type === "set-gpu-async") {
     gpuAsync = msg.on;
     if (core) applyGpuAsync(core);
+    return;
+  }
+
+  if (msg.type === "set-docked") {
+    docked = msg.docked;
+    core?._emulator_set_docked_ffi(docked ? 1 : 0);
     return;
   }
 

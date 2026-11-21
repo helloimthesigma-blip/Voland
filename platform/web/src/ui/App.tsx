@@ -19,6 +19,7 @@ import ModsPanel from "./ModsPanel";
 import ControlsLegend from "./ControlsLegend";
 import TextInputDialog from "./TextInputDialog";
 import LoadPanel from "./LoadPanel";
+import DockedSetting from "./DockedSetting";
 import FrameSkipSetting from "./FrameSkipSetting";
 import ThreadsSetting from "./ThreadsSetting";
 import AutoStateSetting from "./AutoStateSetting";
@@ -34,6 +35,7 @@ interface AppProps {
   readonly systemFiles:  SystemFilesApi;
   readonly setPaused:    (paused: boolean) => void;
   readonly setFrameSkip: (frames: number) => void;
+  readonly setDocked: (docked: boolean) => void;
   readonly setHostCores: (cores: number) => void;
   readonly respondText:  (text: string, accepted: boolean) => void;
 }
@@ -120,6 +122,7 @@ function App(props: AppProps) {
             <div class="voland-tab-stack">
               <section class="voland-panel">
                 <FrameSkipSetting setFrameSkip={props.setFrameSkip} />
+                <DockedSetting setDocked={props.setDocked} />
                 <ThreadsSetting setHostCores={props.setHostCores} />
                 <AutoStateSetting />
               </section>

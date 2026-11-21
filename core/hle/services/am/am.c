@@ -67,7 +67,21 @@ static HLE_ServiceResult cmd_receive_message(HLE_Context *c, Service_Object *sel
     return HLE_RESULT_SUCCESS;                                                                       \
   }
 
-AM_VALUE_COMMAND(cmd_get_operation_mode, ipc_response_push_u32, AM_OPERATION_MODE_HANDHELD)
+static HLE_ServiceResult cmd_get_operation_mode(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                                IPC_Response *res) {
+  (void)req;
+  state_of(self)->mode_read = true;
+  (void)ipc_response_push_u32(res, c->docked ? AM_OPERATION_MODE_CONSOLE : AM_OPERATION_MODE_HANDHELD); /* a u8 */
+  return HLE_RESULT_SUCCESS;
+}
+
+static HLE_ServiceResult cmd_get_performance_mode(HLE_Context *c, Service_Object *self, const IPC_Request *req,
+                                                  IPC_Response *res) {
+  (void)req;
+  state_of(self)->mode_read = true;
+  (void)ipc_response_push_u32(res, c->docked ? AM_PERFORMANCE_MODE_BOOST : AM_PERFORMANCE_MODE_NORMAL);
+  return HLE_RESULT_SUCCESS;
+}
 
 /* Controller setup is in front of the title while it waits for a
  * controller (am_controller_available). */
@@ -95,11 +109,10 @@ AM_VALUE_COMMAND(cmd_get_this_applet_kind, ipc_response_push_u64, 0) /* applicat
 
 static HLE_ServiceResult cmd_get_default_display_resolution(HLE_Context *c, Service_Object *self,
                                                             const IPC_Request *req, IPC_Response *res) {
-  (void)c;
   (void)self;
   (void)req;
-  (void)ipc_response_push_u32(res, AM_DISPLAY_WIDTH);
-  (void)ipc_response_push_u32(res, AM_DISPLAY_HEIGHT);
+  (void)ipc_response_push_u32(res, hle_display_width(c));
+  (void)ipc_response_push_u32(res, hle_display_height(c));
   return HLE_RESULT_SUCCESS;
 }
 
@@ -909,7 +922,7 @@ static const Service_Command k_common_state_getter_commands[] = {
     {3, service_cmd_ok, "AllowToEnterSleep_stub"},
     {4, service_cmd_ok, "DisallowToEnterSleep_stub"},
     {5, cmd_get_operation_mode, "GetOperationMode"},
-    {6, service_cmd_out_u8_false, "GetPerformanceMode"}, /* u32 0: Normal */
+    {6, cmd_get_performance_mode, "GetPerformanceMode"},
     {7, service_cmd_out_u8_false, "GetCradleStatus"},
     {8, service_cmd_out_u8_false, "GetBootMode"},
     {9, cmd_get_focus_state, "GetCurrentFocusState"},
