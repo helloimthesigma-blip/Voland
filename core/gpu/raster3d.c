@@ -5624,6 +5624,7 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
     }
   }
   desc->mrt = rs->mrt;
+  desc->drop_depth = ctx->ps->header.omap_depth && !g->depth_id;
   /* Its global memory, copied with the draw's data. */
   if (!gpu_plan_pixel_globals(ctx, g, rs->stores_only)) return false;
   /* The shader. */

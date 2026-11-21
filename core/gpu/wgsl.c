@@ -2837,7 +2837,8 @@ static void emit_outputs(Tr *t, Out *o) {
   const uint8_t ar = color_reg[0][3];
   out_add(o, "  if (D[%uu] != 0u && !tcmp(D[%uu] - 1u, %s, F(D[%uu]))) { discard; }\n", WGSL_DRAW_ALPHA_FUNC,
           WGSL_DRAW_ALPHA_FUNC, ar == 0xffu ? "1.0" : ex("F(%s)", reg(t, ar).s).s, WGSL_DRAW_ALPHA_REF);
-  if (!t->d->target_count && !h->omap_depth) return;
+  const bool depth = h->omap_depth && !t->d->drop_depth;
+  if (!t->d->target_count && !depth) return;
   out_add(o, "  var fo: FOut;\n");
   for (uint32_t tg = 0; tg < t->d->target_count && tg < WGSL_MAX_TARGETS; tg++) {
     const uint32_t src = t->d->mrt ? tg : 0u;
@@ -2849,7 +2850,7 @@ static void emit_outputs(Tr *t, Out *o) {
     out_add(o, "  fo.c%u = bitcast<%s>(vec4<u32>(%s, %s, %s, %s));\n", tg, target_type(t->d, tg), comp[0].s, comp[1].s,
             comp[2].s, comp[3].s);
   }
-  if (h->omap_depth) out_add(o, "  fo.depth = F(%s);\n", reg(t, depth_reg).s);
+  if (depth) out_add(o, "  fo.depth = F(%s);\n", reg(t, depth_reg).s);
   out_add(o, "  return fo;\n");
 }
 
@@ -3023,6 +3024,9 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
       out_add(&head, "@vertex fn vs(vin: VIn) -> VOut {\n  let vid = vin.vi; let iid = D[%uu];\n", WGSL_DRAW_VS_INSTANCE);
     else
       out_add(&head, "@vertex fn vs(vin: VIn) -> VOut {\n  let vid = vin.ids.x; let iid = vin.ids.y;\n");
+    /* No quads in a vertex stage: lane id, lane masks and votes see lane 0
+     * of a one-lane warp. */
+    out_add(&head, "  let ql = 0u;\n");
     out_add(&head, "  var ain: array<u32, %u>; var aout: array<u32, %u>;\n  aout[%uu] = 0x3f800000u;\n",
             SM_ATTRIBUTE_WORDS, SM_ATTRIBUTE_WORDS, SM_ATTR_POSITION / 4u + 3u);
     for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++) {
@@ -3038,8 +3042,9 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
       }
     }
   } else {
-    emit_io(&head, desc, program->header.omap_depth);
-    const bool has_out = desc->target_count || program->header.omap_depth;
+    const bool depth = program->header.omap_depth && !desc->drop_depth;
+    emit_io(&head, desc, depth);
+    const bool has_out = desc->target_count || depth;
     out_add(&head, "@fragment fn fs(fin: VOut, @builtin(front_facing) ff: bool)%s {\n", has_out ? " -> FOut" : "");
     out_add(&head, "  let ql = (u32(fin.pos.x) & 1u) | ((u32(fin.pos.y) & 1u) << 1u);\n");
     out_add(&head, "  let fy = select(fin.pos.y, F(D[%uu]) - fin.pos.y, (D[%uu] & %uu) != 0u);\n",
@@ -3195,6 +3200,7 @@ uint64_t wgsl_desc_hash(const Wgsl_Program_Desc *desc, const Sm_Program *program
   MIX(&desc->target_int_mask, sizeof(desc->target_int_mask));
   MIX(&desc->target_sint_mask, sizeof(desc->target_sint_mask));
   MIX(&desc->mrt, sizeof(desc->mrt));
+  if (desc->drop_depth) MIX(&desc->drop_depth, sizeof(desc->drop_depth));
   MIX(&desc->hw_sample_mask, sizeof(desc->hw_sample_mask));
   MIX(&desc->planar_mask, sizeof(desc->planar_mask));
   MIX(&desc->stage, sizeof(desc->stage));

@@ -629,6 +629,34 @@ static void structural(void) {
   /* Its position is invariant: a depth pre-pass and the colour pass testing
    * against it compute the same depth in different programs. */
   CHECK(strstr(g_text, "@invariant @builtin(position) pos: vec4<f32>") != NULL);
+  /* A vertex program reading its lane id (S2R SR_LANEID: TOTK's outdoor
+   * vertex programs) sees lane 0 of a one-lane warp - `ql` is declared. */
+  begin(&b);
+  memcpy(b.bytes, &sph0, 4);
+  emit(&b, op_top(0xf0c8) | GUARD | rd(0)); /* S2R R0, SR_LANEID */
+  emit(&b, EXIT());
+  sm_program_decode(b.bytes, SM_SPH_BYTES + 8u * b.words, 0, &g_prog);
+  wgsl_default_desc(&g_prog, &desc);
+  r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
+  CHECK(r.ok && strstr(g_text, "let ql = 0u;") != NULL && strstr(g_text, "r0 = ql;") != NULL);
+  /* A pixel program writing depth with no depth target bound: the depth
+   * output is dropped (WebGPU refuses a pipeline writing frag_depth without
+   * a depth attachment), and only then does its cache key change. */
+  begin(&b);
+  b.bytes[0x4c] |= 2u; /* omap: depth */
+  emit(&b, MOV32I(0, 1));
+  emit(&b, EXIT());
+  sm_program_decode(b.bytes, SM_SPH_BYTES + 8u * b.words, 0, &g_prog);
+  CHECK(g_prog.header.omap_depth);
+  wgsl_default_desc(&g_prog, &desc);
+  const uint64_t with_depth = wgsl_desc_hash(&desc, &g_prog);
+  r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
+  CHECK(r.ok && strstr(g_text, "@builtin(frag_depth)") != NULL && strstr(g_text, "fo.depth") != NULL);
+  desc.drop_depth = true;
+  CHECK(with_depth != wgsl_desc_hash(&desc, &g_prog));
+  r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
+  CHECK(r.ok && strstr(g_text, "frag_depth") == NULL && strstr(g_text, "fo.depth") == NULL &&
+        strstr(g_text, "fo.c0") != NULL);
   /* Unsupported in a pixel program: reported, nothing emitted. */
   begin(&b);
   emit(&b, ALD(0, 0x80, 1));

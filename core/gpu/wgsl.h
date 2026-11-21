@@ -187,6 +187,7 @@ typedef struct Wgsl_Program_Desc {
   uint32_t target_int_mask;
   uint32_t target_sint_mask;
   bool mrt;               /* each target gets its own colour (else target 0's) */
+  bool drop_depth;        /* no depth target: a depth output is dropped (WebGPU rejects frag_depth without one) */
   /* The stage: SM_STAGE_PIXEL, or SM_STAGE_VERTEX for a vertex program run
    * on the GPU. A vertex program's outputs must match its pixel program's
    * inputs: varying_count and flat_mask are the pixel program's, and
