@@ -443,6 +443,32 @@ static void test_triangle_and_blend(Raster3d *r, bool block_linear) {
   raster3d_set_skip(r, false);
 }
 
+/* A clear's layer bits (10-25) pick a layer of an array target: layer 1
+ * is ARRAY_PITCH * 4 bytes on, and layer 0 keeps its colour. A layer past
+ * the target's last clears nothing. */
+#define CLEAR_LAYER_1 (1u << 10)
+#define CLEAR_LAYER_2 (2u << 10)
+#define LAYER_BYTES (RT_SIZE * RT_SIZE * 4u)
+static void test_clear_layer(Raster3d *r) {
+  base_state(RT, false, PS_OFFSET);
+  g_regs[0x206] = 2;                 /* two layers */
+  g_regs[0x207] = LAYER_BYTES >> 2;  /* ARRAY_PITCH */
+  raster3d_begin_submission(r);
+  clear_to(r, 0.0f, 0.0f, 1.0f, 1.0f);
+  const float red = 1.0f, zero = 0.0f;
+  memcpy(&g_regs[0x360], &red, 4);
+  memcpy(&g_regs[0x362], &zero, 4);
+  raster3d_clear(r, g_regs, &k_mem, 0x3cu | CLEAR_LAYER_1);
+  raster3d_flush(r, &k_mem);
+  CHECK(rgba_is(pixel(RT + LAYER_BYTES, false, 5, 5), 255, 0, 0, 255), "layer 1 takes the clear");
+  CHECK(rgba_is(pixel(RT, false, 5, 5), 0, 0, 255, 255), "layer 0 keeps its colour");
+  memcpy(&g_regs[0x361], &red, 4);
+  raster3d_clear(r, g_regs, &k_mem, 0x3cu | CLEAR_LAYER_2);
+  raster3d_flush(r, &k_mem);
+  CHECK(rgba_is(pixel(RT, false, 5, 5), 0, 0, 255, 255) && rgba_is(pixel(RT + LAYER_BYTES, false, 5, 5), 255, 0, 0, 255),
+        "a layer past the last clears nothing");
+}
+
 /* Viewport swizzle NEGATIVE_Y (OpenGL titles' y flip): the lower-left
  * triangle (y down) lands in the upper-left half instead. */
 static void test_viewport_swizzle(Raster3d *r) {
@@ -2310,6 +2336,7 @@ int main(void) {
   build_programs();
   test_triangle_and_blend(&r, false);
   test_triangle_and_blend(&r, true);
+  test_clear_layer(&r);
   test_viewport_swizzle(&r);
   test_viewport_disabled(&r);
   test_texture(&r);

@@ -24,8 +24,13 @@
 /* ---- B197 register words ------------------------------------------ */
 
 #define REG_RASTER_ENABLE 0x0dfu
-#define REG_RT 0x200u               /* + 16 * target: A, B, WIDTH, HEIGHT, FORMAT, MEMORY */
+#define REG_RT 0x200u               /* + 16 * target: A, B, WIDTH, HEIGHT, FORMAT, MEMORY, LAYERS, ARRAY_PITCH */
 #define REG_RT_STRIDE 16u
+#define RT_WORD_LAYERS 6u           /* layers (bits 0-15); bit 16: a volume (slices, not layers) */
+#define RT_WORD_ARRAY_PITCH 7u      /* bytes from one layer to the next, in 4-byte units */
+#define RT_LAYER_COUNT_MASK 0xffffu
+#define RT_LAYERS_VOLUME (1u << 16)
+#define RT_ARRAY_PITCH_SHIFT 2u
 #define REG_VIEWPORT 0x280u         /* scale x/y/z, offset x/y/z */
 #define REG_VIEWPORT_SWIZZLE 0x286u /* viewport 0's swizzle (WGSL_VP_SWIZZLE layout) */
 #define REG_VIEWPORT_CLIP 0x300u    /* horizontal, vertical */
@@ -606,6 +611,24 @@ static bool color_target_desc(const uint32_t *regs, uint32_t target, Surface_Des
          (uint64_t)out->width * out->height * out->bytes_per_pixel <= RASTER_MAX_SURFACE_BYTES;
 }
 
+/* CLEAR_SURFACE's target: colour target `target`'s layer from bits 10-25
+ * (the target is an array of LAYERS layers ARRAY_PITCH apart). Mario Kart
+ * 8 Deluxe accumulates light into a two-layer array and clears each layer
+ * by itself; clearing layer 0 for both left layer 1's light adding up every
+ * frame until the storm in Cloudtop Cruise turned white. A layer past the
+ * last, or a volume's slice, clears nothing. */
+#define CLEAR_LAYER_SHIFT 10u
+#define CLEAR_LAYER_MASK 0xffffu
+static bool clear_target_desc(const uint32_t *regs, uint32_t target, uint32_t clear, Surface_Desc *out) {
+  if (!color_target_desc(regs, target, out)) return false;
+  const uint32_t layer = (clear >> CLEAR_LAYER_SHIFT) & CLEAR_LAYER_MASK;
+  if (!layer) return true;
+  const uint32_t *rt = regs + REG_RT + target * REG_RT_STRIDE;
+  if ((rt[RT_WORD_LAYERS] & RT_LAYERS_VOLUME) || layer >= (rt[RT_WORD_LAYERS] & RT_LAYER_COUNT_MASK)) return false;
+  out->address += (uint64_t)layer * ((uint64_t)rt[RT_WORD_ARRAY_PITCH] << RT_ARRAY_PITCH_SHIFT);
+  return true;
+}
+
 static bool zeta_desc(const uint32_t *regs, Surface_Desc *out) {
   memset(out, 0, sizeof(*out));
   if (!(regs[REG_ZT_SELECT] & 1u)) return false;
@@ -845,7 +868,7 @@ void raster3d_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, ui
     const uint32_t target = mrt < 8u ? (select >> (4u + 3u * mrt)) & 7u : 0u;
     Surface_Desc d;
     const Color_Format *f;
-    if (color_target_desc(regs, target, &d) && (f = color_format(d.format)) != NULL) {
+    if (clear_target_desc(regs, target, clear, &d) && (f = color_format(d.format)) != NULL) {
       Rect rect = {0, 0, (int32_t)d.width, (int32_t)d.height};
       if (control & 0x100u) rect_scissor(&rect, regs);
       if (control & 0x10u) {
@@ -6289,7 +6312,7 @@ static void gpu_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, 
     const uint32_t select = regs[REG_CT_SELECT];
     const uint32_t target = mrt < 8u ? (select >> (4u + 3u * mrt)) & 7u : 0u;
     Surface_Desc d;
-    if (color_target_desc(regs, target, &d)) {
+    if (clear_target_desc(regs, target, clear, &d)) {
       rect = (Rect){0, 0, (int32_t)d.width, (int32_t)d.height};
       if (control & 0x100u) rect_scissor(&rect, regs);
       if (control & 0x10u) {

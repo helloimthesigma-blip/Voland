@@ -33,7 +33,8 @@
  * TRACE_SHAPES; dispatches are listed too); TRACE_VERTEX_WORDS=1 prints the first six CPU-transformed
  * vertices whole and the raw binding list of draws without a vertex stage;
  * TEX_NAN=record:id,... counts NaN / Inf texels per layer and level of
- * those textures just before that record.
+ * those textures just before that record; UPLOAD_HEX=id,... prints the
+ * first 64 bytes of every upload to those textures.
  */
 import { chromium } from "@playwright/test";
 import { readFileSync, statSync, createReadStream, writeFileSync } from "node:fs";
@@ -123,6 +124,7 @@ if (process.env.CB_DUMP) await page.evaluate((t) => { globalThis.CB_DUMP = { sha
 if (process.env.CB_TABLE) await page.evaluate((n) => { globalThis.CB_TABLE = n; }, Number(process.env.CB_TABLE));
 if (process.env.TRACE_WRITES) await page.evaluate((t) => { globalThis.TRACE_WRITES = t; }, process.env.TRACE_WRITES.split(",").map(Number));
 if (process.env.TRACE_SIZES) await page.evaluate(() => { globalThis.TRACE_SIZES = true; });
+if (process.env.UPLOAD_HEX) await page.evaluate((t) => { globalThis.UPLOAD_HEX = t; }, process.env.UPLOAD_HEX.split(",").map(Number));
 if (process.env.DEPTH_CMP) await page.evaluate((t) => { globalThis.DEPTH_CMP = Object.fromEntries(t.split(",").map((e) => e.split(":").map(Number))); }, process.env.DEPTH_CMP);
 if (process.env.NO_DEPTH) await page.evaluate(() => { globalThis.NO_DEPTH = true; });
 if (process.env.SKIP_TYPES) await page.evaluate((t) => { globalThis.SKIP_TYPES = t; }, process.env.SKIP_TYPES.split(",").map(Number));
@@ -340,6 +342,14 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
         for (let k = 0; k < dv.getUint32(4, true) && k < 8; k++)
           if (globalThis.TRACE_WRITES.includes(dv.getUint32(8 + 36 * k, true)))
             console.log(`writes ${dv.getUint32(8 + 36 * k, true)} present ${presents} record ${records} shader ${dv.getUint32(0, true)} vs ${dv.getUint32(408, true)}`);
+      }
+      if (globalThis.UPLOAD_HEX && type === 3) {
+        /* Gpu_Rec_Texture_Write: id, x, y, width, height, layer, bytes_per_row, data_bytes, then the rows. */
+        const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+        if (globalThis.UPLOAD_HEX.includes(dv.getUint32(0, true))) {
+          const head = Array.from(payload.subarray(32, 32 + 64), (b) => b.toString(16).padStart(2, "0")).join("");
+          console.log(`upload ${dv.getUint32(0, true)} present ${presents} record ${records} layer ${dv.getUint32(20, true)}: ${head}`);
+        }
       }
       if (globalThis.TRACE_SHAPES && (type === 1 || type === 13) && presents + 1 === globalThis.TRACE_SHAPES) {
         /* Creates (Gpu_Rec_Texture_Create: id, format, width, height, layers, usage, levels) and level uploads. */
