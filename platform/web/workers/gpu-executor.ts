@@ -2383,7 +2383,13 @@ export class GpuExecutor {
     const mb = (n: number): string => (n / (1024 * 1024)).toFixed(0);
     const commonShapes = [...renderShapes.entries()].sort((x, y) => y[1] - x[1]).slice(0, REPORT_SHAPES)
       .map(([shape, n]) => `${n}x ${shape}`).join(", ");
-    this.host.log("info", `GPU memory: render targets ${mb(render)} MB (${renderCount}; most: ${commonShapes}; ` +
+    /* The largest by area: the resolution the game renders at (docked titles draw larger). */
+    const area = (shape: string): number => {
+      const [w, h] = (shape.split(" ")[1] ?? "").split("x").map(Number);
+      return (w ?? 0) * (h ?? 0);
+    };
+    const largestShapes = [...renderShapes.keys()].sort((x, y) => area(y) - area(x)).slice(0, REPORT_SHAPES).join(", ");
+    this.host.log("info", `GPU memory: render targets ${mb(render)} MB (${renderCount}; most: ${commonShapes}; largest: ${largestShapes}; ` +
       `${this.renderCreates} made, ${this.renderDestroys} destroyed, ${this.unknownDestroys} unknown of ${this.destroysSeen} destroys), textures ${mb(sampled)} MB ` +
       `(${sampledCount}), storage buffers ${mb(buffers)} MB (${this.buffers.size}), shadows ${this.shadows.size}, ` +
       `${this.pipelines.size} pipelines (${this.stats.pipelinesEvicted} evicted), ${this.modulesByHash.size} shader modules (${mb(this.shaderBytes)} MB of WGSL); in the last ${MEMORY_REPORT_PRESENTS} ` +
