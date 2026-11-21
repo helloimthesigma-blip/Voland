@@ -51,6 +51,49 @@ so you can rerun them with your own game files.
 - **A compatibility report.** One click collects every warning and error the
   core logged, which usually shows what a new game is missing.
 
+### Is it really running the game?
+
+Yes, and you can check that without taking our word for it:
+
+- **It has nothing to play without your files.** This repository and the
+  hosted app contain no game code, art or sound. The whole app is about
+  4.5 MB, 2 MB of it WebAssembly, while one Switch game is several
+  gigabytes. Until you load a game you dumped yourself, only homebrew and
+  the built-in demo run.
+- **Your own save picks up where you left off.** Drag a save from your
+  Switch into the app's save browser and the game continues from your progress,
+  your location and your gear. A recording could not do that.
+- **The code is a whole emulator.** About 74,000 lines of C. 18,000 of
+  them emulate the CPU: interpreters for 64-bit and 32-bit ARM, plus the
+  JIT that turns the game's ARM code into WebAssembly. 27,000 rebuild the
+  Switch's operating system: the kernel and services such as file system,
+  input, audio and display.
+  21,000 are the GPU: they process the game's Maxwell command stream and
+  translate its compiled shaders to WebGPU's shading language. 23,000 more
+  lines are tests (71 suites). They include real ARM64 programs run on the
+  emulated kernel, and differential tests that check every JIT block
+  against the interpreter. The [design document](docs/DESIGN.md) and
+  [JIT.md](docs/JIT.md) explain how the pieces fit.
+- **There are no per-game code paths.** The core never checks which game
+  is running. The one per-game setting is a thread-placement default for
+  Hollow Knight in `platform/web/workers/cpu.worker.ts`. To check, search
+  for game IDs:
+  `grep -rn "0100[0-9A-Fa-f]\{12\}" core platform/web/src platform/web/workers`.
+  The other hits are a system archive, a range limit and a comment.
+- **Its bugs are emulator bugs.** The *Known problems* column above lists
+  them: a cyan tint on characters' legs, black patches in one game's sea,
+  rare crashes when guest threads run on several cores. Each one is
+  chased down to a part of the emulator, such as shader translation or
+  kernel synchronisation. The commit history shows how the fixed ones
+  were found and fixed, and
+  [PARALLEL.md](docs/PARALLEL.md) and [NEW_GAMES.md](docs/NEW_GAMES.md)
+  record the investigations.
+- **You can rerun the numbers.** `platform/web/tools/perf.mjs` loads your
+  copy of a game in Chrome, plays scripted input and reports speed and fps.
+  The in-app compatibility report lists every warning and error the core
+  logged while the game ran, such as the system calls and services it used
+  that are missing or incomplete.
+
 ---
 
 ## Quick start
