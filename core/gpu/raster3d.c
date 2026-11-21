@@ -839,6 +839,11 @@ static void gpu_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, 
 void raster3d_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, uint32_t clear) {
   if (!r || !r->ready || frame_skips(r, frame_target(regs, (clear >> 6) & 0xfu))) return;
   r->stats.clears++;
+  if ((clear & 3u) && ((clear >> CLEAR_LAYER_SHIFT) & CLEAR_LAYER_MASK)) { /* depth or stencil of a layer past 0 */
+    static uint32_t logged;
+    if (!logged++)
+      log_warn("[gpu] a depth/stencil clear names layer %u: not honoured (layer 0 is cleared)", (clear >> CLEAR_LAYER_SHIFT) & CLEAR_LAYER_MASK);
+  }
   if (r->trace_draws) { /* VOLAND_TRACE_DRAWS: clears in draw order */
     const uint32_t *rt = regs + REG_RT;
     const uint32_t mrt = (clear >> 6) & 0xfu, target = mrt < 8u ? (regs[REG_CT_SELECT] >> (4u + 3u * mrt)) & 7u : 0u;
