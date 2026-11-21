@@ -1124,6 +1124,10 @@ static CPU_State *jit_create(VMM_Context *vmm, void *userdata) {
    * threshold, as voland-cli's --jit-threshold. */
   const char *threshold = getenv("VOLAND_JIT_THRESHOLD");
   if (threshold) jit_set_hot_threshold((uint32_t)strtoul(threshold, NULL, 0));
+  /* VOLAND_JIT_MAX_LIVE=N (diagnostics): installed regions per host
+   * thread, as voland-cli's --jit-max-live. */
+  const char *max_live = getenv("VOLAND_JIT_MAX_LIVE");
+  if (max_live) jit_set_max_live_regions((uint32_t)strtoul(max_live, NULL, 0));
   /* VOLAND_JIT_FALLBACKS=N (diagnostics; the browser's stand-in for
    * voland-cli's --jit-fallbacks): profile the interpreter's work and print
    * (then reset) the profile every N interpreted block starts. */
