@@ -592,6 +592,46 @@ static void structural(void) {
   CHECK(!wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text)).ok);
 }
 
+/* A storage-buffer address loaded far above its LDG (beyond the backward
+ * search, so the dominating write decides) survives texture results
+ * written next to it: a vector texture op writes one register per mask
+ * bit, the scalar forms Rd, Rd + 1 and Rd2, Rd2 + 1. TOTK's lighting
+ * passes (TEXS into R27, TEX mask 1 into R29 under an address in R30/R31)
+ * went untranslated while every texture op counted as four registers.
+ * A result that does land on the address still fails. */
+#define TEX_GLOBALS_DESC 0x550u
+#define TEX_GLOBALS_FILL 80u
+static uint64_t TEXS_D(uint32_t d, uint32_t d2) {
+  return (0xd800ull << 48) | GUARD | (1ull << 53) | (4ull << 50) | ((uint64_t)d2 << 28) | (RZ << 8) | d;
+}
+static uint64_t TEX_D(uint32_t d, uint32_t mask) {
+  return (0xc038ull << 48) | GUARD | ((uint64_t)mask << 31) | (RZ << 8) | d;
+}
+static bool tex_globals(uint64_t texture_op) {
+  static uint64_t code[TEX_GLOBALS_FILL + 8u];
+  uint32_t n = 0;
+  code[n++] = IADD_C_CC(30, (uint32_t)RZ, 0, TEX_GLOBALS_DESC);
+  code[n++] = IADD_C_X(31, 0, TEX_GLOBALS_DESC + 4u);
+  code[n++] = texture_op;
+  for (uint32_t i = 0; i < TEX_GLOBALS_FILL; i++) code[n++] = FADD_R(1, 1, 1);
+  code[n++] = LDG_E(LDST_32, 8, 30, 0);
+  code[n++] = EXIT();
+  build(code, n);
+  Wgsl_Globals globals;
+  return wgsl_find_globals(&g_prog, &globals) && globals.count == 1u && globals.offset[0] == TEX_GLOBALS_DESC;
+}
+
+static void texture_writes_and_globals(void) {
+  CHECK(tex_globals(TEXS_D(27, (uint32_t)RZ)));          /* R27, R28 */
+  CHECK(g_prog.insns[3].op == SM_OP_TEXS);
+  CHECK(tex_globals(TEX_D(29, 1)));                       /* R29 */
+  CHECK(g_prog.insns[3].op == SM_OP_TEX);
+  CHECK(tex_globals(TEX_D(26, 0xf)));                     /* R26-R29 */
+  CHECK(!tex_globals(TEXS_D(27, 30)));                    /* Rd2 = R30 */
+  CHECK(!tex_globals(TEX_D(29, 3)));                      /* R29, R30 */
+  CHECK(!tex_globals(TEXS_D(29, (uint32_t)RZ)));          /* R29, R30 */
+}
+
 /* A dumped program (voland-cli --dump-shaders): "N OP ... raw HEX" lines
  * after a "stage 6 words N" line. */
 static bool load_dump(const char *path) {
@@ -769,6 +809,7 @@ static void capture_vector(const char *path, uint32_t index) {
 int main(int argc, char **argv) {
   g_dir = argc > 1 ? argv[1] : NULL;
   structural();
+  texture_writes_and_globals();
   vector_global();
   vector_wide();
   vector_shared_barrier();

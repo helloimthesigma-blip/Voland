@@ -2365,6 +2365,38 @@ static bool writes_no_register(uint16_t op) {
          op == SM_OP_RED || op == SM_OP_SUST || op == SM_OP_BARRIER;
 }
 
+/* Whether `in` writes register r: REG_WRITE_NONE, REG_WRITE_ALONE (r is
+ * its only destination) or REG_WRITE_GROUP (one of several registers it
+ * writes) - the registers the emitters write: wide loads their size,
+ * ALD its count, vector texture ops (TEX, TLD, TLD4, TXQ, TMML, TXD) one
+ * register per write-mask bit from Rd, the scalar forms (TEXS, TLDS,
+ * TLD4S) Rd, Rd + 1 and Rd2, Rd2 + 1. Counting every texture op as four
+ * registers from Rd made TOTK's lighting passes lose the address of their
+ * light buffers to a sample written just below it (untranslated, the
+ * draws were skipped). */
+enum { REG_WRITE_NONE, REG_WRITE_ALONE, REG_WRITE_GROUP };
+static uint32_t reg_write(const Sm_Insn *in, uint32_t r) {
+  if (writes_no_register(in->op)) return REG_WRITE_NONE;
+  const uint32_t d = REG_D(in->raw);
+  const uint32_t d2 = BITS(in->raw, 28, 8);
+  uint32_t span = 1;
+  if (in->op == SM_OP_TEXS || in->op == SM_OP_TLDS || in->op == SM_OP_TLD4S) {
+    const bool first = d != SM_RZ && (r == d || r == ((d + 1u) & 0xffu));
+    const bool second = d2 != SM_RZ && (r == d2 || r == ((d2 + 1u) & 0xffu));
+    return first || second ? REG_WRITE_GROUP : REG_WRITE_NONE;
+  }
+  if (in->op == SM_OP_LDG || in->op == SM_OP_LDC || in->op == SM_OP_LDL || in->op == SM_OP_LD)
+    span = (access_bytes(BITS(in->raw, 48, 3)) + 3u) / 4u;
+  else if (in->op == SM_OP_ALD)
+    span = BITS(in->raw, 47, 2) + 1u;
+  else if (is_texture_op(in->op)) {
+    if (d == SM_RZ) return REG_WRITE_NONE;
+    span = (uint32_t)__builtin_popcount(BITS(in->raw, 31, 4));
+  }
+  if (r < d || r >= d + span) return REG_WRITE_NONE;
+  return span == 1u ? REG_WRITE_ALONE : REG_WRITE_GROUP;
+}
+
 /* The latest instruction before `pc` writing register r, or -1 when it is
  * not certain: a control transfer or a branch target lies in between (another
  * path may join), the write is predicated - unless the consumer is
@@ -2382,20 +2414,9 @@ static int32_t last_def_pred(const Sm_Program *p, const bool *targeted, uint32_t
         in->op == SM_OP_PCNT)
       continue;
     if (is_flow(in->op)) return -1;
-    if (writes_no_register(in->op)) {
-      if (writes_predicate(in->op)) predicate_written = true;
-      continue;
-    }
-    const uint32_t d = REG_D(in->raw);
-    uint32_t span = 1;
-    if (in->op == SM_OP_LDG || in->op == SM_OP_LDC || in->op == SM_OP_LDL || in->op == SM_OP_LD)
-      span = (access_bytes(BITS(in->raw, 48, 3)) + 3u) / 4u;
-    else if (in->op == SM_OP_ALD)
-      span = BITS(in->raw, 47, 2) + 1u;
-    else if (is_texture_op(in->op))
-      span = 4;
-    if (span > 1u && r > d && r < d + span) return -1; /* written by a multi-register load */
-    if (d != r) {
+    const uint32_t write = reg_write(in, r);
+    if (write == REG_WRITE_GROUP) return -1; /* written by a multi-register load */
+    if (write == REG_WRITE_NONE) {
       if (writes_predicate(in->op)) predicate_written = true;
       continue;
     }
@@ -2416,16 +2437,9 @@ static int32_t dominating_def(const Sm_Program *p, uint32_t pc, uint32_t r) {
   int32_t def = -1;
   for (uint32_t at = 0; at < pc; at++) {
     const Sm_Insn *in = &p->insns[at];
-    if (in->op == SM_OP_SCHED || in->op == SM_OP_NOP || is_flow(in->op) || writes_no_register(in->op)) continue;
-    const uint32_t d = REG_D(in->raw);
-    uint32_t span = 1;
-    if (in->op == SM_OP_LDG || in->op == SM_OP_LDC || in->op == SM_OP_LDL || in->op == SM_OP_LD)
-      span = (access_bytes(BITS(in->raw, 48, 3)) + 3u) / 4u;
-    else if (in->op == SM_OP_ALD)
-      span = BITS(in->raw, 47, 2) + 1u;
-    else if (is_texture_op(in->op))
-      span = 4;
-    if (r >= d && r < d + span) def = span == 1u ? (int32_t)at : -2;
+    if (in->op == SM_OP_SCHED || in->op == SM_OP_NOP || is_flow(in->op)) continue;
+    const uint32_t write = reg_write(in, r);
+    if (write != REG_WRITE_NONE) def = write == REG_WRITE_ALONE ? (int32_t)at : -2;
   }
   if (def < 0) return -1;
   const Sm_Insn *w = &p->insns[def];
@@ -2450,17 +2464,9 @@ static int32_t sole_def(const Sm_Program *p, uint32_t r) {
   for (uint32_t at = 0; at < p->word_count; at++) {
     const Sm_Insn *in = &p->insns[at];
     if (in->op == SM_OP_SCHED || in->op == SM_OP_NOP || is_flow(in->op)) continue;
-    const uint32_t d = REG_D(in->raw);
-    uint32_t span = 1;
-    if (in->op == SM_OP_LDG || in->op == SM_OP_LDC || in->op == SM_OP_LDL || in->op == SM_OP_LD)
-      span = (access_bytes(BITS(in->raw, 48, 3)) + 3u) / 4u;
-    else if (in->op == SM_OP_ALD)
-      span = BITS(in->raw, 47, 2) + 1u;
-    else if (is_texture_op(in->op))
-      span = 4;
-    if (writes_no_register(in->op)) continue;
-    if (r < d || r >= d + span) continue;
-    if (span > 1u || (in->pred & 7u) != SM_PT || (in->pred & 8u)) return -1;
+    const uint32_t write = reg_write(in, r);
+    if (write == REG_WRITE_NONE) continue;
+    if (write == REG_WRITE_GROUP || (in->pred & 7u) != SM_PT || (in->pred & 8u)) return -1;
     /* Several writes are as good as one when they are the same
      * instruction (a branch's two arms loading the same address). */
     if (found >= 0 && (p->insns[found].op != in->op || p->insns[found].form != in->form ||
@@ -2515,11 +2521,11 @@ static bool candidate_buffers(const Sm_Program *p, uint32_t pc, uint32_t lo, Wgs
   for (uint32_t at = 0; at < p->word_count; at++) {
     const Sm_Insn *in = &p->insns[at];
     if (in->op == SM_OP_SCHED || in->op == SM_OP_NOP || is_flow(in->op)) continue;
-    if (in->op == SM_OP_STG || in->op == SM_OP_ST || in->op == SM_OP_STL || in->op == SM_OP_AST) continue;
-    const uint32_t d = REG_D(in->raw);
-    if (d != lo && d != ((lo + 1u) & 0xffu)) continue;
+    const uint32_t write_lo = reg_write(in, lo), write_hi = reg_write(in, (lo + 1u) & 0xffu);
+    if (write_lo == REG_WRITE_NONE && write_hi == REG_WRITE_NONE) continue;
+    if (write_lo == REG_WRITE_GROUP || write_hi == REG_WRITE_GROUP) return false; /* a texture result or wide load */
     if ((in->op != SM_OP_MOV && in->op != SM_OP_IADD) || in->form != SM_FORM_CBUF) return false;
-    if (d != lo) continue; /* the high half is checked with its low half */
+    if (write_lo == REG_WRITE_NONE) continue; /* the high half is checked with its low half */
     bool paired = false;
     for (uint32_t at2 = 0; at2 < p->word_count && !paired; at2++) {
       const Sm_Insn *h = &p->insns[at2];
