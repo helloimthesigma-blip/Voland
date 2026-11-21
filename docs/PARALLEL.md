@@ -438,7 +438,21 @@ Tears of the Kingdom, native interpreter, three cores, 300k slices
 | Affinity enforced (default) | ~410 | ~9 of 12 |
 | Free | ~2930 (~24 per virtual second) | 3 of 9 |
 
-## Diagnostics for the open multicore crash
+## Diagnostics for the multicore crash (fixed 2026-11-20)
+
+**Resolution.** The crash was a kernel bug, not a race in the scheduler or
+the JIT. SignalToAddress with ModifyByWaitingCountIfEqual left the word at
+value + 1 after waking the only waiter. The SDK's auto-clear light event
+(0 clear, 1 has waiters, 2 signalled) has a waiter that returns without
+consuming the word, so the event stayed signalled and its next Wait
+returned at once. Tears of the Kingdom's loader thread then stopped
+waiting for a decompression job, and the job read its {dst, size} request
+from a stack frame already reused: a garbage destination, overwritten
+objects, or a relocation of an empty buffer. Every crash signature below
+is that one early wake. Now, as on Horizon: no waiters gives value + 1,
+every waiter woken gives value - 1, and some left waiting leaves the value. `tests/guest/lightevent.s` runs the SDK's
+protocol; 40 boots in a row are clean since (the rate was about 1 in 15).
+The tools below stay useful for the next intermittent multicore bug.
 
 - `VOLAND_SOLO_THREADS=0x18802c,...` (thread handles, stable from run to
   run) or `=all`: those threads run alone - nothing else is picked while
