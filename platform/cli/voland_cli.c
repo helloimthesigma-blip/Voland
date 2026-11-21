@@ -1159,13 +1159,18 @@ static void time_stats_print(const Emulator *emu) {
  * boots - a fixture, or a save exported from the browser ("Back up saves"). */
 #define MAX_RESTORE_SAVES 8u
 static bool restore_save_archive(Emulator *emu, const char *path) {
-  static uint8_t bytes[1u << 24];
   FILE *f = fopen(path, "rb");
-  if (!f) {
+  long file_size = -1;
+  if (f && fseek(f, 0, SEEK_END) == 0) file_size = ftell(f);
+  /* Sized from the file: a fixed buffer cut long saves short (TOTK's
+   * slot saves are 17 MB) and the truncated archive failed validation. */
+  uint8_t *bytes = file_size >= 0 && fseek(f, 0, SEEK_SET) == 0 ? malloc((size_t)file_size + 1u) : NULL;
+  if (!f || !bytes) {
     fprintf(stderr, "voland-cli: cannot read %s\n", path);
+    if (f) fclose(f);
     return false;
   }
-  const size_t size = fread(bytes, 1, sizeof(bytes), f);
+  const size_t size = fread(bytes, 1, (size_t)file_size, f);
   fclose(f);
   char name[256];
   const char *base = strrchr(path, '/') ? strrchr(path, '/') + 1 : path;
@@ -1173,6 +1178,7 @@ static bool restore_save_archive(Emulator *emu, const char *path) {
   char *dot = strstr(name, ".vsave");
   if (dot) *dot = '\0';
   const Error err = emulator_save_restore_archive(emu, name, bytes, size);
+  free(bytes);
   if (!error_is_ok(err)) {
     fprintf(stderr, "voland-cli: %s: %s\n", path, err.message ? err.message : "restore failed");
     return false;
