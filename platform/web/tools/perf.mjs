@@ -77,7 +77,8 @@
  *   setting, e.g. frame-skip 2), "cpuspeed PERCENT" (the virtual CPU
  *   clock, as ?cpuspeed=), "measure S" (fps and virtual-time rate over S
  *   wall seconds), "profile-start" / "profile-stop" (the CPU and GPU
- *   workers sampled between the two; top self times to the log), "cheat NAME" (switch on the running cheat whose name
+ *   workers sampled between the two; top self times to the log), "heap-start" / "heap-live" (the GPU
+ *   worker's heap size, and its allocations since heap-start still alive, by site: what a leak keeps), "cheat NAME" (switch on the running cheat whose name
  *   contains NAME, the rest of the line), "export-saves FILE" (the Saves
  *   panel's backup tar, for --restore-saves), "sleep MS", "go"
  *   (measure now). Each
@@ -124,6 +125,8 @@ const SHOT_TIMEOUT_MS = 180_000;
 const ALLOC_SAMPLING_BYTES = 1024; /* --alloc: one sample per this many bytes allocated */
 const DRIVE_PROFILE_INTERVAL_US = 1000; /* the drive file's "profile-start": the sampling interval */
 const DRIVE_PROFILE_TOP = 14; /* ... and how many functions "profile-stop" lists per worker */
+const HEAP_LIVE_SAMPLING_BYTES = 32768; /* "heap-start": one sample per this many bytes allocated */
+const HEAP_LIVE_TOP = 20; /* "heap-live": allocation sites listed */
 const BROWSER_CLOSE_WAIT_MS = 10_000;
 const HARDWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-angle=metal", "--enable-gpu", "--ignore-gpu-blocklist"];
 const SOFTWARE_GPU_ARGS = ["--enable-unsafe-webgpu", "--use-webgpu-adapter=swiftshader", "--enable-features=Vulkan"];
@@ -383,6 +386,23 @@ async function attachToCpuWorker(cdp, pageUrl) {
   });
   await cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, pageSession);
   return Promise.race([found, sleep(10_000).then(() => { throw new Error("CPU worker target not found"); })]);
+}
+
+/** A sampled heap profile's bytes by allocation site, largest first, and the total. A builtin
+ * (subarray, push: no url) is named with its caller - which code allocates is the question. */
+function allocationSites(profile) {
+  const bySite = new Map();
+  let total = 0;
+  const walk = (node, caller) => {
+    const f = node.callFrame;
+    const own = `${f.functionName || "(anonymous)"} ${f.url.split("/").pop()}:${f.lineNumber + 1}`;
+    const site = f.url ? own : `${f.functionName || "(builtin)"} <- ${caller}`;
+    bySite.set(site, (bySite.get(site) ?? 0) + node.selfSize);
+    total += node.selfSize;
+    for (const child of node.children) walk(child, f.url ? own : caller);
+  };
+  walk(profile.head, "(root)");
+  return { sites: [...bySite.entries()].sort((a, b) => b[1] - a[1]), total };
 }
 
 function summariseProfile(profile, top) {
@@ -740,6 +760,7 @@ async function main() {
       const { readFileSync } = await import("node:fs");
       let done = 0;
       let driveProfile = null; /* "profile-start": the CDP connection and its worker sessions */
+      let driveHeap = null; /* "heap-start": the CDP connection and the GPU worker's session */
       console.log(`drive: waiting for commands in ${opts.drive}`);
       for (;;) {
         let lines = [];
@@ -832,6 +853,29 @@ async function main() {
           } catch (e) {
             note = `failed: ${e}`; /* the run goes on unprofiled */
           }
+        } else if (cmd === "heap-start") {
+          /* heap-start ... heap-live: the GPU worker's allocations sampled in between that are still
+           * alive at heap-live (collected ones left out) - what a leak keeps, by allocation site. */
+          try {
+            driveHeap ??= await (async () => {
+              const cdp = await Cdp.connect(opts.debugPort);
+              const [session] = await attachToWorkers(cdp, baseUrl, [/gpu\.worker/]);
+              return { cdp, session };
+            })();
+            await driveHeap.cdp.send("HeapProfiler.enable", {}, driveHeap.session);
+            await driveHeap.cdp.send("HeapProfiler.startSampling", { samplingInterval: HEAP_LIVE_SAMPLING_BYTES, includeObjectsCollectedByMajorGC: false,
+                                                                     includeObjectsCollectedByMinorGC: false }, driveHeap.session);
+          } catch (e) {
+            note = `failed: ${e}`;
+          }
+        } else if (cmd === "heap-live" && driveHeap) {
+          const usage = await driveHeap.cdp.send("Runtime.getHeapUsage", {}, driveHeap.session);
+          const { profile } = await driveHeap.cdp.send("HeapProfiler.getSamplingProfile", {}, driveHeap.session);
+          const { sites, total } = allocationSites(profile);
+          console.log(`drive: GPU worker heap ${(usage.usedSize / 1048576).toFixed(0)} of ${(usage.totalSize / 1048576).toFixed(0)} MiB; ` +
+                      `${(total / 1048576).toFixed(0)} MiB sampled since heap-start still alive, by site:`);
+          for (const [site, bytes] of sites.slice(0, HEAP_LIVE_TOP))
+            console.log(`  ${(bytes / 1048576).toFixed(1).padStart(7)} MiB  ${site}`);
         } else if (cmd === "profile-stop" && driveProfile) {
           mkdirSync(opts.outDir, { recursive: true });
           for (const [i, worker] of ["cpu", "gpu"].entries()) {
@@ -846,6 +890,7 @@ async function main() {
         console.log(`drive: ${done} done ${lines[done - 1]} ${note}`);
         if (cmd === "go") {
           driveProfile?.cdp.close();
+          driveHeap?.cdp.close();
           break;
         }
       }
@@ -978,20 +1023,9 @@ async function main() {
         await cdp.send("HeapProfiler.startSampling", { samplingInterval: ALLOC_SAMPLING_BYTES, includeObjectsCollectedByMajorGC: true, includeObjectsCollectedByMinorGC: true }, gpuSession);
         await sleep(opts.alloc * 1000);
         const { profile } = await cdp.send("HeapProfiler.stopSampling", {}, gpuSession);
-        const bySite = new Map();
-        let total = 0;
-        /* A builtin (subarray, push: no url) is named with its caller - which code allocates is the question. */
-        const walk = (node, caller) => {
-          const f = node.callFrame;
-          const own = `${f.functionName || "(anonymous)"} ${f.url.split("/").pop()}:${f.lineNumber + 1}`;
-          const site = f.url ? own : `${f.functionName || "(builtin)"} <- ${caller}`;
-          bySite.set(site, (bySite.get(site) ?? 0) + node.selfSize);
-          total += node.selfSize;
-          for (const child of node.children) walk(child, f.url ? own : caller);
-        };
-        walk(profile.head, "(root)");
+        const { sites, total } = allocationSites(profile);
         console.log(`\nGPU worker allocations (${opts.alloc} s, sampled; ${(total / 1048576).toFixed(0)} MiB sampled, collected included):`);
-        for (const [site, bytes] of [...bySite.entries()].sort((a, b) => b[1] - a[1]).slice(0, 25))
+        for (const [site, bytes] of sites.slice(0, 25))
           console.log(`  ${((100 * bytes) / Math.max(total, 1)).toFixed(1).padStart(5)}%  ${site}`);
       } finally {
         cdp.close();
