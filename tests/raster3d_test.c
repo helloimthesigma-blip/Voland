@@ -47,6 +47,8 @@ static int g_failures;
 #define PS_LDG_ENTRY_OFFSET 0x3e00u  /* ... but a branch from before the load reaches the LDG */
 #define PS_STORE_OFFSET 0x1c00u /* a pixel program whose only output is a store to the storage buffer */
 #define PS_DEPTH_OUT_OFFSET 0x1d00u
+#define PS_RT1_OFFSET 0x1e00u     /* colour = generic0 into RT1 only: RT0 is in no output */
+#define PS_RT1_TEX_OFFSET 0x1f00u /* ... colour = texture(generic0.xy) */
 #define PS_LDC_OFFSET 0x2400u /* a pixel program whose colour is c[1][0..12], indexed */ /* a pixel program writing depth only: 0.75 in R1 (0.25 in R0) */
 #define STORED_WORD 0x5a5a5a5au
 #define SSBO_DESC 0x110u      /* the storage buffer's descriptor in c[0] (NVN) */
@@ -246,6 +248,15 @@ static void build_programs(void) {
   pd_sph[0x4c] = 0x02; /* depth */
   const uint64_t psz[] = {MOV32I(0, 0x3e800000u), MOV32I(1, 0x3f400000u), EXIT()};
   write_program(PS_DEPTH_OUT_OFFSET, pd_sph, psz, 3);
+  /* Output map RT1 only: R0-R3 go to the second target, the first is
+   * bound but written by no output. */
+  uint8_t p1_sph[SM_SPH_BYTES];
+  memcpy(p1_sph, ps_sph, sizeof(p1_sph));
+  p1_sph[0x18] = 0xff;
+  p1_sph[0x48] = 0xf0;
+  write_program(PS_RT1_OFFSET, p1_sph, ps, 5);
+  p1_sph[0x18] = 0x0f;
+  write_program(PS_RT1_TEX_OFFSET, p1_sph, pst, 4);
 }
 
 /* ---- register state ----------------------------------------------- */
@@ -1164,6 +1175,7 @@ static Seen_Draw gpu_draw_once(Raster3d *r, uint32_t front_face_reg) {
   return gpu_draw_topology(r, front_face_reg, 4, 3);
 }
 static bool g_gpu_textured; /* gpu_draw_topology: the texturing pixel program */
+static bool g_unexported_rt0; /* gpu_draw_topology: RT0 bound but in no output of the pixel program (g_ps_override's) */
 static bool g_bc1_texture;  /* ... sampling texture_state_bc1's texture */
 static uint32_t g_ps_override; /* gpu_draw_topology: this pixel program instead (0: none) */
 static bool g_draw_twice;      /* gpu_draw_topology: the same draw again */
@@ -1187,6 +1199,17 @@ static Seen_Draw gpu_draw_topology(Raster3d *r, uint32_t front_face_reg, uint32_
   raster3d_set_gpu(r, &stream);
   base_state(g_gpu_rt_bl ? RT_BL + g_gpu_rt_offset : RT, g_gpu_rt_bl, g_ps_override ? g_ps_override : g_gpu_textured ? PS_TEX_OFFSET : PS_OFFSET);
   if (g_gpu_textured) texture_state();
+  if (g_unexported_rt0) { /* RT0 = RT_BL's target, RT1 = RT; separate outputs */
+    g_regs[0x210] = (uint32_t)(RT >> 32);
+    g_regs[0x211] = (uint32_t)RT;
+    g_regs[0x212] = RT_SIZE * 4u;
+    g_regs[0x213] = RT_SIZE;
+    g_regs[0x214] = g_regs[0x204];
+    g_regs[0x215] = 1u << 12;
+    g_regs[0x487] = 2u | (0u << 4) | (1u << 7); /* CT_SELECT: RT0, RT1 */
+    g_regs[0x681] = 0x1111;
+    g_regs[0x3eb] = 1; /* CT_MRT_ENABLE */
+  }
   if (g_bc1_texture) texture_state_bc1();
   g_regs[REG_BASE_INSTANCE_TEST] = g_base_instance;
   if (g_masked_targets) g_regs[0x680] = 0;
@@ -1367,6 +1390,34 @@ static void test_gpu_reinterpret(Raster3d *r) {
   CHECK(seen.count == 1 && seen.reinterprets == 0 && seen.texture_writes == 1, "reinterpret: 8-byte view loads (%u, %u)",
         seen.reinterprets, seen.texture_writes);
   g_rt_format = 0xD5;
+}
+
+/* GPU mode: a bound target the pixel program has no output for still
+ * takes the draw (the shader's default colour) - Tears of the Kingdom's
+ * floor and wall G-buffer draws leave out its flag target, and keeping
+ * the old contents kept old scenes' flags (dark blocks, cyan legs). A
+ * draw that samples that target keeps it as it is: it is bound only to
+ * be read (TOTK's half-res lighting binds the depth it samples). */
+static void test_gpu_unexported_target(Raster3d *r) {
+  g_gpu_rt_bl = true;
+  g_unexported_rt0 = true;
+  g_ps_override = PS_RT1_OFFSET;
+  Seen_Draw seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.count == 1 && seen.last.target_count == 2u, "unexported: drawn (%u targets)", seen.last.target_count);
+  CHECK(seen.last.targets[0].id != 0u && seen.last.targets[0].write_mask == 0xfu && seen.last.targets[1].id != 0u,
+        "unexported: RT0 still written (id %u, mask %x)", seen.last.targets[0].id, seen.last.targets[0].write_mask);
+  g_gpu_textured = true;
+  g_tic_rt_bl_width = RT_SIZE; /* the draw samples RT0's target */
+  g_ps_override = PS_RT1_TEX_OFFSET;
+  seen = gpu_draw_once(r, FRONT_CW_REG);
+  CHECK(seen.count == 1, "unexported + sampled: drawn");
+  CHECK(seen.last.targets[0].id == 0u && seen.last.targets[0].write_mask == 0u && seen.last.targets[1].id != 0u,
+        "unexported + sampled: RT0 kept (id %u, mask %x)", seen.last.targets[0].id, seen.last.targets[0].write_mask);
+  g_tic_rt_bl_width = 0;
+  g_gpu_textured = false;
+  g_ps_override = 0;
+  g_unexported_rt0 = false;
+  g_gpu_rt_bl = false;
 }
 
 /* GPU mode: a block-linear target sampled narrower than its GOB-padded
@@ -2278,6 +2329,7 @@ int main(void) {
   test_gpu_compressed_upload(&r);
   test_gpu_float32_filter(&r);
   test_gpu_padded_target(&r);
+  test_gpu_unexported_target(&r);
   test_gpu_gathered_cube(&r);
   test_gpu_reinterpret(&r);
   test_gpu_upload_keeps_bytes(&r);

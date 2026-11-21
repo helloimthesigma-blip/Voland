@@ -2178,6 +2178,7 @@ typedef struct Target {
   bool rgba8;                    /* 4 x 8-bit UNORM */
   bool alpha_blend;              /* colour = src*srcA + dst*(1-srcA) */
   uint32_t write_mask;           /* bit per component */
+  uint32_t unexported_mask;      /* a target the pixel program does not output: its own write mask (write_mask is 0) */
   bool blend;
   uint32_t color_op, color_src, color_dst, alpha_op, alpha_src, alpha_dst;
   uint32_t rgba8_blend;          /* RGBA8_BLEND_*: a common blend on an RGBA8 target, done inline */
@@ -2454,7 +2455,10 @@ static bool setup_state(Draw_Context *ctx, Raster_State *rs) {
      * writing (0, 0, 0, 1) there put every pixel at infinite distance:
      * NaN on characters, the whole picture over-bright. */
     const uint32_t src = rs->mrt ? i : 0u;
-    if (ctx->ps && !((ctx->ps->header.omap_target >> (4u * src)) & 0xfu)) t->write_mask = 0;
+    if (ctx->ps && !((ctx->ps->header.omap_target >> (4u * src)) & 0xfu)) {
+      t->unexported_mask = t->write_mask;
+      t->write_mask = 0;
+    }
     if (!t->write_mask) continue;
     t->surface = surface_get(r, &d, ctx->mem, true);
     t->blend = (regs[REG_BLEND_ENABLE + i] & 1u) != 0 && t->format->kind != KIND_UINT && t->format->kind != KIND_SINT;
@@ -4716,6 +4720,7 @@ typedef struct Gpu_Draw {
   uint32_t target_id[MAX_TARGETS];
   uint32_t target_format[MAX_TARGETS];
   bool target_no_alpha[MAX_TARGETS]; /* format_lacks_alpha: alpha writes masked */
+  bool target_unexported[MAX_TARGETS]; /* bound, not output by the pixel program (Target.unexported_mask) */
   uint32_t depth_id;
   uint32_t depth_format;
   /* varyings: word (vector * 4 + component) -> rs->varyings index; per location its vector */
@@ -5268,7 +5273,7 @@ static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs, uint32_t topolog
   const uint32_t *regs = ctx->regs;
   const uint32_t select = regs[REG_CT_SELECT];
   for (uint32_t i = 0; i < rs->target_count; i++) {
-    if (!rs->targets[i].surface && !rs->stores_only) continue;
+    if (!rs->targets[i].surface && !rs->stores_only && !rs->targets[i].unexported_mask) continue;
     Surface_Desc d;
     if (!color_target_desc(regs, (select >> (4u + 3u * i)) & 7u, &d)) continue;
     if (g->width && (d.width != g->width || d.height != g->height)) {
@@ -5281,6 +5286,7 @@ static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs, uint32_t topolog
     g->target_id[i] = s->id;
     g->target_format[i] = s->gpu_format;
     g->target_no_alpha[i] = format_lacks_alpha(d.format);
+    g->target_unexported[i] = !rs->targets[i].surface && rs->targets[i].unexported_mask;
   }
   if (rs->depth) {
     Surface_Desc zd;
@@ -5797,7 +5803,21 @@ static void gpu_emit_draw(Raster_State *rs) {
     const Target *t = &rs->targets[i];
     Gpu_Rec_Target *o = &d.targets[i];
     o->id = g->target_id[i];
-    o->write_mask = g->target_no_alpha[i] ? t->write_mask & 7u : t->write_mask;
+    uint32_t mask = t->write_mask;
+    /* A bound target the pixel program does not output still takes the
+     * draw's (default) colour - Tears of the Kingdom's G-buffer draws for
+     * floors and walls leave out its flag target, and keeping it left old
+     * scenes' flags there (cyan legs in the cave, dark blocks at Lookout
+     * Landing). Unless the draw samples it too: then it is bound only to
+     * be read - the half-res lighting pass binds the depth it samples as
+     * target 7 - and keeps its contents. */
+    if (g->target_unexported[i]) {
+      mask = t->unexported_mask;
+      for (uint32_t k = 0; k < g->texture_count; k++)
+        if (g->texture_id[k] == o->id) mask = 0;
+      if (!mask) o->id = 0;
+    }
+    o->write_mask = g->target_no_alpha[i] ? mask & 7u : mask;
     o->blend = t->blend ? 1u : 0u;
     o->color_op = t->color_op;
     o->alpha_op = t->alpha_op;
