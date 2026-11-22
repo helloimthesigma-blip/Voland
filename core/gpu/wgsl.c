@@ -19,6 +19,7 @@
  */
 #include "gpu/wgsl.h"
 
+#include <ctype.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -2907,6 +2908,90 @@ static void emit_compute_head(const Tr *t, Out *o) {
           d->block[0], d->block[1], d->block[2], t->uses_subgroups ? ", @builtin(subgroup_invocation_id) sgl: u32" : "");
 }
 
+/* ---- unused helpers ----------------------------------------------- */
+
+/* The prelude and texture helpers are written whole, and a program calls
+ * few of them: in TOTK's shaders 28% of the text was functions nothing
+ * reaches. Chrome's GPU process keeps ~115 bytes per byte of WGSL for
+ * each live module, and parses and compiles them all, so they are taken
+ * out of the finished text. Top-level items open at a line starting in
+ * column 0 (not a closing brace or a comment); an attribute line without
+ * a ';' (the compute entry point's) belongs to the line after it. */
+#define PRUNE_MAX_ITEMS 512u
+
+typedef struct Prune_Item {
+  uint32_t start, end;
+  uint32_t name, name_len; /* of "fn NAME(" (name_len 0: not a function - always kept) */
+  bool live;
+} Prune_Item;
+
+static bool opens_item(char c) { return c != ' ' && c != '\t' && c != '}' && c != '/' && c != '\n'; }
+static bool ident_char(char c) { return isalnum((unsigned char)c) || c == '_'; }
+
+/* Marks the functions item `k` calls live; returns how many it marked. */
+static uint32_t mark_calls(const char *text, Prune_Item *items, uint32_t count, uint32_t k) {
+  uint32_t marked = 0;
+  for (uint32_t at = items[k].start; at < items[k].end; at++) {
+    if (!ident_char(text[at]) || (at > items[k].start && ident_char(text[at - 1]))) continue;
+    uint32_t end = at;
+    while (end < items[k].end && ident_char(text[end])) end++;
+    if (end < items[k].end && text[end] == '(') {
+      for (uint32_t f = 0; f < count; f++) {
+        if (items[f].live || items[f].name_len != end - at || memcmp(text + items[f].name, text + at, end - at) != 0) continue;
+        items[f].live = true;
+        marked++;
+      }
+    }
+    at = end;
+  }
+  return marked;
+}
+
+/* Removes the functions no entry point reaches from `text`; returns its new length. */
+static size_t prune_unused_functions(char *text, size_t len) {
+  static _Thread_local Prune_Item items[PRUNE_MAX_ITEMS];
+  uint32_t count = 0;
+  for (size_t at = 0; at < len;) {
+    if (count == PRUNE_MAX_ITEMS) return len; /* not a shape this pass knows: keep it all */
+    Prune_Item *item = &items[count++];
+    item->start = (uint32_t)at;
+    item->name = item->name_len = 0;
+    const char *eol = memchr(text + at, '\n', len - at);
+    size_t next = eol ? (size_t)(eol - text) + 1u : len;
+    if (text[at] == '@' && memchr(text + at, ';', next - at) == NULL && next < len) {
+      eol = memchr(text + next, '\n', len - next); /* the entry point's attributes: one item with it */
+      next = eol ? (size_t)(eol - text) + 1u : len;
+    } else if (!strncmp(text + at, "fn ", 3)) {
+      uint32_t end = (uint32_t)at + 3u;
+      while (end < len && ident_char(text[end])) end++;
+      item->name = (uint32_t)at + 3u;
+      item->name_len = end - item->name;
+    }
+    while (next < len && !opens_item(text[next])) {
+      eol = memchr(text + next, '\n', len - next);
+      next = eol ? (size_t)(eol - text) + 1u : len;
+    }
+    item->end = (uint32_t)next;
+    item->live = item->name_len == 0;
+    at = next;
+  }
+  /* Live: everything but functions, then whatever live items call. */
+  for (bool grew = true; grew;) {
+    grew = false;
+    for (uint32_t k = 0; k < count; k++) {
+      if (items[k].live && mark_calls(text, items, count, k)) grew = true;
+    }
+  }
+  size_t out = 0;
+  for (uint32_t k = 0; k < count; k++) {
+    if (!items[k].live) continue;
+    memmove(text + out, text + items[k].start, items[k].end - items[k].start);
+    out += items[k].end - items[k].start;
+  }
+  text[out] = '\0';
+  return out;
+}
+
 Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *desc, char *buffer, size_t capacity) {
   Wgsl_Result res;
   memset(&res, 0, sizeof(res));
@@ -3110,7 +3195,7 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
     return res;
   }
   res.ok = true;
-  res.length = head.len;
+  res.length = prune_unused_functions(buffer, head.len);
   res.cbuf_slots = t->cbuf_slots;
   return res;
 }

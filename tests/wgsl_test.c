@@ -344,6 +344,9 @@ static void vector_fmz(void) {
   emit(&b, EXIT());
   finish(&b, "fmz", true);
   CHECK(strstr(g_text, "fmul_fmz(") != NULL);
+  /* Helpers nothing calls are left out of the text (64-bit multiply, byte permute). */
+  CHECK(strstr(g_text, "fn mul64(") == NULL && strstr(g_text, "fn prmt_(") == NULL);
+  CHECK(strstr(g_text, "fn F(") != NULL);
 }
 
 static void vector_integer(void) {
