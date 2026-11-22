@@ -352,6 +352,23 @@ static void test_block_copies(VMM_Context *vmm)
   CHECK_CODE(vmm_read_block(vmm, LAST_PAGE_GVA, dst, 2 * VMM_PAGE_SIZE), RESULT_MEMORY_FAULT);
   CHECK(vmm_last_fault(vmm)->kind == VMM_FAULT_OUT_OF_RANGE);
 
+  /* Inside one page (one translation): a round trip up to the page's last
+   * byte; a hole and a read-only page fault the same way. */
+  const uint64_t in_page = GVA_A + VMM_PAGE_SIZE + 16;
+  CHECK_OK(vmm_write_block(vmm, in_page, src, VMM_PAGE_SIZE - 16));
+  memset(dst, 0, BLOCK);
+  CHECK_OK(vmm_read_block(vmm, in_page, dst, VMM_PAGE_SIZE - 16));
+  CHECK(memcmp(src, dst, VMM_PAGE_SIZE - 16) == 0 && physical(PA_B)[16] == src[0]);
+  memset(dst, 0xEE, BLOCK);
+  CHECK_CODE(vmm_read_block(vmm, GVA_A + 3 * VMM_PAGE_SIZE + 8, dst, 8), RESULT_MEMORY_FAULT);
+  CHECK(vmm_last_fault(vmm)->kind == VMM_FAULT_UNMAPPED && vmm_last_fault(vmm)->gva == GVA_A + 3 * VMM_PAGE_SIZE + 8);
+  CHECK(dst[0] == 0xEE && dst[7] == 0xEE);
+  CHECK_OK(vmm_reprotect(vmm, GVA_A + VMM_PAGE_SIZE, VMM_PAGE_SIZE, VMM_PERM_R));
+  CHECK_CODE(vmm_write_block(vmm, in_page, src + 1, 8), RESULT_MEMORY_FAULT);
+  CHECK(vmm_last_fault(vmm)->kind == VMM_FAULT_PERMISSION && physical(PA_B)[16] == src[0]);
+  CHECK_OK(vmm_read_block(vmm, in_page, dst, 8));
+  CHECK(dst[0] == src[0]);
+
   CHECK_OK(vmm_unmap(vmm, GVA_A, 3 * VMM_PAGE_SIZE));
 }
 

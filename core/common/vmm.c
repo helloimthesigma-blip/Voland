@@ -626,6 +626,14 @@ Error vmm_read_block(VMM_Context *ctx, uint64_t gva, void *out, uint64_t size) {
   if (size == 0) return OK;
   if (!out) return ERR(RESULT_INVALID_ARGUMENT, "vmm_read_block: out is NULL");
   VMM_Fault fault;
+  /* Inside one page (most reads - the renderer's are small): one
+   * translation checks and finds it. */
+  if (is_valid_byte_range(gva, size) && (gva & VMM_PAGE_OFFSET_MASK) + size <= VMM_PAGE_SIZE) {
+    const uint8_t *host = vmm_translate_inline(ctx->l1, gva, VMM_PERM_R, &fault);
+    if (!host) return record_fault(ctx, &fault);
+    memcpy(out, host, (size_t)size);
+    return OK;
+  }
   if (!validate_byte_range(ctx->l1, gva, size, VMM_PERM_R, &fault)) {
     return record_fault(ctx, &fault);
   }
@@ -638,6 +646,12 @@ Error vmm_write_block(VMM_Context *ctx, uint64_t gva, const void *src, uint64_t 
   if (size == 0) return OK;
   if (!src) return ERR(RESULT_INVALID_ARGUMENT, "vmm_write_block: src is NULL");
   VMM_Fault fault;
+  if (is_valid_byte_range(gva, size) && (gva & VMM_PAGE_OFFSET_MASK) + size <= VMM_PAGE_SIZE) { /* as vmm_read_block */
+    uint8_t *host = vmm_translate_inline(ctx->l1, gva, VMM_PERM_W, &fault);
+    if (!host) return record_fault(ctx, &fault);
+    memcpy(host, src, (size_t)size);
+    return OK;
+  }
   if (!validate_byte_range(ctx->l1, gva, size, VMM_PERM_W, &fault)) {
     return record_fault(ctx, &fault);
   }
