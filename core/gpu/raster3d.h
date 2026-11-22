@@ -146,6 +146,10 @@ typedef struct Raster3d_Program {
   uint8_t global_slot[RASTER_PROGRAM_GLOBALS];
   uint16_t global_offset[RASTER_PROGRAM_GLOBALS];
   bool stores_traced; /* a pixel program's every STG address traced to a buffer (window mode can store) */
+  /* Its bytes' fast content hash (program_get): a later submission
+   * re-reads program.byte_size bytes once and compares this instead of
+   * growing the read, finding the end again and hashing with sm_hash. */
+  uint64_t content_hash;
   Sm_Program program;
 } Raster3d_Program;
 

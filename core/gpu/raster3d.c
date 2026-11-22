@@ -1007,10 +1007,22 @@ static void program_index_note(Raster3d *r, const Raster3d_Program *slot, bool c
   r->program_index[program_bucket(slot->program.address, compute)] = (uint16_t)(slot - r->programs + 1);
 }
 
+static uint64_t bytes_content_hash(const uint8_t *p, uint64_t n);
+
 static const Sm_Program *program_get(Raster3d *r, uint64_t address, const Gpu_Memory *mem) {
   r->tick++;
   Raster3d_Program *slot = program_find(r, address, false);
   if (slot && slot->validated == r->submission) {
+    slot->last_used = r->tick;
+    return &slot->program;
+  }
+  /* Unchanged since it was decoded (most submissions): the same bytes up
+   * to its end, so the end marker is where it was. One read and a fast
+   * hash; sm_hash (the program's identity) only runs for new code. */
+  const uint32_t known = slot && slot->valid ? slot->program.byte_size : 0u;
+  if (known && known <= RASTER_PROGRAM_READ_BYTES && mem->read(mem->user, address, r->program_bytes, known) &&
+      bytes_content_hash(r->program_bytes, known) == slot->content_hash) {
+    slot->validated = r->submission;
     slot->last_used = r->tick;
     return &slot->program;
   }
@@ -1027,6 +1039,7 @@ static const Sm_Program *program_get(Raster3d *r, uint64_t address, const Gpu_Me
   if (!extent) extent = got;
   const uint32_t hash = sm_hash(r->program_bytes, extent);
   if (slot && slot->program.hash == hash && slot->program.byte_size == extent) {
+    slot->content_hash = bytes_content_hash(r->program_bytes, extent);
     slot->validated = r->submission;
     slot->last_used = r->tick;
     return &slot->program;
@@ -1042,6 +1055,7 @@ static const Sm_Program *program_get(Raster3d *r, uint64_t address, const Gpu_Me
     }
   }
   sm_program_decode(r->program_bytes, extent, address, &slot->program);
+  slot->content_hash = bytes_content_hash(r->program_bytes, extent);
   program_index_note(r, slot, false);
   slot->globals_state = RASTER_GLOBALS_UNKNOWN;
   if (r->on_program_decoded) r->on_program_decoded(r->on_program_user, &slot->program);
@@ -1140,6 +1154,13 @@ static uint64_t content_hash_end(const Content_Hash *h) {
   uint64_t x = h->lane[0] ^ (h->lane[1] * 31u) ^ (h->lane[2] * 1009u) ^ (h->lane[3] * 65537u) ^ h->length;
   x = (x ^ (x >> 33)) * HASH_MUL;
   return x ^ (x >> 33);
+}
+
+static uint64_t bytes_content_hash(const uint8_t *p, uint64_t n) {
+  Content_Hash h;
+  content_hash_begin(&h, n);
+  content_hash_update(&h, p, n);
+  return content_hash_end(&h);
 }
 
 /* Hashes guest GPU memory [va, va + n) in chunks (callers hold the pool
@@ -4429,14 +4450,20 @@ static uint32_t gpu_gather(Raster3d *r, const Tex_Header *h, const Raster3d_Gpu_
   } else {
     return 0;
   }
+  /* Each level's place, once (not per layer: every draw sampling a cube
+   * map comes here). */
+  Tex_Level_Layout level_at[GATHER_MAX_LEVELS];
+  memset(level_at, 0, sizeof(level_at)); /* level 0 is the header's own */
+  bool level_ok[GATHER_MAX_LEVELS] = {true};
+  for (uint32_t v = 1; v < levels; v++) level_ok[v] = tex_level_layout(h, v, &level_at[v]);
   /* The sources: whether any was written since the last copies, and
    * which surfaces they are now. */
   uint32_t written = 0;
   uint64_t sources = 0;
   for (uint32_t k = 0; k < layers; k++)
     for (uint32_t v = 0; v < levels; v++) {
-      Tex_Level_Layout l;
-      if (v && !tex_level_layout(h, v, &l)) continue;
+      if (!level_ok[v]) continue;
+      const Tex_Level_Layout l = level_at[v];
       const Raster3d_Gpu_Surface *s = gpu_surface_at(r, h->address + k * layer_stride + (v ? l.offset : 0u), v ? l.width : h->width);
       if (!s) continue;
       if (!written || (int32_t)(s->written - written) > 0) written = s->written; /* ticks wrap */
@@ -4464,8 +4491,8 @@ static uint32_t gpu_gather(Raster3d *r, const Tex_Header *h, const Raster3d_Gpu_
   }
   for (uint32_t k = 0; k < layers; k++)
     for (uint32_t v = 0; v < levels; v++) {
-      Tex_Level_Layout l;
-      if (v && !tex_level_layout(h, v, &l)) continue;
+      if (!level_ok[v]) continue;
+      const Tex_Level_Layout l = level_at[v];
       const Raster3d_Gpu_Surface *s = gpu_surface_at(r, h->address + k * layer_stride + (v ? l.offset : 0u), v ? l.width : h->width);
       const uint32_t w = g->width >> v ? g->width >> v : 1u, hh = g->height >> v ? g->height >> v : 1u;
       if (!s || s->gpu_format != g->gpu_format || (v ? s->width < w || s->height < hh : s->width != w || s->height != hh))
