@@ -136,8 +136,8 @@ Other commands: `./voland dev` (live-reloading dev server), `./voland build`,
   WebAssembly memory and cross-origin isolation. Other browsers are untested.
 - About **6 GB of free memory**. The emulator reserves the Switch's full
   memory up front. Heavy games need more: Tears of the Kingdom at Lookout
-  Landing uses about 10 GB in all (the tab ~6.8 GB, Chrome's GPU process
-  ~3.1 GB; measured with macOS `footprint`), so a 16 GB Mac should close
+  Landing uses about 11 GB in all (the tab ~8 GB, Chrome's GPU process
+  ~3 GB; measured with macOS `footprint`), so a 16 GB Mac should close
   other large apps first.
 - A fast CPU. Speed comes mostly from single-thread performance plus up to
   3 extra cores for game threads.

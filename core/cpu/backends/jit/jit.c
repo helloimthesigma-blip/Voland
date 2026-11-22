@@ -66,8 +66,12 @@
  * removed until 7/8 of it remain. Each live region costs ~35 KB of engine
  * memory per host thread: TOTK on 3 cores (Node, 400k slices) peaked at
  * 6.3 GB with 32768, 5.4 GB with 24576 (+8% compiles, same speed) and
- * 4.4 GB with 16384, which thrashes (6x the compiles). */
-#define JIT_MAX_LIVE_REGIONS 24576u
+ * 4.4 GB with 16384, which thrashes (6x the compiles). In the browser
+ * at Lookout Landing (12 minutes standing, 3 cores) 24576 and 32768
+ * trimmed ~15k regions per 10 s once the area had streamed in and the
+ * frame rate sank from ~10 to ~5 fps; 40960 trimmed none and held 9-10.7
+ * fps for +1.2 GB in the tab (49152: +2.2 GB, no faster). */
+#define JIT_MAX_LIVE_REGIONS 40960u
 #define JIT_MODULE_BYTES (512u * 1024u)
 #define JIT_RECENT_BLOCKS 64u
 
