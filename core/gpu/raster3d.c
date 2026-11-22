@@ -1605,6 +1605,18 @@ static bool gpu_texture_native(Raster3d *r, Raster3d_Texture *t, const Tex_Heade
 static uint32_t g_cpu_compute_hash;
 static uint64_t g_draw_programs[2]; /* the draw being prepared: vertex, pixel program (diagnostics) */
 
+/* Whether this frame's periodic whole hashes have room for `bytes` more
+ * (counted if so); the first always does, however large. */
+static bool periodic_room(Raster3d *r, uint64_t bytes) {
+  if (r->periodic_epoch != r->texture_epoch) {
+    r->periodic_epoch = r->texture_epoch;
+    r->periodic_bytes = 0;
+  }
+  if (r->periodic_bytes && r->periodic_bytes + bytes > RASTER_TEXTURE_PERIODIC_BYTES) return false;
+  r->periodic_bytes += bytes;
+  return true;
+}
+
 static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const Gpu_Memory *mem, bool texels) {
   Raster3d_Texture *view = surface_view(r, tic);
   if (view) return view;
@@ -1638,7 +1650,7 @@ static Raster3d_Texture *texture_load(Raster3d *r, const uint32_t tic[8], const 
   uint64_t sample = 0;
   const bool sampled = guest_sample_hash(mem, h.address, raw_bytes, &sample);
   if (usable && sampled && t->raw_bytes == raw_bytes && t->sample_hash == sample &&
-      r->texture_epoch - t->full_epoch < RASTER_TEXTURE_FULL_EVERY) {
+      (r->texture_epoch - t->full_epoch < RASTER_TEXTURE_FULL_EVERY || (!t->forced && !periodic_room(r, raw_bytes)))) {
     t->validated = r->texture_epoch;
     return t;
   }

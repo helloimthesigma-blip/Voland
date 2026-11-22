@@ -71,6 +71,11 @@ struct Gpu_Stream;
 #define RASTER_TEXTURE_SAMPLES 64u
 #define RASTER_TEXTURE_SAMPLE_BYTES 64u
 #define RASTER_TEXTURE_FULL_EVERY 30u
+/* What a frame spends on those periodic whole hashes; a texture past it
+ * keeps its sampled check until a later frame has room. Textures a level
+ * loads together came due together every 30th frame: Super Mario
+ * Odyssey's ~70 MB took one frame. */
+#define RASTER_TEXTURE_PERIODIC_BYTES ((uint64_t)4 * 1024 * 1024)
 #define RASTER_TEXTURE_RAW_BYTES ((size_t)64 * 1024 * 1024) /* a 4096x4096 RGBA8 texture */
 #define RASTER_INLINE_INDICES 0x10000u
 #define RASTER_STREAMS 32u
@@ -298,6 +303,8 @@ typedef struct Raster3d {
   uint32_t draw_serial;
   uint64_t gpu_texture_bytes; /* sum of the cached textures' gpu_bytes */
   uint32_t texture_epoch;    /* decoded textures re-validate against guest memory once per epoch (frame) */
+  uint32_t periodic_epoch;   /* the epoch periodic_bytes counts in */
+  uint64_t periodic_bytes;   /* whole periodic hashes this epoch (RASTER_TEXTURE_PERIODIC_BYTES) */
   uint8_t *cbuf_data;       /* 2 stages x SM_CBUF_SLOTS x 64 KiB */
   Sm_Thread *thread;        /* one invocation's state (vertex work; band 0) */
   /* Pixel work runs in parallel over interleaved row bands (§13): one
