@@ -44,6 +44,10 @@ export interface VolandDebug {
   /** A core debug environment variable (as ?env=NAME=VALUE, but mid-run;
    * VOLAND_LOG_LEVEL=debug|info switches the core's log level). */
   readonly setEnv: (name: string, value: string) => void;
+  /** Frames presented so far, read from shared memory now (not the
+   * once-a-second __VOLAND_STATS__): tools/perf.mjs times the gaps
+   * between the game's frames with it. */
+  readonly presentsNow: () => number;
 }
 
 declare global {

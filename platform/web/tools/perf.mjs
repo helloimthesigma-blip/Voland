@@ -501,7 +501,10 @@ async function main() {
     await page.addInitScript(() => {
       const RESP_TICK_MS = 50;
       const GAPS_KEPT = 20;
-      const fresh = () => ({ longTasks: 0, longTaskMs: 0, longTaskMaxMs: 0, frames: 0, frameGapMaxMs: 0, slowFrames: 0, timerLateMaxMs: 0, timerLateSumMs: 0, timerTicks: 0, gaps: [] });
+      const PRESENT_GAP_MS = 50;
+      const PRESENT_GAPS_KEPT = 400;
+      const fresh = () => ({ longTasks: 0, longTaskMs: 0, longTaskMaxMs: 0, frames: 0, frameGapMaxMs: 0, slowFrames: 0, timerLateMaxMs: 0, timerLateSumMs: 0, timerTicks: 0, gaps: [],
+                             presentGaps: [], presentGapMaxMs: 0, presentGapCount: 0, presentGapSumMs: 0, startMs: performance.now() });
       let r = fresh();
       try {
         new PerformanceObserver((list) => {
@@ -512,8 +515,26 @@ async function main() {
           }
         }).observe({ type: "longtask", buffered: false });
       } catch { /* no longtask support */ }
-      let lastFrame = 0;
+      let lastFrame = 0, lastPresents = -1, lastPresentAt = 0;
       const frame = (t) => {
+        /* The game's own frames (the owner's "freezes every few seconds"):
+         * each gap between presents over PRESENT_GAP_MS, at its time in
+         * seconds from the window's start, so a periodic stall shows its
+         * period. Resolution is one animation frame. */
+        const presents = window.__VOLAND_DEBUG__?.presentsNow?.() ?? -1;
+        if (presents >= 0 && presents !== lastPresents) {
+          if (lastPresents >= 0 && lastPresentAt) {
+            const gap = t - lastPresentAt;
+            r.presentGapMaxMs = Math.max(r.presentGapMaxMs, gap);
+            if (gap > PRESENT_GAP_MS) {
+              r.presentGapCount++;
+              r.presentGapSumMs += gap;
+              if (r.presentGaps.length < PRESENT_GAPS_KEPT) r.presentGaps.push(`${((t - r.startMs) / 1000).toFixed(2)}:${gap.toFixed(0)}`);
+            }
+          }
+          lastPresents = presents;
+          lastPresentAt = t;
+        }
         if (lastFrame) {
           const gap = t - lastFrame;
           r.frames++;
@@ -782,12 +803,16 @@ async function main() {
           await sleep(500);
         } else if (cmd === "measure") {
           const before = await sample();
+          await page.evaluate(() => window.__VOLAND_RESP__?.reset());
           const startedAt = Date.now();
           await sleep(Number(arg) * 1000);
           const after = await sample();
           const wall = (Date.now() - startedAt) / 1000;
           const virtual = (after.perf.ticks - before.perf.ticks) / TICKS_PER_SECOND;
-          note = `fps ${((after.presents - before.presents) / wall).toFixed(2)} virtual ${(100 * virtual / wall).toFixed(1)}% of real time`;
+          const gaps = await page.evaluate(() => window.__VOLAND_RESP__?.read() ?? null);
+          note = `fps ${((after.presents - before.presents) / wall).toFixed(2)} virtual ${(100 * virtual / wall).toFixed(1)}% of real time` +
+                 (gaps ? ` | frame gaps > 50 ms: ${gaps.presentGapCount} (max ${gaps.presentGapMaxMs.toFixed(0)} ms)` : "");
+          if (gaps?.presentGaps.length) console.log(`  frame gaps (s:ms): ${gaps.presentGaps.join(" ")}`);
         } else if (cmd === "cheat") {
           const name = lines[done].slice(cmd.length).trim();
           const box = page.locator(".voland-cheats label", { hasText: name }).first().locator("input");
@@ -993,6 +1018,8 @@ async function main() {
       console.log(`  page            ${resp.longTasks} long tasks (${resp.longTaskMs.toFixed(0)} ms, max ${resp.longTaskMaxMs.toFixed(0)} ms); ` +
                   `${(resp.frames / wallS).toFixed(1)} rAF/s, ${resp.slowFrames} gaps > 50 ms (max ${resp.frameGapMaxMs.toFixed(0)} ms); ` +
                   `timer late avg ${(resp.timerLateSumMs / Math.max(1, resp.timerTicks)).toFixed(1)} ms, max ${resp.timerLateMaxMs.toFixed(0)} ms`);
+      console.log(`  frame gaps      ${resp.presentGapCount} gaps > 50 ms between presented frames (${resp.presentGapSumMs.toFixed(0)} ms in all, ` +
+                  `max ${resp.presentGapMaxMs.toFixed(0)} ms)` + (resp.presentGaps.length ? `\n  frame gaps (s:ms): ${resp.presentGaps.join(" ")}` : ""));
       results.responsiveness = resp;
     }
     results.window = {
