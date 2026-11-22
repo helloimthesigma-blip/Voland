@@ -77,7 +77,8 @@
  *   setting, e.g. frame-skip 2), "cpuspeed PERCENT" (the virtual CPU
  *   clock, as ?cpuspeed=), "measure S" (fps and virtual-time rate over S
  *   wall seconds), "profile-start" / "profile-stop" (the CPU and GPU
- *   workers sampled between the two; top self times to the log), "heap-start" / "heap-live" (the GPU
+ *   workers sampled between the two; top self times to the log), "profile-all-start" /
+ *   "profile-all-stop" (every worker, the core's pthreads too: each one's busy share and top self times), "heap-start" / "heap-live" (the GPU
  *   worker's heap size, and its allocations since heap-start still alive, by site: what a leak keeps), "cheat NAME" (switch on the running cheat whose name
  *   contains NAME, the rest of the line), "export-saves FILE" (the Saves
  *   panel's backup tar, for --restore-saves), "sleep MS", "go"
@@ -125,6 +126,7 @@ const SHOT_TIMEOUT_MS = 180_000;
 const ALLOC_SAMPLING_BYTES = 1024; /* --alloc: one sample per this many bytes allocated */
 const DRIVE_PROFILE_INTERVAL_US = 1000; /* the drive file's "profile-start": the sampling interval */
 const DRIVE_PROFILE_TOP = 14; /* ... and how many functions "profile-stop" lists per worker */
+const PROFILE_ALL_TOP = 4; /* --profile-all: functions named per worker without --profile-top */
 const HEAP_LIVE_SAMPLING_BYTES = 32768; /* "heap-start": one sample per this many bytes allocated */
 const HEAP_LIVE_TOP = 20; /* "heap-live": allocation sites listed */
 const BROWSER_CLOSE_WAIT_MS = 10_000;
@@ -370,6 +372,45 @@ async function attachToWorkers(cdp, pageUrl, patterns) {
   });
   await cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, pageSession);
   return Promise.race([all, sleep(10_000).then(() => { throw new Error("worker targets not found"); })]);
+}
+
+/** Every worker target - the core's pthreads too (the workers a worker
+ * started) - attached; their sessions after ATTACH_SETTLE_MS. */
+const ATTACH_SETTLE_MS = 3000;
+async function attachToAllWorkers(cdp, pageUrl) {
+  const { targetInfos } = await cdp.send("Target.getTargets");
+  const pageTarget = targetInfos.find((t) => t.type === "page" && t.url.startsWith(pageUrl));
+  if (!pageTarget) throw new Error("page target not found");
+  const { sessionId: pageSession } = await cdp.send("Target.attachToTarget", { targetId: pageTarget.targetId, flatten: true });
+  const sessions = [];
+  cdp.listeners.push((msg) => {
+    if (msg.method !== "Target.attachedToTarget") return;
+    sessions.push({ id: msg.params.sessionId, url: msg.params.targetInfo.url });
+    void cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
+                  msg.params.sessionId).catch(() => undefined);
+  });
+  await cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, pageSession);
+  await sleep(ATTACH_SETTLE_MS);
+  return sessions;
+}
+
+/** Each worker's busy share of `seconds` and its top self times (waits left out). */
+function workerBusy(profile, seconds, top) {
+  const byId = new Map(profile.nodes.map((n) => [n.id, n]));
+  const own = new Map();
+  let busy = 0;
+  for (let k = 0; k < profile.samples.length; k++) {
+    const name = byId.get(profile.samples[k])?.callFrame?.functionName || "(anonymous)";
+    /* helper_main (common/workers.c) only waits for work itself: the
+     * build inlines its condition wait, so its self time is idle. */
+    if (name === "(idle)" || name === "(program)" || /futex_wait|atomic_wait|cond_timedwait|^helper_main$/.test(name)) continue;
+    const us = profile.timeDeltas[k] ?? 0;
+    own.set(name, (own.get(name) ?? 0) + us);
+    busy += us;
+  }
+  const names = [...own.entries()].sort((a, b) => b[1] - a[1]).slice(0, top)
+    .map(([n, us]) => `${n} ${((100 * us) / (seconds * 1e6)).toFixed(1)}%`).join(", ");
+  return { busy, own, line: `busy ${((100 * busy) / (seconds * 1e6)).toFixed(0)}%${names ? `: ${names}` : ""}` };
 }
 
 async function attachToCpuWorker(cdp, pageUrl) {
@@ -787,6 +828,7 @@ async function main() {
       let done = 0;
       let driveProfile = null; /* "profile-start": the CDP connection and its worker sessions */
       let driveHeap = null; /* "heap-start": the CDP connection and the GPU worker's session */
+      let driveAll = null; /* "profile-all-start": the CDP connection, every worker's session, the start time */
       console.log(`drive: waiting for commands in ${opts.drive}`);
       for (;;) {
         let lines = [];
@@ -884,6 +926,32 @@ async function main() {
           } catch (e) {
             note = `failed: ${e}`; /* the run goes on unprofiled */
           }
+        } else if (cmd === "profile-all-start") {
+          /* profile-all-start ... profile-all-stop: every worker (the core's
+           * pthreads too: guest cores, the GPU thread) sampled in between. */
+          try {
+            if (!driveAll) {
+              const cdp = await Cdp.connect(opts.debugPort);
+              driveAll = { cdp, sessions: await attachToAllWorkers(cdp, baseUrl), from: 0 };
+            }
+            for (const session of driveAll.sessions) {
+              await driveAll.cdp.send("Profiler.enable", {}, session.id);
+              await driveAll.cdp.send("Profiler.setSamplingInterval", { interval: DRIVE_PROFILE_INTERVAL_US }, session.id);
+              await driveAll.cdp.send("Profiler.start", {}, session.id);
+            }
+            driveAll.from = Date.now();
+          } catch (e) {
+            note = `failed: ${e}`;
+          }
+        } else if (cmd === "profile-all-stop" && driveAll) {
+          mkdirSync(opts.outDir, { recursive: true });
+          const seconds = (Date.now() - driveAll.from) / 1000;
+          console.log(`drive: every worker over ${seconds.toFixed(1)} s (self time; profiles in ${opts.outDir}):`);
+          for (const [i, session] of driveAll.sessions.entries()) {
+            const { profile } = await driveAll.cdp.send("Profiler.stop", {}, session.id);
+            writeFileSync(join(opts.outDir, `drive-${done + 1}-worker-${i}.cpuprofile`), JSON.stringify(profile));
+            console.log(`  worker ${i} (${session.url.split("/").pop()}): ${workerBusy(profile, seconds, DRIVE_PROFILE_TOP).line}`);
+          }
         } else if (cmd === "heap-start") {
           /* heap-start ... heap-live: the GPU worker's allocations sampled in between that are still
            * alive at heap-live (collected ones left out) - what a leak keeps, by allocation site. */
@@ -921,6 +989,7 @@ async function main() {
         console.log(`drive: ${done} done ${lines[done - 1]} ${note}`);
         if (cmd === "go") {
           driveProfile?.cdp.close();
+          driveAll?.cdp.close();
           driveHeap?.cdp.close();
           break;
         }
@@ -1069,19 +1138,7 @@ async function main() {
       /* Every worker target (the pthreads too), sampled together. */
       const cdp = await Cdp.connect(opts.debugPort);
       try {
-        const { targetInfos } = await cdp.send("Target.getTargets");
-        const pageTarget = targetInfos.find((t) => t.type === "page" && t.url.startsWith(baseUrl));
-        const { sessionId: pageSession } = await cdp.send("Target.attachToTarget", { targetId: pageTarget.targetId, flatten: true });
-        const sessions = [];
-        cdp.listeners.push((msg) => {
-          if (msg.method !== "Target.attachedToTarget") return;
-          sessions.push({ id: msg.params.sessionId, url: msg.params.targetInfo.url });
-          /* Workers a worker started (the core's pthreads): attach to those too. */
-          void cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true },
-                        msg.params.sessionId).catch(() => undefined);
-        });
-        await cdp.send("Target.setAutoAttach", { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, pageSession);
-        await sleep(3000);
+        const sessions = await attachToAllWorkers(cdp, baseUrl);
         for (const s of sessions) {
           await cdp.send("Profiler.enable", {}, s.id);
           await cdp.send("Profiler.setSamplingInterval", { interval: 1000 }, s.id);
@@ -1095,24 +1152,10 @@ async function main() {
         for (const [i, s] of sessions.entries()) {
           const { profile } = await cdp.send("Profiler.stop", {}, s.id);
           writeFileSync(join(opts.outDir, `worker-${i}-${Date.now()}.cpuprofile`), JSON.stringify(profile));
-          const byId = new Map(profile.nodes.map((n) => [n.id, n]));
-          const own = new Map();
-          let busy = 0;
-          for (let k = 0; k < profile.samples.length; k++) {
-            const frame = byId.get(profile.samples[k])?.callFrame;
-            const name = frame?.functionName || "(anonymous)";
-            /* helper_main (common/workers.c) only waits for work itself: the
-             * build inlines its condition wait, so its self time is idle. */
-            if (name === "(idle)" || name === "(program)" || /futex_wait|atomic_wait|cond_timedwait|^helper_main$/.test(name)) continue;
-            const us = profile.timeDeltas[k] ?? 0;
-            merged.set(name, (merged.get(name) ?? 0) + us);
-            own.set(name, (own.get(name) ?? 0) + us);
-            busy += us;
-            total += us;
-          }
-          const top = [...own.entries()].sort((a, b) => b[1] - a[1]).slice(0, opts.profileTop ?? 4)
-            .map(([n, us]) => (opts.profileTop ? `${n} ${((100 * us) / (opts.profile * 1e6)).toFixed(1)}%` : n)).join(", ");
-          perWorker.push(`  worker ${i} (${s.url.split("/").pop()}): busy ${((100 * busy) / (opts.profile * 1e6)).toFixed(0)}%${top ? `: ${top}` : ""}`);
+          const { busy, own, line } = workerBusy(profile, opts.profile, opts.profileTop ?? PROFILE_ALL_TOP);
+          for (const [name, us] of own) merged.set(name, (merged.get(name) ?? 0) + us);
+          total += busy;
+          perWorker.push(`  worker ${i} (${s.url.split("/").pop()}): ${line}`);
         }
         console.log(`\nPer worker (${opts.profile} s):`);
         for (const line of perWorker) console.log(line);
