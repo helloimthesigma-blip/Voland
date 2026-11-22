@@ -875,11 +875,24 @@ static void macro_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t method
 
 /* LOAD_CONSTANT_BUFFER(i): a word into the selected buffer at the load
  * offset, which then advances. */
+/* The constant buffer words LOAD_CONSTANT_BUFFER collected, written. A
+ * word at a time, the write (its translation, the renderer's check of
+ * the constant buffers it holds) cost more than the data. */
+static void constant_buffer_flush(Gpu_Channel *ch, const Gpu_Memory *mem) {
+  if (!ch->cb_pending_count) return;
+  if (!mem->write(mem->user, ch->cb_pending_va, ch->cb_pending, (uint64_t)ch->cb_pending_count * 4u)) ch->faults++;
+  ch->cb_pending_count = 0;
+}
+
 static void constant_buffer_load(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t data) {
   const uint32_t offset = ch->engine3d[M3D_CB_LOAD_OFFSET];
   if (offset + 4u <= ch->engine3d[M3D_CB_SELECTOR_SIZE]) {
-    const uint64_t va = addr40(ch->engine3d[M3D_CB_SELECTOR_ADDRESS_HI], ch->engine3d[M3D_CB_SELECTOR_ADDRESS_LO]);
-    if (!mem->write(mem->user, va + offset, &data, sizeof(data))) ch->faults++;
+    const uint64_t va = addr40(ch->engine3d[M3D_CB_SELECTOR_ADDRESS_HI], ch->engine3d[M3D_CB_SELECTOR_ADDRESS_LO]) + offset;
+    if (ch->cb_pending_count &&
+        (ch->cb_pending_count == GPU_CB_PENDING_WORDS || va != ch->cb_pending_va + (uint64_t)ch->cb_pending_count * 4u))
+      constant_buffer_flush(ch, mem);
+    if (!ch->cb_pending_count) ch->cb_pending_va = va;
+    ch->cb_pending[ch->cb_pending_count++] = data;
   }
   ch->engine3d[M3D_CB_LOAD_OFFSET] = offset + 4u;
 }
@@ -1074,6 +1087,7 @@ static void engine3d_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t met
     constant_buffer_load(ch, mem, data);
     return;
   }
+  constant_buffer_flush(ch, mem); /* (a macro's methods come here directly) */
   if (is_i2m_method(method)) {
     ch->engine3d[method] = data;
     i2m_method(ch, mem, method - GPU_I2M_FIRST, data);
@@ -1121,6 +1135,9 @@ static void compute_launch(Gpu_Channel *ch, const Gpu_Memory *mem) {
 void gpu_channel_method(Gpu_Channel *ch, const Gpu_Memory *mem, uint32_t subchannel, uint32_t method, uint32_t data) {
   ch->methods++;
   subchannel &= GPU_SUBCHANNELS - 1u;
+  if (ch->cb_pending_count && !(ch->subchannel_class[subchannel] == GPU_CLASS_3D && method >= M3D_CB_LOAD_FIRST &&
+                                method <= M3D_CB_LOAD_LAST))
+    constant_buffer_flush(ch, mem); /* every other method sees the words written */
   if (method < HOST_METHODS) {
     host_method(ch, mem, subchannel, method, data);
     return;
@@ -1243,6 +1260,7 @@ void gpu_channel_submit_words(Gpu_Channel *ch, const Gpu_Memory *mem, const uint
     }
   }
   gpu_channel_flush_macro(ch, mem);
+  constant_buffer_flush(ch, mem);
   if (mem->renderer) raster3d_flush(mem->renderer, mem);
 }
 

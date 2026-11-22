@@ -59,6 +59,7 @@
 #define GPU_MME_MACROS 0x80u
 #define GPU_MME_MAX_PARAMS 0x4000u
 #define GPU_LINE_BYTES 0x10000u       /* longest DMA line handled */
+#define GPU_CB_PENDING_WORDS 256u /* a constant buffer update is usually a few hundred bytes */
 #define GPU_FETCH_WORDS 0x1000u       /* pushbuffer words fetched at a time */
 #define GPU_INLINE_INDICES 0x4000u    /* DRAW_INLINE_INDEX words between BEGIN and END */
 #define GPU_I2M_FIRST 0x60u           /* inline-to-memory methods (3D, compute, I2M classes) */
@@ -129,6 +130,11 @@ typedef struct Gpu_Channel {
   uint64_t faults;                           /* reads/writes to unmapped GPU VA */
   uint64_t zpass_samples;                    /* reported sample count, grows per report */
   uint64_t report_time;                      /* reported timestamp, grows per report */
+  /* LOAD_CONSTANT_BUFFER words not yet written: consecutive ones go to
+   * guest memory as one write, before any other method runs. */
+  uint64_t cb_pending_va;
+  uint32_t cb_pending_count;
+  uint32_t cb_pending[GPU_CB_PENDING_WORDS];
   uint8_t line[GPU_LINE_BYTES];              /* DMA staging */
   uint8_t line_out[GPU_LINE_BYTES];
   uint32_t fetch[GPU_FETCH_WORDS];           /* pushbuffer staging */

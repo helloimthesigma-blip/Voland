@@ -26,8 +26,10 @@ static bool fake_read(void *user, uint64_t va, void *out, uint64_t size) {
   memcpy(out, g_mem + (va - MEM_BASE), size);
   return true;
 }
+static uint32_t g_writes; /* fake_write calls */
 static bool fake_write(void *user, uint64_t va, const void *src, uint64_t size) {
   (void)user;
+  g_writes++;
   if (va < MEM_BASE || va - MEM_BASE + size > MEM_BYTES) return false;
   memcpy(g_mem + (va - MEM_BASE), src, size);
   return true;
@@ -411,10 +413,35 @@ static void test_mme(void) {
   const uint32_t words[3] = {0x11111111, 0x22222222, 0x33333333};
   g_pb[g_pb_len++] = header(3, 2, 0x8E4, 3); /* non-incrementing: offset advances itself */
   for (int i = 0; i < 3; i++) g_pb[g_pb_len++] = words[i];
+  g_writes = 0;
   submit();
   uint32_t got[3];
   memcpy(got, g_mem + 0x808, sizeof(got));
   CHECK(got[0] == 0x11111111 && got[1] == 0x22222222 && got[2] == 0x33333333 && g_channel.engine3d[0x8E3] == 20);
+  CHECK(g_writes == 1); /* consecutive words: one write */
+
+  /* The words are in memory before any other method runs (a copy in the
+   * same submission reads them); a jump in the offset starts another
+   * write. */
+  one(1, 0, 0xB0B5);
+  one(2, 0x8E3, 0x40);
+  const uint32_t more[2] = {0x44444444, 0x55555555};
+  port(2, 0x8E4, more, 2);
+  set_offsets(MEM_BASE + 0x840, MEM_BASE + 0x900);
+  one(1, R(0x418), 8);
+  one(1, LAUNCH, 2u | (1u << 7) | (1u << 8));
+  one(2, 0x8E3, 0x10);
+  port(2, 0x8E4, words, 1);
+  one(2, 0x8E3, 0x20);
+  port(2, 0x8E4, words + 1, 1);
+  g_writes = 0;
+  submit();
+  memcpy(got, g_mem + 0x900, 2u * sizeof(got[0]));
+  CHECK(got[0] == 0x44444444 && got[1] == 0x55555555);
+  memcpy(got, g_mem + 0x810, sizeof(got[0]));
+  memcpy(got + 1, g_mem + 0x820, sizeof(got[0]));
+  CHECK(got[0] == 0x11111111 && got[1] == 0x22222222);
+  CHECK(g_writes == 4); /* the pair, the copy, then each lone word */
 }
 
 
