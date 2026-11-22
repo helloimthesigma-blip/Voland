@@ -23,3 +23,48 @@ void cpu_set_multicore(bool on) {
   g_multicore = on;
 }
 bool cpu_multicore(void) { return g_multicore; }
+
+/* The exclusive-access watch (cpu.h). Static: one process at a time. */
+#define CPU_WATCH_RING 2048u
+typedef struct CPU_Watch_Record {
+  uint64_t sequence; /* 0: empty */
+  uint64_t tls;
+  uint32_t value, desired, now;
+  uint8_t kind, flags;
+} CPU_Watch_Record;
+uint64_t g_cpu_watch_gva;
+static CPU_Watch_Record g_watch_ring[CPU_WATCH_RING];
+static uint64_t g_watch_next = 1;
+
+void cpu_watch_set(uint64_t gva) {
+  g_cpu_watch_gva = gva;
+  if (gva) log_warn("[watch-x] recording every exclusive access to 0x%llx", (unsigned long long)gva);
+}
+
+void cpu_watch_note(CPU_Watch_Kind kind, uint64_t tls, uint32_t value, uint32_t desired, uint32_t flags, uint32_t now) {
+  const uint64_t sequence = __atomic_fetch_add(&g_watch_next, 1u, __ATOMIC_SEQ_CST);
+  CPU_Watch_Record *r = &g_watch_ring[sequence % CPU_WATCH_RING];
+  r->tls = tls;
+  r->value = value;
+  r->desired = desired;
+  r->now = now;
+  r->kind = (uint8_t)kind;
+  r->flags = (uint8_t)flags;
+  __atomic_store_n(&r->sequence, sequence, __ATOMIC_RELEASE);
+}
+
+void cpu_watch_log(void) {
+  static const char *const names[] = {"load-ex", "store-ex", "k-read", "k-write"};
+  if (!g_cpu_watch_gva) return;
+  const uint64_t next = __atomic_load_n(&g_watch_next, __ATOMIC_ACQUIRE);
+  const uint64_t first = next > CPU_WATCH_RING ? next - CPU_WATCH_RING : 1u;
+  log_warn("[watch-x] the latest %llu accesses to 0x%llx:", (unsigned long long)(next - first),
+           (unsigned long long)g_cpu_watch_gva);
+  for (uint64_t k = first; k < next; k++) {
+    const CPU_Watch_Record *r = &g_watch_ring[k % CPU_WATCH_RING];
+    if (__atomic_load_n(&r->sequence, __ATOMIC_ACQUIRE) != k) continue;
+    log_warn("[watch-x]   #%llu tls 0x%llx %s 0x%x -> 0x%x flags %u, now 0x%x", (unsigned long long)k,
+             (unsigned long long)r->tls, r->kind < sizeof(names) / sizeof(names[0]) ? names[r->kind] : "?", r->value,
+             r->desired, r->flags, r->now);
+  }
+}

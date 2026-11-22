@@ -601,6 +601,23 @@ core nothing changes.
   (`scheduler_note_sync`: each thread's latest mutex and condvar events,
   plus a process-wide timeline) is the tool for the next such freeze.
   AArch64's store-exclusives are unchanged.
+- **The freeze is rarer, not gone.** On 2026-11-22 one race in 20 froze in
+  the same shape: subsdk0's mutex word named a job worker (owner plus the
+  waiters bit), two threads waited in ArbitrateLock for ever, and the
+  worker sat idle in its job loop - its last kernel step on the word a
+  release, so it had taken and left the mutex in user space. The SDK's
+  lock and unlock (`tests/guest/mutexes.s`, and `mutexes32.s` in AArch32,
+  instruction for instruction) on three pinned cores do not reproduce it,
+  on the interpreters or the JIT, sliced or free-running. The tool for
+  the next one: `VOLAND_WATCH_EXCLUSIVE=GVA` (or `MODULE+OFFSET`, e.g.
+  `subsdk0+0x15f488` for this mutex) records every load- and
+  store-exclusive of that word on the A32 interpreter path - with several
+  cores the A32 JIT sends all its exclusives there - and the kernel's
+  reads and writes of it, in one ring numbered by an atomic counter (a
+  store-exclusive takes its number while it holds the granule), so the
+  thread dump shows the true order of every core's steps (`cpu.h`,
+  `cpu_watch_*`). One compare per exclusive when off; a race with it on
+  ran at full speed.
 - **The exclusive monitor** is still cleared at every `run()` entry, and
   the grace rule (keep running up to 64 instructions past the budget
   while a monitor is held) still applies per core.

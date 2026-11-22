@@ -190,4 +190,28 @@ const CPU_Backend *cpu_get_active_backend(void);
 void cpu_set_multicore(bool on);
 bool cpu_multicore(void);
 
+/* Exclusive-access watch (diagnostics, docs/PARALLEL.md "Memory model"):
+ * with a word set (cpu_watch_set, VOLAND_WATCH_EXCLUSIVE in the
+ * emulator), every load- and store-exclusive of that word and the
+ * kernel's reads and writes of it go into one ring, numbered by one
+ * atomic counter - the order the steps of all cores happened in (a
+ * store-exclusive takes its number while it holds the granule).
+ * cpu_watch_log prints the latest. Each step names its thread by TLS
+ * address (TPIDRRO_EL0 / TPIDRURO, a kernel thread's tls_gva). */
+typedef enum CPU_Watch_Kind {
+  CPU_WATCH_LOAD_EXCLUSIVE,  /* value: what it read */
+  CPU_WATCH_STORE_EXCLUSIVE, /* value: what the load read, desired: the store, flags: CPU_WATCH_* */
+  CPU_WATCH_KERNEL_READ,     /* ArbitrateLock: value: the word, desired: owner | waiters it expected */
+  CPU_WATCH_KERNEL_WRITE,    /* value: the word before, desired: after */
+} CPU_Watch_Kind;
+#define CPU_WATCH_STORED 1u        /* the store-exclusive wrote */
+#define CPU_WATCH_MONITOR 2u       /* its monitor held this address and size */
+#define CPU_WATCH_GRANULE 4u       /* no exclusive store to the granule since the load */
+extern uint64_t g_cpu_watch_gva;   /* 0: off */
+static inline bool cpu_watching(uint64_t gva) { return g_cpu_watch_gva != 0 && gva == g_cpu_watch_gva; }
+void cpu_watch_set(uint64_t gva);
+/* `now`: the word as it reads after the step. */
+void cpu_watch_note(CPU_Watch_Kind kind, uint64_t tls, uint32_t value, uint32_t desired, uint32_t flags, uint32_t now);
+void cpu_watch_log(void);
+
 #endif /* SWITCH_CPU_CPU_H */

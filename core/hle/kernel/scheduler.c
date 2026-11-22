@@ -94,6 +94,15 @@ void scheduler_log_sync_timeline(const Scheduler *sched) {
     log_warn("[threads]   %llu %s 0x%llx 0x%x at tick %llu", (unsigned long long)r->thread_id, sync_name(r->event),
              (unsigned long long)r->address, r->value, (unsigned long long)r->tick);
   }
+  if (g_cpu_watch_gva) { /* the exclusive-access watch names threads by TLS */
+    for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+      const Sched_Thread *t = &sched->threads[i];
+      if (t->state != THREAD_STATE_FREE)
+        log_warn("[watch-x] thread %llu: tls 0x%llx", (unsigned long long)t->thread_id,
+                 (unsigned long long)t->thread.tls_gva);
+    }
+    cpu_watch_log();
+  }
   if (!n) return;
   const uint64_t last = g_sync_timeline[(g_sync_timeline_next - 1u) % SCHEDULER_SYNC_TIMELINE].tick;
   for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {

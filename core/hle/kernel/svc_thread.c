@@ -374,12 +374,27 @@ static bool store_word(HLE_Context *c, uint64_t address, uint32_t value) {
   return true;
 }
 
+/* The exclusive-access watch (cpu.h): a kernel step on a watched word,
+ * by `thread`; `flags` is the step's own detail. */
+#define WATCH_FLAGS_MAX 255u
+static void watch_kernel(HLE_Context *c, const Sched_Thread *thread, CPU_Watch_Kind kind, uint64_t address,
+                         uint32_t value, uint32_t desired, uint32_t flags) {
+  uint32_t now = 0;
+  (void)vmm_read32(c->vmm, address, &now);
+  cpu_watch_note(kind, thread ? thread->thread.tls_gva : 0u, value, desired,
+                 flags < WATCH_FLAGS_MAX ? flags : WATCH_FLAGS_MAX, now);
+}
+
 /* Releases the mutex at `address` to its best waiter (or to nobody). */
 static uint32_t release_mutex(HLE_Context *c, Sched_Thread *self, uint64_t address, Sync_Event event) {
   uint32_t waiters = 0;
   Sched_Thread *next = best_waiter(c->scheduler, WAIT_ARBITER_LOCK, address, &waiters);
   const uint32_t value = next ? (next->wait_tag | (waiters > 1u ? HLE_MUTEX_HAS_WAITERS : 0u)) : 0u;
+  uint32_t before = 0;
+  const bool watched = cpu_watching(address);
+  if (watched) (void)vmm_read32(c->vmm, address, &before);
   if (!store_word(c, address, value)) return HLE_RESULT_INVALID_MEMORY_STATE;
+  if (watched) watch_kernel(c, self, CPU_WATCH_KERNEL_WRITE, address, before, value, waiters); /* flags: waiters */
   if (self) scheduler_note_sync(c->scheduler, self, event, address, value);
   if (next) {
     scheduler_note_sync(c->scheduler, next, SYNC_HANDED, address, value);
@@ -397,6 +412,9 @@ void hle_svc_arbitrate_lock(HLE_Context *c, CPU_State *s) {
   if (!error_is_ok(vmm_read32(c->vmm, address, &value))) { r->x[0] = HLE_RESULT_INVALID_MEMORY_STATE; return; }
   r->x[0] = HLE_RESULT_SUCCESS;
   Sched_Thread *self = current(c, s);
+  if (cpu_watching(address)) /* flags: 1 if it waits */
+    watch_kernel(c, self, CPU_WATCH_KERNEL_READ, address, value, owner | HLE_MUTEX_HAS_WAITERS,
+                 value == (owner | HLE_MUTEX_HAS_WAITERS) ? 1u : 0u);
   if (value != (owner | HLE_MUTEX_HAS_WAITERS)) { /* the lock changed hands already */
     if (self) scheduler_note_sync(c->scheduler, self, SYNC_LOCK_SKIP, address, value);
     return;
@@ -461,6 +479,9 @@ void hle_svc_signal_process_wide_key(HLE_Context *c, CPU_State *s) {
       scheduler_wake(c->scheduler, t, HLE_RESULT_INVALID_MEMORY_STATE);
       continue;
     }
+    if (cpu_watching(t->mutex_address))
+      watch_kernel(c, t, CPU_WATCH_KERNEL_WRITE, t->mutex_address, value,
+                   value == 0 ? t->wait_tag : (value | HLE_MUTEX_HAS_WAITERS), 0u);
     if (value == 0) {
       scheduler_note_sync(c->scheduler, t, SYNC_COND_TAKEN, t->mutex_address, t->wait_tag);
       scheduler_wake(c->scheduler, t, HLE_RESULT_SUCCESS);

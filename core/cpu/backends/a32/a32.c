@@ -351,10 +351,20 @@ static Interp_Status load_store_extra(A32_State *a, uint32_t insn) {
  * against what the LDREX read, so a store by another core in between
  * makes it fail. Exclusives are aligned here (an alignment fault
  * otherwise, as on hardware). */
+/* The exclusive-access watch (cpu.h): this store-exclusive, numbered
+ * while it still holds the granule when it claimed it. */
+static void watch_store_exclusive(A32_State *a, uint32_t address, uint32_t desired, uint32_t flags) {
+  uint32_t expected = 0, now = 0;
+  memcpy(&expected, a->s.exclusive_value, sizeof(expected));
+  (void)a32_read(a, address, &now, sizeof(now));
+  cpu_watch_note(CPU_WATCH_STORE_EXCLUSIVE, a->s.tpidrro_el0, expected, desired, flags, now);
+}
+
 static Interp_Status store_exclusive_shared(A32_State *a, uint32_t address, uint32_t size, uint32_t rd, uint32_t rt) {
   uint32_t *seq = interp_exclusive_seq_slot(address); /* the ABA check (interp_internal.h) */
-  bool pass = a->s.exclusive_valid && a->s.exclusive_address == address && a->s.exclusive_size == size &&
-              interp_exclusive_claim(seq, a->s.exclusive_seq);
+  const bool monitor = a->s.exclusive_valid && a->s.exclusive_address == address && a->s.exclusive_size == size;
+  bool pass = monitor && interp_exclusive_claim(seq, a->s.exclusive_seq);
+  const uint32_t v[2] = {a32_reg(a, rt), size == 8u ? a32_reg(a, rt + 1u) : 0u};
   if (pass) {
     VMM_Fault fault;
     uint8_t *host = vmm_translate_inline(a->s.l1, address, VMM_PERM_W, &fault);
@@ -363,9 +373,12 @@ static Interp_Status store_exclusive_shared(A32_State *a, uint32_t address, uint
       a->s.fault_address = fault.gva;
       return INTERP_FAULT;
     }
-    const uint32_t v[2] = {a32_reg(a, rt), size == 8u ? a32_reg(a, rt + 1u) : 0u};
     pass = interp_compare_and_swap(host, a->s.exclusive_value, v, size);
+    if (cpu_watching(address))
+      watch_store_exclusive(a, address, v[0], CPU_WATCH_MONITOR | CPU_WATCH_GRANULE | (pass ? CPU_WATCH_STORED : 0u));
     interp_exclusive_release(seq, a->s.exclusive_seq, pass);
+  } else if (cpu_watching(address)) {
+    watch_store_exclusive(a, address, v[0], monitor ? CPU_WATCH_MONITOR : 0u);
   }
   /* A full fence after every store-exclusive, whether it stored or not.
    * Without it Mario Kart 8 Deluxe froze about once in two Grand Prix
@@ -422,6 +435,7 @@ static Interp_Status synchronization(A32_State *a, uint32_t insn) {
     a->s.exclusive_size = size;
     memcpy(a->s.exclusive_value, v, sizeof(v)); /* for the multicore compare-and-swap */
     a->s.exclusive_seq = seq;
+    if (cpu_watching(address)) cpu_watch_note(CPU_WATCH_LOAD_EXCLUSIVE, a->s.tpidrro_el0, v[0], 0u, 0u, v[0]);
     a32_set_reg(a, rd, v[0]);
     if (size == 8u) a32_set_reg(a, rd + 1u, v[1]);
     if (multicore && ordered == 2u) __atomic_thread_fence(__ATOMIC_SEQ_CST); /* LDAEX: acquire */

@@ -683,6 +683,8 @@ static const CPU_Backend* a32_backend_for(const CPU_Backend* base) {
   (void)base;
   return &CPU_BACKEND_A32;
 }
+static uint64_t watch_word_address(const Emulator* emulator, const char* spec, size_t length);
+
 
 /* Shared tail of every load: arm the main thread (Horizon entry ABI) and
  * adopt it into the scheduler. On failure the process is torn down. */
@@ -743,6 +745,9 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
   fs_set_addons(&emulator->fs, emulator->addon_ids, emulator->addon_romfs, emulator->addon_count);
   ns_set_addons(&emulator->ns, emulator->addon_indices, emulator->addon_count);
   emulator->program_loaded = true;
+  /* VOLAND_WATCH_EXCLUSIVE=GVA or MODULE+OFFSET: the exclusive-access watch (cpu.h). */
+  const char* watch_exclusive = getenv("VOLAND_WATCH_EXCLUSIVE");
+  cpu_watch_set(watch_exclusive ? watch_word_address(emulator, watch_exclusive, strlen(watch_exclusive)) : 0u);
   log_info("[emulator] program '%s' loaded; main thread armed at pc=0x%010llx",
            emulator->process.npdm.name, (unsigned long long)emulator->process.entry_point);
   log_notice("game loaded: %s (title %016llx, %s, %u code modules)", emulator->process.npdm.name,
