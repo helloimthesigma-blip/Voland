@@ -5314,7 +5314,7 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
   Wgsl_Program_Desc *d = &g->vs_desc;
   wgsl_default_desc(ctx->vs, d);
   /* Texture bindings come with the pixel program's (gpu_prepare_textures). */
-  memset(d->binding_of, WGSL_NO_BINDING, sizeof(d->binding_of));
+  wgsl_clear_bindings(d, ctx->vs);
   d->texture_count = 0;
   d->hw_sample_mask = 0;
   d->planar_mask = 0;
@@ -5679,13 +5679,13 @@ static bool gpu_prepare_textures(Raster_State *rs, const Gpu_Probe *pixel_probe)
   combined = *pixel_probe;
   const bool vs_textures = g->vs_mode && vs_samples_textures(ctx->vs);
   if (vs_textures) {
-    memset(g->vs_desc.binding_of, WGSL_NO_BINDING, sizeof(g->vs_desc.binding_of));
+    wgsl_clear_bindings(&g->vs_desc, ctx->vs);
     (void)gpu_static_probe_append(ctx->vs, &ctx->env[0], true, &combined);
   }
   const Gpu_Probe *probe = &combined;
   /* One binding per distinct handle. */
   Wgsl_Program_Desc *desc = &g->desc;
-  memset(desc->binding_of, WGSL_NO_BINDING, sizeof(desc->binding_of));
+  wgsl_clear_bindings(desc, ctx->ps);
   desc->texture_count = 0;
   desc->hw_sample_mask = 0;
   desc->planar_mask = 0;
@@ -7272,7 +7272,7 @@ static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute
   static Gpu_Probe probe;
   probe.count = 0;
   (void)gpu_static_probe_append(program, env, false, &probe);
-  memset(desc.binding_of, WGSL_NO_BINDING, sizeof(desc.binding_of));
+  wgsl_clear_bindings(&desc, program);
   desc.texture_count = 0;
   desc.hw_sample_mask = 0;
   desc.planar_mask = 0;

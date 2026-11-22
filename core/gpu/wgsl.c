@@ -21,6 +21,7 @@
 
 #include <ctype.h>
 #include <stdarg.h>
+#include <stddef.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -3210,9 +3211,17 @@ static bool is_texture_op(uint16_t op) {
   }
 }
 
+_Static_assert(offsetof(Wgsl_Program_Desc, binding_of) == 0 &&
+                   offsetof(Wgsl_Program_Desc, texture_count) == sizeof(((Wgsl_Program_Desc *)0)->binding_of),
+               "wgsl_default_desc zeroes the fields after binding_of from texture_count on");
+void wgsl_clear_bindings(Wgsl_Program_Desc *desc, const Sm_Program *program) {
+  memset(desc->binding_of, WGSL_NO_BINDING, program->word_count < SM_MAX_WORDS ? program->word_count : SM_MAX_WORDS);
+}
+
 void wgsl_default_desc(const Sm_Program *program, Wgsl_Program_Desc *desc) {
-  memset(desc, 0, sizeof(*desc));
-  memset(desc->binding_of, WGSL_NO_BINDING, sizeof(desc->binding_of));
+  /* Every field after binding_of (the first) zeroed; binding_of only as far as the program reaches. */
+  memset(&desc->texture_count, 0, sizeof(*desc) - offsetof(Wgsl_Program_Desc, texture_count));
+  wgsl_clear_bindings(desc, program);
   memset(desc->varying_location, 0xff, sizeof(desc->varying_location));
   const Sm_Header *h = &program->header;
   for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT && desc->varying_count < WGSL_MAX_VARYINGS; v++) {

@@ -276,6 +276,10 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
  * each texture instruction its own float binding while they last, and one
  * float target per render target the output map writes. */
 void wgsl_default_desc(const Sm_Program *program, Wgsl_Program_Desc *desc);
+/* desc->binding_of over `program`'s words (all a translation or hash of it
+ * reads) to WGSL_NO_BINDING: the whole 4 KB array, cleared several times
+ * per draw, was ~240 MB of memset per frame in Tears of the Kingdom. */
+void wgsl_clear_bindings(Wgsl_Program_Desc *desc, const Sm_Program *program);
 
 /* FNV-1a over the descriptor's meaningful bytes (the WGSL cache key, with
  * the program's hash). */
