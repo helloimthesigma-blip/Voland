@@ -124,6 +124,7 @@
 #define MAX_POLY 12u
 #define VERTEX_CACHE 1024u /* direct-mapped by index; covers a prefetched chunk */
 #define INDEX_BATCH 1024u
+#define TRIANGLE_INDICES 3u
 #define CBUF_SLOT_BYTES 0x10000u
 #define MAX_VARYINGS (SM_ATTR_GENERIC_COUNT * 4u)
 #define TOPOLOGY_POINTS 0u
@@ -1156,6 +1157,38 @@ static uint64_t content_hash_end(const Content_Hash *h) {
   return x ^ (x >> 33);
 }
 
+/* A pooled page's change check (vpool_window), not an identity: sixteen
+ * 32-bit lanes the compiler turns into SIMD - WebAssembly has no fast
+ * 64-bit lane multiply, so content_hash's lanes stay scalar - hash a page
+ * 2.7 times as fast in V8. Each step is invertible for a fixed word, so a
+ * page that differs in one word always hashes differently; changes
+ * confined to one lane's words escape with odds of 2^-32. */
+#define PAGE_HASH_LANES 16u
+#define PAGE_HASH_LANE_MUL 0x85EBCA6Bu
+#define PAGE_HASH_LANE_SEED 0x9E3779B9u
+#define PAGE_HASH_LANE_SHIFT 15u
+#define PAGE_HASH_MIX_SHIFT 29u
+#define PAGE_HASH_BLOCK_BYTES (PAGE_HASH_LANES * 4u)
+
+static uint64_t page_hash(const uint8_t *p, uint32_t n) {
+  uint32_t lane[PAGE_HASH_LANES];
+  for (uint32_t j = 0; j < PAGE_HASH_LANES; j++) lane[j] = (PAGE_HASH_LANE_SEED * (j + 1u)) ^ n;
+  for (uint32_t i = 0; i + PAGE_HASH_BLOCK_BYTES <= n; i += PAGE_HASH_BLOCK_BYTES) {
+    uint32_t v[PAGE_HASH_LANES];
+    memcpy(v, p + i, sizeof(v));
+    for (uint32_t j = 0; j < PAGE_HASH_LANES; j++) {
+      const uint32_t x = (lane[j] ^ v[j]) * PAGE_HASH_LANE_MUL;
+      lane[j] = x ^ (x >> PAGE_HASH_LANE_SHIFT);
+    }
+  }
+  uint64_t x = n;
+  for (uint32_t j = 0; j < PAGE_HASH_LANES; j++) {
+    x = (x ^ lane[j]) * HASH_MUL;
+    x ^= x >> PAGE_HASH_MIX_SHIFT;
+  }
+  return x;
+}
+
 static uint64_t bytes_content_hash(const uint8_t *p, uint64_t n) {
   Content_Hash h;
   content_hash_begin(&h, n);
@@ -1257,6 +1290,7 @@ static void vertex_pages_note(Raster3d *r, const Gpu_Memory *mem, uint64_t va, u
 #define VPOOL_GROW_PRESENTS 60u /* a pool that loaded more chunks than it holds over this many presents thrashes */
 #define VPOOL_PAGE_BYTES 4096u
 #define VPOOL_PAGES (VPOOL_SLOT_BYTES / VPOOL_PAGE_BYTES)
+_Static_assert(VPOOL_PAGE_BYTES % PAGE_HASH_BLOCK_BYTES == 0, "page_hash takes whole blocks");
 #define VPOOL_BUFFER_ID 0x7fff0000u /* above gpu_mirror's ids, which count up from 1 */
 #define IPOOL_BUFFER_ID 0x7fff0001u
 
@@ -1355,10 +1389,7 @@ static bool vpool_window(Vpool *pool, Raster3d *r, const Gpu_Memory *mem, uint64
   for (uint64_t p = (va - base) / VPOOL_PAGE_BYTES; p <= (va + bytes - 1u - base) / VPOOL_PAGE_BYTES; p++) {
     if (chunk->page_sync[p] == stamp) continue;
     if (!mem->read(mem->user, base + p * VPOOL_PAGE_BYTES, g_vpool_page, VPOOL_PAGE_BYTES)) return false;
-    Content_Hash h;
-    content_hash_begin(&h, VPOOL_PAGE_BYTES);
-    content_hash_update(&h, g_vpool_page, VPOOL_PAGE_BYTES);
-    const uint64_t hash = content_hash_end(&h);
+    const uint64_t hash = page_hash(g_vpool_page, VPOOL_PAGE_BYTES);
     if (!chunk->page_sync[p] || chunk->page_hash[p] != hash) {
       const uint32_t head[3] = {pool->buffer_id, slot * VPOOL_SLOT_BYTES + (uint32_t)p * VPOOL_PAGE_BYTES, VPOOL_PAGE_BYTES};
       uint8_t *rec = gpu_stream_begin(r->gpu, GPU_REC_BUFFER_WRITE, (uint32_t)sizeof(head) + VPOOL_PAGE_BYTES);
@@ -6715,7 +6746,13 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     const uint32_t size = inline_indices ? 4u : draw->index_size;
     const uint64_t base = addr40(regs[REG_INDEX_BUFFER], regs[REG_INDEX_BUFFER + 1u]) + (uint64_t)draw->first * size;
     if (r->gpu && !inline_indices) vertex_pages_note(r, mem, base, (uint64_t)draw->count * size);
-    if (bulk && !inline_indices && (size == 2u || size == 4u) && draw->count <= GPU_MAX_INDICES) {
+    /* A whole triangle list the record can take from the guest's index
+     * buffer: its first triangle prepares the draw through the assembler,
+     * gpu_index_fast the rest by range (most of Super Mario Odyssey's
+     * draws have fewer indices than a batch: walking each through the
+     * first batch was the largest part of its GPU thread's run_draw). */
+    bool fast = bulk && !inline_indices && (size == 2u || size == 4u) && draw->count <= GPU_MAX_INDICES;
+    if (fast) {
       g_gpu_draw.index_va = base;
       g_gpu_draw.index_size = size;
       g_gpu_draw.index_total = draw->count;
@@ -6724,9 +6761,14 @@ void raster3d_draw(Raster3d *r, const uint32_t *regs, const Raster3d_Bindings *b
     const uint32_t restart_value = size == 4u ? restart_index : (restart_index & ((1u << (8u * size)) - 1u));
     static uint8_t batch[INDEX_BATCH * 4u];
     for (uint32_t done = 0; done < draw->count;) {
-      /* After the first batch prepared the draw: the rest by range alone. */
-      if (done && bulk && !inline_indices && gpu_index_fast(&rs, mem, done, draw->count, restart, restart_value)) break;
+      /* After the first triangle prepared the draw: the rest by range
+       * alone (after a failure, batch by batch). */
+      if (done && fast) {
+        if (gpu_index_fast(&rs, mem, done, draw->count, restart, restart_value)) break;
+        fast = false;
+      }
       uint32_t n = draw->count - done < INDEX_BATCH ? draw->count - done : INDEX_BATCH;
+      if (fast && !done && n > TRIANGLE_INDICES) n = TRIANGLE_INDICES;
       if (bulk && n < draw->count - done) n -= n % 3u; /* whole triangles, so the next batch starts on one */
       if (inline_indices) memcpy(batch, draw->inline_indices + done, (size_t)n * 4u);
       else if (!mem->read(mem->user, base + (uint64_t)done * size, batch, (uint64_t)n * size)) break;
