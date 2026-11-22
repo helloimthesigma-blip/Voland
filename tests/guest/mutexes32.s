@@ -7,7 +7,8 @@
 @ 32-bit internal critical section instruction for instruction (LDAEX/
 @ STLEX fast paths; a contended lock sets the waiters bit and calls
 @ ArbitrateLock, then counts the lock as taken when the word names its own
-@ tag; an unlock that finds the waiters bit calls ArbitrateUnlock). A
+@ tag; an unlock that finds the waiters bit calls ArbitrateUnlock; both
+@ read the tag through TLS). A
 @ hand-off lost between the kernel and a user-space exclusive deadlocks
 @ it; two holders at once lose increments.
 @
@@ -86,11 +87,16 @@ fail:
   svc   #0x27
   svc   #0x07
 
-@ r0 = this worker's handle slot: r4 = the block (the mutex), r5 = the tag.
+@ r0 = this worker's handle slot: r4 = the block (the mutex). The SDK
+@ finds its tag through the thread's TLS (TPIDRURO + 0x1FC: its ThreadType,
+@ whose +0xF4 is the handle) at every lock and unlock, and so do these:
+@ TLS + 0x1FC points 0xF4 before the handle slot.
 worker:
   bic   r4, r0, #0xFF0
   bic   r4, r4, #0xF
-  ldr   r5, [r0]
+  sub   r1, r0, #0xF4
+  mrc   p15, 0, r2, c13, c0, 3
+  str   r1, [r2, #0x1FC]
   movw  r6, #20000
 1:
   mov   lr, pc                      @ bl, minus its relocation: pc reads 8 ahead
@@ -104,14 +110,18 @@ worker:
   bne   1b
   svc   #0x0A                       @ ExitThread
 
-@ The mutex at [r4], tag r5; clobbers r0-r3 and r12.
+@ The mutex at [r4]; r5 = the tag (from TLS); clobbers r0-r3 and r12.
 .Llock:
+  mrc   p15, 0, r0, c13, c0, 3
+  ldr   r0, [r0, #0x1FC]
+  ldr   r5, [r0, #0xF4]
+1:
   ldaex r1, [r4]
   cmp   r1, #0
   bne   2f
   stlex r0, r5, [r4]
   cmp   r0, #0
-  bne   .Llock
+  bne   1b
   bx    lr
 2:                                  @ held (r1): is it ours already?
   mov   r0, r1
@@ -146,10 +156,13 @@ worker:
   bx    lr
 
 .Lunlock:
+  mrc   p15, 0, r1, c13, c0, 3
   mov   r12, #0
+  ldr   r1, [r1, #0x1FC]
+  ldr   r2, [r1, #0xF4]
 1:
   ldaex r1, [r4]
-  cmp   r1, r5
+  cmp   r1, r2
   bne   2f
   stlex r3, r12, [r4]
   cmp   r3, #0
