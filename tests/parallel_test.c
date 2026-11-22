@@ -252,7 +252,7 @@ static void test_free_running(void) {
       check_completes(&k_programs[stressed[k]], 3, 997, &o);
     }
   }
-  printf("[parallel_test] free-running: every program on 2-3 cores; atomics, condvar, polls 20 rounds on 3\n");
+  printf("[parallel_test] free-running: every program on 2-3 cores; atomics, condvar, polls, mutexes, mutexes32 20 rounds on 3\n");
 }
 
 /* Wall-clock pacing (emulator_set_pacing): virtual time keeps up with wall

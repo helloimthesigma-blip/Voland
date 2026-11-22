@@ -504,7 +504,10 @@ async function main() {
       const PRESENT_GAP_MS = 50;
       const PRESENT_GAPS_KEPT = 400;
       const fresh = () => ({ longTasks: 0, longTaskMs: 0, longTaskMaxMs: 0, frames: 0, frameGapMaxMs: 0, slowFrames: 0, timerLateMaxMs: 0, timerLateSumMs: 0, timerTicks: 0, gaps: [],
-                             presentGaps: [], presentGapMaxMs: 0, presentGapCount: 0, presentGapSumMs: 0, startMs: performance.now() });
+                             presentGaps: [], presentGapMaxMs: 0, presentGapCount: 0, presentGapSumMs: 0, startMs: performance.now(),
+                             presentHistogram: [0, 0, 0, 0, 0, 0] });
+      /* Frame-to-frame times, bucketed: under 24 ms (on time at 60 Hz), 24-40 (one frame missed), 40-60, 60-100, 100-250, more. */
+      const PRESENT_BUCKETS_MS = [24, 40, 60, 100, 250];
       let r = fresh();
       try {
         new PerformanceObserver((list) => {
@@ -525,6 +528,8 @@ async function main() {
         if (presents >= 0 && presents !== lastPresents) {
           if (lastPresents >= 0 && lastPresentAt) {
             const gap = t - lastPresentAt;
+            const bucket = PRESENT_BUCKETS_MS.findIndex((limit) => gap < limit);
+            r.presentHistogram[bucket < 0 ? PRESENT_BUCKETS_MS.length : bucket]++;
             r.presentGapMaxMs = Math.max(r.presentGapMaxMs, gap);
             if (gap > PRESENT_GAP_MS) {
               r.presentGapCount++;
@@ -811,7 +816,8 @@ async function main() {
           const virtual = (after.perf.ticks - before.perf.ticks) / TICKS_PER_SECOND;
           const gaps = await page.evaluate(() => window.__VOLAND_RESP__?.read() ?? null);
           note = `fps ${((after.presents - before.presents) / wall).toFixed(2)} virtual ${(100 * virtual / wall).toFixed(1)}% of real time` +
-                 (gaps ? ` | frame gaps > 50 ms: ${gaps.presentGapCount} (max ${gaps.presentGapMaxMs.toFixed(0)} ms)` : "");
+                 (gaps ? ` | frame gaps > 50 ms: ${gaps.presentGapCount} (max ${gaps.presentGapMaxMs.toFixed(0)} ms)` +
+                         ` | frame times <24/24-40/40-60/60-100/100-250/250+ ms: ${gaps.presentHistogram.join("/")}` : "");
           if (gaps?.presentGaps.length) console.log(`  frame gaps (s:ms): ${gaps.presentGaps.join(" ")}`);
         } else if (cmd === "cheat") {
           const name = lines[done].slice(cmd.length).trim();
