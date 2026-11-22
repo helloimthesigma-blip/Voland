@@ -263,6 +263,12 @@ bool scheduler_alone(const Scheduler *sched, const Sched_Thread *self, uint64_t 
 /* `thread` left its core (parallel mode): wakes the WAIT_OFF_CORE waiters on it. */
 void scheduler_wake_off_core_waiters(Scheduler *sched, const Sched_Thread *thread);
 
+/* Ends every run in progress at its next block (request_stop), as if its
+ * budget had run out - not a thread inside a preemption-disabled region.
+ * Under the kernel lock; for the end of a free-running burst
+ * (docs/PARALLEL.md). Returns how many it asked. */
+uint32_t scheduler_stop_runs(Scheduler *sched);
+
 /* Marks a thread dead and wakes every WaitSynchronization on it. */
 void scheduler_exit_thread(Scheduler *sched, Sched_Thread *thread, const CPU_Backend *backend);
 

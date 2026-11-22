@@ -269,6 +269,13 @@ deterministic).
     9.46 vs 8.73 fps (2026-11-22, 4 alternating pairs; Silksong and
     MK8DX unchanged). Input reaches the cores through linear memory, so
     a longer burst does not delay it.
+  - Since 2026-11-22 the pause does not wait for those runs: it asks each
+    running core to stop at its next block (`scheduler_stop_runs`, the
+    backends' `request_stop`; not a thread in a preemption-disabled
+    region), as if its budget had run out. `VOLAND_BURST_STOP=0` is the
+    old pause. Super Mario Odyssey (Fossil Falls, 3 alternating minutes
+    each): fps the same (58.7), frames of 40-60 ms 209 -> 152; TOTK at
+    Lookout Landing 11.2 vs 11.0 fps (noise), parked ~3% either way.
 
 A core with nothing to run while a thread is runnable only on another
 core (its affinity) broadcasts so that core looks, then waits - once per

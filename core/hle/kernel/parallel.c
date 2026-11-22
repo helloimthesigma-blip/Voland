@@ -28,7 +28,7 @@ uint32_t parallel_core_count(const Parallel *p) {
 }
 Parallel_Stats parallel_stats(const Parallel *p) {
   (void)p;
-  const Parallel_Stats none = {0, 0, 0, 0};
+  const Parallel_Stats none = {0, 0, 0, 0, 0};
   return none;
 }
 #ifdef __EMSCRIPTEN__
@@ -753,6 +753,15 @@ static bool free_run_stopped(const Parallel *p) {
 }
 static bool free_run_parked(const Parallel *p) { return p->free_parked; }
 
+static bool burst_stop(void) {
+  static int on = -1;
+  if (on < 0) {
+    const char *v = getenv("VOLAND_BURST_STOP");
+    on = !(v && strcmp(v, "0") == 0);
+  }
+  return on != 0;
+}
+
 Scheduler_Status parallel_run_for(Parallel *p, uint64_t host_ns, uint64_t budget) {
   Scheduler *sched = p->sched;
   pthread_mutex_lock(&p->kernel);
@@ -777,6 +786,11 @@ Scheduler_Status parallel_run_for(Parallel *p, uint64_t host_ns, uint64_t budget
    * are still served meanwhile (a core may be in an SVC that needs one). */
   lock_kernel_serving(p);
   p->free_running = false;
+  /* The runs in progress end at their next block, not at their budgets:
+   * otherwise the burst waits for the slowest core's whole run (up to
+   * `budget` cycles, milliseconds) with the others parked.
+   * VOLAND_BURST_STOP=0 (A/B runs): the old way. */
+  if (burst_stop()) p->stats.burst_stops += scheduler_stop_runs(sched);
   pthread_cond_broadcast(&p->core_cv);
   pthread_mutex_unlock(&p->kernel);
   drive_until(p, free_run_parked, 0);

@@ -51,6 +51,7 @@ typedef struct Parallel_Stats {
   uint64_t cycles;         /* guest cycles, summed over cores */
   uint64_t span;           /* per slice the busiest core's cycles, summed */
   uint64_t shared_slices;  /* slices in which two or more cores ran */
+  uint64_t burst_stops;    /* runs ended early at a free-running burst's end */
 } Parallel_Stats;
 Parallel_Stats parallel_stats(const Parallel *p);
 

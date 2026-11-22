@@ -226,6 +226,18 @@ static void preempt_for(Scheduler *sched, const Sched_Thread *woken) {
   }
 }
 
+uint32_t scheduler_stop_runs(Scheduler *sched) {
+  if (!sched->backend || !sched->backend->request_stop) return 0;
+  uint32_t asked = 0;
+  for (uint32_t i = 0; i < SCHEDULER_MAX_THREADS; i++) {
+    Sched_Thread *r = &sched->threads[i];
+    if (!r->on_core || preemption_disabled(sched, r)) continue;
+    sched->backend->request_stop(r->thread.cpu_state);
+    asked++;
+  }
+  return asked;
+}
+
 void scheduler_wake(Scheduler *sched, Sched_Thread *thread, uint32_t result) {
   forget_coalescing(sched, thread);
   thread->state = THREAD_STATE_RUNNABLE;
