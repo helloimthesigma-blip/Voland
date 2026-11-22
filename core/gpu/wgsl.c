@@ -3215,6 +3215,10 @@ _Static_assert(offsetof(Wgsl_Program_Desc, binding_of) == 0 &&
                    offsetof(Wgsl_Program_Desc, texture_count) == sizeof(((Wgsl_Program_Desc *)0)->binding_of),
                "wgsl_default_desc zeroes the fields after binding_of from texture_count on");
 void wgsl_clear_bindings(Wgsl_Program_Desc *desc, const Sm_Program *program) {
+  if (sm_texture_pcs_complete(program)) { /* a translation and its hash read these entries only */
+    for (uint32_t k = 0; k < program->texture_pc_count; k++) desc->binding_of[program->texture_pcs[k]] = WGSL_NO_BINDING;
+    return;
+  }
   memset(desc->binding_of, WGSL_NO_BINDING, program->word_count < SM_MAX_WORDS ? program->word_count : SM_MAX_WORDS);
 }
 
@@ -3271,8 +3275,8 @@ void wgsl_default_desc(const Sm_Program *program, Wgsl_Program_Desc *desc) {
   }
 }
 
-/* FNV-1a over 8-byte words (the binding table is up to 4096 bytes, hashed
- * per draw), then the tail bytewise; wgsl_desc_hash finishes with an
+/* FNV-1a over 8-byte words (a binding table hashed whole is up to 4096
+ * bytes), then the tail bytewise; wgsl_desc_hash finishes with an
  * avalanche so the low bits (the shader table slot) see every input bit. */
 #define DESC_HASH_PRIME 0x100000001b3ull
 static uint64_t desc_mix(uint64_t h, const void *data, size_t n) {
@@ -3292,7 +3296,13 @@ uint64_t wgsl_desc_hash(const Wgsl_Program_Desc *desc, const Sm_Program *program
 #define MIX(ptr, n) (h = desc_mix(h, (ptr), (size_t)(n)))
   MIX(&program->hash, sizeof(program->hash));
   MIX(&program->byte_size, sizeof(program->byte_size));
-  MIX(desc->binding_of, program->word_count < SM_MAX_WORDS ? program->word_count : SM_MAX_WORDS);
+  /* The translation reads a binding only at a texture instruction: with
+   * the program's list of them complete, those entries are the table. */
+  if (sm_texture_pcs_complete(program)) {
+    for (uint32_t k = 0; k < program->texture_pc_count; k++) MIX(&desc->binding_of[program->texture_pcs[k]], 1u);
+  } else {
+    MIX(desc->binding_of, program->word_count < SM_MAX_WORDS ? program->word_count : SM_MAX_WORDS);
+  }
   MIX(&desc->texture_count, sizeof(desc->texture_count));
   MIX(desc->sample_type, sizeof(desc->sample_type));
   MIX(desc->varying_location, sizeof(desc->varying_location));
