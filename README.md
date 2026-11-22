@@ -45,8 +45,9 @@ so you can rerun them with your own game files.
 - **Remappable controls.** Keyboard or any standard gamepad, rebound from the
   controls panel.
 - **Docked or handheld, per game.** Docked games draw at a higher resolution
-  (Tears of the Kingdom at 1600x900 instead of 1280x720). The setting
-  applies when the game starts.
+  (Tears of the Kingdom at 1600x900 instead of 1280x720, with more distant
+  detail, at the same frame rate on an M4 Mac mini: its limit is the
+  emulated CPU). The setting applies when the game starts.
 - **Fast paths.** An ARM64 → WebAssembly JIT, guest threads spread across host
   cores, a WebGPU renderer, and a shader cache that warms up on later visits.
 - **Homebrew.** NROs run directly, or through a homebrew menu from the emulated
