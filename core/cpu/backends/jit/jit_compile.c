@@ -3268,14 +3268,24 @@ static void emit_fp_arith_lane(Ctx *c, bool dbl, uint32_t opcode, bool two, uint
    * environment decide between the fast arm and softfloat. */
   c->uses_fp_env = true;
   ltee(c, L_EXACT); /* the result checks, for the second arm */
-  /* Or an infinite result from an infinite input (not the dividend's
-   * divisor: x/0 raises DZC): exact and raising nothing - TOTK computes
-   * with infinities all the time (~1M helper calls per report). Only with
-   * IXC already set: the exactness checks below do not cover infinities. */
+  /* Or an infinite result from an infinite input (not the divisor: x/0
+   * raises DZC): exact and raising nothing - TOTK computes with
+   * infinities all the time (~1M helper calls per report). Or, but for
+   * FDIV, an overflow once OFC and IXC are both recorded: round to nearest
+   * (the FPCR guard) gives the infinity and nothing new is raised (TOTK's
+   * FMULs overflowing: ~540k per report). Only with IXC already set: the
+   * exactness checks below do not cover infinities. */
   emit_is_inf(c, r, dbl);
   emit_is_inf(c, a, dbl);
   if (two && opcode != 1u) {
     emit_is_inf(c, b, dbl);
+    op(c, WASM_OP_I32_OR);
+    lget(c, L_STATE);
+    mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
+    i32c(c, FPSR_OFC | FPSR_IXC);
+    op(c, WASM_OP_I32_AND);
+    i32c(c, FPSR_OFC | FPSR_IXC);
+    op(c, WASM_OP_I32_EQ);
     op(c, WASM_OP_I32_OR);
   }
   op(c, WASM_OP_I32_AND);
@@ -3640,10 +3650,45 @@ static void emit_truncation_in_range(Ctx *c, uint32_t local, bool dbl, bool to64
 #define FP_ROUND_UP 1u
 #define FP_ROUND_DOWN 2u
 #define FP_ROUND_ZERO 3u
+#define FP_ROUND_AWAY 4u /* ties away from zero (FRINTA, FCVTA*): no wasm instruction */
 static uint8_t fp_round_op(uint32_t mode, bool dbl) {
   static const uint8_t ops[2][4] = {{WASM_OP_F32_NEAREST, WASM_OP_F32_CEIL, WASM_OP_F32_FLOOR, WASM_OP_F32_TRUNC},
                                     {WASM_OP_F64_NEAREST, WASM_OP_F64_CEIL, WASM_OP_F64_FLOOR, WASM_OP_F64_TRUNC}};
   return mode < 4u ? ops[dbl][mode] : 0u;
+}
+
+/* Pushes local `x` rounded to an integral value in `mode`. Ties away:
+ * t = trunc(x) and x - t are exact (x's fraction), so the result is t,
+ * or t + copysign(1, x) when |x - t| >= 0.5 - selected, not added, so a
+ * -0 stays -0. Infinities give t (x - t is NaN); the callers rule out
+ * NaNs. Clobbers L_FS2 / L_FD2. */
+#define F32_ONE 0x3F800000u
+#define F32_HALF 0x3F000000u
+#define F64_ONE 0x3FF0000000000000ull
+#define F64_HALF 0x3FE0000000000000ull
+static void emit_round_value(Ctx *c, uint32_t mode, bool dbl, uint32_t x) {
+  lget(c, x);
+  if (mode != FP_ROUND_AWAY) {
+    op(c, fp_round_op(mode, dbl));
+    return;
+  }
+  const uint32_t t = dbl ? L_FD2 : L_FS2;
+  op(c, dbl ? WASM_OP_F64_TRUNC : WASM_OP_F32_TRUNC);
+  ltee(c, t);
+  if (dbl) f64c(c, F64_ONE);
+  else f32c(c, F32_ONE);
+  lget(c, x);
+  op(c, dbl ? WASM_OP_F64_COPYSIGN : WASM_OP_F32_COPYSIGN);
+  op(c, dbl ? WASM_OP_F64_ADD : WASM_OP_F32_ADD);
+  lget(c, t);
+  lget(c, x);
+  lget(c, t);
+  op(c, dbl ? WASM_OP_F64_SUB : WASM_OP_F32_SUB);
+  op(c, dbl ? WASM_OP_F64_ABS : WASM_OP_F32_ABS);
+  if (dbl) f64c(c, F64_HALF);
+  else f32c(c, F32_HALF);
+  op(c, dbl ? WASM_OP_F64_GE : WASM_OP_F32_GE);
+  op(c, WASM_OP_SELECT);
 }
 
 /* FCVT{N,P,M,Z}{S,U} (general; fixed point only by truncation: the value
@@ -3653,15 +3698,13 @@ static uint8_t fp_round_op(uint32_t mode, bool dbl) {
 static void emit_fp_to_int_rounded(Ctx *c, bool sf, bool is_unsigned, bool dbl, uint32_t rn, uint32_t rd,
                                    uint32_t fbits, uint32_t mode) {
   const uint32_t a = fp_result_local(dbl);
-  const uint8_t round = fp_round_op(mode, dbl);
   load_fp(c, rn, dbl);
   if (fbits) {
     fp_power_of_two(c, dbl, (int32_t)fbits);
     op(c, dbl ? WASM_OP_F64_MUL : WASM_OP_F32_MUL);
   }
   lset(c, a);
-  lget(c, a); /* exact: rounding changed nothing */
-  op(c, round);
+  emit_round_value(c, mode, dbl, a); /* exact: rounding changed nothing */
   lget(c, a);
   op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
   set_exactness(c);
@@ -3670,8 +3713,7 @@ static void emit_fp_to_int_rounded(Ctx *c, bool sf, bool is_unsigned, bool dbl, 
   i32c(c, 1);
   if (!fbits) and_not_subnormal(c, a, dbl);
   if (mode != FP_ROUND_ZERO) {
-    lget(c, a);
-    op(c, round);
+    emit_round_value(c, mode, dbl, a);
     lset(c, a);
   }
   emit_truncation_in_range(c, a, dbl, sf, is_unsigned);
@@ -3717,8 +3759,7 @@ static void emit_fp_round_integral(Ctx *c, bool dbl, uint32_t rn, uint32_t rd, u
   emit_fpcr_mode(c, true);
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
-  lget(c, a);
-  op(c, fp_round_op(mode, dbl));
+  emit_round_value(c, mode, dbl, a);
   lset(c, a);
   store_fp_local(c, rd, dbl, a);
   fp_else_exact_scalar(c, rd, dbl);
@@ -3788,6 +3829,10 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
       emit_fp_to_int_rounded(c, sf, opcode == 1, dbl, rn, rd, 0, rmode);
       return true;
     }
+    if ((opcode == 4 || opcode == 5) && rmode == 0) { /* FCVTAS / FCVTAU */
+      emit_fp_to_int_rounded(c, sf, opcode == 5, dbl, rn, rd, 0, FP_ROUND_AWAY);
+      return true;
+    }
     return false;
   }
   if (ftype == FP_TYPE_HALF && bits(insn, 14, 10) == 0x10 && bits(insn, 20, 15) == FCVT_TO_SINGLE) {
@@ -3816,6 +3861,9 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
       return true;
     case 8: case 9: case 10: case 11: /* FRINTN, FRINTP, FRINTM, FRINTZ */
       emit_fp_round_integral(c, dbl, rn, rd, opcode - 8u);
+      return true;
+    case 12: /* FRINTA: ties away (TOTK: ~120k helper calls per fallback report) */
+      emit_fp_round_integral(c, dbl, rn, rd, FP_ROUND_AWAY);
       return true;
     case 15: /* FRINTI: FPCR's rounding mode - nearest under the guard (FPCR 0 or FZ alone) */
       emit_fp_round_integral(c, dbl, rn, rd, FP_ROUND_NEAREST);
@@ -4758,7 +4806,8 @@ static void emit_vector_fp_compare(Ctx *c, Fp_Compare cmp, bool dbl, bool q, boo
 
 /* Scalar SCVTF/UCVTF/FCVTZS/FCVTZU (vector forms on one element): V[d]
  * as integer or FP bits, the rest zeroed. */
-static void emit_scalar_lane_convert(Ctx *c, bool to_fp, bool dbl, bool is_unsigned, uint32_t n, uint32_t d) {
+static void emit_scalar_lane_convert(Ctx *c, bool to_fp, bool dbl, bool is_unsigned, uint32_t n, uint32_t d,
+                                     uint32_t mode) {
   const uint32_t r = fp_result_local(dbl);
   if (to_fp) {
     lget(c, L_STATE);
@@ -4774,14 +4823,17 @@ static void emit_scalar_lane_convert(Ctx *c, bool to_fp, bool dbl, bool is_unsig
     fp_fast_arm(c);
     store_fp_local(c, d, dbl, r);
   } else {
+    const uint32_t rounded = dbl ? L_FD3 : L_FS3;
     load_fp(c, n, dbl);
     lset(c, r);
-    emit_truncation_in_range(c, r, dbl, dbl, is_unsigned);
-    and_not_subnormal(c, r, dbl); /* FZ: a subnormal input would also set IDC */
-    emit_fp_env_ok_as(c, true);
+    emit_round_value(c, mode, dbl, r); /* integral, so the truncation below is exact */
+    lset(c, rounded);
+    emit_truncation_in_range(c, rounded, dbl, dbl, is_unsigned);
+    and_not_subnormal(c, r, dbl); /* FZ: a subnormal input is a flushed zero (and IDC) */
+    emit_fp_env_ok_as(c, true); /* rounding may raise IXC: it is set */
     op(c, WASM_OP_I32_AND);
     fp_fast_arm(c);
-    lget(c, r);
+    lget(c, rounded);
     if (dbl) {
       op(c, is_unsigned ? WASM_OP_I64_TRUNC_F64_U : WASM_OP_I64_TRUNC_F64_S);
     } else {
@@ -4805,13 +4857,19 @@ static bool c_simd_misc_fp(Ctx *c, uint32_t insn) {
   if (!scalar && dbl && !q) return false; /* .1D: reserved */
   const uint32_t opcode = bits(insn, 16, 12), rn = bits(insn, 9, 5), rd = bits(insn, 4, 0);
   if (opcode == 0x1D && !hi) { /* SCVTF / UCVTF */
-    if (scalar) emit_scalar_lane_convert(c, true, dbl, u, rn, rd);
+    if (scalar) emit_scalar_lane_convert(c, true, dbl, u, rn, rd, FP_ROUND_ZERO);
     else emit_vector_int_to_fp(c, dbl, q, u, rn, rd);
     return true;
   }
   if (opcode == 0x1B && hi) { /* FCVTZS / FCVTZU */
-    if (scalar) emit_scalar_lane_convert(c, false, dbl, u, rn, rd);
+    if (scalar) emit_scalar_lane_convert(c, false, dbl, u, rn, rd, FP_ROUND_ZERO);
     else emit_vector_fp_to_int(c, dbl, q, u, rn, rd);
+    return true;
+  }
+  if (scalar && ((!hi && opcode >= 0x1A && opcode <= 0x1C) || (hi && opcode == 0x1A))) {
+    /* FCVT{N,M,A}{S,U} and FCVTP{S,U} (TOTK's FCVTNS: ~410k helper calls per fallback report) */
+    const uint32_t mode = hi ? FP_ROUND_UP : opcode == 0x1A ? FP_ROUND_NEAREST : opcode == 0x1B ? FP_ROUND_DOWN : FP_ROUND_AWAY;
+    emit_scalar_lane_convert(c, false, dbl, u, rn, rd, mode);
     return true;
   }
   if (scalar || !hi) return false;

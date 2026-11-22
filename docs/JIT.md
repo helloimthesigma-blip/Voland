@@ -935,6 +935,15 @@ shows it next to the backend name.
   fps (every pair faster; game speed 92-99% -> 99-100%), direct SIMD&FP
   calls ~29 M -> ~16 M per 10 s. What remains: FMUL overflowing to
   infinity, FCVTNS, FCVTAS/FRINTA, vector FCVTL, FMLA by element.
+- **0.5.9** (2026-11-22) - the scalar FP tail TOTK still sent to the
+  helper: FMUL/FNMUL/FADD/FSUB overflowing to infinity once OFC and IXC
+  are recorded; ties-away rounding (no wasm instruction: trunc, then
+  +-1 when the exact fraction is >= 0.5, selected so -0 stays -0) for
+  FRINTA, FCVTAS/FCVTAU and the scalar (vector form) FCVT{N,M,A,P}{S,U}.
+  Lookout Landing: single-precision helper calls per fallback report
+  549 k -> 19 k; 4 alternating browser pairs 8.46 -> 9.20 fps (3 of 4
+  faster - within this rig's noise). What remains is vector: FCVTL,
+  FCVTN, FMLA/FMUL by element, FMAXP/FADDP.
 
 ## What a region costs on V8
 
