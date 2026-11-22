@@ -294,16 +294,18 @@ interface CpuPerf {
   jitGenerations: number;
   jitStale: number;
   jitInstallMs: number;
+  /** Time the GPU thread spent running calls (against wall time: how busy it is). */
+  gpuRunMs: number;
   /** Renderer counters (emulator_render_stats_ffi), by name. */
   render: Record<string, number>;
 }
 const perf: CpuPerf = {
   startedMs: 0, slices: 0, sliceMs: 0, yieldMs: 0, bursts: 0,
   fileReads: 0, fileReadBytes: 0, fileReadMs: 0, fileChunks: 0, ticks: 0, svcs: 0, gpuBytes: 0, gpuStalls: 0, streamWaitMs: 0, frames: 0, gpuLockMs: 0, gpuLatencyStalls: 0, jitCompiled: 0, jitEvicted: 0, jitTrimmed: 0, jitGenerations: 0, jitStale: 0,
-  jitInstallMs: 0, render: {},
+  jitInstallMs: 0, gpuRunMs: 0, render: {},
 };
 (globalThis as unknown as { __VOLAND_CPU_PERF__: CpuPerf }).__VOLAND_CPU_PERF__ = perf;
-const PERF_COUNTERS = 14;
+const PERF_COUNTERS = 15;
 let perfBuffer = 0;
 let lastBurstEnd = 0;
 
@@ -346,6 +348,7 @@ function refreshCorePerf(): void {
     perf.jitGenerations = Number(values[11] ?? 0n);
     perf.jitStale = Number(values[12] ?? 0n);
     perf.jitInstallMs = Number(values[13] ?? 0n) / 1e6;
+    perf.gpuRunMs = Number(values[14] ?? 0n) / 1e6;
   }
   {
     const stats = new BigUint64Array(coreMemory.buffer, Number(core._emulator_render_stats_ffi()), RENDER_STAT_NAMES.length);

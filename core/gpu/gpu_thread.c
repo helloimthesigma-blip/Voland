@@ -41,6 +41,7 @@ void gpu_thread_lock(Gpu_Thread *t) { (void)t; }
 void gpu_thread_unlock(Gpu_Thread *t) { (void)t; }
 uint64_t gpu_thread_lock_wait_ns(const Gpu_Thread *t) { (void)t; return 0; }
 uint64_t gpu_thread_lock_count(const Gpu_Thread *t) { (void)t; return 0; }
+uint64_t gpu_thread_run_ns(const Gpu_Thread *t) { (void)t; return 0; }
 
 #else
 
@@ -71,6 +72,7 @@ struct Gpu_Thread_Impl {
   pthread_cond_t progress; /* a record finished */
   pthread_mutex_t state;   /* gpu_thread_lock */
   uint64_t lock_wait_ns, lock_count; /* gpu_thread_lock's (diagnostics) */
+  uint64_t run_ns;         /* host time running records (diagnostics; written by the GPU thread only) */
   uint64_t head, tail;     /* byte positions: tail = next write, head = next read */
   uint32_t finished;       /* records run */
   uint32_t queued;         /* records queued (finished trails it) */
@@ -78,6 +80,10 @@ struct Gpu_Thread_Impl {
   bool quit;
   uint8_t ring[QUEUE_BYTES + RECORD_HEADER]; /* the slack holds a wrap marker at the very end */
 };
+
+static uint64_t elapsed_ns(const struct timespec *from, const struct timespec *to) {
+  return (uint64_t)(to->tv_sec - from->tv_sec) * 1000000000ull + (uint64_t)(to->tv_nsec - from->tv_nsec);
+}
 
 static uint32_t record_size(uint32_t bytes) {
   return RECORD_HEADER + ((bytes + RECORD_ALIGN - 1u) & ~(RECORD_ALIGN - 1u));
@@ -101,7 +107,11 @@ static void *thread_main(void *arg) {
     /* The record stays in place (the producer never overwrites unread
      * bytes), so the payload is read where it lies. */
     pthread_mutex_lock(&p->state);
+    struct timespec from, to;
+    clock_gettime(CLOCK_MONOTONIC, &from);
     r.fn(r.user, payload, r.bytes);
+    clock_gettime(CLOCK_MONOTONIC, &to);
+    __atomic_store_n(&p->run_ns, p->run_ns + elapsed_ns(&from, &to), __ATOMIC_RELAXED);
     pthread_mutex_unlock(&p->state);
     pthread_mutex_lock(&p->mutex);
     p->head += r.size;
@@ -247,13 +257,14 @@ void gpu_thread_lock(Gpu_Thread *t) {
     clock_gettime(CLOCK_MONOTONIC, &a);
     pthread_mutex_lock(&t->impl->state);
     clock_gettime(CLOCK_MONOTONIC, &b);
-    t->impl->lock_wait_ns += (uint64_t)(b.tv_sec - a.tv_sec) * 1000000000ull + (uint64_t)(b.tv_nsec - a.tv_nsec);
+    t->impl->lock_wait_ns += elapsed_ns(&a, &b);
   }
   t->impl->lock_count++;
 }
 
 uint64_t gpu_thread_lock_wait_ns(const Gpu_Thread *t) { return t && t->impl ? t->impl->lock_wait_ns : 0; }
 uint64_t gpu_thread_lock_count(const Gpu_Thread *t) { return t && t->impl ? t->impl->lock_count : 0; }
+uint64_t gpu_thread_run_ns(const Gpu_Thread *t) { return t && t->impl ? __atomic_load_n(&t->impl->run_ns, __ATOMIC_RELAXED) : 0; }
 
 void gpu_thread_unlock(Gpu_Thread *t) {
   if (t && t->impl) pthread_mutex_unlock(&t->impl->state);

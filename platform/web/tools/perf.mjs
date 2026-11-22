@@ -857,7 +857,9 @@ async function main() {
           const wall = (Date.now() - startedAt) / 1000;
           const virtual = (after.perf.ticks - before.perf.ticks) / TICKS_PER_SECOND;
           const gaps = await page.evaluate(() => window.__VOLAND_RESP__?.read() ?? null);
+          const gpuRunMs = (after.perf.gpuRunMs ?? 0) - (before.perf.gpuRunMs ?? 0); /* 0: synchronous GPU, or an older core */
           note = `fps ${((after.presents - before.presents) / wall).toFixed(2)} virtual ${(100 * virtual / wall).toFixed(1)}% of real time` +
+                 (gpuRunMs > 0 ? ` | GPU thread busy ${(gpuRunMs / (10 * wall)).toFixed(0)}%` : "") +
                  (gaps ? ` | frame gaps > 50 ms: ${gaps.presentGapCount} (max ${gaps.presentGapMaxMs.toFixed(0)} ms)` +
                          ` | frame times <24/24-40/40-60/60-100/100-250/250+ ms: ${gaps.presentHistogram.join("/")}` : "");
           if (gaps?.presentGaps.length) console.log(`  frame gaps (s:ms): ${gaps.presentGaps.join(" ")}`);

@@ -480,11 +480,12 @@ EXPORT uint64_t emulator_virtual_ticks_ffi(void)
  * thread's lock (command processing), times the guest waited for the GPU
  * thread to catch up (nvdrv_bound_gpu_latency), then the JIT's regions
  * compiled, evicted, trimmed (live cap), code generations seen, stale
- * regions, and host ns installing modules. */
+ * regions, and host ns installing modules; host ns the GPU thread spent
+ * running calls. */
 enum {
   PERF_TICKS, PERF_SVCS, PERF_GPU_BYTES, PERF_GPU_STALLS, PERF_STREAM_WAIT_NS, PERF_FRAMES, PERF_GPU_LOCK_WAIT_NS,
   PERF_GPU_LATENCY_STALLS, PERF_JIT_COMPILED, PERF_JIT_EVICTED, PERF_JIT_TRIMMED, PERF_JIT_GENERATIONS, PERF_JIT_STALE,
-  PERF_JIT_INSTALL_NS, PERF_COUNT
+  PERF_JIT_INSTALL_NS, PERF_GPU_RUN_NS, PERF_COUNT
 };
 
 EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity)
@@ -499,6 +500,7 @@ EXPORT uint32_t emulator_perf_counters_ffi(uint64_t out, uint32_t capacity)
     [PERF_FRAMES] = g_emulator.vi.frames_presented,
     [PERF_GPU_LOCK_WAIT_NS] = gpu_thread_lock_wait_ns(&g_emulator.gpu_thread),
     [PERF_GPU_LATENCY_STALLS] = g_emulator.nvdrv.stalls_for_latency,
+    [PERF_GPU_RUN_NS] = gpu_thread_run_ns(&g_emulator.gpu_thread),
   };
 #if defined(SWITCH_CPU_BACKEND_JIT)
   const Jit_Stats *j = jit_stats(); /* the JIT's regions: compiled, dropped (evicted / trimmed / stale), install time */
