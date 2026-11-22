@@ -279,6 +279,8 @@ export interface ExecutorStats {
   ahead: number;
   /** Live pipelines dropped to stay under PIPELINE_LIMIT. */
   pipelinesEvicted: number;
+  /** Shader modules made again for a shader whose module had been dropped (LIVE_MODULE_LIMIT). */
+  modulesRemade: number;
   presents: number;
   errors: number;
   shadows: number;
@@ -460,12 +462,13 @@ function sameNumbers(a: readonly number[], b: readonly number[]): boolean {
 }
 
 export class GpuExecutor {
-  readonly stats: ExecutorStats = { draws: 0, dispatches: 0, passes: 0, submits: 0, pipelines: 0, prewarmed: 0, ahead: 0, pipelinesEvicted: 0, presents: 0, errors: 0, shadows: 0, shadowsReused: 0, copies: 0 };
+  readonly stats: ExecutorStats = { draws: 0, dispatches: 0, passes: 0, submits: 0, pipelines: 0, prewarmed: 0, ahead: 0, pipelinesEvicted: 0, modulesRemade: 0, presents: 0, errors: 0, shadows: 0, shadowsReused: 0, copies: 0 };
   private readonly textures = new Map<number, Tex>();
   /* Per-session shader ids -> WGSL content hash; modules shared by hash. */
   private readonly shaderHashes = new Map<number, string>();
   private readonly codeByHash = new Map<string, string>();
   private readonly liveModules = new Map<string, GPUShaderModule>(); /* LIVE_MODULE_LIMIT, oldest first */
+  private readonly madeModules = new Set<string>(); /* hashes a module was ever made for */
   private cacheStore: ShaderCacheStore | null = null;
   private readonly pipelines = new Map<string, CachedPipeline>();
   private pipelineUses = 0;
@@ -1208,6 +1211,8 @@ export class GpuExecutor {
       if (code === undefined) throw new Error(`no shader text ${hash}`);
       module = this.device.createShaderModule({ code });
       this.newModules++;
+      if (this.madeModules.has(hash)) this.stats.modulesRemade++;
+      else this.madeModules.add(hash);
       if (this.liveModules.size >= LIVE_MODULE_LIMIT) {
         const oldest = this.liveModules.keys().next();
         if (!oldest.done) this.liveModules.delete(oldest.value);
@@ -2436,7 +2441,7 @@ export class GpuExecutor {
     this.host.log("info", `GPU memory: render targets ${mb(render)} MB (${renderCount}; most: ${commonShapes}; largest: ${largestShapes}; ` +
       `${this.renderCreates} made, ${this.renderDestroys} destroyed, ${this.unknownDestroys} unknown of ${this.destroysSeen} destroys), textures ${mb(sampled)} MB ` +
       `(${sampledCount}), storage buffers ${mb(buffers)} MB (${this.buffers.size}), shadows ${this.shadows.size}, ` +
-      `${this.pipelines.size} pipelines (${this.stats.pipelinesEvicted} evicted), ${this.codeByHash.size} shaders (${mb(this.shaderBytes)} MB of WGSL, ${this.liveModules.size} live modules); in the last ${MEMORY_REPORT_PRESENTS} ` +
+      `${this.pipelines.size} pipelines (${this.stats.pipelinesEvicted} evicted), ${this.codeByHash.size} shaders (${mb(this.shaderBytes)} MB of WGSL, ${this.liveModules.size} live modules, ${this.stats.modulesRemade} made again); in the last ${MEMORY_REPORT_PRESENTS} ` +
       `presents ${mb(this.uploadedBytes)} MB texture uploads, ${mb(this.bufferBytes)} MB buffer uploads (vertices ${mb(this.vertexBytes)}, data ${mb(this.dataBytes)}, ` +
       `pool ${mb(this.poolBytes)}; ${this.bufferWrites} writes), ${this.submits} submits, ${this.bindGroupsMade} bind groups made, ` +
       `${this.stats.draws - this.reportedStats.draws} draws, ${this.stats.passes - this.reportedStats.passes} passes, ` +
