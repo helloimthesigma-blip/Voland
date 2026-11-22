@@ -130,6 +130,12 @@ const TRACE_PRESENTS = 6;
 const PREWARM_MAX = 512;
 /** Live render pipelines kept (least recently used go first). */
 const PIPELINE_LIMIT = 1200;
+/** Shader modules kept alive (least recently used go first). Chrome's GPU
+ * process holds ~115 bytes per byte of WGSL for each live module (TOTK's
+ * 1085 Lookout Landing shaders: 6.3 GB), and frees it once the module is
+ * dropped - pipelines built from it do not need it. Every shader's text
+ * stays, so a module is made again for a new pipeline of an old shader. */
+const LIVE_MODULE_LIMIT = 64;
 /* Diagnostics (?shadersalt=N): each pixel shader opens with a branch on
  * the draw's flags word (core/gpu/wgsl.h WGSL_DRAW_FLAGS: a few low bits)
  * that is never taken, so the GPU's compiler has seen none of them. */
@@ -247,7 +253,6 @@ interface TexKind {
 /** A shader the scan has seen defined (scanAhead). */
 interface AheadShader {
   readonly hash: string;
-  readonly module: GPUShaderModule;
   readonly present: number; /* the scan's present count when it was defined */
   draws: number;            /* draws still predicted for it */
 }
@@ -457,10 +462,10 @@ function sameNumbers(a: readonly number[], b: readonly number[]): boolean {
 export class GpuExecutor {
   readonly stats: ExecutorStats = { draws: 0, dispatches: 0, passes: 0, submits: 0, pipelines: 0, prewarmed: 0, ahead: 0, pipelinesEvicted: 0, presents: 0, errors: 0, shadows: 0, shadowsReused: 0, copies: 0 };
   private readonly textures = new Map<number, Tex>();
-  private readonly shaders = new Map<number, GPUShaderModule>();
   /* Per-session shader ids -> WGSL content hash; modules shared by hash. */
   private readonly shaderHashes = new Map<number, string>();
-  private readonly modulesByHash = new Map<string, GPUShaderModule>();
+  private readonly codeByHash = new Map<string, string>();
+  private readonly liveModules = new Map<string, GPUShaderModule>(); /* LIVE_MODULE_LIMIT, oldest first */
   private cacheStore: ShaderCacheStore | null = null;
   private readonly pipelines = new Map<string, CachedPipeline>();
   private pipelineUses = 0;
@@ -977,8 +982,8 @@ export class GpuExecutor {
 
   private compute(v: DataView, payload: Uint8Array): void {
     const c = parseCompute(v);
-    const module = this.shaders.get(c.shaderId);
-    if (!module) {
+    const hash = this.shaderHashes.get(c.shaderId);
+    if (hash === undefined) {
       this.warnOnce(`shader ${c.shaderId}`, `dispatch with unknown shader ${c.shaderId}`);
       return;
     }
@@ -1057,7 +1062,7 @@ export class GpuExecutor {
       const layout = this.device.createBindGroupLayout({ entries });
       const pipeline = this.device.createComputePipeline({
         layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout] }),
-        compute: { module, entryPoint: "cs" },
+        compute: { module: this.moduleFor(hash), entryPoint: "cs" },
       });
       cached = { pipeline, layout };
       this.computePipelines.set(key, cached);
@@ -1186,15 +1191,29 @@ export class GpuExecutor {
     return code;
   }
 
-  /** The module of WGSL `code` (one per distinct text). */
-  private moduleOf(hash: string, code: string): GPUShaderModule {
-    let module = this.modulesByHash.get(hash);
-    if (!module) {
+  /** Keeps WGSL `code` for its modules (one text per hash). */
+  private noteCode(hash: string, code: string): void {
+    if (this.codeByHash.has(hash)) return;
+    this.codeByHash.set(hash, code);
+    this.shaderBytes += code.length;
+  }
+
+  /** The module of the WGSL text `hash` names, made again if it was dropped. */
+  private moduleFor(hash: string): GPUShaderModule {
+    let module = this.liveModules.get(hash);
+    if (module) {
+      this.liveModules.delete(hash); /* most recently used last */
+    } else {
+      const code = this.codeByHash.get(hash);
+      if (code === undefined) throw new Error(`no shader text ${hash}`);
       module = this.device.createShaderModule({ code });
-      this.modulesByHash.set(hash, module);
       this.newModules++;
-      this.shaderBytes += code.length;
+      if (this.liveModules.size >= LIVE_MODULE_LIMIT) {
+        const oldest = this.liveModules.keys().next();
+        if (!oldest.done) this.liveModules.delete(oldest.value);
+      }
     }
+    this.liveModules.set(hash, module);
     return module;
   }
 
@@ -1208,8 +1227,7 @@ export class GpuExecutor {
     const code = finds.reduce((c, f, k) => c.replace(f, replaces[k] ?? ""), this.shaderCode(v, payload));
     if ((globalThis as { PRINT_SHADER?: number }).PRINT_SHADER === id) console.log(`shader ${id}:\n${code}`);
     const hash = wgslHash(code);
-    const module = this.moduleOf(hash, code);
-    this.shaders.set(id, module);
+    this.noteCode(hash, code);
     this.shaderHashes.set(id, hash);
     this.shaderSerials.set(id, ++this.shaderSerial);
     const windows = [...code.matchAll(/@binding\((\d+)\) var<storage, read_write>/g)].map((m) => Number(m[1]));
@@ -1226,13 +1244,9 @@ export class GpuExecutor {
   usePersistentCache(store: ShaderCacheStore, contents: CacheContents): Promise<void> {
     this.cacheStore = store;
     const moduleFor = (hash: string): GPUShaderModule | undefined => {
-      let module = this.modulesByHash.get(hash);
-      const code = module ? undefined : contents.shaders.get(hash);
-      if (code !== undefined) {
-        module = this.device.createShaderModule({ code });
-        this.modulesByHash.set(hash, module);
-      }
-      return module;
+      const code = contents.shaders.get(hash);
+      if (code !== undefined) this.noteCode(hash, code);
+      return this.codeByHash.has(hash) ? this.moduleFor(hash) : undefined;
     };
     const build = (spec: CacheContents["pipelines"][number]): void => {
       const key = specKey(spec);
@@ -1311,7 +1325,8 @@ export class GpuExecutor {
         const code = this.shaderCode(view, payload);
         const hash = wgslHash(code);
         this.aheadShaders.delete(id); /* newest last: the order they are dropped in */
-        this.aheadShaders.set(id, { hash, module: this.moduleOf(hash, code), present: this.aheadPresents, draws: AHEAD_SHADER_DRAWS });
+        this.noteCode(hash, code);
+        this.aheadShaders.set(id, { hash, present: this.aheadPresents, draws: AHEAD_SHADER_DRAWS });
       } else if (type === REC_TEXTURE_CREATE) {
         const c = parseTextureCreate(new DataView(buffer, body, size - 8));
         const asked = FORMATS[c.format];
@@ -1347,11 +1362,9 @@ export class GpuExecutor {
   private predictDraw(v: DataView, payload: Uint8Array): void {
     const d = parseDrawInto(v, this.aheadScratch);
     const fs = this.aheadShaders.get(d.shaderId), vs = d.vsShaderId ? this.aheadShaders.get(d.vsShaderId) : undefined;
-    const module = fs?.module ?? this.shaders.get(d.shaderId);
     const wgsl = fs?.hash ?? this.shaderHashes.get(d.shaderId);
-    const vsModule = d.vsShaderId ? vs?.module ?? this.shaders.get(d.vsShaderId) : module;
     const vsWgsl = d.vsShaderId ? vs?.hash ?? this.shaderHashes.get(d.vsShaderId) : "";
-    if (!module || !vsModule || wgsl === undefined || vsWgsl === undefined) return;
+    if (wgsl === undefined || vsWgsl === undefined) return;
     const textures: TexKind[] = [], filtered: boolean[] = [];
     const windows: { readonly binding: number; readonly writable: boolean }[] = [];
     let at = DRAW_BYTES;
@@ -1381,7 +1394,8 @@ export class GpuExecutor {
     const key = specKey(spec);
     if (this.pipelines.has(key) || this.aheadPending.has(key)) return;
     const built = this.aheadSlot().then(() => {
-      const { desc, layout } = this.pipelineDescriptor(spec, module, vsModule);
+      const module = this.moduleFor(wgsl);
+      const { desc, layout } = this.pipelineDescriptor(spec, module, vsWgsl ? this.moduleFor(vsWgsl) : module);
       return this.device.createRenderPipelineAsync(desc).then((pipeline) => {
         this.pipelines.set(key, { pipeline, layout });
         this.evictPipelines();
@@ -1700,7 +1714,7 @@ export class GpuExecutor {
     return this.keyEnd();
   }
 
-  private drawPipeline(d: Draw, module: GPUShaderModule, textures: readonly Tex[], filtered: readonly boolean[],
+  private drawPipeline(d: Draw, textures: readonly Tex[], filtered: readonly boolean[],
                        colorFormats: readonly (GPUTextureFormat | null)[], depth: Tex | undefined,
                        windows: readonly DrawWindow[]): CachedPipeline | null {
     const fast = this.drawPipelineKey(d, textures, filtered, colorFormats, depth, windows);
@@ -1719,7 +1733,7 @@ export class GpuExecutor {
       this.awaiting = pending;
       return null;
     }
-    const made = this.slowDrawPipeline(d, module, spec, key);
+    const made = this.slowDrawPipeline(d, spec, key);
     if (this.aheadSpecs.delete(key)) this.cacheStore?.recordPipeline(spec); /* built ahead and now used: worth keeping */
     if (fast !== null) {
       if (this.fastPipelines.size >= FAST_PIPELINE_LIMIT) this.fastPipelines.clear();
@@ -1728,11 +1742,12 @@ export class GpuExecutor {
     return made;
   }
 
-  private slowDrawPipeline(d: Draw, module: GPUShaderModule, spec: PipelineSpec, key: string): CachedPipeline {
+  private slowDrawPipeline(d: Draw, spec: PipelineSpec, key: string): CachedPipeline {
     return this.cached(key, () => {
-      const vsModule = d.vsShaderId ? this.shaders.get(d.vsShaderId) : module;
-      if (!vsModule) throw new Error(`draw uses unknown vertex shader ${d.vsShaderId}`);
-      const { desc, layout } = this.pipelineDescriptor(spec, module, vsModule);
+      const vsHash = d.vsShaderId ? this.shaderHashes.get(d.vsShaderId) : undefined;
+      if (d.vsShaderId && vsHash === undefined) throw new Error(`draw uses unknown vertex shader ${d.vsShaderId}`);
+      const module = this.moduleFor(this.shaderHashes.get(d.shaderId) ?? "");
+      const { desc, layout } = this.pipelineDescriptor(spec, module, vsHash === undefined ? module : this.moduleFor(vsHash));
       const made = { pipeline: this.device.createRenderPipeline(desc), layout };
       if (this.shaderHashes.has(d.shaderId) && (!d.vsShaderId || this.shaderHashes.has(d.vsShaderId))) {
         this.cacheStore?.recordPipeline(spec);
@@ -1930,8 +1945,7 @@ export class GpuExecutor {
   /* ---- records ---- */
 
   private draw(d: Draw, v: DataView, payload: Uint8Array): void {
-    const module = this.shaders.get(d.shaderId);
-    if (!module) {
+    if (!this.shaderHashes.has(d.shaderId)) {
       this.warnOnce(`shader ${d.shaderId}`, `draw with unknown shader ${d.shaderId}`);
       return;
     }
@@ -2033,7 +2047,7 @@ export class GpuExecutor {
       }
       if (depthId && (d.depthWrite || stencilWrites(d))) this.releaseShadowHolds(depthId, d.depthWrite ? "depth write" : "stencil write");
     }
-    const made = this.drawPipeline(d, module, textures, filtered, colorFormats, depthId ? depthTex : undefined, windows);
+    const made = this.drawPipeline(d, textures, filtered, colorFormats, depthId ? depthTex : undefined, windows);
     if (!made) return; /* execute() says what to wait for; nothing of this draw is recorded yet */
     const { pipeline, layout } = made;
     /* Vertices and data (a flush may happen in between: stage both first). */
@@ -2422,7 +2436,7 @@ export class GpuExecutor {
     this.host.log("info", `GPU memory: render targets ${mb(render)} MB (${renderCount}; most: ${commonShapes}; largest: ${largestShapes}; ` +
       `${this.renderCreates} made, ${this.renderDestroys} destroyed, ${this.unknownDestroys} unknown of ${this.destroysSeen} destroys), textures ${mb(sampled)} MB ` +
       `(${sampledCount}), storage buffers ${mb(buffers)} MB (${this.buffers.size}), shadows ${this.shadows.size}, ` +
-      `${this.pipelines.size} pipelines (${this.stats.pipelinesEvicted} evicted), ${this.modulesByHash.size} shader modules (${mb(this.shaderBytes)} MB of WGSL); in the last ${MEMORY_REPORT_PRESENTS} ` +
+      `${this.pipelines.size} pipelines (${this.stats.pipelinesEvicted} evicted), ${this.codeByHash.size} shaders (${mb(this.shaderBytes)} MB of WGSL, ${this.liveModules.size} live modules); in the last ${MEMORY_REPORT_PRESENTS} ` +
       `presents ${mb(this.uploadedBytes)} MB texture uploads, ${mb(this.bufferBytes)} MB buffer uploads (vertices ${mb(this.vertexBytes)}, data ${mb(this.dataBytes)}, ` +
       `pool ${mb(this.poolBytes)}; ${this.bufferWrites} writes), ${this.submits} submits, ${this.bindGroupsMade} bind groups made, ` +
       `${this.stats.draws - this.reportedStats.draws} draws, ${this.stats.passes - this.reportedStats.passes} passes, ` +
