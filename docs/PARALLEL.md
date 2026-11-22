@@ -251,7 +251,7 @@ deterministic).
 
 - **One call per burst.** `emulator_run_for(emu, host_ms, budget)`
   replaces many `emulator_run_slice` calls. The web CPU worker makes one
-  call per ~12 ms burst.
+  call per ~36 ms burst (12 ms until 2026-11-22; see the pause below).
 - **Inside the call.**
   - The cores run continuously: pick, run up to `budget` cycles,
     account, pick again. There is no slice and no barrier.
@@ -262,7 +262,13 @@ deterministic).
   runs only inside the call, and loads, snapshots, input and settings
   between calls see a quiescent machine.
   - That is one handoff per burst instead of one per slice: about
-    160 us per 12 ms, ~1.3%.
+    160 us to wake the cores. The pause itself costs more: every core
+    waits for the slowest to finish its run (up to a 200k-cycle budget,
+    ~2 ms of JIT code). With 12 ms bursts TOTK's cores were parked ~16%
+    of the time at Lookout Landing; with 36 ms bursts ~7%, and it ran
+    9.46 vs 8.73 fps (2026-11-22, 4 alternating pairs; Silksong and
+    MK8DX unchanged). Input reaches the cores through linear memory, so
+    a longer burst does not delay it.
 
 A core with nothing to run while a thread is runnable only on another
 core (its affinity) broadcasts so that core looks, then waits - once per

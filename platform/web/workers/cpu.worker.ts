@@ -391,7 +391,15 @@ function pollEventFeed(): void {
   statusPrevious = sample;
   for (const entry of feed.summary()) log(entry.level, entry.message);
 }
-const BURST_MS = 12;
+/* Host time per emulator_run_for call. Each call ends with the guest
+ * cores parking while the slowest finishes its current run (up to one
+ * SLICE_CYCLES budget, ~2 ms), so a short burst parks them for a large
+ * share: at Tears of the Kingdom's Lookout Landing 12 ms bursts parked
+ * each core ~16% of the time, 36 ms ones ~7% (9.46 vs 8.73 fps, 4 of 4
+ * pairs; Silksong and MK8DX unchanged). Input reaches the cores through
+ * linear memory, not messages, so it is not delayed by a longer burst;
+ * only lifecycle messages (pause, save states, settings) wait for one. */
+const BURST_MS = 36;
 let running = false;
 let loadedTitleId: string | null = null;
 let paused = false;
