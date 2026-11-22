@@ -2580,6 +2580,8 @@ static void simd_fp_sync(uint32_t insn, Sync *sync) {
 #define FP_INFINITY_D 0x7FF0000000000000ull
 #define FP_MIN_NORMAL_S 0x00800000u
 #define FP_INFINITY_S 0x7F800000u
+#define F32_DEFAULT_NAN 0x7FC00000u
+#define F64_DEFAULT_NAN 0x7FF8000000000000ull
 #define FP_SIGN_D 0x8000000000000000ull
 #define FP_SIGN_S 0x80000000u
 #define FPSR_IXC_BIT 4u /* softfloat.h FPSR_IXC */
@@ -2622,17 +2624,24 @@ static void emit_fpcr_default(Ctx *c) {
  * instead of FPCR = 0. */
 #define FPCR_FZ_ONLY 0x01000000u
 
+/* DN (default NaN) changes only NaN results, and no fz_safe fast arm
+ * produces one (each checks its result is a number). TOTK runs much of
+ * its code with FZ and DN together (FPCR 0x3000000): 3.5M of 5.1M scalar
+ * single-precision helper calls per report at Lookout Landing.
+ * (FPCR_DN: softfloat.h.) */
+
 /* i32: FPCR is what the fast arm assumes. */
 static void emit_fpcr_mode(Ctx *c, bool fz_safe) {
-  if (!fz_safe || !c->fz) {
+  if (!fz_safe) {
     emit_fpcr_default(c);
     return;
   }
-  /* FPCR 0 or FZ alone: the not-subnormal checks make both exact, so code
-   * shared by threads in either mode keeps its fast arms. */
+  /* FPCR 0, DN, and in a region compiled FZ-capable FZ: the not-subnormal
+   * checks make all of them exact, so code shared by threads in any of
+   * these modes keeps its fast arms. */
   lget(c, L_STATE);
   mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPCR);
-  i32c(c, (int32_t)~FPCR_FZ_ONLY);
+  i32c(c, (int32_t)~(FPCR_DN | (c->fz ? FPCR_FZ_ONLY : 0u)));
   op(c, WASM_OP_I32_AND);
   op(c, WASM_OP_I32_EQZ);
 }
@@ -3023,6 +3032,15 @@ static void emit_is_zero(Ctx *c, uint32_t local, bool dbl) {
   op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
 }
 
+/* i32: local is +-infinity. */
+static void emit_is_inf(Ctx *c, uint32_t local, bool dbl) {
+  lget(c, local);
+  op(c, dbl ? WASM_OP_F64_ABS : WASM_OP_F32_ABS);
+  if (dbl) f64c(c, FP_INFINITY_D);
+  else f32c(c, FP_INFINITY_S);
+  op(c, dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ);
+}
+
 /* i32: an f64 that is non-zero but no larger than the smallest f32
  * normal - a fused single result that may underflow. */
 #define FP_MIN_NORMAL_S_AS_D 0x3810000000000000ull
@@ -3064,6 +3082,140 @@ static void fp_else_exact_scalar(Ctx *c, uint32_t d, bool dbl) {
 }
 
 static uint32_t fp_result_local(bool dbl) { return dbl ? L_FD : L_FS; }
+
+/* FCVT Sd, Hn. Every half that is not a NaN is a normal single or a
+ * zero, and the conversion reads half subnormals whatever FZ says
+ * (FPUnpackCV), so it is exact and raises nothing: normal halves and zeros
+ * move their bits (exponent rebiased); subnormals, infinities and NaNs,
+ * and AHP/DN or a rounding mode in FPCR, take the exact path. */
+#define FP_TYPE_HALF 3u
+#define FCVT_TO_SINGLE 4u          /* opcode 0001xx: to single */
+#define HALF_SIGN 0x8000u
+#define HALF_MAGNITUDE 0x7FFFu
+#define HALF_EXP_MASK 0x7C00u
+#define HALF_TO_SINGLE_BIAS 0x1C000u /* (127 - 15) << 10: the exponent rebiased under the fraction */
+#define HALF_TO_SINGLE_SHIFT 13u     /* 23 - 10 fraction bits */
+#define HALF_TO_SINGLE_SIGN_SHIFT 16u /* bit 15 -> bit 31 */
+static void emit_fcvt_half_to_single(Ctx *c, uint32_t n, uint32_t d) {
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I64_LOAD16_U, ALIGN_1, OFF_V(n));
+  lset(c, L_T1);
+  lget(c, L_T1); /* normal: the exponent field neither 0 nor 31 */
+  i64c(c, HALF_EXP_MASK);
+  op(c, WASM_OP_I64_AND);
+  i64c(c, 0);
+  op(c, WASM_OP_I64_NE);
+  lget(c, L_T1);
+  i64c(c, HALF_EXP_MASK);
+  op(c, WASM_OP_I64_AND);
+  i64c(c, HALF_EXP_MASK);
+  op(c, WASM_OP_I64_NE);
+  op(c, WASM_OP_I32_AND);
+  lget(c, L_T1); /* or a zero */
+  i64c(c, HALF_MAGNITUDE);
+  op(c, WASM_OP_I64_AND);
+  op(c, WASM_OP_I64_EQZ);
+  op(c, WASM_OP_I32_OR);
+  emit_fpcr_mode(c, true);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  lget(c, L_T1);
+  i64c(c, HALF_SIGN);
+  op(c, WASM_OP_I64_AND);
+  i64c(c, HALF_TO_SINGLE_SIGN_SHIFT);
+  op(c, WASM_OP_I64_SHL);
+  lget(c, L_T1);
+  i64c(c, HALF_MAGNITUDE);
+  op(c, WASM_OP_I64_AND);
+  i64c(c, HALF_TO_SINGLE_BIAS);
+  op(c, WASM_OP_I64_ADD);
+  i64c(c, HALF_TO_SINGLE_SHIFT);
+  op(c, WASM_OP_I64_SHL);
+  i64c(c, 0);
+  lget(c, L_T1);
+  i64c(c, HALF_MAGNITUDE);
+  op(c, WASM_OP_I64_AND);
+  i64c(c, 0);
+  op(c, WASM_OP_I64_NE);
+  op(c, WASM_OP_SELECT);
+  op(c, WASM_OP_I64_OR);
+  op(c, WASM_OP_I32_WRAP_I64);
+  op(c, WASM_OP_F32_REINTERPRET_I32);
+  lset(c, L_FS);
+  store_fp_local(c, d, false, L_FS);
+  fp_else_exact_scalar(c, d, false);
+}
+
+static void emit_fp_arith(Ctx *c, bool dbl, uint32_t opcode, bool two, uint32_t n, uint32_t m, uint32_t d);
+static void emit_is_snan(Ctx *c, uint32_t local, bool dbl);
+
+/* FSQRT. Of a negative number: the default NaN, raising IOC; of a NaN:
+ * its quiet form (DN: the default NaN), a signalling one raising IOC.
+ * Native when that raises nothing new (IOC already set, or a quiet NaN):
+ * TOTK takes square roots of negatives and NaNs all the time (fp_sqrt was
+ * 2-3% of each guest core at Lookout Landing). Otherwise the arithmetic
+ * paths. V[n] is loaded first so its cached copy is defined on both arms. */
+#define F32_QUIET_BIT 0x00400000u
+#define F64_QUIET_BIT 0x0008000000000000ull
+static void emit_fsqrt(Ctx *c, bool dbl, uint32_t n, uint32_t d) {
+  const uint32_t a = dbl ? L_FD2 : L_FS2, r = fp_result_local(dbl);
+  const uint8_t eq = dbl ? WASM_OP_F64_EQ : WASM_OP_F32_EQ;
+  load_fp(c, n, dbl);
+  lset(c, a);
+  lget(c, a); /* raises IOC: a negative number or a signalling NaN... */
+  if (dbl) f64c(c, 0);
+  else f32c(c, 0);
+  op(c, dbl ? WASM_OP_F64_LT : WASM_OP_F32_LT);
+  emit_is_snan(c, a, dbl);
+  op(c, WASM_OP_I32_OR);
+  lget(c, L_STATE); /* ...which changes nothing once IOC is set */
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
+  i32c(c, FPSR_IOC);
+  op(c, WASM_OP_I32_AND);
+  op(c, WASM_OP_I32_AND);
+  lget(c, a); /* or raises nothing: a quiet NaN */
+  lget(c, a);
+  op(c, eq);
+  op(c, WASM_OP_I32_EQZ);
+  emit_is_snan(c, a, dbl);
+  op(c, WASM_OP_I32_EQZ);
+  op(c, WASM_OP_I32_AND);
+  op(c, WASM_OP_I32_OR);
+  and_not_subnormal(c, a, dbl); /* FZ: a negative subnormal is -0 (and IDC) */
+  emit_fpcr_mode(c, true);
+  op(c, WASM_OP_I32_AND);
+  hint(c, false);
+  open_if(c, WASM_BLOCK_VOID);
+  /* the default NaN for a number or under DN, else the NaN made quiet */
+  if (dbl) i64c(c, F64_DEFAULT_NAN);
+  else i32c(c, (int32_t)F32_DEFAULT_NAN);
+  lget(c, a);
+  if (dbl) {
+    op(c, WASM_OP_I64_REINTERPRET_F64);
+    i64c(c, F64_QUIET_BIT);
+    op(c, WASM_OP_I64_OR);
+  } else {
+    op(c, WASM_OP_I32_REINTERPRET_F32);
+    i32c(c, (int32_t)F32_QUIET_BIT);
+    op(c, WASM_OP_I32_OR);
+  }
+  lget(c, a);
+  lget(c, a);
+  op(c, eq);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPCR);
+  i32c(c, (int32_t)FPCR_DN);
+  op(c, WASM_OP_I32_AND);
+  op(c, WASM_OP_I32_OR);
+  op(c, WASM_OP_SELECT);
+  op(c, dbl ? WASM_OP_F64_REINTERPRET_I64 : WASM_OP_F32_REINTERPRET_I32);
+  lset(c, r);
+  store_fp_local(c, d, dbl, r);
+  else_(c);
+  emit_fp_arith(c, dbl, 0, false, n, 0, d);
+  end_(c);
+  fp_cache_define(c, d, dbl ? FP_CACHE_F64 : FP_CACHE_F32); /* both arms left it there */
+}
 
 /* FMUL, FDIV, FADD, FSUB, FNMUL, and FSQRT (two = false). */
 /* Scalar FP arithmetic; `m_lane`: the element of V[m] (by-element forms). */
@@ -3116,6 +3268,20 @@ static void emit_fp_arith_lane(Ctx *c, bool dbl, uint32_t opcode, bool two, uint
    * environment decide between the fast arm and softfloat. */
   c->uses_fp_env = true;
   ltee(c, L_EXACT); /* the result checks, for the second arm */
+  /* Or an infinite result from an infinite input (not the dividend's
+   * divisor: x/0 raises DZC): exact and raising nothing - TOTK computes
+   * with infinities all the time (~1M helper calls per report). Only with
+   * IXC already set: the exactness checks below do not cover infinities. */
+  emit_is_inf(c, r, dbl);
+  emit_is_inf(c, a, dbl);
+  if (two && opcode != 1u) {
+    emit_is_inf(c, b, dbl);
+    op(c, WASM_OP_I32_OR);
+  }
+  op(c, WASM_OP_I32_AND);
+  and_not_subnormal(c, a, dbl);
+  if (two) and_not_subnormal(c, b, dbl);
+  op(c, WASM_OP_I32_OR);
   lget(c, L_FPENV);
   i32c(c, FP_ENV_FAST);
   op(c, WASM_OP_I32_EQ);
@@ -3226,7 +3392,49 @@ static void emit_fp_min_max(Ctx *c, bool dbl, bool min, uint32_t n, uint32_t m, 
 }
 
 /* FCMP/FCMPE (and with #0.0): NZCV from an ordered compare. */
-static void emit_fp_compare(Ctx *c, bool dbl, uint32_t n, uint32_t m, bool with_zero) {
+/* i32: local holds a signalling NaN. */
+#define FP_SNAN_TEST_S 0x7FC00000u /* exponent and quiet bit */
+#define FP_SNAN_TEST_D 0x7FF8000000000000ull
+#define FP_FRACTION_S 0x007FFFFFu
+#define FP_FRACTION_D 0x000FFFFFFFFFFFFFull
+static void emit_is_snan(Ctx *c, uint32_t local, bool dbl) {
+  if (dbl) {
+    lget(c, local);
+    op(c, WASM_OP_I64_REINTERPRET_F64);
+    lset(c, L_T1);
+    lget(c, L_T1);
+    i64c(c, FP_SNAN_TEST_D);
+    op(c, WASM_OP_I64_AND);
+    i64c(c, FP_INFINITY_D);
+    op(c, WASM_OP_I64_EQ);
+    lget(c, L_T1);
+    i64c(c, FP_FRACTION_D);
+    op(c, WASM_OP_I64_AND);
+    i64c(c, 0);
+    op(c, WASM_OP_I64_NE);
+  } else {
+    lget(c, local);
+    op(c, WASM_OP_I32_REINTERPRET_F32);
+    lset(c, L_EXACT);
+    lget(c, L_EXACT);
+    i32c(c, (int32_t)FP_SNAN_TEST_S);
+    op(c, WASM_OP_I32_AND);
+    i32c(c, (int32_t)FP_INFINITY_S);
+    op(c, WASM_OP_I32_EQ);
+    lget(c, L_EXACT);
+    i32c(c, (int32_t)FP_FRACTION_S);
+    op(c, WASM_OP_I32_AND);
+    i32c(c, 0);
+    op(c, WASM_OP_I32_NE);
+  }
+  op(c, WASM_OP_I32_AND);
+}
+
+/* FCMP/FCMPE (and with #0.0): NZCV from the compare. Unordered (a quiet
+ * NaN, FCMP only) is 0011 and raises nothing; a signalling NaN, or any
+ * NaN for FCMPE, raises IOC: the exact path. TOTK compares NaNs a lot
+ * (~1.4M FCMPs per fallback report at Lookout Landing). */
+static void emit_fp_compare(Ctx *c, bool dbl, uint32_t n, uint32_t m, bool with_zero, bool signal) {
   load_fp(c, n, dbl);
   if (dbl) lset(c, L_FD);
   else lset(c, L_FS);
@@ -3247,6 +3455,13 @@ static void emit_fp_compare(Ctx *c, bool dbl, uint32_t n, uint32_t m, bool with_
   lget(c, b);
   op(c, eq);
   op(c, WASM_OP_I32_AND);
+  if (!signal) { /* or no signalling NaN (L_EXACT is emit_is_snan's scratch: keep "ordered" on the stack) */
+    emit_is_snan(c, a, dbl);
+    emit_is_snan(c, b, dbl);
+    op(c, WASM_OP_I32_OR);
+    op(c, WASM_OP_I32_EQZ);
+    op(c, WASM_OP_I32_OR);
+  }
   and_not_subnormal(c, a, dbl);
   and_not_subnormal(c, b, dbl);
   emit_fpcr_mode(c, true);
@@ -3263,6 +3478,17 @@ static void emit_fp_compare(Ctx *c, bool dbl, uint32_t n, uint32_t m, bool with_
   lget(c, b);
   op(c, lt);
   op(c, WASM_OP_SELECT);
+  if (!signal) { /* unordered: 0011 */
+    i32c(c, CPU_PSTATE_C | CPU_PSTATE_V);
+    lget(c, a);
+    lget(c, a);
+    op(c, eq);
+    lget(c, b);
+    lget(c, b);
+    op(c, eq);
+    op(c, WASM_OP_I32_AND);
+    op(c, WASM_OP_SELECT);
+  }
   store_flags(c);
   Sync flags = {0};
   flags.nzcv = true;
@@ -3564,6 +3790,10 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
     }
     return false;
   }
+  if (ftype == FP_TYPE_HALF && bits(insn, 14, 10) == 0x10 && bits(insn, 20, 15) == FCVT_TO_SINGLE) {
+    emit_fcvt_half_to_single(c, rn, rd);
+    return true;
+  }
   if (ftype > 1u) return false;
   const uint64_t sign = dbl ? FP_SIGN_D : FP_SIGN_S;
   if (bits(insn, 14, 10) == 0x10) { /* one source */
@@ -3582,7 +3812,7 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
       store_fp_bits(c, rd);
       return true;
     case 3: /* FSQRT */
-      emit_fp_arith(c, dbl, 0, false, rn, 0, rd);
+      emit_fsqrt(c, dbl, rn, rd);
       return true;
     case 8: case 9: case 10: case 11: /* FRINTN, FRINTP, FRINTM, FRINTZ */
       emit_fp_round_integral(c, dbl, rn, rd, opcode - 8u);
@@ -3593,14 +3823,19 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
     case 4: case 5: { /* FCVT between single and double */
       const uint32_t to = opcode & 3u;
       if (to == ftype) return false;
-      if (!dbl) { /* single -> double: exact unless NaN */
+      if (!dbl) { /* single -> double: exact unless NaN (or, under FZ, a subnormal input) */
         load_fp(c, rn, false);
         op(c, WASM_OP_F64_PROMOTE_F32);
         ltee(c, L_FD);
         lget(c, L_FD);
         op(c, WASM_OP_F64_EQ);
-        emit_fpcr_default(c);
+        emit_fpcr_mode(c, true);
         op(c, WASM_OP_I32_AND);
+        if (c->fz) {
+          emit_tiny_single_in_double(c, L_FD);
+          op(c, WASM_OP_I32_EQZ);
+          op(c, WASM_OP_I32_AND);
+        }
         fp_fast_arm(c);
         store_fp_local(c, rd, true, L_FD);
       } else { /* double -> single: rounds */
@@ -3609,9 +3844,9 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
         op(c, WASM_OP_F32_DEMOTE_F64);
         lset(c, L_FS);
         emit_result_normal(c, L_FS, false);
-        emit_is_zero(c, L_FD, true); /* a zero converts exactly */
+        emit_is_zero(c, L_FD, true); /* a zero converts exactly (FZ: a subnormal input is neither) */
         op(c, WASM_OP_I32_OR);
-        emit_fp_env_ok(c);
+        emit_fp_env_ok_as(c, true);
         op(c, WASM_OP_I32_AND);
         fp_fast_arm(c);
         store_fp_local(c, rd, false, L_FS);
@@ -3626,7 +3861,7 @@ static bool c_scalar_fp_fast(Ctx *c, uint32_t insn) {
   if (bits(insn, 13, 10) == 0x8) { /* FCMP, FCMPE */
     const uint32_t opcode2 = bits(insn, 4, 0);
     if (bits(insn, 15, 14) != 0 || (opcode2 & 7u) != 0) return false;
-    emit_fp_compare(c, dbl, rn, rm, (opcode2 >> 3) & 1u);
+    emit_fp_compare(c, dbl, rn, rm, (opcode2 >> 3) & 1u, (opcode2 >> 4) & 1u);
     return true;
   }
   if (bits(insn, 12, 10) == 0x4) { /* FMOV (immediate) */
@@ -3952,8 +4187,6 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
  * result with its NaN lanes replaced is the architecture's. */
 #define F32_QUIET_BIT 0x00400000u
 #define F64_QUIET_BIT 0x0008000000000000ull
-#define F32_DEFAULT_NAN 0x7FC00000u
-#define F64_DEFAULT_NAN 0x7FF8000000000000ull
 #define WASM_SIMD_I32X4_EQ_OP 0x37u
 #define WASM_SIMD_I64X2_EQ_OP 0xD6u
 static void v128_splat_bits(Ctx *c, uint64_t bits, bool dbl) {
@@ -4401,8 +4634,9 @@ static void emit_lanes_ordered(Ctx *c, uint32_t local, bool dbl, bool q) {
   lget(c, local);
   lget(c, local);
   simd(c, dbl ? WASM_SIMD_F64X2_EQ : WASM_SIMD_F32X4_EQ);
+  and_lanes_not_subnormal(c, local, dbl); /* FZ compares them as zero (and raises IDC) */
   emit_all_lanes(c, q);
-  emit_fpcr_default(c);
+  emit_fpcr_mode(c, true);
   op(c, WASM_OP_I32_AND);
 }
 
@@ -4430,7 +4664,7 @@ static void emit_vector_int_to_fp(Ctx *c, bool dbl, bool q, bool is_unsigned, ui
     lget(c, L_VR);
   }
   lset(c, L_VR);
-  emit_fp_env_ok(c);
+  emit_fp_env_ok_as(c, true); /* integers convert to normals or zeros: FZ changes nothing */
   fp_fast_arm(c);
   store_v(c, d, L_VR, q);
   Sync none = {0};
@@ -4536,14 +4770,15 @@ static void emit_scalar_lane_convert(Ctx *c, bool to_fp, bool dbl, bool is_unsig
       op(c, is_unsigned ? WASM_OP_F32_CONVERT_I32_U : WASM_OP_F32_CONVERT_I32_S);
     }
     lset(c, r);
-    emit_fp_env_ok(c);
+    emit_fp_env_ok_as(c, true); /* an integer converts to a normal or zero: FZ changes nothing */
     fp_fast_arm(c);
     store_fp_local(c, d, dbl, r);
   } else {
     load_fp(c, n, dbl);
     lset(c, r);
     emit_truncation_in_range(c, r, dbl, dbl, is_unsigned);
-    emit_fp_env_ok(c);
+    and_not_subnormal(c, r, dbl); /* FZ: a subnormal input would also set IDC */
+    emit_fp_env_ok_as(c, true);
     op(c, WASM_OP_I32_AND);
     fp_fast_arm(c);
     lget(c, r);
@@ -6585,9 +6820,10 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
     analysis.link = link;
     analysis.discover = true;
     analysis.a32 = link->aarch32;
-    if (source->fpcr == FPCR_FZ_ONLY && !__atomic_load_n(&g_fz_seen, __ATOMIC_RELAXED))
+    const bool fz_mode = (source->fpcr & ~FPCR_DN) == FPCR_FZ_ONLY;
+    if (fz_mode && !__atomic_load_n(&g_fz_seen, __ATOMIC_RELAXED))
       __atomic_store_n(&g_fz_seen, true, __ATOMIC_RELAXED);
-    analysis.fz = source->fpcr == FPCR_FZ_ONLY || __atomic_load_n(&g_fz_seen, __ATOMIC_RELAXED);
+    analysis.fz = fz_mode || __atomic_load_n(&g_fz_seen, __ATOMIC_RELAXED);
     analysis.source = source;
     analysis.max_blocks = max_blocks;
     analysis.max_block_insns = max_block_insns;

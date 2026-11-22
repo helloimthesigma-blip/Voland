@@ -919,6 +919,22 @@ shows it next to the backend name.
   (the region's busiest) live in locals, the rest in the state. Hollow
   Knight's fight +4-5%, Silksong +3-4% in the browser.
   `JIT_LOCAL_REGS=32` restores 0.5.5.
+- **0.5.8** (2026-11-22) - TOTK's FP slow paths. The fallback profile
+  (`VOLAND_JIT_FALLBACKS`) now also says why single-precision scalar FP
+  reached the helper (FPCR, FPSR.IXC, input and result classes). At
+  Lookout Landing: most ran under FPCR = FZ + DN (0x3000000), and the
+  fz_safe guards took only 0 or FZ - DN changes only NaN results, which
+  no guarded fast arm produces, so they accept it (and FZ + DN counts as
+  FZ for compiling FZ-capable regions). Also: infinite results from an
+  infinite input in FMUL/FADD/FSUB/FDIV/FNMUL/FSQRT (IXC set); FCMP with
+  quiet NaNs (unordered, 0011); FSQRT of negatives and NaNs (default NaN
+  once IOC is set; a quiet NaN raises nothing); vector FCM* compares,
+  FCVT between single and double, scalar (SIMD form) SCVTF/UCVTF/FCVTZ*
+  and vector SCVTF/UCVTF made FZ-safe; FCVT Sd, Hn compiles (it had no
+  fast path). Browser, Lookout Landing, 6 alternating pairs: 8.20 -> 9.38
+  fps (every pair faster; game speed 92-99% -> 99-100%), direct SIMD&FP
+  calls ~29 M -> ~16 M per 10 s. What remains: FMUL overflowing to
+  infinity, FCVTNS, FCVTAS/FRINTA, vector FCVTL, FMLA by element.
 
 ## What a region costs on V8
 
@@ -945,7 +961,10 @@ From V8's arm64 output (`node --no-liftoff --no-wasm-lazy-compilation
 ## Limits and next steps
 
 - Compiled modules are one function per region; batching several regions
-  per module would cut per-module overhead during loads.
+  per module would cut per-module overhead during loads, but not memory:
+  in Chrome a region costs ~30 KB per host thread at TOTK's sizes, and a
+  synthetic module of similar wasm size only ~6 KB (8 per module: no
+  less) - the cost is the machine code real regions compile to.
 - SIMD&FP instructions without a fast path still run through the
   interpreter's softfloat.
 - Nothing persists across sessions (see "V8 quirks").

@@ -676,8 +676,73 @@ static void print_cold_profile(uint32_t top) {
   }
 }
 
+/* VOLAND_JIT_FALLBACKS: why scalar single-precision FP data processing
+ * (FMUL/FADD/FSQRT/...) reached the helper - the FPCR it ran under,
+ * FPSR.IXC, and the class of its inputs and result (the fast arms take
+ * normal or zero values only, and FZ or FPCR 0). */
+#define FP_WHY_FPCRS 8u
+enum { FP_WHY_CALLS, FP_WHY_IXC_CLEAR, FP_WHY_IN_ZERO, FP_WHY_IN_SUBNORMAL, FP_WHY_IN_INF, FP_WHY_IN_NAN,
+       FP_WHY_OUT_ZERO, FP_WHY_OUT_SUBNORMAL, FP_WHY_OUT_INF, FP_WHY_OUT_NAN, FP_WHY_KINDS };
+static const char *const fp_why_names[FP_WHY_KINDS] = {"calls", "IXC clear", "input zero", "input subnormal",
+                                                       "input inf", "input NaN", "result zero", "result subnormal",
+                                                       "result inf", "result NaN"};
+static uint64_t g_fp_why[FP_WHY_KINDS];
+static uint32_t g_fp_why_fpcr[FP_WHY_FPCRS];
+static uint64_t g_fp_why_fpcr_count[FP_WHY_FPCRS];
+#define FP_SINGLE_DP_MASK 0xFFE00000u /* M=0 S=0, type 00 (single), bit 21 */
+#define FP_SINGLE_DP 0x1E200000u
+#define FP_TWO_SOURCE_BITS 0x2u /* bits 11:10 of a two-source operation */
+#define F32_EXP_SHIFT 23u
+#define F32_EXP_MAX 0xFFu
+#define F32_FRAC_MASK 0x7FFFFFu
+
+/* FP_WHY_IN_ZERO.. (or ..OUT_..: + 4) for a single's bits; FP_WHY_KINDS if normal. */
+static uint32_t fp_why_class(uint32_t value, uint32_t zero_kind) {
+  const uint32_t exp = (value >> F32_EXP_SHIFT) & F32_EXP_MAX, frac = value & F32_FRAC_MASK;
+  if (exp == 0) return frac ? zero_kind + 1u : zero_kind;
+  if (exp == F32_EXP_MAX) return frac ? zero_kind + 3u : zero_kind + 2u;
+  return FP_WHY_KINDS;
+}
+
+static void fp_why_count(uint32_t kind) {
+  if (kind < FP_WHY_KINDS) __atomic_add_fetch(&g_fp_why[kind], 1u, __ATOMIC_RELAXED);
+}
+
+static bool fp_why_inputs(const Interp_State *s, uint32_t insn) {
+  if ((insn & FP_SINGLE_DP_MASK) != FP_SINGLE_DP) return false;
+  fp_why_count(FP_WHY_CALLS);
+  if (!(s->fpsr & 0x10u)) fp_why_count(FP_WHY_IXC_CLEAR);
+  for (uint32_t k = 0; k < FP_WHY_FPCRS; k++) {
+    if (g_fp_why_fpcr_count[k] && g_fp_why_fpcr[k] != s->fpcr) continue;
+    g_fp_why_fpcr[k] = s->fpcr; /* racy: diagnostics only */
+    __atomic_add_fetch(&g_fp_why_fpcr_count[k], 1u, __ATOMIC_RELAXED);
+    break;
+  }
+  fp_why_count(fp_why_class((uint32_t)s->v[bits(insn, 9, 5)].lo, FP_WHY_IN_ZERO));
+  if (bits(insn, 11, 10) == FP_TWO_SOURCE_BITS) fp_why_count(fp_why_class((uint32_t)s->v[bits(insn, 20, 16)].lo, FP_WHY_IN_ZERO));
+  return true;
+}
+
+static void print_fp_why(void) {
+  if (!g_fp_why[FP_WHY_CALLS]) return;
+  char line[512];
+  int at = snprintf(line, sizeof(line), "[jit]   single-precision FP in the helper:");
+  for (uint32_t k = 0; k < FP_WHY_KINDS && at > 0 && at < (int)sizeof(line); k++) {
+    at += snprintf(line + at, sizeof(line) - (size_t)at, " %s %llu;", fp_why_names[k], (unsigned long long)g_fp_why[k]);
+    g_fp_why[k] = 0;
+  }
+  for (uint32_t k = 0; k < FP_WHY_FPCRS && at > 0 && at < (int)sizeof(line); k++) {
+    if (!g_fp_why_fpcr_count[k]) continue;
+    at += snprintf(line + at, sizeof(line) - (size_t)at, " FPCR %x: %llu;", g_fp_why_fpcr[k],
+                   (unsigned long long)g_fp_why_fpcr_count[k]);
+    g_fp_why_fpcr_count[k] = 0;
+  }
+  log_warn("%s", line);
+}
+
 void jit_print_fallback_profile(uint32_t top) {
   print_cold_profile(top / 2u);
+  print_fp_why();
   for (uint32_t n = 0; n < top; n++) {
     uint32_t best = FALLBACK_SLOTS;
     for (uint32_t i = 0; i < FALLBACK_SLOTS; i++) {
@@ -747,12 +812,15 @@ uint32_t jit_helper_simd(Jit_State *state, uint32_t insn) {
     if (g_fallback_profile) profile_fallback_a32(insn, A32_FALLBACK_DIRECT);
     return a32_execute((A32_State *)state, insn) == INTERP_CONTINUE ? 0u : 1u;
   }
+  const bool why = g_fallback_profile && fp_why_inputs(&state->interp, insn);
   if (g_fallback_profile) profile_fallback(insn);
   if (state->interp.fpcr != 0) st->simd_fpcr_nonzero++;
   else if (!(state->interp.fpsr & 0x10u)) st->simd_ixc_clear++;
   st->last_fpcr = state->interp.fpcr;
   st->direct_simd++;
-  return interp_execute(&state->interp, insn) == INTERP_CONTINUE ? 0u : 1u;
+  const uint32_t stop = interp_execute(&state->interp, insn) == INTERP_CONTINUE ? 0u : 1u;
+  if (why) fp_why_count(fp_why_class((uint32_t)state->interp.v[bits(insn, 4, 0)].lo, FP_WHY_OUT_ZERO));
+  return stop;
 }
 
 uint32_t jit_helper_write(Jit_State *state, uint64_t address, uint32_t size) {

@@ -376,7 +376,10 @@ static uint32_t gen_fp_cache_mix(void) {
   case 15: return 0x4EA04400u | (pick(2) << 29) | ((28u + pick(4)) << 16) | (n << 5) | d; /* SSHL/USHL v.4s, counts from V28-V31 */
   case 10: return 0x1F000000u | type | (pick(2) << 21) | (m << 16) | (pick(2) << 15) | (cache_vreg() << 10) | (n << 5) | d; /* FMADD family */
   case 11: return 0x1E204800u | type | (m << 16) | (pick(4) << 12) | (n << 5) | d;      /* FMAX/FMIN/FMAXNM/FMINNM */
-  case 12: return pick(2) ? 0x1E22C000u | (n << 5) | d : 0x1E624000u | (n << 5) | d;    /* FCVT d, s / s, d */
+  case 12: { /* FCVT d, s / s, d / s, h */
+    static const uint32_t fcvt[3] = {0x1E22C000u, 0x1E624000u, 0x1EE24000u};
+    return fcvt[pick(3)] | (n << 5) | d;
+  }
   case 13: return (pick(2) ? 0x1E220000u : 0x9E620000u) | type | (reg() << 5) | d;      /* SCVTF from w / x */
   case 14: return pick(2) ? 0x1E244000u | type | (pick(8) << 15) | (n << 5) | d        /* FRINT* */
                           : 0x1E200400u | type | (m << 16) | (pick(16) << 12) | (n << 5) | (pick(2) << 4) | pick(16); /* FCCMP(E) */
@@ -387,6 +390,7 @@ static uint32_t gen_fp_cache_mix(void) {
   case 6: return 0x4E20D400u | (m << 16) | (n << 5) | d;                                  /* FADD v.4s */
   case 7: return 0x4E001C00u | ((((pick(4)) << 3) | 4u) << 16) | (reg() << 5) | d;          /* INS v.s[i], w */
   case 8: return 0x2F00E400u | d;                                                         /* MOVI d, #0 */
+  case 9: return 0x1E202000u | type | (m << 16) | (n << 5) | (pick(4) << 3);              /* FCMP(E): NaN/inf lanes in V16-V19 */
   default: return 0x54000040u | pick(14);                                                 /* B.cond +2 */
   }
 }
