@@ -28,6 +28,10 @@ void guest_boot(Guest_Run *run, const CPU_Backend *backend, const uint8_t *code,
 /* The same with `cores` host cores set before the load (the web worker's order). */
 void guest_boot_cores(Guest_Run *run, const CPU_Backend *backend, const uint8_t *code, size_t size, uint32_t cores);
 
+/* A 32-bit process (AArch32 `code`, 32-bit address space): the emulator
+ * runs it on `backend`'s A32 counterpart, with `cores` host cores (0: serial). */
+void guest_boot_a32(Guest_Run *run, const CPU_Backend *backend, const uint8_t *code, size_t size, uint32_t cores);
+
 /* Runs slices of `budget` cycles until the process stops (or max_slices). */
 Emulator_Status guest_run(Guest_Run *run, uint64_t budget, uint64_t max_slices);
 

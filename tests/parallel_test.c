@@ -12,6 +12,7 @@
  *      condvar producer/consumer (a lost wakeup deadlocks it).
  *   3. Host calls from a core reach the driver thread (parallel_on_driver).
  */
+#define _POSIX_C_SOURCE 200809L /* nanosleep under -std=c11 (Emscripten) */
 #define CHECK_NAME "parallel_test"
 #include "check.h"
 
@@ -24,6 +25,8 @@
 #include "guest/busyfeed.inc"
 #include "guest/polls.inc"
 #include "guest/preemptoff.inc"
+#include "guest/mutexes.inc"
+#include "guest/mutexes32.inc"
 #include "hle/kernel/parallel.h"
 
 #include <pthread.h>
@@ -46,17 +49,20 @@ typedef struct Program {
   const uint8_t *code;
   size_t size;
   const char *expected;
+  bool a32; /* an AArch32 program, booted as a 32-bit process */
 } Program;
 
 static const Program k_programs[] = {
-    {"threads", k_guest_threads, sizeof(k_guest_threads), "counter 2000, sleep ok"},
-    {"condvar", k_guest_condvar, sizeof(k_guest_condvar), "sum 125250, timeouts ok"},
-    {"events", k_guest_events, sizeof(k_guest_events), "signal, reset, timeout, close ok"},
-    {"atomics", k_guest_atomics, sizeof(k_guest_atomics), "counters 150000 ok"},
-    {"yieldspin", k_guest_yieldspin, sizeof(k_guest_yieldspin), "flag seen"},
-    {"busyfeed", k_guest_busyfeed, sizeof(k_guest_busyfeed), "job taken"},
-    {"polls", k_guest_polls, sizeof(k_guest_polls), "picked up promptly"},
-    {"preemptoff", k_guest_preemptoff, sizeof(k_guest_preemptoff), "counter 600"},
+    {"threads", k_guest_threads, sizeof(k_guest_threads), "counter 2000, sleep ok", false},
+    {"condvar", k_guest_condvar, sizeof(k_guest_condvar), "sum 125250, timeouts ok", false},
+    {"events", k_guest_events, sizeof(k_guest_events), "signal, reset, timeout, close ok", false},
+    {"atomics", k_guest_atomics, sizeof(k_guest_atomics), "counters 150000 ok", false},
+    {"yieldspin", k_guest_yieldspin, sizeof(k_guest_yieldspin), "flag seen", false},
+    {"busyfeed", k_guest_busyfeed, sizeof(k_guest_busyfeed), "job taken", false},
+    {"polls", k_guest_polls, sizeof(k_guest_polls), "picked up promptly", false},
+    {"preemptoff", k_guest_preemptoff, sizeof(k_guest_preemptoff), "counter 600", false},
+    {"mutexes", k_guest_mutexes, sizeof(k_guest_mutexes), "counter 60000 ok", false},
+    {"mutexes32", k_guest_mutexes32, sizeof(k_guest_mutexes32), "counter 60000 ok", true},
 };
 #define PROGRAM_COUNT (sizeof(k_programs) / sizeof(k_programs[0]))
 #define MAX_SLICES 20000000ull
@@ -67,9 +73,18 @@ typedef struct Outcome {
   char output[GUEST_OUTPUT_BYTES];
 } Outcome;
 
-static void run_program(const Program *program, uint32_t cores, uint64_t budget, Outcome *out) {
+/* Boots `program` (a 32-bit process for an AArch32 one) with `cores` host cores (0: serial). */
+static void boot_program(const Program *program, uint32_t cores) {
+  if (program->a32) {
+    guest_boot_a32(&g_run, TEST_BACKEND, program->code, program->size, cores);
+    return;
+  }
   guest_boot(&g_run, TEST_BACKEND, program->code, program->size);
   if (cores) CHECK(emulator_set_host_cores(&g_run.emu, cores) == cores);
+}
+
+static void run_program(const Program *program, uint32_t cores, uint64_t budget, Outcome *out) {
+  boot_program(program, cores);
   out->status = guest_run(&g_run, budget, MAX_SLICES);
   out->slices = g_run.slices;
   out->svcs = g_run.emu.hle.svc_call_count;
@@ -131,6 +146,7 @@ static void test_stress(void) {
   static const struct { size_t program; uint32_t cores; uint64_t budget; } runs[] = {
       {3, 3, 50000}, {1, 2, 997}, {1, 3, 997}, {1, 2, 100000},
       {6, 3, 997}, {6, 2, 31}, {6, 3, 31},
+      {8, 3, 997}, {8, 3, 31}, {8, 2, 100000}, {9, 3, 997}, {9, 3, 31}, {9, 2, 100000},
   };
   for (size_t k = 0; k < sizeof(runs) / sizeof(runs[0]); k++) {
     for (uint32_t round = 0; round < 20u; round++) {
@@ -204,8 +220,7 @@ static void test_poll_coalescing(void) {
 #define FREE_BURST_MS 5u
 #define FREE_MAX_BURSTS 20000u
 static void run_free(const Program *program, uint32_t cores, uint64_t budget, Outcome *out) {
-  guest_boot(&g_run, TEST_BACKEND, program->code, program->size);
-  CHECK(emulator_set_host_cores(&g_run.emu, cores) == cores);
+  boot_program(program, cores);
   emulator_set_free_running(&g_run.emu, true);
   Emulator_Status status = EMULATOR_RUNNING;
   uint64_t bursts = 0;
@@ -230,7 +245,7 @@ static void test_free_running(void) {
     run_free(&k_programs[p], cores, budgets[i], &o);
     check_completes(&k_programs[p], cores, budgets[i], &o);
   }
-  static const size_t stressed[] = {3, 1, 6}; /* atomics, condvar, polls */
+  static const size_t stressed[] = {3, 1, 6, 8, 9}; /* atomics, condvar, polls, mutexes, mutexes32 */
   for (size_t k = 0; k < sizeof(stressed) / sizeof(stressed[0]); k++) {
     for (uint32_t round = 0; round < 20u; round++) {
       run_free(&k_programs[stressed[k]], 3, 997, &o);
@@ -333,8 +348,7 @@ static void test_pinned_cores(void) {
   for (uint32_t cores = 2; cores <= 3; cores++)
   for (size_t p = 0; p < PROGRAM_COUNT; p++)
   for (uint32_t free_running = 0; free_running <= 1; free_running++) {
-    guest_boot(&g_run, TEST_BACKEND, k_programs[p].code, k_programs[p].size);
-    CHECK(emulator_set_host_cores(&g_run.emu, cores) == cores);
+    boot_program(&k_programs[p], cores);
     emulator_set_pin_ideal_cores(&g_run.emu, true);
     if (free_running) {
       emulator_set_free_running(&g_run.emu, true);

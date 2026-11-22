@@ -28,7 +28,12 @@ void guest_boot(Guest_Run *run, const CPU_Backend *backend, const uint8_t *code,
   guest_boot_cores(run, backend, code, size, 0);
 }
 
-void guest_boot_cores(Guest_Run *run, const CPU_Backend *backend, const uint8_t *code, size_t size, uint32_t cores) {
+/* NPDM flags: bit 0 the 64-bit instruction set, bits 1-3 the address space. */
+#define NPDM_FLAGS_64BIT (0x01u | (3u << 1))
+#define NPDM_FLAGS_32BIT 0x00u
+
+static void boot(Guest_Run *run, const CPU_Backend *backend, const uint8_t *code, size_t size, uint32_t cores,
+                 uint8_t npdm_flags) {
   memset(run, 0, sizeof(*run));
   Fixture_NSO_Params nso;
   memset(&nso, 0, sizeof(nso));
@@ -41,7 +46,7 @@ void guest_boot_cores(Guest_Run *run, const CPU_Backend *backend, const uint8_t 
 
   Fixture_NPDM_Params npdm;
   memset(&npdm, 0, sizeof(npdm));
-  npdm.flags = 0x01 | (3 << 1);
+  npdm.flags = npdm_flags;
   npdm.main_thread_priority = GUEST_PRIORITY;
   npdm.main_thread_stack_size = GUEST_STACK_BYTES;
   npdm.name = "GuestTest";
@@ -77,6 +82,14 @@ void guest_boot_cores(Guest_Run *run, const CPU_Backend *backend, const uint8_t 
   fixture_buffer_free(&exefs_image);
   fixture_buffer_free(&npdm_image);
   fixture_buffer_free(&nso_image);
+}
+
+void guest_boot_cores(Guest_Run *run, const CPU_Backend *backend, const uint8_t *code, size_t size, uint32_t cores) {
+  boot(run, backend, code, size, cores, NPDM_FLAGS_64BIT);
+}
+
+void guest_boot_a32(Guest_Run *run, const CPU_Backend *backend, const uint8_t *code, size_t size, uint32_t cores) {
+  boot(run, backend, code, size, cores, NPDM_FLAGS_32BIT);
 }
 
 Emulator_Status guest_run(Guest_Run *run, uint64_t budget, uint64_t max_slices) {

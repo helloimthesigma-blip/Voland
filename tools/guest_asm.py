@@ -2,6 +2,7 @@
 """Assemble a self-contained ARM64 guest program into bytes Voland can run.
 
     guest_asm.py inc  program.s  out.inc   # C array for tests (#include-able)
+    guest_asm.py inc32 program.s out.inc   # the same for an AArch32 (ARM-state) program
     guest_asm.py nro  program.s  out.nro   # a homebrew NRO (DESIGN.md §12)
 
 The program must be position-independent and live in .text alone (ADR /
@@ -9,7 +10,8 @@ literal / branch addressing only): the tool takes the assembled .text
 bytes and refuses any object that still carries relocations, because
 there is no linker in the loop. Requires clang with the AArch64 target
 (any Apple or LLVM clang). Generated files are committed, so building and
-testing Voland never needs this tool or an ARM toolchain.
+testing Voland never needs this tool or an ARM toolchain. inc32 assembles
+for ARMv8-A AArch32 instead (ARM state, so LDAEX/STLEX are there).
 
 NRO layout written here (switchbrew "NRO"): the image starts with NroStart
 (a branch to the code, the MOD0 offset, padding) and the 0x70-byte
@@ -23,6 +25,7 @@ import sys
 import tempfile
 
 ELF_SECTION_HEADER = struct.Struct("<IIQQQQIIQQ")
+ELF32_SECTION_HEADER = struct.Struct("<IIIIIIIIII")
 SHT_RELA = 4
 SHT_REL = 9
 NRO_HEADER_OFFSET = 0x10
@@ -32,16 +35,24 @@ PAGE = 0x1000
 NRO_BSS_DEFAULT = 0x10000
 
 
-def assemble(source: str) -> bytes:
+def assemble(source: str, a32: bool = False) -> bytes:
+    target = ["-target", "armv8a-none-eabi", "-marm"] if a32 else ["-target", "aarch64-none-elf"]
     with tempfile.TemporaryDirectory() as tmp:
         obj = os.path.join(tmp, "out.o")
-        subprocess.run(["clang", "-c", "-target", "aarch64-none-elf", source, "-o", obj], check=True)
+        subprocess.run(["clang", "-c", *target, source, "-o", obj], check=True)
         data = open(obj, "rb").read()
-    if data[:4] != b"\x7fELF" or data[4] != 2 or data[5] != 1:
-        sys.exit("not a little-endian ELF64 object")
-    shoff = struct.unpack_from("<Q", data, 0x28)[0]
-    shentsize, shnum, shstrndx = struct.unpack_from("<HHH", data, 0x3A)
-    sections = [ELF_SECTION_HEADER.unpack_from(data, shoff + i * shentsize) for i in range(shnum)]
+    elf_class = 1 if a32 else 2
+    if data[:4] != b"\x7fELF" or data[4] != elf_class or data[5] != 1:
+        sys.exit(f"not a little-endian ELF{32 if a32 else 64} object")
+    if a32:
+        shoff = struct.unpack_from("<I", data, 0x20)[0]
+        shentsize, shnum, shstrndx = struct.unpack_from("<HHH", data, 0x2E)
+        header = ELF32_SECTION_HEADER
+    else:
+        shoff = struct.unpack_from("<Q", data, 0x28)[0]
+        shentsize, shnum, shstrndx = struct.unpack_from("<HHH", data, 0x3A)
+        header = ELF_SECTION_HEADER
+    sections = [header.unpack_from(data, shoff + i * shentsize) for i in range(shnum)]
     strtab = sections[shstrndx]
     names = data[strtab[4]: strtab[4] + strtab[5]]
 
@@ -96,11 +107,11 @@ def write_nro(code: bytes, out: str) -> None:
 
 
 def main() -> None:
-    if len(sys.argv) != 4 or sys.argv[1] not in ("inc", "nro"):
+    if len(sys.argv) != 4 or sys.argv[1] not in ("inc", "inc32", "nro"):
         sys.exit(__doc__)
     mode, source, out = sys.argv[1:]
-    code = assemble(source)
-    if mode == "inc":
+    code = assemble(source, a32=mode == "inc32")
+    if mode in ("inc", "inc32"):
         write_inc(code, source, out)
     else:
         write_nro(code, out)
