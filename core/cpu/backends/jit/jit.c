@@ -743,16 +743,23 @@ static void print_fp_why(void) {
 void jit_print_fallback_profile(uint32_t top) {
   print_cold_profile(top / 2u);
   print_fp_why();
+  uint64_t total = 0;
+  for (uint32_t i = 0; i < FALLBACK_SLOTS; i++) total += g_fallback_count[i];
+  log_warn("[jit]   fallbacks: %llu in all since the last report", (unsigned long long)total);
   for (uint32_t n = 0; n < top; n++) {
     uint32_t best = FALLBACK_SLOTS;
     for (uint32_t i = 0; i < FALLBACK_SLOTS; i++) {
       if (g_fallback_count[i] && (best == FALLBACK_SLOTS || g_fallback_count[i] > g_fallback_count[best])) best = i;
     }
-    if (best == FALLBACK_SLOTS) return;
+    if (best == FALLBACK_SLOTS) break;
     log_warn("[jit]   fallback %12llu  %08x%s", (unsigned long long)g_fallback_count[best], g_fallback_key[best] & ~1u,
             has_fast_path(g_fallback_key[best]) ? "  (fast path's exact arm)" : "");
     g_fallback_count[best] = 0;
   }
+  /* A fresh table per report: keys kept with zero counts filled it over a
+   * long run, and keys seen later were then dropped uncounted. */
+  memset(g_fallback_key, 0, sizeof(g_fallback_key));
+  memset(g_fallback_count, 0, sizeof(g_fallback_count));
 }
 
 /* The calling host thread's counters (a dummy if it has no JIT state). */
