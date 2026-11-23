@@ -687,6 +687,10 @@ Tears of the Kingdom at Lookout Landing (same setup, 42-52k regions
 imported, three alternating pairs, 20 s measures): ~1 minute after
 loading 7.4 / 8.2 / 8.8 fps without the list, 11.9 / 10.8 / 9.6 with it;
 ~3 minutes after, 8.1 / 12.2 / 11.4 without, 12.3 / 14.2 / 14.4 with.
+SMO's Mushroom Kingdom, where the main thread alone holds core 0 (19.6
+of 20 s; ~10% of it interpreting warm code before): 60 s of play, three
+pairs, 56.9 / 57.1 / 56.3 fps without the list, 59.5 / 59.8 / 59.7 with
+it; 40-60 ms frames 95 / 67 / 108 against 62 / 71 / 38.
 
 `VOLAND_JIT_HOT=0` (`?env=` in the browser) neither imports nor exports,
 for A/B runs, and leaves the stored list as it is. `tests/jit_hot_test.c`
@@ -990,7 +994,8 @@ shows it next to the backend name.
 - **0.6.0** (2026-11-23) - hot code across sessions: the region entries
   a title compiled are stored per title and code key, and compile on
   first sight in later sessions ("Hot code across sessions"). SMO's first
-  Cappy throws after loading 54.7 -> 57.2 fps; TOTK at Lookout Landing
+  Cappy throws after loading 54.7 -> 57.2 fps, its Mushroom Kingdom
+  56.7 -> 59.7 fps; TOTK at Lookout Landing
   ~3 minutes in 10.5 -> 13.6 fps (means of three pairs).
 
 ## What a region costs on V8
