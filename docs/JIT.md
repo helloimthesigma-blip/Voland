@@ -683,6 +683,10 @@ Falls, one browser profile with its shaders cached, the first six Cappy
 throws after loading (2 s windows each), three alternating pairs: 54.7 /
 54.6 / 54.8 fps without the list, 57.0 / 57.3 / 57.3 with it (~10,000
 regions imported); a minute later both hold ~59.
+Tears of the Kingdom at Lookout Landing (same setup, 42-52k regions
+imported, three alternating pairs, 20 s measures): ~1 minute after
+loading 7.4 / 8.2 / 8.8 fps without the list, 11.9 / 10.8 / 9.6 with it;
+~3 minutes after, 8.1 / 12.2 / 11.4 without, 12.3 / 14.2 / 14.4 with.
 
 `VOLAND_JIT_HOT=0` (`?env=` in the browser) neither imports nor exports,
 for A/B runs, and leaves the stored list as it is. `tests/jit_hot_test.c`
@@ -986,7 +990,8 @@ shows it next to the backend name.
 - **0.6.0** (2026-11-23) - hot code across sessions: the region entries
   a title compiled are stored per title and code key, and compile on
   first sight in later sessions ("Hot code across sessions"). SMO's first
-  Cappy throws after loading 54.7 -> 57.2 fps.
+  Cappy throws after loading 54.7 -> 57.2 fps; TOTK at Lookout Landing
+  ~3 minutes in 10.5 -> 13.6 fps (means of three pairs).
 
 ## What a region costs on V8
 
