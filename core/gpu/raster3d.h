@@ -67,9 +67,12 @@ struct Gpu_Stream;
 #define RASTER_TEXTURE_POOL_BYTES ((size_t)1024 * 1024 * 1024)
 #endif
 /* Texture change detection: a sampled hash each frame, the whole texture
- * every RASTER_TEXTURE_FULL_EVERY frames. */
-#define RASTER_TEXTURE_SAMPLES 64u
-#define RASTER_TEXTURE_SAMPLE_BYTES 64u
+ * every RASTER_TEXTURE_FULL_EVERY frames. Each span is one guest read:
+ * 16 of 256 bytes cost a quarter of the reads 64 of 64 did, for the same
+ * bytes (a thousand textures checked per frame in Super Mario Odyssey's
+ * New Donk City). */
+#define RASTER_TEXTURE_SAMPLES 16u
+#define RASTER_TEXTURE_SAMPLE_BYTES 256u
 #define RASTER_TEXTURE_FULL_EVERY 30u
 /* What a frame spends on those periodic whole hashes; a texture past it
  * keeps its sampled check until a later frame has room. Textures a level

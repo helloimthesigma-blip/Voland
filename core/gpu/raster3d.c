@@ -1189,6 +1189,46 @@ static uint64_t page_hash(const uint8_t *p, uint32_t n) {
   return x;
 }
 
+/* page_hash's lanes, streamed (texture change checks): whole blocks into
+ * the lanes, a last partial block bytewise into `tail`. Every call but the
+ * last takes a multiple of PAGE_HASH_BLOCK_BYTES. */
+typedef struct Lane_Hash {
+  uint32_t lane[PAGE_HASH_LANES];
+  uint64_t tail;
+  uint64_t length;
+} Lane_Hash;
+
+static void lane_hash_begin(Lane_Hash *h, uint64_t length) {
+  for (uint32_t j = 0; j < PAGE_HASH_LANES; j++) h->lane[j] = (PAGE_HASH_LANE_SEED * (j + 1u)) ^ (uint32_t)length;
+  h->tail = length;
+  h->length = length;
+}
+
+static void lane_hash_update(Lane_Hash *h, const uint8_t *p, uint64_t n) {
+  uint32_t lane[PAGE_HASH_LANES];
+  memcpy(lane, h->lane, sizeof(lane));
+  uint64_t i = 0;
+  for (; i + PAGE_HASH_BLOCK_BYTES <= n; i += PAGE_HASH_BLOCK_BYTES) {
+    uint32_t v[PAGE_HASH_LANES];
+    memcpy(v, p + i, sizeof(v));
+    for (uint32_t j = 0; j < PAGE_HASH_LANES; j++) {
+      const uint32_t x = (lane[j] ^ v[j]) * PAGE_HASH_LANE_MUL;
+      lane[j] = x ^ (x >> PAGE_HASH_LANE_SHIFT);
+    }
+  }
+  memcpy(h->lane, lane, sizeof(lane));
+  for (; i < n; i++) h->tail = (h->tail ^ p[i]) * 0x100000001B3ull;
+}
+
+static uint64_t lane_hash_end(const Lane_Hash *h) {
+  uint64_t x = h->length ^ h->tail;
+  for (uint32_t j = 0; j < PAGE_HASH_LANES; j++) {
+    x = (x ^ h->lane[j]) * HASH_MUL;
+    x ^= x >> PAGE_HASH_MIX_SHIFT;
+  }
+  return x;
+}
+
 static uint64_t bytes_content_hash(const uint8_t *p, uint64_t n) {
   Content_Hash h;
   content_hash_begin(&h, n);
@@ -1204,8 +1244,8 @@ static uint64_t bytes_content_hash(const uint8_t *p, uint64_t n) {
  * at once (textures_invalidate). */
 static bool guest_sample_hash(const Gpu_Memory *mem, uint64_t va, uint64_t n, uint64_t *out) {
   uint8_t span[RASTER_TEXTURE_SAMPLE_BYTES];
-  Content_Hash h;
-  content_hash_begin(&h, n);
+  Lane_Hash h;
+  lane_hash_begin(&h, n);
   if (n <= (uint64_t)RASTER_TEXTURE_SAMPLES * RASTER_TEXTURE_SAMPLE_BYTES) {
     *out = 0;
     return false; /* small: the whole hash is as cheap */
@@ -1213,23 +1253,23 @@ static bool guest_sample_hash(const Gpu_Memory *mem, uint64_t va, uint64_t n, ui
   const uint64_t step = n / RASTER_TEXTURE_SAMPLES;
   for (uint32_t i = 0; i < RASTER_TEXTURE_SAMPLES; i++) {
     if (!mem->read(mem->user, va + (uint64_t)i * step, span, sizeof(span))) return false;
-    content_hash_update(&h, span, sizeof(span));
+    lane_hash_update(&h, span, sizeof(span));
   }
-  *out = content_hash_end(&h);
+  *out = lane_hash_end(&h);
   return true;
 }
 
 static bool guest_hash(const Gpu_Memory *mem, uint64_t va, uint64_t n, uint64_t *out) {
   static uint8_t chunk[HASH_CHUNK_BYTES];
-  Content_Hash h;
-  content_hash_begin(&h, n);
+  Lane_Hash h;
+  lane_hash_begin(&h, n);
   for (uint64_t done = 0; done < n;) {
     const uint64_t len = n - done < HASH_CHUNK_BYTES ? n - done : HASH_CHUNK_BYTES;
     if (!mem->read(mem->user, va + done, chunk, len)) return false;
-    content_hash_update(&h, chunk, len);
+    lane_hash_update(&h, chunk, len);
     done += len;
   }
-  *out = content_hash_end(&h);
+  *out = lane_hash_end(&h);
   return true;
 }
 
@@ -1291,6 +1331,8 @@ static void vertex_pages_note(Raster3d *r, const Gpu_Memory *mem, uint64_t va, u
 #define VPOOL_PAGE_BYTES 4096u
 #define VPOOL_PAGES (VPOOL_SLOT_BYTES / VPOOL_PAGE_BYTES)
 _Static_assert(VPOOL_PAGE_BYTES % PAGE_HASH_BLOCK_BYTES == 0, "page_hash takes whole blocks");
+_Static_assert(HASH_CHUNK_BYTES % PAGE_HASH_BLOCK_BYTES == 0 && RASTER_TEXTURE_SAMPLE_BYTES % PAGE_HASH_BLOCK_BYTES == 0,
+               "lane_hash_update takes whole blocks but in the last call");
 #define VPOOL_BUFFER_ID 0x7fff0000u /* above gpu_mirror's ids, which count up from 1 */
 #define IPOOL_BUFFER_ID 0x7fff0001u
 

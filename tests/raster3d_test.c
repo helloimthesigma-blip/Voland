@@ -702,6 +702,62 @@ static void triangle(float ax, float ay, float bx, float by, float cx, float cy)
   vertex(2, cx, cy, 1, 0, 0, 1);
 }
 
+/* Texture change detection: a 64x64 texture (past the size hashed whole
+ * each frame) changed everywhere between frames is caught by its sampled
+ * hash at once; a change in bytes between the samples, by the whole hash
+ * within RASTER_TEXTURE_FULL_EVERY frames. */
+#define TEX_CHANGE (GPU_BASE + 0xF0000u)
+#define TEX_CHANGE_SIZE 64u
+#define TEX_CHANGE_ROW_BYTES (TEX_CHANGE_SIZE * 4u)
+#define TEX_CHANGE_ROW 2u /* its bytes [512, 768) lie between two samples */
+static void fill_rows(uint32_t first, uint32_t count, uint32_t rgba) {
+  for (uint32_t y = first; y < first + count; y++)
+    for (uint32_t x = 0; x < TEX_CHANGE_SIZE; x++) put32(TEX_CHANGE + y * TEX_CHANGE_ROW_BYTES + x * 4u, rgba);
+}
+static void draw_textured_quad(Raster3d *r) {
+  raster3d_begin_submission(r);
+  clear_to(r, 0, 0, 0, 1);
+  vertex(0, -1.0f, -1.0f, 0, 0, 0, 0);
+  vertex(1, 1.0f, -1.0f, 1, 0, 0, 0);
+  vertex(2, -1.0f, 1.0f, 0, 1, 0, 0);
+  vertex(3, 1.0f, 1.0f, 1, 1, 0, 0);
+  draw_arrays(r, 5, 4);
+  raster3d_flush(r, &k_mem);
+}
+static void test_texture_change(Raster3d *r) {
+  _Static_assert(TEX_CHANGE_SIZE * TEX_CHANGE_ROW_BYTES > RASTER_TEXTURE_SAMPLES * RASTER_TEXTURE_SAMPLE_BYTES,
+                 "the texture is checked by samples");
+  base_state(RT, false, PS_TEX_OFFSET);
+  texture_state();
+  uint32_t tic[8];
+  memcpy(tic, g_gpu + (TIC_POOL - GPU_BASE), sizeof(tic));
+  tic[1] = (uint32_t)TEX_CHANGE;
+  tic[2] = (uint32_t)(TEX_CHANGE >> 32) | (2u << 21); /* pitch */
+  tic[3] = TEX_CHANGE_ROW_BYTES >> 5;
+  tic[4] = (TEX_CHANGE_SIZE - 1u) | (1u << 23);
+  tic[5] = (TEX_CHANGE_SIZE - 1u) | (1u << 31);
+  memcpy(g_gpu + (TIC_POOL - GPU_BASE), tic, sizeof(tic));
+  const uint32_t red = 0xff0000ffu, green = 0xff00ff00u, blue = 0xffff0000u;
+  fill_rows(0, TEX_CHANGE_SIZE, red);
+  draw_textured_quad(r);
+  CHECK(rgba_is(pixel(RT, false, 30, 30), 255, 0, 0, 255), "texture change: first frame red");
+  raster3d_end_frame(r);
+  fill_rows(0, TEX_CHANGE_SIZE, green);
+  draw_textured_quad(r);
+  CHECK(rgba_is(pixel(RT, false, 30, 30), 0, 255, 0, 255), "texture change: rewritten whole, green the next frame");
+  fill_rows(TEX_CHANGE_ROW, 1, blue);
+  bool seen = false;
+  for (uint32_t f = 0; f <= RASTER_TEXTURE_FULL_EVERY && !seen; f++) {
+    raster3d_end_frame(r);
+    draw_textured_quad(r);
+    seen = rgba_is(pixel(RT, false, 30, TEX_CHANGE_ROW), 0, 0, 255, 255);
+  }
+  CHECK(seen, "texture change: a row between the samples shows within %u frames", RASTER_TEXTURE_FULL_EVERY);
+  CHECK(rgba_is(pixel(RT, false, 30, 30), 0, 255, 0, 255), "texture change: the other rows stay green");
+  CHECK(r->stats.texture_misses == 0, "texture change: no misses");
+  texture_state(); /* the 2x2 texture again for later tests */
+}
+
 static void test_stencil(Raster3d *r) {
   base_state(RT, false, PS_OFFSET);
   g_regs[0x3f8] = (uint32_t)(ZT >> 32);
@@ -2341,6 +2397,7 @@ int main(void) {
   test_viewport_disabled(&r);
   test_texture(&r);
   test_render_to_texture(&r);
+  test_texture_change(&r);
   test_stencil(&r);
   test_stencil_flip_y(&r);
   test_depth_write_needs_test(&r);
