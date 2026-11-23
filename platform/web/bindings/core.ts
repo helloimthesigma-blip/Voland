@@ -83,6 +83,10 @@ export interface SwitchCoreExports {
   readonly _emulator_mods_add_ffi: (modName: bigint, path: bigint, titleId: bigint, size: bigint, id: number) => number;
   readonly _emulator_cheat_count_ffi: () => number;
   readonly _emulator_main_build_id_ffi: () => bigint; /* 32 bytes, or 0 */
+  /* The JIT's cross-session hot list (workers/jit-hot-store.ts): the code key (0 = none), u32 offsets out / in. */
+  readonly _emulator_jit_hot_key_ffi: () => bigint;
+  readonly _emulator_jit_hot_export_ffi: (out: bigint, capacity: number) => number;
+  readonly _emulator_jit_hot_import_ffi: (offsets: bigint, count: number) => number;
   readonly _emulator_cheat_name_ffi: (index: number) => bigint; /* const char* or 0 */
   readonly _emulator_cheat_flags_ffi: (index: number) => number; /* bit 0 enabled, bit 1 master */
   readonly _emulator_cheat_set_enabled_ffi: (index: number, enabled: number) => void;

@@ -45,6 +45,9 @@ EXPORT void emulator_mods_clear_ffi(void);
 EXPORT int emulator_mods_add_ffi(const char *mod_name, const char *path, uint64_t title_id, uint64_t size, uint32_t id);
 EXPORT uint32_t emulator_cheat_count_ffi(void);
 EXPORT uint64_t emulator_main_build_id_ffi(void);
+EXPORT uint64_t emulator_jit_hot_key_ffi(void);
+EXPORT uint32_t emulator_jit_hot_export_ffi(uint64_t out, uint32_t capacity);
+EXPORT uint32_t emulator_jit_hot_import_ffi(uint64_t offsets, uint32_t count);
 EXPORT uint64_t emulator_cheat_name_ffi(uint32_t index);
 EXPORT uint32_t emulator_cheat_flags_ffi(uint32_t index);
 EXPORT void emulator_cheat_set_enabled_ffi(uint32_t index, int enabled);
@@ -290,6 +293,61 @@ EXPORT uint64_t emulator_main_build_id_ffi(void)
     if (strcmp(g_emulator.process.modules[m].name, "main") == 0)
       return (uint64_t)(uintptr_t)g_emulator.process.modules[m].module_id;
   return 0;
+}
+
+/* The JIT's cross-session hot list (docs/JIT.md "Hot code across
+ * sessions"). Its key names the code it is relative to: an FNV-1a hash of
+ * every module's build id in load order, its name and the code size, so a
+ * game update or an exefs mod starts a new list. 0 when nothing is loaded. */
+#define HOT_KEY_FNV_OFFSET 0xcbf29ce484222325ull
+#define HOT_KEY_FNV_PRIME 0x100000001b3ull
+static uint64_t hot_key_mix(uint64_t h, const uint8_t *bytes, size_t length)
+{
+  for (size_t i = 0; i < length; i++)
+    h = (h ^ bytes[i]) * HOT_KEY_FNV_PRIME;
+  return h;
+}
+
+EXPORT uint64_t emulator_jit_hot_key_ffi(void)
+{
+  if (!g_initialised || !g_emulator.program_loaded)
+    return 0;
+  uint64_t h = HOT_KEY_FNV_OFFSET;
+  for (uint32_t m = 0; m < g_emulator.process.module_count; m++) {
+    const Process_Module *module = &g_emulator.process.modules[m];
+    h = hot_key_mix(h, (const uint8_t *)module->name, strlen(module->name));
+    h = hot_key_mix(h, module->module_id, sizeof(module->module_id));
+  }
+  const uint64_t size = g_emulator.process.code_bytes_mapped;
+  return hot_key_mix(h, (const uint8_t *)&size, sizeof(size));
+}
+
+/* Writes up to `capacity` u32 offsets at `out`; returns how many. */
+EXPORT uint32_t emulator_jit_hot_export_ffi(uint64_t out, uint32_t capacity)
+{
+#if defined(SWITCH_CPU_BACKEND_JIT)
+  if (!g_initialised || !g_emulator.program_loaded || !out)
+    return 0;
+  return jit_hot_export((uint32_t *)(uintptr_t)out, capacity);
+#else
+  (void)out;
+  (void)capacity;
+  return 0;
+#endif
+}
+
+/* Marks `count` u32 offsets at `offsets` hot; returns how many were new. */
+EXPORT uint32_t emulator_jit_hot_import_ffi(uint64_t offsets, uint32_t count)
+{
+#if defined(SWITCH_CPU_BACKEND_JIT)
+  if (!g_initialised || !g_emulator.program_loaded || !offsets)
+    return 0;
+  return jit_hot_import((const uint32_t *)(uintptr_t)offsets, count);
+#else
+  (void)offsets;
+  (void)count;
+  return 0;
+#endif
 }
 
 /* The loaded program's cheats, for the toggles in the mods panel. */

@@ -30,6 +30,7 @@ import {
   readState, readStoredPlan, stateInfo, writeState, writeStateInfo,
 } from "./savestate";
 import { parseTextInputRequest } from "./text-input";
+import { JIT_HOT_MAX_OFFSETS, hotListName, readHotList, writeHotList } from "./jit-hot-store";
 
 const self: DedicatedWorkerGlobalScope =
   globalThis as unknown as DedicatedWorkerGlobalScope;
@@ -817,6 +818,53 @@ const SD_MIRROR_MS = 3000;
  * (src/memory-guard.ts remembers each game's most, to warn next time). */
 const MEMORY_REPORT_MS = 30_000;
 
+/* ------------------------------------------------------------------ */
+/* The JIT's hot list across sessions (workers/jit-hot-store.ts): read  */
+/* when a game loads, written back while it runs once it has grown.     */
+/* ------------------------------------------------------------------ */
+const JIT_HOT_SAVE_MS = 30_000;
+let jitHotName: string | null = null;
+let jitHotSaved = 0;
+let jitHotSaving = false;
+let jitHotBuffer = 0;
+
+/** A core buffer for JIT_HOT_MAX_OFFSETS u32 offsets (kept), or 0. */
+function jitHotScratch(c: SwitchCoreExports): number {
+  if (jitHotBuffer === 0) jitHotBuffer = c._malloc(JIT_HOT_MAX_OFFSETS * Uint32Array.BYTES_PER_ELEMENT);
+  return jitHotBuffer;
+}
+
+async function attachJitHotList(c: SwitchCoreExports, memory: WebAssembly.Memory, titleId: string): Promise<void> {
+  const name = hotListName(titleId, c._emulator_jit_hot_key_ffi());
+  jitHotName = name;
+  jitHotSaved = 0;
+  if (!name) return;
+  const offsets = await readHotList(name);
+  if (jitHotName !== name || offsets.length === 0) return; /* another game since, or nothing stored */
+  const at = jitHotScratch(c);
+  if (at === 0) return;
+  new Uint32Array(memory.buffer, at, offsets.length).set(offsets);
+  const added = c._emulator_jit_hot_import_ffi(BigInt(at), offsets.length);
+  jitHotSaved = offsets.length;
+  log("info", `JIT: ${added} of ${offsets.length} region(s) hot in earlier sessions compile on first sight`);
+}
+
+async function saveJitHotList(): Promise<void> {
+  const c = core, memory = coreMemory, name = jitHotName;
+  if (!c || !memory || !name || jitHotSaving) return;
+  const at = jitHotScratch(c);
+  if (at === 0) return;
+  const count = c._emulator_jit_hot_export_ffi(BigInt(at), JIT_HOT_MAX_OFFSETS);
+  if (count <= jitHotSaved) return;
+  const offsets = new Uint32Array(memory.buffer, at, count).slice();
+  jitHotSaving = true;
+  try {
+    if (await writeHotList(name, offsets)) jitHotSaved = count;
+  } finally {
+    jitHotSaving = false;
+  }
+}
+
 function reportMemoryUse(): void {
   if (!core || !running || !loadedTitleId) return;
   self.postMessage({ type: "memory-use", titleId: loadedTitleId,
@@ -1319,6 +1367,7 @@ function loadGame(file: File): CPUToMainMessage {
   }
 
   loadedTitleId = formatTitleId(core._emulator_program_id_ffi());
+  void attachJitHotList(core, coreMemory, loadedTitleId);
   if (requestedHostCores === null) applyHostCores(core); /* the default may depend on the title */
   if (requestedCpuPercent === null) applyCpuSpeed(core);
   if (requestedFreePlacement === null) applyPlacement(core);
@@ -1372,6 +1421,7 @@ async function init(memory: WebAssembly.Memory): Promise<void> {
   setInterval(() => void mirrorSdChanges(), SD_MIRROR_MS);
   setInterval(() => void mirrorCommittedSaves(), SAVE_COMMIT_POLL_MS);
   setInterval(reportMemoryUse, MEMORY_REPORT_MS);
+  setInterval(() => void saveJitHotList(), JIT_HOT_SAVE_MS);
 
   const layoutPtr = core._layout_get_ffi();
   const layout = readMemoryLayout(memory, layoutPtr);

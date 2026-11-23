@@ -652,6 +652,43 @@ code ran interpreted for longer. It stays available for experiments: set
 serialises compilation across host threads. Each thread has its own
 512 KiB output buffer.
 
+## Hot code across sessions
+
+Compiled modules cannot be stored (see "V8 quirks"), but the knowledge of
+*what* got hot can. Every region entry the JIT installs is kept as a byte
+offset into the process's code (the modules, mapped back to back from the
+code base, so ASLR does not change it) in a fixed 2^17-slot set in
+`jit.c` (`jit_hot_*`, at most 98,304 offsets). The CPU worker stores the
+set in OPFS (`jit-hot/<title>-<key>.bin`, `workers/jit-hot-store.ts`)
+every 30 s once it has grown; the key hashes every module's name and
+build id and the code size, so an update or an exefs mod starts a new
+list. When the title loads again the list is imported, and an imported
+offset compiles the **first** time its PC is reached instead of after
+`JIT_DEFAULT_HOT_THRESHOLD` interpreted runs. The mark is then cleared,
+so a region that fails to compile, or is evicted later, goes back to the
+threshold, and other cores find it through `g_compiled_somewhere` as
+usual. Offsets outside the code region (ldr:ro's NROs) are not kept.
+
+Why not simply a lower threshold: in Super Mario Odyssey's Mushroom
+Kingdom (browser, steady state, every worker profiled) 4096 cut core 0's
+interpreter time from 9.0% to 5.7%, but compiled code took 17% more
+time per frame (15.6 against 13.3 ms; 3458 against 2956 regions
+sampled) and the game ran at 50.7 against 55.6 fps. The extra regions
+are lukewarm code, and this JIT is bound by instruction delivery (see
+"Region transitions"). The hot list compiles exactly what an earlier
+session found hot, only sooner.
+
+Measured (browser, mini, 2026-11-23): Super Mario Odyssey at Fossil
+Falls, one browser profile with its shaders cached, the first six Cappy
+throws after loading (2 s windows each), three alternating pairs: 54.7 /
+54.6 / 54.8 fps without the list, 57.0 / 57.3 / 57.3 with it (~10,000
+regions imported); a minute later both hold ~59.
+
+`VOLAND_JIT_HOT=0` (`?env=` in the browser) neither imports nor exports,
+for A/B runs, and leaves the stored list as it is. `tests/jit_hot_test.c`
+checks the list natively and, under Node, that an imported offset
+compiles on first sight with the threshold far away.
+
 ## Parallel guest threads
 
 The JIT supports the parallel scheduler (`supports_multicore`). The
@@ -724,8 +761,9 @@ the same period), not specification guarantees.
   cache would have to store the emitted bytes and compile them again,
   which saves the emit (small) but not V8's compile (DESIGN.md §11,
   "Persistence reality"). V8's own wasm code cache only applies to
-  `compileStreaming` of HTTP-cached responses of 128 KB or more. No
-  cross-session cache exists today.
+  `compileStreaming` of HTTP-cached responses of 128 KB or more. What
+  persists instead is the list of hot entry PCs ("Hot code across
+  sessions").
 - **Liftoff vs TurboFan.** Running Chromium with `--no-liftoff` was about
   5% faster at a title screen, within measurement noise, and a page
   cannot set engine flags anyway. The JIT does nothing special for
@@ -945,6 +983,11 @@ shows it next to the backend name.
   faster - within this rig's noise). What remains is vector: FCVTL,
   FCVTN, FMLA/FMUL by element, FMAXP/FADDP.
 
+- **0.6.0** (2026-11-23) - hot code across sessions: the region entries
+  a title compiled are stored per title and code key, and compile on
+  first sight in later sessions ("Hot code across sessions"). SMO's first
+  Cappy throws after loading 54.7 -> 57.2 fps.
+
 ## What a region costs on V8
 
 From V8's arm64 output (`node --no-liftoff --no-wasm-lazy-compilation
@@ -976,7 +1019,8 @@ From V8's arm64 output (`node --no-liftoff --no-wasm-lazy-compilation
   less) - the cost is the machine code real regions compile to.
 - SIMD&FP instructions without a fast path still run through the
   interpreter's softfloat.
-- Nothing persists across sessions (see "V8 quirks").
+- Compiled code does not persist across sessions (see "V8 quirks"); only
+  the list of what was hot does ("Hot code across sessions").
 - In parallel mode each core compiles into its own cache, which
   multiplies compiles and evictions. Sharing the compiled code is
   possible because the bytes are identical, but the tables are per

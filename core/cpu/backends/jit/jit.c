@@ -233,6 +233,123 @@ static uint16_t g_shared_hits[JIT_HIT_COUNTERS];
 
 void jit_set_hot_threshold(uint32_t executions) { g_hot_threshold = executions ? executions : 1u; }
 
+/* Hot code across sessions (jit_hot_*, docs/JIT.md): an open-addressed
+ * set of the region entries compiled, each a byte offset into the code
+ * region plus one (0 = empty), JIT_HOT_IMPORTED while an offset from an
+ * earlier session waits to be reached. Lossless up to JIT_HOT_MAX; Tears
+ * of the Kingdom compiles ~70k regions in its first minutes. */
+#define JIT_HOT_BITS 17u
+#define JIT_HOT_SLOTS (1u << JIT_HOT_BITS)
+#define JIT_HOT_MAX (JIT_HOT_SLOTS - JIT_HOT_SLOTS / 4u)
+#define JIT_HOT_IMPORTED 0x80000000u
+#define JIT_HOT_KEY_MASK (JIT_HOT_IMPORTED - 1u)
+#define JIT_HOT_HASH 0x9E3779B1u
+static uint32_t g_hot[JIT_HOT_SLOTS];
+static uint32_t g_hot_used, g_hot_waiting;
+static uint64_t g_hot_base, g_hot_size; /* size 0: off */
+
+/* The key for `pc`, 0 when it is outside the code region. */
+static uint32_t hot_key(uint64_t pc) {
+  if (pc < g_hot_base || pc - g_hot_base >= g_hot_size) return 0;
+  return (uint32_t)(pc - g_hot_base) + 1u;
+}
+
+/* The slot holding `key`, or the empty slot where it would go (NULL: full). */
+static uint32_t *hot_slot(uint32_t key) {
+  uint32_t i = (key * JIT_HOT_HASH) >> (32u - JIT_HOT_BITS);
+  for (uint32_t n = 0; n < JIT_HOT_SLOTS; n++, i = (i + 1u) & (JIT_HOT_SLOTS - 1u)) {
+    const uint32_t v = __atomic_load_n(&g_hot[i], __ATOMIC_RELAXED);
+    if (!v || (v & JIT_HOT_KEY_MASK) == key) return &g_hot[i];
+  }
+  return NULL;
+}
+
+/* Adds `key` (with `flags`) unless present; true when it was added. */
+static bool hot_insert(uint32_t key, uint32_t flags) {
+  for (;;) {
+    uint32_t *slot = hot_slot(key);
+    if (!slot) return false;
+    uint32_t v = __atomic_load_n(slot, __ATOMIC_RELAXED);
+    if (v) return false;
+    if (__atomic_load_n(&g_hot_used, __ATOMIC_RELAXED) >= JIT_HOT_MAX) return false;
+    if (__atomic_compare_exchange_n(slot, &v, key | flags, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+      __atomic_add_fetch(&g_hot_used, 1u, __ATOMIC_RELAXED);
+      if (flags & JIT_HOT_IMPORTED) __atomic_add_fetch(&g_hot_waiting, 1u, __ATOMIC_RELAXED);
+      return true;
+    }
+    /* another thread took the slot: probe again (it may be this key) */
+  }
+}
+
+/* A region was installed for `pc`: kept, and no longer waiting. */
+static void hot_note(uint64_t pc) {
+  const uint32_t key = hot_key(pc);
+  if (!key) return;
+  uint32_t *slot = hot_slot(key);
+  if (slot && __atomic_load_n(slot, __ATOMIC_RELAXED)) {
+    if (__atomic_fetch_and(slot, ~JIT_HOT_IMPORTED, __ATOMIC_RELAXED) & JIT_HOT_IMPORTED)
+      __atomic_sub_fetch(&g_hot_waiting, 1u, __ATOMIC_RELAXED);
+    return;
+  }
+  (void)hot_insert(key, 0);
+}
+
+/* Whether `pc` was hot in an earlier session and is not compiled yet.
+ * Clears the mark: if the compile fails, the threshold applies. */
+static bool hot_take(uint64_t pc) {
+  if (!__atomic_load_n(&g_hot_waiting, __ATOMIC_RELAXED)) return false;
+  const uint32_t key = hot_key(pc);
+  if (!key) return false;
+  uint32_t *slot = hot_slot(key);
+  if (!slot || !(__atomic_load_n(slot, __ATOMIC_RELAXED) & JIT_HOT_IMPORTED)) return false;
+  if (!(__atomic_fetch_and(slot, ~JIT_HOT_IMPORTED, __ATOMIC_RELAXED) & JIT_HOT_IMPORTED)) return false;
+  __atomic_sub_fetch(&g_hot_waiting, 1u, __ATOMIC_RELAXED);
+  return true;
+}
+
+void jit_hot_set_code(uint64_t base, uint64_t size) {
+  if (size && size == g_hot_size) { /* the same program at another base (a save state's) */
+    g_hot_base = base;
+    return;
+  }
+  memset(g_hot, 0, sizeof(g_hot));
+  g_hot_used = 0;
+  g_hot_waiting = 0;
+  g_hot_base = base;
+  g_hot_size = size <= JIT_HOT_KEY_MASK - 1u ? size : 0; /* offsets + 1 must fit beside the flag */
+}
+
+/* VOLAND_JIT_HOT=0 (diagnostics; ?env= in the browser): no list in or
+ * out - the first session's behaviour, and the stored list kept as it is,
+ * for A/B runs. */
+static bool hot_disabled(void) {
+  const char *hot = getenv("VOLAND_JIT_HOT");
+  return hot && strcmp(hot, "0") == 0;
+}
+
+uint32_t jit_hot_export(uint32_t *out, uint32_t capacity) {
+  if (hot_disabled()) return 0;
+  uint32_t n = 0;
+  for (uint32_t i = 0; i < JIT_HOT_SLOTS && n < capacity; i++) {
+    const uint32_t v = __atomic_load_n(&g_hot[i], __ATOMIC_RELAXED) & JIT_HOT_KEY_MASK;
+    if (v) out[n++] = v - 1u;
+  }
+  return n;
+}
+
+uint32_t jit_hot_import(const uint32_t *offsets, uint32_t count) {
+  if (hot_disabled()) return 0;
+  uint32_t added = 0;
+  for (uint32_t i = 0; i < count; i++) {
+    if (!g_hot_size || offsets[i] >= g_hot_size) continue;
+    if (hot_insert(offsets[i] + 1u, JIT_HOT_IMPORTED)) added++;
+  }
+  return added;
+}
+
+uint32_t jit_hot_count(void) { return __atomic_load_n(&g_hot_used, __ATOMIC_RELAXED); }
+uint32_t jit_hot_pending(void) { return __atomic_load_n(&g_hot_waiting, __ATOMIC_RELAXED); }
+
 static uint32_t g_max_live = JIT_MAX_LIVE_REGIONS;
 void jit_set_max_live_regions(uint32_t regions) { g_max_live = regions ? regions : JIT_MAX_LIVE_REGIONS; }
 
@@ -937,6 +1054,7 @@ static void install_entry(Jit_Thread *t, Jit_Entry *e, uint64_t pc, uint64_t gen
   e->referenced = 1; /* the trim below must not take it straight back */
   t->stats.blocks_compiled++;
   note_compiled_pc(t, pc);
+  hot_note(pc);
   note_region_blocks(t, pc, compiled);
   t->stats.region_blocks += compiled->blocks;
   t->stats.module_bytes += compiled->module_bytes;
@@ -1167,7 +1285,7 @@ static CPU_ExitReason jit_run(CPU_State *state, uint64_t cycle_budget) {
       uint16_t *hits = multicore ? &g_shared_hits[slot] : &t->hits[slot];
       const uint32_t count = multicore ? (uint32_t)__atomic_add_fetch(hits, 1u, __ATOMIC_RELAXED) : ++*hits;
       if (count >= g_hot_threshold ||
-          (multicore && __atomic_load_n(&g_compiled_somewhere[slot], __ATOMIC_RELAXED) == pc)) {
+          (multicore && __atomic_load_n(&g_compiled_somewhere[slot], __ATOMIC_RELAXED) == pc) || hot_take(pc)) {
         if (multicore) __atomic_store_n(hits, 0, __ATOMIC_RELAXED);
         else *hits = 0;
         compile(t, s, pc, generation);

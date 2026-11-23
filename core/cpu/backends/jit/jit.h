@@ -60,7 +60,7 @@ void jit_set_span_calls(bool enabled);
 
 /* The JIT's version, shared by CPU_BACKEND_JIT (A64) and
  * CPU_BACKEND_A32_JIT (the UI shows it; docs/JIT.md "Versions"). */
-#define JIT_VERSION "0.5.9"
+#define JIT_VERSION "0.6.0"
 
 /* Interpreted executions of a block before it is compiled. */
 void jit_set_hot_threshold(uint32_t executions);
@@ -101,5 +101,25 @@ void jit_set_interpret_only(bool enabled);
 
 /* Diagnostics: write every compiled module to DIR/<pc>.wasm (NULL: off). */
 void jit_set_dump_directory(const char *directory);
+
+/* Hot code across sessions (docs/JIT.md "Hot code across sessions"):
+ * every region entry compiled is kept as a byte offset into the process's
+ * code, [base, base + size); an offset imported from an earlier session
+ * compiles the first time its PC is reached instead of after the hot
+ * threshold. Setting a code region of another size forgets every offset
+ * (size 0: off, as after an unload); the same size only moves the base
+ * (the same program restored from a save state). Process-wide; any
+ * thread may export or import while cores run. */
+void jit_hot_set_code(uint64_t base, uint64_t size);
+/* Up to `capacity` offsets, compiled this session or imported; returns
+ * how many were written. */
+uint32_t jit_hot_export(uint32_t *out, uint32_t capacity);
+/* Marks `count` offsets for compiling on first sight; returns how many
+ * were new (offsets outside the code region or over the table's bound
+ * are skipped). */
+uint32_t jit_hot_import(const uint32_t *offsets, uint32_t count);
+/* Offsets kept (compiled or imported), and imported ones not yet compiled. */
+uint32_t jit_hot_count(void);
+uint32_t jit_hot_pending(void);
 
 #endif /* SWITCH_CPU_BACKENDS_JIT_JIT_H */

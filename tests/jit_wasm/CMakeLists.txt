@@ -56,6 +56,16 @@ target_link_options(jit_tlb_test_wasm PRIVATE
 set_target_properties(jit_tlb_test_wasm PROPERTIES OUTPUT_NAME "jit_tlb_test" SUFFIX ".js")
 add_test(NAME jit_tlb_test_node COMMAND ${VOLAND_NODE} $<TARGET_FILE:jit_tlb_test_wasm>)
 
+# An imported hot offset compiles on first sight (jit.h jit_hot_*).
+add_executable(jit_hot_test_wasm ../jit_hot_test.c)
+target_link_libraries(jit_hot_test_wasm PRIVATE switch_core)
+target_include_directories(jit_hot_test_wasm PRIVATE ..)
+target_link_options(jit_hot_test_wasm PRIVATE
+  -sENVIRONMENT=node,worker -sIMPORTED_MEMORY=0 -sMODULARIZE=0 -sEXPORT_ES6=0 -sEXIT_RUNTIME=1
+  -sPTHREAD_POOL_SIZE=0 -sNODERAWFS=1 "-sEXPORTED_FUNCTIONS=['_main']")
+set_target_properties(jit_hot_test_wasm PROPERTIES OUTPUT_NAME "jit_hot_test" SUFFIX ".js")
+add_test(NAME jit_hot_test_node COMMAND ${VOLAND_NODE} $<TARGET_FILE:jit_hot_test_wasm>)
+
 # A remap by another host thread while an A64 region runs (a pool of one).
 add_executable(jit_tlb_fence_test_wasm ../jit_tlb_fence_test.c)
 target_link_libraries(jit_tlb_fence_test_wasm PRIVATE switch_core)

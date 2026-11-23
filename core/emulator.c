@@ -745,6 +745,11 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
   fs_set_addons(&emulator->fs, emulator->addon_ids, emulator->addon_romfs, emulator->addon_count);
   ns_set_addons(&emulator->ns, emulator->addon_indices, emulator->addon_count);
   emulator->program_loaded = true;
+  /* The modules, mapped back to back from the code base: what the JIT's
+   * cross-session hot list is relative to (docs/JIT.md). */
+#ifdef SWITCH_CPU_BACKEND_JIT
+  jit_hot_set_code(emulator->process.address_space.code.base, emulator->process.code_bytes_mapped);
+#endif
   /* VOLAND_WATCH_EXCLUSIVE=GVA or MODULE+OFFSET: the exclusive-access watch (cpu.h). */
   const char* watch_exclusive = getenv("VOLAND_WATCH_EXCLUSIVE");
   cpu_watch_set(watch_exclusive ? watch_word_address(emulator, watch_exclusive, strlen(watch_exclusive)) : 0u);
@@ -1091,6 +1096,9 @@ void emulator_unload_program(Emulator* emulator) {
   emulator->content_node = RAMFS_NO_NODE;
   emulator->is_homebrew = false;
   emulator->program_loaded = false;
+#ifdef SWITCH_CPU_BACKEND_JIT
+  jit_hot_set_code(0, 0);
+#endif
   const Error backend_err = use_backend(emulator, emulator->base_backend);
   if (!error_is_ok(backend_err)) log_warn("[emulator] %s; keeping %s", backend_err.message, emulator->cpu_backend->name);
 }
@@ -2396,6 +2404,9 @@ Error emulator_savestate_finish_restore(Emulator* emulator, bool applied) {
   emulator->video_ready = before->video_ready;
   if (emulator->gpu_stream_ready) raster3d_set_gpu(&emulator->renderer, &emulator->gpu_stream);
   savestate_revalidate_renderer(&emulator->renderer, &emulator->nvdrv);
+#ifdef SWITCH_CPU_BACKEND_JIT
+  jit_hot_set_code(emulator->process.address_space.code.base, emulator->process.code_bytes_mapped);
+#endif
 
   /* Every thread gets a live CPU state holding its saved registers: the
    * main thread's is the Emulator's; others reuse a state that still

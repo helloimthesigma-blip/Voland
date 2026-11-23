@@ -184,6 +184,13 @@ add_executable(jit_tlb_test jit_tlb_test.c)
 target_link_libraries(jit_tlb_test PRIVATE switch_core)
 add_test(NAME jit_tlb_test COMMAND jit_tlb_test)
 
+# The cross-session hot list (jit.h jit_hot_*; the JIT backend only).
+if(CPU_BACKEND STREQUAL "jit")
+  add_executable(jit_hot_test jit_hot_test.c)
+  target_link_libraries(jit_hot_test PRIVATE switch_core)
+  add_test(NAME jit_hot_test COMMAND jit_hot_test)
+endif()
+
 # A remap by another host thread during an A64 region (jit_compile.c emit_tlb_recheck).
 add_executable(jit_tlb_fence_test jit_tlb_fence_test.c)
 target_link_libraries(jit_tlb_fence_test PRIVATE switch_core)

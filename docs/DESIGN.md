@@ -1078,6 +1078,8 @@ A compiled `WebAssembly.Module` **cannot** be persisted — only its bytes. Chro
 
 The same agent-cluster rule that forces the compiler to be a dedicated worker also means compiled Modules can never be shared across tabs — cross-tab sharing exists only at the byte level, which the OPFS PTC already is. There is nothing a SharedWorker could have added here.
 
+**Deviation (2026-11-23, docs/JIT.md "Hot code across sessions").** The JIT that exists stores no module bytes (emission is a small share of its cost, and caching bytes would not avoid V8's compile). What persists in OPFS is the list of region entry PCs a title found hot, as offsets into its code; the next session compiles each on first sight instead of interpreting it up to the hot threshold. That removes the warm-up interpretation the PTC was meant to remove, without a bulk compile at launch.
+
 ### Self-modifying code
 
 `invalidate_cache(gva, size)` drops block-cache entries whose regions overlap the range and marks their region modules dead (instances dropped; GC reclaims). Combined with the §5 write-protection fault path.
