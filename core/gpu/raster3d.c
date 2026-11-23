@@ -1059,6 +1059,7 @@ static const Sm_Program *program_get(Raster3d *r, uint64_t address, const Gpu_Me
   slot->content_hash = bytes_content_hash(r->program_bytes, extent);
   program_index_note(r, slot, false);
   slot->globals_state = RASTER_GLOBALS_UNKNOWN;
+  slot->desc_ready = false;
   if (r->on_program_decoded) r->on_program_decoded(r->on_program_user, &slot->program);
   slot->valid = true;
   slot->validated = r->submission;
@@ -5133,6 +5134,17 @@ static uint32_t cbuf_words_read(const Sm_Program *program, const Sm_Env *env, ui
  * the whole program, too slow to repeat per draw. */
 _Static_assert(RASTER_PROGRAM_GLOBALS == WGSL_MAX_GLOBALS, "the program cache holds every global buffer");
 
+/* wgsl_default_desc of a graphics program (ctx->vs / ctx->ps, from
+ * program_get), from the defaults its cache entry keeps. */
+static void program_desc(const Sm_Program *program, Wgsl_Program_Desc *desc) {
+  Raster3d_Program *p = (Raster3d_Program *)((uint8_t *)(uintptr_t)program - offsetof(Raster3d_Program, program));
+  if (!p->desc_ready) {
+    wgsl_desc_defaults(program, &p->desc_defaults);
+    p->desc_ready = true;
+  }
+  wgsl_default_desc_from(program, &p->desc_defaults, desc);
+}
+
 static const Raster3d_Program *program_globals(const Sm_Program *program) {
   Raster3d_Program *p = (Raster3d_Program *)((uint8_t *)(uintptr_t)program - offsetof(Raster3d_Program, program));
   if (p->globals_state == RASTER_GLOBALS_UNKNOWN) {
@@ -5424,7 +5436,7 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
     return;
   }
   Wgsl_Program_Desc *d = &g->vs_desc;
-  wgsl_default_desc(ctx->vs, d);
+  program_desc(ctx->vs, d);
   /* Texture bindings come with the pixel program's (gpu_prepare_textures). */
   wgsl_clear_bindings(d, ctx->vs);
   d->texture_count = 0;
@@ -5509,7 +5521,7 @@ static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs, uint32_t topolog
   /* Varying locations: each generic vector the pixel program reads. */
   memset(g->varying_index, 0xff, sizeof(g->varying_index));
   for (uint32_t i = 0; i < rs->varyings.count; i++) g->varying_index[rs->varyings.word[i]] = (uint8_t)i;
-  wgsl_default_desc(ctx->ps, &g->desc);
+  program_desc(ctx->ps, &g->desc);
   for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++) {
     const uint8_t loc = g->desc.varying_location[v];
     if (loc != 0xffu && loc < WGSL_MAX_VARYINGS) g->location_vector[loc] = (uint8_t)v;

@@ -32,6 +32,7 @@
 #include "gpu/compute.h"
 #include "gpu/maxwell_shader.h"
 #include "gpu/texture.h"
+#include "gpu/wgsl.h"
 
 struct Gpu_Memory;
 struct Gpu_Stream;
@@ -158,6 +159,10 @@ typedef struct Raster3d_Program {
    * re-reads program.byte_size bytes once and compares this instead of
    * growing the read, finding the end again and hashing with sm_hash. */
   uint64_t content_hash;
+  /* Its wgsl_default_desc past the binding table, worked out at its first
+   * draw after a decode (program_desc): every draw starts from it. */
+  bool desc_ready;
+  Wgsl_Desc_Defaults desc_defaults;
   Sm_Program program;
 } Raster3d_Program;
 

@@ -3275,6 +3275,24 @@ void wgsl_default_desc(const Sm_Program *program, Wgsl_Program_Desc *desc) {
   }
 }
 
+void wgsl_desc_defaults(const Sm_Program *program, Wgsl_Desc_Defaults *defaults) {
+  Wgsl_Program_Desc desc;
+  wgsl_default_desc(program, &desc);
+  memcpy(defaults->tail, &desc.texture_count, sizeof(defaults->tail));
+}
+
+void wgsl_default_desc_from(const Sm_Program *program, const Wgsl_Desc_Defaults *defaults, Wgsl_Program_Desc *desc) {
+  if (!sm_texture_pcs_complete(program)) {
+    wgsl_default_desc(program, desc);
+    return;
+  }
+  memcpy(&desc->texture_count, defaults->tail, sizeof(defaults->tail));
+  wgsl_clear_bindings(desc, program);
+  /* As wgsl_default_desc numbers them (its texture_count is in the tail). */
+  for (uint32_t k = 0; k < program->texture_pc_count && k < WGSL_MAX_TEXTURES; k++)
+    desc->binding_of[program->texture_pcs[k]] = (uint8_t)k;
+}
+
 /* FNV-1a over 8-byte words (a binding table hashed whole is up to 4096
  * bytes), then the tail bytewise; wgsl_desc_hash finishes with an
  * avalanche so the low bits (the shader table slot) see every input bit. */

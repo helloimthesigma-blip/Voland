@@ -276,6 +276,15 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
  * each texture instruction its own float binding while they last, and one
  * float target per render target the output map writes. */
 void wgsl_default_desc(const Sm_Program *program, Wgsl_Program_Desc *desc);
+/* wgsl_default_desc's fields after binding_of, worked out once per
+ * program: per-draw setup (two descriptors a draw, ~3000 draws a frame in
+ * Super Mario Odyssey's New Donk City) copies them instead, and
+ * wgsl_default_desc_from gives the same descriptor as wgsl_default_desc. */
+typedef struct Wgsl_Desc_Defaults {
+  uint8_t tail[sizeof(Wgsl_Program_Desc) - offsetof(Wgsl_Program_Desc, texture_count)];
+} Wgsl_Desc_Defaults;
+void wgsl_desc_defaults(const Sm_Program *program, Wgsl_Desc_Defaults *defaults);
+void wgsl_default_desc_from(const Sm_Program *program, const Wgsl_Desc_Defaults *defaults, Wgsl_Program_Desc *desc);
 /* desc->binding_of over `program`'s words (all a translation or hash of it
  * reads) to WGSL_NO_BINDING: the whole 4 KB array, cleared several times
  * per draw, was ~240 MB of memset per frame in Tears of the Kingdom. With

@@ -225,10 +225,26 @@ static uint32_t g_hw_sample_mask; /* the next vector's hardware-sampled textures
  * renderer's mip chains are a deliberate improvement, DESIGN.md §13). */
 static bool g_mip_vector;
 
+/* wgsl_default_desc_from (per-program defaults, as draws use them) gives
+ * wgsl_default_desc's descriptor, over a binding table another program
+ * left behind. */
+static Wgsl_Program_Desc g_desc_from;
+static void check_desc_from(const Wgsl_Program_Desc *desc) {
+  Wgsl_Desc_Defaults defaults;
+  wgsl_desc_defaults(&g_prog, &defaults);
+  memset(&g_desc_from, 0x5a, sizeof(g_desc_from));
+  wgsl_default_desc_from(&g_prog, &defaults, &g_desc_from);
+  CHECK(memcmp(&g_desc_from.texture_count, &desc->texture_count, sizeof(defaults.tail)) == 0);
+  for (uint32_t k = 0; k < g_prog.texture_pc_count && k < SM_MAX_TEXTURE_PCS; k++)
+    CHECK(g_desc_from.binding_of[g_prog.texture_pcs[k]] == desc->binding_of[g_prog.texture_pcs[k]]);
+  CHECK(wgsl_desc_hash(&g_desc_from, &g_prog) == wgsl_desc_hash(desc, &g_prog));
+}
+
 static void finish(const Builder *b, const char *name, bool float_compare) {
   sm_program_decode(b->bytes, SM_SPH_BYTES + 8u * b->words, 0, &g_prog);
   Wgsl_Program_Desc desc;
   wgsl_default_desc(&g_prog, &desc);
+  check_desc_from(&desc);
   desc.target_int_mask = 1u; /* raw register bits out (rgba32uint) */
   desc.hw_sample_mask = g_hw_sample_mask;
   g_hw_sample_mask = 0;
@@ -660,6 +676,16 @@ static void structural(void) {
   r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   CHECK(r.ok && strstr(g_text, "frag_depth") == NULL && strstr(g_text, "fo.depth") == NULL &&
         strstr(g_text, "fo.c0") != NULL);
+  /* More texture instructions than bindings: the first WGSL_MAX_TEXTURES
+   * get one each, the rest none - from the per-program defaults too. */
+  begin(&b);
+  for (uint32_t i = 0; i < WGSL_MAX_TEXTURES + 4u; i++) emit(&b, TEXS(0, 2, 4, 5, 1, 4, i));
+  emit(&b, EXIT());
+  sm_program_decode(b.bytes, SM_SPH_BYTES + 8u * b.words, 0, &g_prog);
+  wgsl_default_desc(&g_prog, &desc);
+  CHECK(g_prog.texture_pc_count == WGSL_MAX_TEXTURES + 4u && desc.texture_count == WGSL_MAX_TEXTURES);
+  CHECK(desc.binding_of[g_prog.texture_pcs[WGSL_MAX_TEXTURES]] == WGSL_NO_BINDING);
+  check_desc_from(&desc);
   /* Unsupported in a pixel program: reported, nothing emitted. */
   begin(&b);
   emit(&b, ALD(0, 0x80, 1));
