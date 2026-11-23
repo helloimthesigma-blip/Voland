@@ -137,7 +137,8 @@ browser (2026-11-10, two runs each):
 | 0 | 49.9-50.0 / 51.5-52.6 / 54.9-55.4 | |
 
 Below 8 it is flat for Hollow Knight; 8 leaves a tight loop its hot
-registers. `tests/jit_bench.c` in a Chromium worker was the same or
+registers. Super Mario Odyssey's New Donk City (C++, main thread bound,
+2026-11-23): 12 gave 47.6 fps against 48.5-48.6 at 8. `tests/jit_bench.c` in a Chromium worker was the same or
 slightly faster at 8 in every case.
 
 What did not help (each tried in the browser and reverted, 2026-11-10):
@@ -422,7 +423,10 @@ What joins a region:
   | 64/128, 64-block regions | 50.5-51.0 / 53.8-53.9 | | ~59 | |
   | 16/48 (until 0.5.7) | 51.5-52.7 / 54.4-55.9 | 43.9-44.0 | 59.1-59.3 | 33-35 s |
   | 8/24 | 53.0-55.1 / 55.8-56.8 | 44.4-44.8 | 59.4-59.5 | 33-35 s |
-  | 4/12 (0.5.7) | 53.7-54.2 / 56.9-57.3 | 44.9-45.4 | 59.75 | 34 s | The
+  | 4/12 (0.5.7) | 53.7-54.2 / 56.9-57.3 | 44.9-45.4 | 59.75 | 34 s |
+
+  Super Mario Odyssey (C++, not IL2CPP) agrees: in New Donk City 8/24 gave
+  47.6-48.0 fps against 48.1-48.6 at 4/12 (2026-11-23, three runs each). The
   return site joins too, and a RET goes back to an in-region return site
   through a guarded internal transition. Larger callees stay regions of
   their own, compiled once instead of into every caller.
@@ -433,7 +437,9 @@ What joins a region:
 Limits: 32 blocks per region (the environment variable
 `JIT_MAX_REGION_BLOCKS` sets 1-64 for A/B runs; 64 was no clear gain,
 16 and 8 were slower: Hollow Knight's fight 50.2 and 45.2-45.9 fps against
-51.0-52.4 at 32), 128 instructions per block
+51.0-52.4 at 32; in Super Mario Odyssey's New Donk City 64 gave 48.8-49.1
+against 48.4-48.6, +0.8% in three of three runs, too small to change the
+default without the other games), 128 instructions per block
 (`JIT_MAX_BLOCK_INSNS`), and four code pages (`JIT_MAX_REGION_PAGES`),
 each validated by its own range hash.
 `voland-cli --jit-no-calls` turns call spanning off.
@@ -775,7 +781,9 @@ the same period), not specification guarantees.
 - **Liftoff vs TurboFan.** Running Chromium with `--no-liftoff` was about
   5% faster at a title screen, within measurement noise, and a page
   cannot set engine flags anyway. The JIT does nothing special for
-  tiering.
+  tiering. In gameplay (Super Mario Odyssey's New Donk City, 2026-11-23)
+  `--no-liftoff` was slower, 47.3-47.8 against 48.4-48.5 fps: Liftoff code
+  does not linger in hot regions.
 
 ## Testing
 
