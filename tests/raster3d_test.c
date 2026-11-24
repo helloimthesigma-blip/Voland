@@ -469,6 +469,21 @@ static void test_clear_layer(Raster3d *r) {
         "a layer past the last clears nothing");
 }
 
+/* A clear writes the components its bits 2-5 name, whatever the draws'
+ * colour write mask says: Super Mario Odyssey clears its particle buffer
+ * whole with CT_WRITE red only from the pass before. Masked, green and
+ * blue kept the old smoke (cyan). */
+static void test_clear_ignores_write_mask(Raster3d *r) {
+  base_state(RT, false, PS_OFFSET);
+  raster3d_begin_submission(r);
+  clear_to(r, 0.0f, 0.0f, 1.0f, 1.0f);
+  g_regs[0x680] = 0x0001; /* CT_WRITE(0): red */
+  clear_to(r, 1.0f, 0.0f, 0.0f, 1.0f);
+  raster3d_flush(r, &k_mem);
+  CHECK(rgba_is(pixel(RT, false, 5, 5), 255, 0, 0, 255), "a clear writes every component it names");
+  g_regs[0x680] = 0x1111;
+}
+
 /* Viewport swizzle NEGATIVE_Y (OpenGL titles' y flip): the lower-left
  * triangle (y down) lands in the upper-left half instead. */
 static void test_viewport_swizzle(Raster3d *r) {
@@ -2393,6 +2408,7 @@ int main(void) {
   test_triangle_and_blend(&r, false);
   test_triangle_and_blend(&r, true);
   test_clear_layer(&r);
+  test_clear_ignores_write_mask(&r);
   test_viewport_swizzle(&r);
   test_viewport_disabled(&r);
   test_texture(&r);

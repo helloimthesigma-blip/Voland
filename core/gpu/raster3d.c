@@ -620,6 +620,13 @@ static bool color_target_desc(const uint32_t *regs, uint32_t target, Surface_Des
  * last, or a volume's slice, clears nothing. */
 #define CLEAR_LAYER_SHIFT 10u
 #define CLEAR_LAYER_MASK 0xffffu
+/* CLEAR_COMPONENTS: bits 2-5 name the red, green, blue and alpha a clear
+ * writes, and they alone - the colour write masks (CT_WRITE) are the
+ * draws'. Super Mario Odyssey clears its particle buffer whole with
+ * CT_WRITE still red only from the pass before; masked, green and blue
+ * kept every earlier frame's smoke, which came out cyan. */
+#define CLEAR_COMPONENTS_SHIFT 2u
+#define CLEAR_COMPONENTS_MASK 0xfu
 static bool clear_target_desc(const uint32_t *regs, uint32_t target, uint32_t clear, Surface_Desc *out) {
   if (!color_target_desc(regs, target, out)) return false;
   const uint32_t layer = (clear >> CLEAR_LAYER_SHIFT) & CLEAR_LAYER_MASK;
@@ -882,10 +889,9 @@ void raster3d_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, ui
         rect_intersect(&rect, (int32_t)(h & 0xffffu), (int32_t)(v & 0xffffu), (int32_t)(h >> 16), (int32_t)(v >> 16));
       }
       if (control & 0x1000u) rect_viewport_clip(&rect, regs);
-      const uint32_t write = (regs[REG_SINGLE_CT_WRITE] & 1u) ? regs[REG_CT_WRITE] : regs[REG_CT_WRITE + target];
-      uint32_t comps = 0;
-      for (uint32_t c = 0; c < 4; c++)
-        if ((clear >> (2u + c)) & 1u && (write >> (4u * c)) & 1u) comps |= 1u << c;
+      /* The clear's own component bits only: the colour write masks are
+       * the draws' (CLEAR_COMPONENTS). */
+      const uint32_t comps = (clear >> CLEAR_COMPONENTS_SHIFT) & CLEAR_COMPONENTS_MASK;
       if (rect.x0 < rect.x1 && rect.y0 < rect.y1 && comps) {
         const bool full = rect.x0 == 0 && rect.y0 == 0 && rect.x1 == (int32_t)d.width && rect.y1 == (int32_t)d.height &&
                           comps == 0xfu;
@@ -6516,9 +6522,7 @@ static void gpu_clear(Raster3d *r, const uint32_t *regs, const Gpu_Memory *mem, 
         rect_intersect(&rect, (int32_t)(h & 0xffffu), (int32_t)(v & 0xffffu), (int32_t)(h >> 16), (int32_t)(v >> 16));
       }
       if (control & 0x1000u) rect_viewport_clip(&rect, regs);
-      const uint32_t write = (regs[REG_SINGLE_CT_WRITE] & 1u) ? regs[REG_CT_WRITE] : regs[REG_CT_WRITE + target];
-      for (uint32_t i = 0; i < 4; i++)
-        if ((clear >> (2u + i)) & 1u && (write >> (4u * i)) & 1u) c.color_mask |= 1u << i;
+      c.color_mask = (clear >> CLEAR_COMPONENTS_SHIFT) & CLEAR_COMPONENTS_MASK; /* CLEAR_COMPONENTS */
       if (rect.x0 < rect.x1 && rect.y0 < rect.y1 && c.color_mask) {
         const bool full = rect.x0 == 0 && rect.y0 == 0 && rect.x1 == (int32_t)d.width && rect.y1 == (int32_t)d.height &&
                           c.color_mask == 0xfu;
