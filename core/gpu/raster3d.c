@@ -5755,8 +5755,19 @@ static bool gpu_bind_texture(Raster3d *r, const Gpu_Memory *mem, const uint32_t 
   if (sample_type != WGSL_SAMPLE_FLOAT) ts->tex_sw_int++;
   else if (cube_map) ts->tex_sw_cube++;
   else if (padded) ts->tex_sw_padded++;
-  else if (!gpu_format_filterable(r, gpu_format)) ts->tex_sw_format++;
-  else if (s.wrap[0] > 2u || s.wrap[1] > 2u) ts->tex_sw_wrap++;
+  else if (!gpu_format_filterable(r, gpu_format)) {
+    ts->tex_sw_format++;
+    /* Which formats miss the hardware sampler: shader-side filtering is
+     * what a first draw's pipeline compile spends its time on. Once per
+     * GPU format. */
+    static uint64_t logged[(GPU_FMT_COUNT + 63u) / 64u];
+    if (gpu_format < GPU_FMT_COUNT && !(logged[gpu_format / 64u] >> (gpu_format % 64u) & 1u)) {
+      logged[gpu_format / 64u] |= 1ull << (gpu_format % 64u);
+      log_info("[gpu] shader-filtered texture format: gpu %u, guest components 0x%x types %u/%u/%u/%u, %ux%u, "
+               "filters mag %u min %u mip %u", gpu_format, h.format, h.data_type[0], h.data_type[1], h.data_type[2],
+               h.data_type[3], h.width, h.height, s.mag_filter, s.min_filter, s.mip_filter);
+    }
+  } else if (s.wrap[0] > 2u || s.wrap[1] > 2u) ts->tex_sw_wrap++;
   else ts->tex_hw++;
   if (sample_type == WGSL_SAMPLE_FLOAT && !cube_map && !padded && gpu_format_filterable(r, gpu_format) &&
       s.wrap[0] <= 2u && s.wrap[1] <= 2u) {

@@ -25,6 +25,10 @@
  *     [--dump DIR]    the WGSL of the printed rows, as DIR/<hash>.wgsl
  *     [--software]    SwiftShader instead of the hardware adapter
  *
+ * A profile the game registered its service worker in fails at page.goto
+ * (net::ERR_FAILED): bench a copy of the profile with its
+ * Default/Service Worker folder removed (the shader cache stays).
+ *
  * The profile must not be open in another browser. Nothing is written to
  * it: the pipelines are built on a device of the tool's own.
  */
