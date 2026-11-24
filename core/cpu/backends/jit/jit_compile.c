@@ -2268,6 +2268,16 @@ static void emit_store(Ctx *c, uint32_t size, uint32_t t, bool pair, uint32_t t2
     end_(c);
   }
   emit_walk(c, bytes, VMM_PERM_W, slow);
+  if (g_cpu_watch_host) { /* ... and one through another mapping of its bytes */
+    lget(c, L_HOST);
+    i64c(c, (uint64_t)g_cpu_watch_host - (bytes - 1u));
+    op(c, WASM_OP_I64_SUB);
+    i64c(c, bytes + CPU_WATCH_WORD_BYTES - 1u);
+    op(c, WASM_OP_I64_LT_U);
+    open_if(c, WASM_BLOCK_VOID);
+    br(c, slow);
+    end_(c);
+  }
   lget(c, L_HOST);
   get_x(c, t);
   mem(c, store_opcode(size), ALIGN_1, 0);

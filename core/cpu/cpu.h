@@ -208,8 +208,17 @@ typedef enum CPU_Watch_Kind {
 #define CPU_WATCH_STORED 1u        /* the store-exclusive wrote */
 #define CPU_WATCH_MONITOR 2u       /* its monitor held this address and size */
 #define CPU_WATCH_GRANULE 4u       /* no exclusive store to the granule since the load */
+#define CPU_WATCH_ALIAS 8u         /* a store: through another guest address mapping the same bytes */
 extern uint64_t g_cpu_watch_gva;   /* 0: off */
 static inline bool cpu_watching(uint64_t gva) { return g_cpu_watch_gva != 0 && gva == g_cpu_watch_gva; }
+/* The watched word's host address (cpu_watch_set_host; 0: not mapped), so
+ * a store through another guest mapping of its bytes is seen too. */
+extern uintptr_t g_cpu_watch_host;
+void cpu_watch_set_host(uintptr_t host);
+static inline bool cpu_watching_host(const void *host, uint32_t size) {
+  const uintptr_t at = (uintptr_t)host;
+  return g_cpu_watch_host != 0 && at < g_cpu_watch_host + 4u && at + size > g_cpu_watch_host;
+}
 /* An access of `size` bytes at `gva` overlaps the watched word (4 bytes). */
 #define CPU_WATCH_WORD_BYTES 4u
 static inline bool cpu_watching_range(uint64_t gva, uint32_t size) {

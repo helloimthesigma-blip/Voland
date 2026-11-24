@@ -753,6 +753,14 @@ static Error finish_load(Emulator* emulator, const Byte_Source* source, bool is_
   /* VOLAND_WATCH_EXCLUSIVE=GVA or MODULE+OFFSET: the exclusive-access watch (cpu.h). */
   const char* watch_exclusive = getenv("VOLAND_WATCH_EXCLUSIVE");
   cpu_watch_set(watch_exclusive ? watch_word_address(emulator, watch_exclusive, strlen(watch_exclusive)) : 0u);
+  cpu_watch_set_host(0u);
+  if (g_cpu_watch_gva) { /* its bytes, however a store addresses them (cpu.h) */
+    void* host = NULL;
+    vmm_borrow_scope_begin(emulator->vmm);
+    if (error_is_ok(vmm_guest_to_host(emulator->vmm, g_cpu_watch_gva, CPU_WATCH_WORD_BYTES, VMM_PERM_R, &host)))
+      cpu_watch_set_host((uintptr_t)host);
+    vmm_borrow_scope_end(emulator->vmm);
+  }
   log_info("[emulator] program '%s' loaded; main thread armed at pc=0x%010llx",
            emulator->process.npdm.name, (unsigned long long)emulator->process.entry_point);
   log_notice("game loaded: %s (title %016llx, %s, %u code modules)", emulator->process.npdm.name,

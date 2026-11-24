@@ -18,6 +18,7 @@
 #define CODE_GVA 0x10000ull
 #define DATA_GVA 0x20000ull
 #define NOEXEC_GVA 0x30000ull
+#define ALIAS_GVA 0x40000ull /* maps DATA_GVA's bytes a second time */
 #define PAGE VMM_PAGE_SIZE
 
 static VMM_Context *g_vmm;
@@ -323,6 +324,23 @@ static void test_watch_plain_store(void) {
     }
   }
   CHECK(now == 0xAABBCCDDu); /* the word after the straddling store */
+
+  /* A store through another mapping of the same bytes is seen by the
+   * word's host address. */
+  void *host = NULL;
+  vmm_borrow_scope_begin(g_vmm);
+  CHECK_OK(vmm_guest_to_host(g_vmm, word, CPU_WATCH_WORD_BYTES, VMM_PERM_R, &host));
+  vmm_borrow_scope_end(g_vmm);
+  cpu_watch_set_host((uintptr_t)host);
+  const uint32_t alias_store = 0xB9000801u; /* str w1, [x0, #8] */
+  load_code(&alias_store, 1);
+  reset_state();
+  g_cpu->set_reg(g_state, 0, ALIAS_GVA);
+  g_cpu->set_reg(g_state, 1, 0x8000u);
+  CHECK(g_cpu->run(g_state, 1) == CPU_EXIT_CYCLES_ELAPSED);
+  CHECK(cpu_watch_latest(&kind, &value, &desired, &now) == seen + 1u && kind == CPU_WATCH_STORE &&
+        value == 0x8000u && now == 0x8000u);
+  cpu_watch_set_host(0u);
   cpu_watch_set(0);
 }
 
@@ -344,6 +362,7 @@ int main(void) {
   CHECK_OK(vmm_map(g_vmm, CODE_GVA, 0, PAGE, VMM_PERM_ALL));
   CHECK_OK(vmm_map(g_vmm, DATA_GVA, PAGE, PAGE, VMM_PERM_RW));
   CHECK_OK(vmm_map(g_vmm, NOEXEC_GVA, 2 * PAGE, PAGE, VMM_PERM_RW));
+  CHECK_OK(vmm_map(g_vmm, ALIAS_GVA, PAGE, PAGE, VMM_PERM_RW));
   g_cpu = &CPU_BACKEND_INTERPRETER;
   g_state = g_cpu->create(g_vmm, NULL);
   CHECK(g_state != NULL);
