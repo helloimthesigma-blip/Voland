@@ -621,6 +621,20 @@ Error vmm_compare_exchange32(VMM_Context *ctx, uint64_t gva, uint32_t *expected,
   return OK;
 }
 
+/* A block of 1, 2, 4 or 8 bytes inside a page is one load and store, so
+ * a word another core updates (a semaphore, a lock) reads as its old or
+ * its new value, never a mix: a variable-size memcpy is a byte-wise
+ * memory.copy in wasm (as interp_read's was, docs/PARALLEL.md). */
+static inline void copy_small(void *dst, const void *src, uint64_t size) {
+  switch (size) {
+  case 1u: { uint8_t v; memcpy(&v, src, 1u); memcpy(dst, &v, 1u); return; }
+  case 2u: { uint16_t v; memcpy(&v, src, 2u); memcpy(dst, &v, 2u); return; }
+  case 4u: { uint32_t v; memcpy(&v, src, 4u); memcpy(dst, &v, 4u); return; }
+  case 8u: { uint64_t v; memcpy(&v, src, 8u); memcpy(dst, &v, 8u); return; }
+  default: memcpy(dst, src, (size_t)size); return;
+  }
+}
+
 Error vmm_read_block(VMM_Context *ctx, uint64_t gva, void *out, uint64_t size) {
   if (!ctx) return ERR(RESULT_INVALID_ARGUMENT, "vmm_read_block: ctx is NULL");
   if (size == 0) return OK;
@@ -631,7 +645,7 @@ Error vmm_read_block(VMM_Context *ctx, uint64_t gva, void *out, uint64_t size) {
   if (is_valid_byte_range(gva, size) && (gva & VMM_PAGE_OFFSET_MASK) + size <= VMM_PAGE_SIZE) {
     const uint8_t *host = vmm_translate_inline(ctx->l1, gva, VMM_PERM_R, &fault);
     if (!host) return record_fault(ctx, &fault);
-    memcpy(out, host, (size_t)size);
+    copy_small(out, host, size);
     return OK;
   }
   if (!validate_byte_range(ctx->l1, gva, size, VMM_PERM_R, &fault)) {
@@ -649,7 +663,7 @@ Error vmm_write_block(VMM_Context *ctx, uint64_t gva, const void *src, uint64_t 
   if (is_valid_byte_range(gva, size) && (gva & VMM_PAGE_OFFSET_MASK) + size <= VMM_PAGE_SIZE) { /* as vmm_read_block */
     uint8_t *host = vmm_translate_inline(ctx->l1, gva, VMM_PERM_W, &fault);
     if (!host) return record_fault(ctx, &fault);
-    memcpy(host, src, (size_t)size);
+    copy_small(host, src, size);
     return OK;
   }
   if (!validate_byte_range(ctx->l1, gva, size, VMM_PERM_W, &fault)) {
@@ -672,7 +686,7 @@ Error vmm_read_physical(VMM_Context *ctx, uint64_t guest_pa, void *out, uint64_t
   if (!out || !physical_range_valid(ctx, guest_pa, size)) {
     return ERR(RESULT_INVALID_ARGUMENT, "vmm_read_physical: range outside guest RAM");
   }
-  memcpy(out, (const void *)(uintptr_t)(ctx->guest_ram_base + guest_pa), (size_t)size);
+  copy_small(out, (const void *)(uintptr_t)(ctx->guest_ram_base + guest_pa), size);
   return OK;
 }
 
@@ -682,7 +696,7 @@ Error vmm_write_physical(VMM_Context *ctx, uint64_t guest_pa, const void *src, u
   if (!src || !physical_range_valid(ctx, guest_pa, size)) {
     return ERR(RESULT_INVALID_ARGUMENT, "vmm_write_physical: range outside guest RAM");
   }
-  memcpy((void *)(uintptr_t)(ctx->guest_ram_base + guest_pa), src, (size_t)size);
+  copy_small((void *)(uintptr_t)(ctx->guest_ram_base + guest_pa), src, size);
   return OK;
 }
 
