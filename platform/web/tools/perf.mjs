@@ -333,26 +333,32 @@ async function recordGpu(page, file, presents) {
 /** Every GPU render target as DIR/PREFIX-tex<id>-<w>x<h>-<format>.pam (RGBA8; float formats clamped, and
  * unclamped as .f32). */
 async function dumpTargets(page, dir, prefix) {
-  const targets = await page.evaluate(async () => {
+  /* One target per round trip: all of them in one reply passed Node's
+   * string limit (Super Mario Odyssey: 4,500 targets, float copies). */
+  const count = await page.evaluate(async () => {
     const list = await globalThis.__volandDebug.dumpTargets();
-    return list.map((t) => {
-      let bin = "";
-      for (let i = 0; i < t.rgba.length; i += 0x8000) bin += String.fromCharCode(...t.rgba.subarray(i, i + 0x8000));
-      /* Float formats: the unclamped values too (DIR/*.f32, little-endian RGBA float32). */
-      let fbin = "";
-      const fbytes = t.floats ? new Uint8Array(t.floats.buffer, t.floats.byteOffset, t.floats.byteLength) : new Uint8Array(0);
-      for (let i = 0; i < fbytes.length; i += 0x8000) fbin += String.fromCharCode(...fbytes.subarray(i, i + 0x8000));
-      return { id: t.id, format: t.format, width: t.width, height: t.height, b64: btoa(bin), f64: btoa(fbin) };
-    });
+    globalThis.__volandDumped = list;
+    return list.length;
   });
   mkdirSync(dir, { recursive: true });
-  for (const t of targets) {
+  for (let k = 0; k < count; k++) {
+    const t = await page.evaluate((i) => {
+      const d = globalThis.__volandDumped[i];
+      let bin = "";
+      for (let j = 0; j < d.rgba.length; j += 0x8000) bin += String.fromCharCode(...d.rgba.subarray(j, j + 0x8000));
+      /* Float formats: the unclamped values too (DIR/*.f32, little-endian RGBA float32). */
+      let fbin = "";
+      const fbytes = d.floats ? new Uint8Array(d.floats.buffer, d.floats.byteOffset, d.floats.byteLength) : new Uint8Array(0);
+      for (let j = 0; j < fbytes.length; j += 0x8000) fbin += String.fromCharCode(...fbytes.subarray(j, j + 0x8000));
+      return { id: d.id, format: d.format, width: d.width, height: d.height, b64: btoa(bin), f64: btoa(fbin) };
+    }, k);
     const header = `P7\nWIDTH ${t.width}\nHEIGHT ${t.height}\nDEPTH 4\nMAXVAL 255\nTUPLTYPE RGB_ALPHA\nENDHDR\n`;
     writeFileSync(`${dir}/${prefix}-tex${t.id}-${t.width}x${t.height}-${t.format}.pam`,
       Buffer.concat([Buffer.from(header), Buffer.from(t.b64, "base64")]));
     if (t.f64) writeFileSync(`${dir}/${prefix}-tex${t.id}-${t.width}x${t.height}-${t.format}.f32`, Buffer.from(t.f64, "base64"));
   }
-  return targets.length;
+  await page.evaluate(() => { globalThis.__volandDumped = undefined; });
+  return count;
 }
 
 async function attachToWorkers(cdp, pageUrl, patterns) {
@@ -525,7 +531,7 @@ async function main() {
       if ((m.type() === "error" && /\[(ERROR|WARN )\]|failed|crash/i.test(m.text())) || /core: |svcBreak|shader cache/.test(m.text()))
         console.log(`  console: ${m.text()}`);
       /* Parallel guest threads' periodic timing report (docs/PARALLEL.md "Measuring"). */
-      if (/\[parallel\] |\[gpu\] (stream|render targets|compute mirrors|method 0x|conditional)|GPU memory:|new GPU programs|compile on first sight|frame presented|WebGPU frame|trace present/.test(m.text())) console.log(`  ${m.text().replace(/^\[INFO \] /, "")}`);
+      if (/\[parallel\] |\[gpu\] (stream|render targets|compute mirrors|method 0x|conditional)|GPU memory:|new GPU programs|compile on first sight|frame presented|WebGPU frame|trace (present|draw|clear|wgsl)/.test(m.text())) console.log(`  ${m.text().replace(/^\[INFO \] /, "")}`);
       if (/^\[WARN \] \[threads\]/.test(m.text())) console.log(`  ${m.text()}`);
       if (opts.logMatch && new RegExp(opts.logMatch).test(m.text())) console.log(`  log: ${m.text()}`);
     });

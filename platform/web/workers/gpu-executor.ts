@@ -196,6 +196,7 @@ const NO_SHADOW_SERIES = -1;
 const READBACK_BATCH = 16;
 /* Debug readback skips small targets (probes, LUTs): later scenes have thousands. */
 const DEBUG_MIN_TEXELS = 256 * 256;
+const CUBE_FACES = 6;
 /* A memory report (textures by kind, storage buffers) every this many presents. */
 const MEMORY_REPORT_PRESENTS = 300;
 /* Render-target shapes the memory report names (the most numerous). */
@@ -471,6 +472,22 @@ function popcount(x: number): number {
   return n;
 }
 
+/* Debugging: texture k's parameter words in a draw's constants (core/gpu/wgsl.h:
+ * WGSL_DRAW_TEXTURE_PARAMS + WGSL_TEX_PARAM_WORDS * k): flags (hex), swizzle as
+ * four TEX_SOURCE_* digits x, y, z, w (0 zero, 2-5 r-a, 6-7 one), levels, and
+ * the sampler's min/max LOD. */
+const TRACE_TEX_PARAMS = 4, TRACE_TEX_PARAM_WORDS = 13, TRACE_SWIZZLE_DIGITS = 4;
+const TRACE_TEXP_FLAGS = 0, TRACE_TEXP_SWIZZLE = 2, TRACE_TEXP_LEVELS = 3, TRACE_TEXP_MIN_LOD = 6, TRACE_TEXP_MAX_LOD = 7;
+function traceTexParams(data: Uint8Array | null, k: number): string {
+  const base = 4 * (TRACE_TEX_PARAMS + TRACE_TEX_PARAM_WORDS * k);
+  if (!data || base + 4 * TRACE_TEX_PARAM_WORDS > data.length) return "-";
+  const dv = new DataView(data.buffer, data.byteOffset + base, 4 * TRACE_TEX_PARAM_WORDS);
+  const word = (i: number): number => dv.getUint32(4 * i, true);
+  let swz = "";
+  for (let c = 0; c < TRACE_SWIZZLE_DIGITS; c++) swz += String((word(TRACE_TEXP_SWIZZLE) >>> (4 * c)) & 0xf);
+  return `f${word(TRACE_TEXP_FLAGS).toString(16)}:${swz}:m${word(TRACE_TEXP_LEVELS)}:lod${dv.getFloat32(4 * TRACE_TEXP_MIN_LOD, true)}-${dv.getFloat32(4 * TRACE_TEXP_MAX_LOD, true)}`;
+}
+
 function sameNumbers(a: readonly number[], b: readonly number[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -483,6 +500,7 @@ export class GpuExecutor {
   /* Per-session shader ids -> WGSL content hash; modules shared by hash. */
   private readonly shaderHashes = new Map<number, string>();
   private readonly codeByHash = new Map<string, string>();
+  private readonly tracedShaders = new Set<number>(); /* debugging: shaders whose WGSL a trace printed */
   private readonly liveModules = new Map<string, GPUShaderModule>(); /* LIVE_MODULE_LIMIT, oldest first */
   private readonly madeModules = new Set<string>(); /* hashes a module was ever made for */
   private cacheStore: ShaderCacheStore | null = null;
@@ -715,45 +733,64 @@ export class GpuExecutor {
   /** Submits everything recorded so far. */
   readonly prof = { write: 0, finish: 0, submit: 0 };
   /** Debugging (perf.mjs --dump-targets-at): every colour render target as
-   * RGBA8 (float formats clamped to [0, 1]). Not on any per-frame path. */
+   * RGBA8 (float formats clamped to [0, 1]), then every cube texture,
+   * one image per mip level with its faces stacked (format "FORMAT-cube-mL").
+   * Contents are as of wherever the stream is, usually mid-frame: a target
+   * can hold this frame's clear over the last frame's draws.
+   * Not on any per-frame path. */
   async debugTargets(minTexels = DEBUG_MIN_TEXELS): Promise<DebugTarget[]> {
     this.flush();
     this.traceFrame = true;
     this.tracePresents = TRACE_PRESENTS;
     const out: DebugTarget[] = [];
     for (const [id, t] of this.textures) {
-      const texel = DEBUG_TEXEL_BYTES[t.format];
-      if (!t.renderView || !texel || t.width * t.height < minTexels) continue;
-      const bytesPerRow = Math.ceil((t.width * texel) / 256) * 256;
-      const buffer = this.device.createBuffer({ size: bytesPerRow * t.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-      const enc = this.device.createCommandEncoder();
-      enc.copyTextureToBuffer({ texture: t.texture }, { buffer, bytesPerRow }, [t.width, t.height]);
-      this.device.queue.submit([enc.finish()]);
-      await buffer.mapAsync(GPUMapMode.READ);
-      const dv = new DataView(buffer.getMappedRange());
-      const rgba = new Uint8Array(t.width * t.height * 4);
-      const floats = texel === 4 && t.format !== "rg11b10ufloat" ? undefined : new Float32Array(t.width * t.height * 4);
-      for (let y = 0; y < t.height; y++)
-        for (let x = 0; x < t.width; x++) {
-          const at = y * bytesPerRow + x * texel, o = (y * t.width + x) * 4;
-          if (texel === 4 && t.format !== "rg11b10ufloat") {
-            for (let k = 0; k < 4; k++) rgba[o + k] = dv.getUint8(at + k);
-            continue;
-          }
-          let c: number[];
-          if (t.format === "rgba16float") c = [0, 2, 4, 6].map((k) => debugHalf(dv.getUint16(at + k, true)));
-          else if (t.format === "r16float") { const v = debugHalf(dv.getUint16(at, true)); c = [v, v, v, 1]; }
-          else { const w = dv.getUint32(at, true); c = [debugSmall(w & 2047, 6), debugSmall((w >> 11) & 2047, 6), debugSmall(w >>> 22, 5), 1]; }
-          for (let k = 0; k < 4; k++) {
-            rgba[o + k] = debugByte(c[k] ?? 0);
-            if (floats) floats[o + k] = c[k] ?? 0;
-          }
-        }
-      buffer.unmap();
-      buffer.destroy();
-      out.push({ id, format: t.format, width: t.width, height: t.height, rgba, floats });
+      if (!t.renderView || !DEBUG_TEXEL_BYTES[t.format] || t.width * t.height < minTexels) continue;
+      out.push(await this.debugRead(id, t.texture, t.format, 0, t.width, t.height, 1));
+    }
+    for (const [id, t] of this.textures) {
+      if (!DEBUG_TEXEL_BYTES[t.format] || t.texture.depthOrArrayLayers !== CUBE_FACES) continue;
+      for (let level = 0; level < t.texture.mipLevelCount; level++) {
+        const w = Math.max(1, t.width >> level), h = Math.max(1, t.height >> level);
+        const image = await this.debugRead(id, t.texture, t.format, level, w, h, CUBE_FACES);
+        out.push({ ...image, format: `${t.format}-cube-m${level}` });
+      }
     }
     return out;
+  }
+
+  /** One mip level of a texture's first `layers` layers, stacked top to bottom. */
+  private async debugRead(id: number, texture: GPUTexture, format: string, mipLevel: number, width: number, layerHeight: number, layers: number): Promise<DebugTarget> {
+    const texel = DEBUG_TEXEL_BYTES[format] ?? 4;
+    const height = layerHeight * layers;
+    const bytesPerRow = Math.ceil((width * texel) / COPY_ROW_ALIGN) * COPY_ROW_ALIGN;
+    const buffer = this.device.createBuffer({ size: bytesPerRow * height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+    const enc = this.device.createCommandEncoder();
+    enc.copyTextureToBuffer({ texture, mipLevel }, { buffer, bytesPerRow, rowsPerImage: layerHeight }, [width, layerHeight, layers]);
+    this.device.queue.submit([enc.finish()]);
+    await buffer.mapAsync(GPUMapMode.READ);
+    const dv = new DataView(buffer.getMappedRange());
+    const rgba = new Uint8Array(width * height * 4);
+    const bytes4 = texel === 4 && format !== "rg11b10ufloat";
+    const floats = bytes4 ? undefined : new Float32Array(width * height * 4);
+    for (let y = 0; y < height; y++)
+      for (let x = 0; x < width; x++) {
+        const at = y * bytesPerRow + x * texel, o = (y * width + x) * 4;
+        if (bytes4) {
+          for (let k = 0; k < 4; k++) rgba[o + k] = dv.getUint8(at + k);
+          continue;
+        }
+        let c: number[];
+        if (format === "rgba16float") c = [0, 2, 4, 6].map((k) => debugHalf(dv.getUint16(at + k, true)));
+        else if (format === "r16float") { const v = debugHalf(dv.getUint16(at, true)); c = [v, v, v, 1]; }
+        else { const w = dv.getUint32(at, true); c = [debugSmall(w & 2047, 6), debugSmall((w >> 11) & 2047, 6), debugSmall(w >>> 22, 5), 1]; }
+        for (let k = 0; k < 4; k++) {
+          rgba[o + k] = debugByte(c[k] ?? 0);
+          if (floats) floats[o + k] = c[k] ?? 0;
+        }
+      }
+    buffer.unmap();
+    buffer.destroy();
+    return { id, format, width, height, rgba, floats };
   }
 
   /** Save states (gpu-readback): each surface's texels as rows of width *
@@ -2114,8 +2151,14 @@ export class GpuExecutor {
       }
     }
     if (this.traceFrame) {
-      const size = (id: number): string => { const t = this.textures.get(id); return t ? `${id}(${t.format} ${t.width}x${t.height})` : `${id}(-)`; };
-      console.log(`trace draw shader ${d.shaderId} vs ${d.vsShaderId} targets ${d.targets.map((t) => size(t.id)).join(",")} depth ${d.depthId ? size(d.depthId) : 0} test ${d.depthTest} write ${d.depthWrite} cmp ${d.depthCompare} tex ${textureIds.join(",")}`);
+      const size = (id: number): string => { const t = this.textures.get(id); return t ? `${id}(${t.format} ${t.width}x${t.height}x${t.texture.depthOrArrayLayers} m${t.texture.mipLevelCount})` : `${id}(-)`; };
+      console.log(`trace draw shader ${d.shaderId} vs ${d.vsShaderId} targets ${d.targets.map((t) => size(t.id)).join(",")} depth ${d.depthId ? size(d.depthId) : 0} test ${d.depthTest} write ${d.depthWrite} cmp ${d.depthCompare} tex ${textureIds.map(size).join(",")} masks ${d.targets.map((t) => t.writeMask).join(",")} blend ${d.targets.map((t) => t.blend ? [t.colorOp, t.colorSrc, t.colorDst, t.alphaOp, t.alphaSrc, t.alphaDst].join(":") : "-").join(",")} params ${textureIds.map((_, k) => traceTexParams(data, k)).join(",")}`);
+      for (const id of [d.shaderId, d.vsShaderId]) { /* each traced shader's WGSL, once */
+        const hash = id ? this.shaderHashes.get(id) : undefined;
+        if (hash === undefined || this.tracedShaders.has(id)) continue;
+        this.tracedShaders.add(id);
+        console.log(`trace wgsl ${id} ${JSON.stringify(this.codeByHash.get(hash) ?? "")}`);
+      }
     }
     const pulled = d.vsShaderId !== 0 && (d.flags & DRAW_VERTEX_PULL) !== 0;
     const second = pulled ? resident ?? this.emptyStorage() : null;
