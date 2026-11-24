@@ -131,6 +131,8 @@ const SKIP_EVERY_FRAME = 0b111;
 /** ?skipbuilding=3: a target drawn in at least half of the last 8 frames (every other frame too). */
 const SKIP_HISTORY_MASK = 0xff;
 const SKIP_HISTORY_MIN = 4;
+/** ?skipbuilding=4: a target drawn in each of the last 2 frames. */
+const SKIP_LAST_TWO = 0b11;
 const HISTORY_BITS = 32;
 /** At most this many cached pipelines are prewarmed (the newest): under
  * PIPELINE_LIMIT, and far from the ~1,900 live pipelines that took
@@ -1685,6 +1687,7 @@ export class GpuExecutor {
       }
       const before = this.framesDrawnBefore(id);
       const ok = this.skipBuilding === 2 ? (before & SKIP_EVERY_FRAME) === SKIP_EVERY_FRAME
+        : this.skipBuilding === 4 ? (before & SKIP_LAST_TWO) === SKIP_LAST_TWO
         : popcount(before & SKIP_HISTORY_MASK) >= SKIP_HISTORY_MIN;
       if (!ok) return `${kind} ${size} drawn ${(before & SKIP_HISTORY_MASK).toString(2).padStart(8, "0")}`;
       return null;

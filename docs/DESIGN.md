@@ -1392,7 +1392,7 @@ The real pipeline:
 2. While compiling, per user setting:
    - **Stall**: the frame waits for the pipeline. Accurate, stutters on first encounters.
    - **Skip**: the draw is dropped for this frame. Fast, visible pop-in/flicker.
-   - *v3.74 deviation (web): the default is a limited skip (`?skipbuilding=2`; `0` stalls always). A draw is dropped only when every target it draws into was drawn in each of the last 3 frames, so the loss is a frame of that draw; draws into anything else (a lookup table baked once at load) stall, because a plain skip left Mario Kart 8 Deluxe's race black for good. Mario Kart race, fresh profile: 1.7 s of stalls against 2.2-5.0 s, worst gap 53-62 ms against 54-336 ms.*
+   - *v3.74 deviation (web): the default is a limited skip (`?skipbuilding=4`; `0` stalls always, `2` asks for 3 frames). A draw is dropped only when every target it draws into was drawn in each of the last 2 frames, so the loss is a frame of that draw; draws into anything else (a lookup table baked once at load) stall, because a plain skip left Mario Kart 8 Deluxe's race black for good. Mario Kart race, fresh profile: 1.7 s of stalls against 2.2-5.0 s, worst gap 53-62 ms against 54-336 ms (3 frames); asking for 2 frames took the race start's worst freeze from 1.2-1.5 s to 0.9-1.0 s (Yoshi Circuit, fresh profile, two runs each).*
 3. **Persistent pipeline cache** in OPFS keyed by `hash(shader microcode) + decompiler_version + backend`. First-encounter stutter is first-*session*-per-title, not first-frame-per-play.
 4. **AOT pre-translation** (Phase 7, opt-in per game) walks known shaders up front.
 
@@ -2658,7 +2658,7 @@ The format of this register is "what could go wrong," not "what will go wrong." 
 - **§15, save browser:** the shell's Save data panel browses, edits, adds (files and dropped folders), downloads and deletes each game's save files; `put-save` / `delete-save` / `list-saves` lifecycle messages.
 - **§15, save states:** the whole machine saved and restored (`emulator_savestate_*`, `workers/savestate.ts`, the player bar's Save state). States load in the same build and memory layout only.
 - **§13, pipeline cache:** WGSL modules and draw-pipeline specs persist per title in OPFS (`workers/shader-cache.ts`) and are built with `createRenderPipelineAsync` when the title loads. Pipelines are keyed by a WGSL content hash, not by the stream's per-session shader ids.
-- **§13, compile stalls:** the default is a limited Skip, not Stall: a draw whose pipeline is still being built is dropped when all its targets were drawn in each of the last 3 frames, and stalls otherwise (`?skipbuilding=0` restores Stall everywhere). Up to 1000 cached pipelines (was 512) are built when a title loads.
+- **§13, compile stalls:** the default is a limited Skip, not Stall: a draw whose pipeline is still being built is dropped when all its targets were drawn in each of the last 2 frames, and stalls otherwise (`?skipbuilding=0` restores Stall everywhere). Up to 1000 cached pipelines (was 512) are built when a title loads.
 - **§12, address spaces:** all four NPDM types are laid out: 39-bit, 36-bit, and the two 32-bit types (in [2 MB, 4 GB); "no reserved" drops the 1 GB alias region for a 2 GB heap). AArch32 programs (NPDM 64-bit flag clear) are refused at bootstrap with a plain message, because Voland has no A32/T32 CPU backend yet.
 - **Super Smash Bros. Ultimate bring-up (first steps):**
   - `svcCreateTransferMemory` accepts module `.data`/`.bss`. SSBU hands a service a static buffer at start-up.
