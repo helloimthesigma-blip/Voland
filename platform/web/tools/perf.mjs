@@ -80,6 +80,7 @@
  *   workers sampled between the two; top self times to the log), "profile-all-start" /
  *   "profile-all-stop" (every worker, the core's pthreads too: each one's busy share and top self times), "heap-start" / "heap-live" (the GPU
  *   worker's heap size, and its allocations since heap-start still alive, by site: what a leak keeps),
+ *   "keydown KEY" / "keyup KEY" (a key held across the commands in between, e.g. a measure while driving),
  *   "trace-start" / "trace-stop FILE" (a Chrome trace of every process in between, the GPU process's Dawn work too), "cheat NAME" (switch on the running cheat whose name
  *   contains NAME, the rest of the line), "export-saves FILE" (the Saves
  *   panel's backup tar, for --restore-saves), "sleep MS", "go"
@@ -850,6 +851,10 @@ async function main() {
         if (cmd === "press") {
           await page.keyboard.down(arg);
           await sleep(Number(arg2 ?? 150));
+          await page.keyboard.up(arg);
+        } else if (cmd === "keydown") {
+          await page.keyboard.down(arg); /* held across later commands (a measure while driving) */
+        } else if (cmd === "keyup") {
           await page.keyboard.up(arg);
         } else if (cmd === "shot") {
           const box = await page.getByTestId("screen").boundingBox();
