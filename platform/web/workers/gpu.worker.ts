@@ -533,6 +533,7 @@ self.addEventListener("message", (event: MessageEvent<MainToGPUMessage>) => {
     if (event.data.trivialShaders) (globalThis as { TRIVIAL_SHADERS?: boolean }).TRIVIAL_SHADERS = true;
     if (event.data.noWriteStaging) (globalThis as { NO_WRITE_STAGING?: boolean }).NO_WRITE_STAGING = true;
     lookAhead = !event.data.noLookAhead;
+    if (event.data.skipBuilding) (globalThis as { SKIP_BUILDING?: number }).SKIP_BUILDING = event.data.skipBuilding;
     if (event.data.shaderSalt) {
       (globalThis as { SHADER_SALT?: number }).SHADER_SALT = event.data.shaderSalt;
       cacheAttached = true; /* a first visit every time: nothing kept, nothing built from what was */

@@ -49,6 +49,10 @@ const TOTAL_MEMORY_BYTES = 5_637_144_576n; // ~5.25GiB
 const TOTAL_MEMORY_PAGES = TOTAL_MEMORY_BYTES / WASM_PAGE_BYTES; // 86016n
 
 const WORKER_READY_TIMEOUT_MS = 10_000;
+/* A draw into targets drawn in each of the last 3 frames skips a pipeline
+ * still being built instead of freezing the game for it (gpu-executor.ts;
+ * ?skipbuilding=0 waits for every pipeline, 1 and 3 are other rules). */
+const DEFAULT_SKIP_BUILDING = "2";
 
 function fatal(reason: string): void {
   setStatus(`fatal: ${reason}`);
@@ -267,6 +271,7 @@ async function boot(): Promise<BootResult | null> {
             trivialShaders: new URLSearchParams(location.search).get("trivialshaders") === "1",
             noWriteStaging: new URLSearchParams(location.search).get("writestaging") === "0",
             noLookAhead: new URLSearchParams(location.search).get("lookahead") === "0",
+            skipBuilding: Number(new URLSearchParams(location.search).get("skipbuilding") ?? DEFAULT_SKIP_BUILDING) || 0,
             shaderSalt: Number(new URLSearchParams(location.search).get("shadersalt")) || 0 } satisfies MainToGPUMessage,
           [offscreen],
         );

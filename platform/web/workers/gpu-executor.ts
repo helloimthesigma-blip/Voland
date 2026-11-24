@@ -126,8 +126,17 @@ const BIND_GROUP_CACHE_LIMIT = 4096;
 const PREWARM_BATCH = 8;
 /** Presents logged after a debug target dump (which ones the screen shows). */
 const TRACE_PRESENTS = 6;
-/** At most this many cached pipelines are prewarmed (the newest). */
-const PREWARM_MAX = 512;
+/** ?skipbuilding=2: a target drawn in each of the last 3 frames (bits of its history). */
+const SKIP_EVERY_FRAME = 0b111;
+/** ?skipbuilding=3: a target drawn in at least half of the last 8 frames (every other frame too). */
+const SKIP_HISTORY_MASK = 0xff;
+const SKIP_HISTORY_MIN = 4;
+const HISTORY_BITS = 32;
+/** At most this many cached pipelines are prewarmed (the newest): under
+ * PIPELINE_LIMIT, and far from the ~1,900 live pipelines that took
+ * Chrome's GPU process down. 512 left a hundred of Mario Kart's 611 to
+ * stall the race that first drew each (2026-11-23). */
+const PREWARM_MAX = 1000;
 /** Live render pipelines kept (least recently used go first). */
 const PIPELINE_LIMIT = 1200;
 /** Shader modules kept alive (least recently used go first). Chrome's GPU
@@ -455,6 +464,13 @@ interface CachedBindGroup {
   readonly group: GPUBindGroup;
 }
 
+/** Set bits in a 32-bit `x`. Pure. */
+function popcount(x: number): number {
+  let n = 0;
+  for (let v = x >>> 0; v; v &= v - 1) n++;
+  return n;
+}
+
 function sameNumbers(a: readonly number[], b: readonly number[]): boolean {
   if (a.length !== b.length) return false;
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
@@ -591,6 +607,20 @@ export class GpuExecutor {
   private aheadRing: DataView | null = null;
   private aheadBuilt = 0; /* since the last present, for the log */
   private aheadWaitMs = 0;
+  /* ?skipbuilding=N (main.ts default 2; 0 off): a draw whose pipeline is still being
+   * built is left out, rather than waited for, when every target it draws
+   * into is redrawn each frame, so the loss is one frame of that draw.
+   * 1: cleared whole this frame and drawn the frame before; 2: drawn in
+   * each of the last 3 frames (cleared or not: a skipped draw leaves the
+   * last frame's pixels); 3: drawn in half of the last 8. Draws into anything else (a lookup
+   * table baked once) wait as before: skipping those left Mario Kart's
+   * race black for good. Per texture id: */
+  private readonly skipBuilding = (globalThis as { SKIP_BUILDING?: number }).SKIP_BUILDING ?? 0;
+  private readonly clearedAt = new Map<number, number>(); /* present count of its last whole clear */
+  private readonly drawnAt = new Map<number, number>();   /* present count of its last pass */
+  private readonly drawnHistory = new Map<number, number>(); /* bit k: drawn in frame drawnAt - k */
+  private skippedDraws = 0; /* since the last present, for the log */
+  private readonly unskippable = new Map<string, number>(); /* why waited draws were not skipped (the log) */
   /* Set by a draw whose pipeline is still being built: execute() hands it to the caller. */
   private awaiting: Promise<void> | null = null;
   /* Draws' constant buffers and global memory (stream version 9). */
@@ -1104,6 +1134,9 @@ export class GpuExecutor {
     this.mipsStale.delete(t.texture);
     this.pendingColor.delete(id);
     this.pendingDepth.delete(id);
+    this.clearedAt.delete(id);
+    this.drawnAt.delete(id);
+    this.drawnHistory.delete(id);
     this.pendingDestroy.push(t.texture);
   }
 
@@ -1398,6 +1431,12 @@ export class GpuExecutor {
       attachment(d.depthId) ?? undefined, windows);
     const key = specKey(spec);
     if (this.pipelines.has(key) || this.aheadPending.has(key)) return;
+    this.buildAhead(key, spec, wgsl, vsWgsl);
+  }
+
+  /** Builds pipeline `key` in the background (AHEAD_IN_FLIGHT at a time);
+   * its draws find it in `pipelines` once built. */
+  private buildAhead(key: string, spec: PipelineSpec, wgsl: string, vsWgsl: string): void {
     const built = this.aheadSlot().then(() => {
       const module = this.moduleFor(wgsl);
       const { desc, layout } = this.pipelineDescriptor(spec, module, vsWgsl ? this.moduleFor(vsWgsl) : module);
@@ -1543,7 +1582,72 @@ export class GpuExecutor {
     const pass = this.beginPass(key, colors, depth, size);
     this.passColorIds = colorIds.slice();
     this.passDepthId = depthId;
+    if (this.skipBuilding) {
+      for (const id of colorIds) this.noteDrawn(id);
+      this.noteDrawn(depthId);
+    }
     return pass;
+  }
+
+  private noteDrawn(id: number): void {
+    if (!id) return;
+    const now = this.stats.presents;
+    const last = this.drawnAt.get(id);
+    if (last === now) return;
+    const gap = last === undefined ? HISTORY_BITS : now - last;
+    const history = gap < HISTORY_BITS ? (this.drawnHistory.get(id) ?? 0) << gap : 0;
+    this.drawnHistory.set(id, (history | 1) >>> 0);
+    this.drawnAt.set(id, now);
+  }
+
+  /** Texture `id`'s frames before this one: bit j set when frame now-1-j drew into it. */
+  private framesDrawnBefore(id: number): number {
+    const now = this.stats.presents;
+    const last = this.drawnAt.get(id);
+    if (last === undefined) return 0;
+    const history = this.drawnHistory.get(id) ?? 0;
+    if (last === now) return history >>> 1;
+    const shift = now - last - 1;
+    return shift < HISTORY_BITS ? (history << shift) >>> 0 : 0;
+  }
+
+  /** Whether draw `d` only draws into targets redrawn every frame
+   * (skipBuilding); `depth`: its depth target, if any. */
+  private drawRedrawn(d: Draw, depth: Tex | undefined): boolean {
+    const now = this.stats.presents;
+    const why = (id: number, kind: string): string | null => {
+      const t = this.textures.get(id);
+      const size = t ? `${t.width}x${t.height}` : "?";
+      if (this.skipBuilding === 1) {
+        if (this.clearedAt.get(id) !== now) return `${kind} ${size} not cleared this frame`;
+        if (!(this.framesDrawnBefore(id) & 1)) return `${kind} ${size} not drawn last frame`;
+        return null;
+      }
+      const before = this.framesDrawnBefore(id);
+      const ok = this.skipBuilding === 2 ? (before & SKIP_EVERY_FRAME) === SKIP_EVERY_FRAME
+        : popcount(before & SKIP_HISTORY_MASK) >= SKIP_HISTORY_MIN;
+      if (!ok) return `${kind} ${size} drawn ${(before & SKIP_HISTORY_MASK).toString(2).padStart(8, "0")}`;
+      return null;
+    };
+    let any = false;
+    for (let i = 0; i < d.targets.length; i++) {
+      const id = (d.targets[i] as Target).id;
+      if (!id || !this.textures.get(id)?.renderView) continue;
+      const no = why(id, "colour");
+      if (no) return this.noteUnskippable(no);
+      any = true;
+    }
+    if (depth) {
+      const no = why(d.depthId, "depth");
+      if (no) return this.noteUnskippable(no);
+      any = true;
+    }
+    return any || this.noteUnskippable("no target");
+  }
+
+  private noteUnskippable(why: string): false {
+    this.unskippable.set(why, (this.unskippable.get(why) ?? 0) + 1);
+    return false;
   }
 
   /** Stages `bytes` at a DATA_ALIGN offset; `window`: the binding reads
@@ -1735,8 +1839,21 @@ export class GpuExecutor {
     const key = specKey(spec);
     const pending = this.aheadPending.get(key);
     if (pending) { /* being built (scanAhead): the caller waits rather than have it built twice */
+      if (this.skipBuilding && this.drawRedrawn(d, depth)) {
+        this.skippedDraws++;
+        return null;
+      }
       this.awaiting = pending;
       return null;
+    }
+    if (this.skipBuilding && !this.pipelines.has(key) && this.drawRedrawn(d, depth)) {
+      const wgsl = this.shaderHashes.get(d.shaderId);
+      const vsWgsl = d.vsShaderId ? this.shaderHashes.get(d.vsShaderId) : "";
+      if (wgsl !== undefined && vsWgsl !== undefined) {
+        this.buildAhead(key, spec, wgsl, vsWgsl);
+        this.skippedDraws++;
+        return null;
+      }
     }
     const made = this.slowDrawPipeline(d, spec, key);
     if (this.aheadSpecs.delete(key)) this.cacheStore?.recordPipeline(spec); /* built ahead and now used: worth keeping */
@@ -2206,6 +2323,7 @@ export class GpuExecutor {
         return new DataView(new Uint32Array([bits]).buffer).getFloat32(0, true);
       });
       if (this.attachedNow(c.colorId)) this.endPass("clear-attached");
+      this.clearedAt.set(c.colorId, this.stats.presents);
       this.pendingColor.set(c.colorId, { r: value[0] ?? 0, g: value[1] ?? 0, b: value[2] ?? 0, a: value[3] ?? 0 });
       return;
     }
@@ -2230,6 +2348,7 @@ export class GpuExecutor {
     const stencil = (c.flags & CLEAR_STENCIL) && hasStencil(t.format) ? c.stencil : null;
     if (whole && (stencil === null || (c.stencilMask & 0xff) === 0xff)) {
       if (this.attachedNow(c.depthId)) this.endPass("clear-attached");
+      this.clearedAt.set(c.depthId, this.stats.presents);
       const prev = this.pendingDepth.get(c.depthId);
       this.pendingDepth.set(c.depthId, { depth: depth ?? prev?.depth ?? null, stencil: stencil ?? prev?.stencil ?? null });
       return;
@@ -2397,11 +2516,15 @@ export class GpuExecutor {
       /* Wall-clock time, to line a page stall up with a burst of builds. */
       this.host.log("info", `new GPU programs at ${((performance.timeOrigin + performance.now()) / 1000).toFixed(1)}: ` +
         `${this.newPipelines} pipelines, ${this.newModules} shader modules (present ${this.stats.presents})` +
-        (this.aheadBuilt ? `; ${this.aheadBuilt} pipelines built ahead, ${(this.aheadWaitMs / 1000).toFixed(1)} s waiting for them` : ""));
+        (this.aheadBuilt ? `; ${this.aheadBuilt} pipelines built ahead, ${(this.aheadWaitMs / 1000).toFixed(1)} s waiting for them` : "") +
+        (this.skippedDraws ? `; ${this.skippedDraws} draws skipped while building` : "") +
+        (this.unskippable.size ? `; waited because: ${[...this.unskippable].map(([w, n]) => `${w} x${n}`).join(", ")}` : ""));
+      this.unskippable.clear();
       this.newPipelines = 0;
       this.newModules = 0;
       this.aheadBuilt = 0;
       this.aheadWaitMs = 0;
+      this.skippedDraws = 0;
     }
     if (this.stats.presents % MEMORY_REPORT_PRESENTS === 0) this.reportMemory();
     this.host.presented(width, height);

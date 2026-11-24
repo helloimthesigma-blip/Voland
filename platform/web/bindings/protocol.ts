@@ -222,6 +222,9 @@ export type MainToGPUMessage =
       /* Diagnostics (?lookahead=0): pipelines are built as the draws ask,
        * not ahead of them from the records the stream already holds. */
       readonly noLookAhead: boolean;
+      /* ?skipbuilding=N (default 2, 0 off): a draw into targets redrawn
+       * every frame skips a pipeline still being built (gpu-executor.ts). */
+      readonly skipBuilding: number;
       /* Diagnostics (?shadersalt=N, N > 0): every shader is new to
        * the GPU's compiler and the persistent shader cache stays out of
        * it - a title's first visit to each scene, as often as wanted. */
