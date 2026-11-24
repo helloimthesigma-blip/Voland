@@ -197,6 +197,11 @@ const READBACK_BATCH = 16;
 /* Debug readback skips small targets (probes, LUTs): later scenes have thousands. */
 const DEBUG_MIN_TEXELS = 256 * 256;
 const CUBE_FACES = 6;
+/* A pass end slower than this is logged (SLOW_PASS_LOGS of them), with
+ * the last RECENT_CREATES textures made. */
+const SLOW_PASS_END_MS = 50;
+const SLOW_PASS_LOGS = 20;
+const RECENT_CREATES = 8;
 /* A memory report (textures by kind, storage buffers) every this many presents. */
 const MEMORY_REPORT_PRESENTS = 300;
 /* Render-target shapes the memory report names (the most numerous). */
@@ -559,6 +564,11 @@ export class GpuExecutor {
   private traceFrame = false;
   private tracePresents = 0; /* presents still to log after a target dump (diagnostics) */
   private passKey = "";
+  /* Diagnostics: a pass end that blocks (the GPU process busy) is logged
+   * with the textures made just before it. */
+  private readonly recentCreates: string[] = new Array<string>(RECENT_CREATES).fill("");
+  private recentCreateNext = 0;
+  private slowPassLogs = 0;
   /* Buffers the open render pass binds as storage: true once written. A
    * buffer cannot be written and read in one pass (one usage scope). */
   private readonly passBuffers = new Map<GPUBuffer, boolean>();
@@ -989,6 +999,8 @@ export class GpuExecutor {
     if (this.textures.has(c.id)) this.textureDestroy(c.id); /* an id made again: the old texture goes */
     this.textures.set(c.id, this.makeTex(format, width, height, Math.max(1, c.layers), (c.usage & USAGE_RENDER) !== 0,
       fallback, levels));
+    this.recentCreates[this.recentCreateNext++ % RECENT_CREATES] =
+      `${c.id}(${format} ${width}x${height}x${Math.max(1, c.layers)} m${levels}${(c.usage & USAGE_RENDER) !== 0 ? " render" : ""})`;
     if ((c.usage & USAGE_RENDER) !== 0) this.renderCreates++;
   }
 
@@ -1526,7 +1538,13 @@ export class GpuExecutor {
   private endPass(reason: string): void {
     if (this.pass) {
       this.passEnds.set(reason, (this.passEnds.get(reason) ?? 0) + 1);
+      const t0 = performance.now();
       this.pass.end();
+      const took = performance.now() - t0;
+      if (took > SLOW_PASS_END_MS && this.slowPassLogs++ < SLOW_PASS_LOGS) {
+        const recent = this.recentCreates.filter((t) => t).join(", ");
+        this.host.log("warn", `[gpu] pass end took ${took.toFixed(0)} ms (pass ${this.passKey}); textures made lately: ${recent}`);
+      }
     }
     this.pass = null;
     this.passKey = "";
