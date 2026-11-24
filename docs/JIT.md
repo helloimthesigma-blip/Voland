@@ -616,6 +616,11 @@ stays under the threshold for minutes, still did best at 8192
 46.0/45.5) - compiled code cost more than interpreting it. Celeste's
 load, mostly one-shot managed init code, too: 34/34 s to the title at
 8192, 35/36 s at 2048, 35/35 s at 512 (2026-11-10, mini).
+The cross-session hot list (below) did not change the answer: Super
+Mario Odyssey's New Donk City with a warm player profile (a warm-up pass,
+then the measured pass, each threshold on its own copy of the profile)
+ran 48.7/48.1 fps at 8192 and 44.3/43.7 at 2048 (2026-11-24, mini),
+though core 0 still spends ~9% in the interpreter there.
 `VOLAND_JIT_THRESHOLD=N` overrides it (in the browser through
 `?env=VOLAND_JIT_THRESHOLD=N`), for A/B runs without a rebuild.
 `VOLAND_JIT_FALLBACKS=N` is the browser's `--jit-fallbacks`: every N
