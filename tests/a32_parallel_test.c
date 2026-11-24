@@ -6,6 +6,12 @@
  * small random budgets so that run() exits often in the middle of the
  * loop. A lost update fails it.
  *
+ * Then single-copy atomicity: a host thread flips a word between 0 and
+ * 0xFFFFFFFF while each core LDREXes it in a loop; any other value is a
+ * torn read (svc #1). A variable-size memcpy was a byte-wise memory.copy
+ * in wasm, and Mario Kart 8 Deluxe's main thread read its own tag out of
+ * another core's lock word that way.
+ *
  * Natively the backend is the A32 interpreter; tests/jit_wasm builds the
  * same file against the A32 JIT (compiled code on every core).
  *
@@ -38,6 +44,11 @@
 #define DEFAULT_INCREMENTS 20000u
 #define COUNTER_OFFSET 0x40u  /* LDREX/STREX */
 #define COUNTER2_OFFSET 0x80u /* LDAEX/STLEX */
+#define FLIP_OFFSET 0xC0u     /* the torn-read check's word */
+#define FLIP_PROGRAM 0x100u   /* k_flip_program's offset in the code page */
+#define FLIP_READS 20000u
+#define FLIP_ONES 0xFFFFFFFFu
+#define SVC_TORN 1u
 
 /* r0 = &counter, r4 = &counter2, r3 = increments:
  *   loop:  ldrex r1, [r0]; add r1, r1, #1; strex r2, r1, [r0]; cmp r2, #0; bne loop
@@ -60,19 +71,38 @@ static const uint32_t k_program[] = {
     0xEF000000u, /* 0x34 svc #0 */
 };
 
+/* r6 = &flip, r3 = reads:
+ *   loop:  ldrex r1, [r6]; clrex; cmp r1, #0; cmnne r1, #1; bne torn
+ *          subs r3, r3, #1; bne loop; svc #0
+ *   torn:  svc #1 */
+static const uint32_t k_flip_program[] = {
+    0xE1961F9Fu, /* 0x00 ldrex r1, [r6] */
+    0xF57FF01Fu, /* 0x04 clrex */
+    0xE3510000u, /* 0x08 cmp r1, #0 */
+    0x13710001u, /* 0x0c cmnne r1, #1 */
+    0x1A000002u, /* 0x10 bne 0x20 */
+    0xE2533001u, /* 0x14 subs r3, r3, #1 */
+    0x1AFFFFF8u, /* 0x18 bne 0x00 */
+    0xEF000000u, /* 0x1c svc #0 */
+    0xEF000001u, /* 0x20 svc #1 */
+};
+
 typedef struct Worker {
   pthread_t thread;
   VMM_Context *vmm;
   uint32_t increments;
   uint64_t seed;
+  bool flip; /* runs k_flip_program */
   bool done;
+  bool torn;
   bool ok;
 } Worker;
 
 static void on_svc(CPU_State *state, uint32_t swi, void *userdata) {
   (void)state;
-  (void)swi;
-  ((Worker *)userdata)->done = true;
+  Worker *w = (Worker *)userdata;
+  if (swi == SVC_TORN) w->torn = true;
+  w->done = true;
 }
 static void on_undefined(CPU_State *state, uint32_t insn, void *userdata) {
   (void)state;
@@ -89,8 +119,9 @@ static void *worker_main(void *arg) {
   cpu->set_undefined_handler(s, on_undefined);
   cpu->set_reg(s, 0, DATA_GVA + COUNTER_OFFSET);
   cpu->set_reg(s, 4, DATA_GVA + COUNTER2_OFFSET);
+  cpu->set_reg(s, 6, DATA_GVA + FLIP_OFFSET);
   cpu->set_reg(s, 3, w->increments);
-  cpu->set_pc(s, CODE_GVA);
+  cpu->set_pc(s, CODE_GVA + (w->flip ? FLIP_PROGRAM : 0u));
   uint64_t rng = w->seed;
   for (uint64_t runs = 0; !w->done && runs < 100000000ull; runs++) {
     rng ^= rng << 13;
@@ -104,6 +135,19 @@ static void *worker_main(void *arg) {
   return NULL;
 }
 
+typedef struct Flipper {
+  pthread_t thread;
+  uint32_t *word;
+  bool stop;
+} Flipper;
+
+static void *flipper_main(void *arg) {
+  Flipper *f = (Flipper *)arg;
+  for (uint32_t i = 0; !__atomic_load_n(&f->stop, __ATOMIC_ACQUIRE); i++)
+    __atomic_store_n(f->word, (i & 1u) ? FLIP_ONES : 0u, __ATOMIC_SEQ_CST);
+  return NULL;
+}
+
 int main(int argc, char **argv) {
   const uint32_t increments = argc > 1 ? (uint32_t)strtoul(argv[1], NULL, 0) : DEFAULT_INCREMENTS;
   CHECK_OK(layout_create());
@@ -112,6 +156,7 @@ int main(int argc, char **argv) {
   CHECK_OK(vmm_map(vmm, CODE_GVA, CODE_PA, VMM_PAGE_SIZE, VMM_PERM_RX));
   CHECK_OK(vmm_map(vmm, DATA_GVA, DATA_PA, VMM_PAGE_SIZE, VMM_PERM_RW));
   CHECK_OK(vmm_write_physical(vmm, CODE_PA, k_program, sizeof(k_program)));
+  CHECK_OK(vmm_write_physical(vmm, CODE_PA + FLIP_PROGRAM, k_flip_program, sizeof(k_flip_program)));
   const uint32_t zero[2] = {0, 0};
   CHECK_OK(vmm_write_physical(vmm, DATA_PA + COUNTER_OFFSET, zero, sizeof(uint32_t)));
   CHECK_OK(vmm_write_physical(vmm, DATA_PA + COUNTER2_OFFSET, zero, sizeof(uint32_t)));
@@ -130,6 +175,29 @@ int main(int argc, char **argv) {
     CHECK(pthread_join(workers[i].thread, NULL) == 0);
     CHECK(workers[i].ok);
   }
+
+  static Flipper flipper;
+  void *flip_host = NULL;
+  vmm_borrow_scope_begin(vmm);
+  CHECK_OK(vmm_guest_to_host(vmm, DATA_GVA + FLIP_OFFSET, sizeof(uint32_t), VMM_PERM_RW, &flip_host));
+  vmm_borrow_scope_end(vmm);
+  flipper.word = (uint32_t *)flip_host;
+  CHECK(pthread_create(&flipper.thread, NULL, flipper_main, &flipper) == 0);
+  for (uint32_t i = 0; i < THREADS; i++) {
+    workers[i] = (Worker){.vmm = vmm, .increments = FLIP_READS, .seed = 0x9E3779B97F4A7C15ull * (i + 7u), .flip = true};
+    CHECK(pthread_create(&workers[i].thread, NULL, worker_main, &workers[i]) == 0);
+  }
+  uint32_t torn = 0;
+  for (uint32_t i = 0; i < THREADS; i++) {
+    CHECK(pthread_join(workers[i].thread, NULL) == 0);
+    CHECK(workers[i].ok);
+    torn += workers[i].torn ? 1u : 0u;
+  }
+  __atomic_store_n(&flipper.stop, true, __ATOMIC_RELEASE);
+  CHECK(pthread_join(flipper.thread, NULL) == 0);
+  printf("[a32_parallel_test] %u threads x %u LDREX of a flipping word: %u saw a torn value\n", THREADS, FLIP_READS,
+         torn);
+  CHECK(torn == 0);
   cpu_set_multicore(false);
 
   uint32_t counter = 0, counter2 = 0;

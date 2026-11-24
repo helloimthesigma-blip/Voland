@@ -100,6 +100,23 @@ void interp_set_read_watch(uint64_t host, uint64_t bytes, Interp_Read_Hook hook,
 /* The state whose access the watch hook reports (its thread's TLS). */
 static _Thread_local const Interp_State *g_watch_state;
 
+/* A guest access of 1, 2, 4 or 8 bytes inside a page is one load or store,
+ * single-copy atomic when aligned as on hardware: another core sees the old
+ * value or the new one, never a mix. A memcpy of a variable size is a
+ * byte-wise memory.copy in wasm, which tears - Mario Kart 8 Deluxe's main
+ * thread read 0x8000 (byte 1 of 0x118020, and its own tag) out of a lock
+ * word another core was taking and freeing, believed it held the lock,
+ * and the game hung (about once in 30 races, parallel mode). */
+static inline void access_copy(void *dst, const void *src, uint32_t size) {
+  switch (size) {
+  case 1u: { uint8_t v; memcpy(&v, src, 1u); memcpy(dst, &v, 1u); return; }
+  case 2u: { uint16_t v; memcpy(&v, src, 2u); memcpy(dst, &v, 2u); return; }
+  case 4u: { uint32_t v; memcpy(&v, src, 4u); memcpy(dst, &v, 4u); return; }
+  case 8u: { uint64_t v; memcpy(&v, src, 8u); memcpy(dst, &v, 8u); return; }
+  default: memcpy(dst, src, size); return;
+  }
+}
+
 bool interp_read(Interp_State *s, uint64_t address, void *out, uint32_t size) {
   VMM_Fault fault;
   if (vmm_access_crosses_page(address, size)) {
@@ -107,7 +124,7 @@ bool interp_read(Interp_State *s, uint64_t address, void *out, uint32_t size) {
   } else {
     const uint8_t *host = vmm_translate_inline(s->l1, address, VMM_PERM_R, &fault);
     if (host) {
-      memcpy(out, host, size);
+      access_copy(out, host, size);
       if (interp_watched(host)) {
         g_watch_state = s;
         g_interp_watch_hook(s->regs.pc, s->regs.x[30], address, size, out, false);
@@ -126,7 +143,7 @@ bool interp_write(Interp_State *s, uint64_t address, const void *data, uint32_t 
   } else {
     uint8_t *host = vmm_translate_inline(s->l1, address, VMM_PERM_W, &fault);
     if (host) {
-      memcpy(host, data, size);
+      access_copy(host, data, size);
       const bool here = cpu_watching_range(address, size);
       if (here || cpu_watching_host(host, size)) { /* the exclusive-access watch: plain stores to its word too */
         uint32_t first = 0, now = 0;

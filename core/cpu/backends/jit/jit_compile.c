@@ -2074,11 +2074,33 @@ static void tlb_entry(Ctx *c, uint32_t perm, uint32_t *base, uint32_t *delta, bo
   }
 }
 
+/* The exclusive-access watch (cpu.h): an access of `size` bytes whose
+ * `local` address (L_ADDR or L_HOST) overlaps the word at `word` takes
+ * the slow path, where interp_write notes it. */
+static void emit_watch_branch(Ctx *c, uint32_t local, uint64_t word, uint32_t size, uint32_t slow) {
+  lget(c, local);
+  i64c(c, word - (size - 1u));
+  op(c, WASM_OP_I64_SUB);
+  i64c(c, size + CPU_WATCH_WORD_BYTES - 1u);
+  op(c, WASM_OP_I64_LT_U);
+  open_if(c, WASM_BLOCK_VOID);
+  br(c, slow);
+  end_(c);
+}
+
+static void emit_walk_tlb(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow);
 static void emit_walk(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) {
   if (perm == VMM_PERM_W && interp_pc_log_watching()) { /* diagnostics: every store through interp_write */
     br(c, slow);
     return;
   }
+  const bool watch = perm == VMM_PERM_W && g_cpu_watch_gva != 0;
+  if (watch) emit_watch_branch(c, L_ADDR, g_cpu_watch_gva, size, slow);
+  emit_walk_tlb(c, size, perm, slow);
+  if (watch && g_cpu_watch_host) emit_watch_branch(c, L_HOST, g_cpu_watch_host, size, slow); /* another mapping of its bytes */
+}
+
+static void emit_walk_tlb(Ctx *c, uint32_t size, uint32_t perm, uint32_t slow) {
   if (no_tlb()) {
     emit_walk_full(c, size, perm, slow);
     return;
@@ -2255,29 +2277,7 @@ static void emit_store(Ctx *c, uint32_t size, uint32_t t, bool pair, uint32_t t2
   open_block(c); /* $done */
   const uint32_t done = c->depth;
   open_block(c); /* $slow */
-  const uint32_t slow = c->depth;
-  const uint32_t bytes = pair ? 2u * size : size;
-  if (g_cpu_watch_gva) { /* the exclusive-access watch (cpu.h): a store over its word goes through interp_write, which notes it */
-    lget(c, L_ADDR);
-    i64c(c, g_cpu_watch_gva - (bytes - 1u));
-    op(c, WASM_OP_I64_SUB);
-    i64c(c, bytes + CPU_WATCH_WORD_BYTES - 1u);
-    op(c, WASM_OP_I64_LT_U);
-    open_if(c, WASM_BLOCK_VOID);
-    br(c, slow);
-    end_(c);
-  }
-  emit_walk(c, bytes, VMM_PERM_W, slow);
-  if (g_cpu_watch_host) { /* ... and one through another mapping of its bytes */
-    lget(c, L_HOST);
-    i64c(c, (uint64_t)g_cpu_watch_host - (bytes - 1u));
-    op(c, WASM_OP_I64_SUB);
-    i64c(c, bytes + CPU_WATCH_WORD_BYTES - 1u);
-    op(c, WASM_OP_I64_LT_U);
-    open_if(c, WASM_BLOCK_VOID);
-    br(c, slow);
-    end_(c);
-  }
+  emit_walk(c, pair ? 2u * size : size, VMM_PERM_W, c->depth);
   lget(c, L_HOST);
   get_x(c, t);
   mem(c, store_opcode(size), ALIGN_1, 0);

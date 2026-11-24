@@ -586,7 +586,18 @@ core nothing changes.
   until it exits, as a core between two TLB shootdown points would.
 - **Plain loads and stores** stay plain. Aligned accesses of up to 8 bytes
   are single-copy atomic on both hosts (AArch64, and wasm's aligned
-  loads/stores in practice).
+  loads/stores in practice) - as long as they are *one* load or store. The
+  interpreter's `interp_read`/`interp_write` copied with a variable-size
+  `memcpy`, which wasm lowers to `memory.copy`: byte by byte on shared
+  memory, so a read racing another core's compare-and-swap could see a mix
+  of the two values. Mario Kart 8 Deluxe hung about once in 30 races that
+  way (fixed 2026-11-24): its main thread's LDREX read 0x8000 - byte 1 of
+  another core's tag 0x118020, and its own tag - out of a lock word going
+  0 <-> 0x118020, took itself for the owner, and the lock ended up held by
+  an idle thread. Accesses of 1, 2, 4 and 8 bytes now copy through one
+  fixed-size load and store (`access_copy`). `a32_parallel_test` flips a
+  word between 0 and 0xFFFFFFFF on a host thread while three cores LDREX
+  it: with `memory.copy` 2-3 cores of 3 see a torn value in every run.
 - **AArch32** (`CPU_BACKEND_A32`, `CPU_BACKEND_A32_JIT`) follows the same
   rules: STREX/STLEX of 1, 2, 4 and 8 bytes is the compare-and-swap,
   exclusives are aligned (an alignment fault otherwise), and DMB/DSB,
