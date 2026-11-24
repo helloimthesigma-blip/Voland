@@ -197,8 +197,8 @@ const READBACK_BATCH = 16;
 /* Debug readback skips small targets (probes, LUTs): later scenes have thousands. */
 const DEBUG_MIN_TEXELS = 256 * 256;
 const CUBE_FACES = 6;
-/* A pass end slower than this is logged (SLOW_PASS_LOGS of them), with
- * the last RECENT_CREATES textures made. */
+/* A pass end or texture creation slower than this is logged (SLOW_PASS_LOGS
+ * of them), with the last RECENT_CREATES textures made. */
 const SLOW_PASS_END_MS = 50;
 const SLOW_PASS_LOGS = 20;
 const RECENT_CREATES = 8;
@@ -997,10 +997,15 @@ export class GpuExecutor {
       return;
     }
     if (this.textures.has(c.id)) this.textureDestroy(c.id); /* an id made again: the old texture goes */
+    const t0 = performance.now();
     this.textures.set(c.id, this.makeTex(format, width, height, Math.max(1, c.layers), (c.usage & USAGE_RENDER) !== 0,
       fallback, levels));
-    this.recentCreates[this.recentCreateNext++ % RECENT_CREATES] =
-      `${c.id}(${format} ${width}x${height}x${Math.max(1, c.layers)} m${levels}${(c.usage & USAGE_RENDER) !== 0 ? " render" : ""})`;
+    const took = performance.now() - t0;
+    const made = `${c.id}(${format} ${width}x${height}x${Math.max(1, c.layers)} m${levels}${(c.usage & USAGE_RENDER) !== 0 ? " render" : ""})`;
+    if (took > SLOW_PASS_END_MS && this.slowPassLogs++ < SLOW_PASS_LOGS) {
+      this.host.log("warn", `[gpu] texture create took ${took.toFixed(0)} ms: ${made}; textures made before it: ${this.recentCreates.filter((t) => t).join(", ")}`);
+    }
+    this.recentCreates[this.recentCreateNext++ % RECENT_CREATES] = made;
     if ((c.usage & USAGE_RENDER) !== 0) this.renderCreates++;
   }
 

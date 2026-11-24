@@ -79,7 +79,8 @@
  *   wall seconds), "profile-start" / "profile-stop" (the CPU and GPU
  *   workers sampled between the two; top self times to the log), "profile-all-start" /
  *   "profile-all-stop" (every worker, the core's pthreads too: each one's busy share and top self times), "heap-start" / "heap-live" (the GPU
- *   worker's heap size, and its allocations since heap-start still alive, by site: what a leak keeps), "cheat NAME" (switch on the running cheat whose name
+ *   worker's heap size, and its allocations since heap-start still alive, by site: what a leak keeps),
+ *   "trace-start" / "trace-stop FILE" (a Chrome trace of every process in between, the GPU process's Dawn work too), "cheat NAME" (switch on the running cheat whose name
  *   contains NAME, the rest of the line), "export-saves FILE" (the Saves
  *   panel's backup tar, for --restore-saves), "sleep MS", "go"
  *   (measure now). Each
@@ -126,6 +127,9 @@ const SHOT_TIMEOUT_MS = 180_000;
 const ALLOC_SAMPLING_BYTES = 1024; /* --alloc: one sample per this many bytes allocated */
 const DRIVE_PROFILE_INTERVAL_US = 1000; /* the drive file's "profile-start": the sampling interval */
 const DRIVE_PROFILE_TOP = 14; /* ... and how many functions "profile-stop" lists per worker */
+/* trace-start: the categories that show the GPU process's work (Dawn, its command buffers). */
+const TRACE_CATEGORIES = ["toplevel", "gpu", "gpu.dawn", "disabled-by-default-gpu.dawn", "gpu.service", "gpu.angle", "viz",
+                          "disabled-by-default-gpu.service", "disabled-by-default-gpu_cmd_queue"];
 const PROFILE_ALL_TOP = 4; /* --profile-all: functions named per worker without --profile-top */
 const HEAP_LIVE_SAMPLING_BYTES = 32768; /* "heap-start": one sample per this many bytes allocated */
 const HEAP_LIVE_TOP = 20; /* "heap-live": allocation sites listed */
@@ -835,6 +839,7 @@ async function main() {
       let driveProfile = null; /* "profile-start": the CDP connection and its worker sessions */
       let driveHeap = null; /* "heap-start": the CDP connection and the GPU worker's session */
       let driveAll = null; /* "profile-all-start": the CDP connection, every worker's session, the start time */
+      let driveTrace = null; /* "trace-start": the browser-level CDP connection tracing */
       console.log(`drive: waiting for commands in ${opts.drive}`);
       for (;;) {
         let lines = [];
@@ -960,6 +965,30 @@ async function main() {
             writeFileSync(join(opts.outDir, `drive-${done + 1}-worker-${i}.cpuprofile`), JSON.stringify(profile));
             console.log(`  worker ${i} (${session.url.split("/").pop()}): ${workerBusy(profile, seconds, DRIVE_PROFILE_TOP).line}`);
           }
+        } else if (cmd === "trace-start") {
+          /* trace-start ... trace-stop FILE: a Chrome trace of every process (the GPU process's
+           * Dawn and command-buffer work too) - what a stall outside the page's workers is.
+           * Over the debug port: a persistent context (--user-data-dir) has no browser session. */
+          driveTrace = await Cdp.connect(opts.debugPort);
+          await driveTrace.send("Tracing.start", { transferMode: "ReturnAsStream", traceConfig: { includedCategories: TRACE_CATEGORIES } });
+        } else if (cmd === "trace-stop" && driveTrace) {
+          const cdp = driveTrace;
+          const complete = new Promise((resolve) => cdp.listeners.push((msg) => {
+            if (msg.method === "Tracing.tracingComplete") resolve(msg.params);
+          }));
+          await cdp.send("Tracing.end");
+          const { stream } = await complete;
+          const parts = [];
+          for (;;) {
+            const chunk = await cdp.send("IO.read", { handle: stream });
+            parts.push(chunk.base64Encoded ? Buffer.from(chunk.data, "base64").toString() : chunk.data);
+            if (chunk.eof) break;
+          }
+          await cdp.send("IO.close", { handle: stream });
+          writeFileSync(arg, parts.join(""));
+          cdp.close();
+          driveTrace = null;
+          note = `${(parts.reduce((n, p) => n + p.length, 0) / 1048576).toFixed(0)} MiB`;
         } else if (cmd === "heap-start") {
           /* heap-start ... heap-live: the GPU worker's allocations sampled in between that are still
            * alive at heap-live (collected ones left out) - what a leak keeps, by allocation site. */
