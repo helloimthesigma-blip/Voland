@@ -255,6 +255,23 @@ static void test_free_running(void) {
   printf("[parallel_test] free-running: every program on 2-3 cores; atomics, condvar, polls, mutexes, mutexes32 20 rounds on 3\n");
 }
 
+/* parallel_log_cores (the stuck-core diagnostics, also the [threads]
+ * dump's last lines): safe on no scheduler, and between bursts of a real
+ * 3-core free run, where it reads each core's state and a running
+ * thread's pc without the kernel lock. */
+static void test_log_cores(void) {
+  parallel_log_cores(NULL);
+  boot_program(&k_programs[1], 3); /* condvar */
+  emulator_set_free_running(&g_run.emu, true);
+  for (uint32_t burst = 0; burst < 4u; burst++) {
+    (void)emulator_run_for(&g_run.emu, FREE_BURST_MS, 997);
+    parallel_log_cores(g_run.emu.parallel);
+  }
+  emulator_dump_threads(&g_run.emu, false);
+  guest_shutdown(&g_run);
+  printf("[parallel_test] core states logged between free-run bursts\n");
+}
+
 /* Wall-clock pacing (emulator_set_pacing): virtual time keeps up with wall
  * time, so a CPU-bound program ends with at least ~all of the wall time
  * it took in virtual ticks; unpaced it falls far behind. The programs'
@@ -569,6 +586,7 @@ int main(void) {
   test_yield_alone();
   test_poll_coalescing();
   test_free_running();
+  test_log_cores();
   test_pacing();
   test_cores_before_load();
   test_host_calls();

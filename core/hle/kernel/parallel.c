@@ -100,6 +100,7 @@ Scheduler_Status parallel_run_for(Parallel *p, uint64_t host_ns, uint64_t budget
   return SCHEDULER_DEADLOCK;
 }
 bool parallel_on_core_thread(void) { return false; }
+void parallel_log_cores(const Parallel *p) { (void)p; }
 
 #else
 
@@ -132,6 +133,7 @@ typedef struct Core {
   Core_Time time;
   uint64_t stall_rng;       /* VOLAND_CORE_STALL's draws */
   uint64_t nudged;          /* Scheduler.run_counter + 1 at its last "runnable elsewhere" broadcast */
+  const char *where;        /* what it is doing (core_at; diagnostics: parallel_log_cores) */
 } Core;
 
 /* A host call waiting for the driver. */
@@ -239,6 +241,10 @@ static void wait_core_cv_paced(Parallel *p, uint64_t *waited) {
 }
 
 static _Thread_local Core *t_core;
+
+/* Where core `c` is (a static string; read without the lock by
+ * parallel_log_cores, so a stuck core can be named). */
+static void core_at(Core *c, const char *where) { __atomic_store_n(&c->where, where, __ATOMIC_RELAXED); }
 static Parallel *g_parallel; /* the attached scheduler, for parallel_on_driver */
 
 bool parallel_supported(void) { return true; }
@@ -382,6 +388,7 @@ static void run_free_on_core(Parallel *p, Core *core) {
   Scheduler *sched = p->sched;
   const CPU_Backend *backend = p->backend;
   while (p->free_running && !p->quit) {
+    core_at(core, "pick");
     if (sched->process_crashed || sched->process_exited) {
       stop_free_run(p, sched->process_crashed ? SCHEDULER_CRASHED : SCHEDULER_EXITED);
       wait_core_cv(p, &core->time.park_ns);
@@ -401,13 +408,16 @@ static void run_free_on_core(Parallel *p, Core *core) {
           core->nudged = sched->run_counter + 1u;
           pthread_cond_broadcast(&p->core_cv);
         }
+        core_at(core, "idle (runnable elsewhere)");
         wait_core_cv(p, &core->time.idle_ns);
         continue;
       }
       if (p->busy == 0 && p->free_status == SCHEDULER_RAN) {
         /* Nothing runnable anywhere: virtual time up to the wall clock,
          * the serial idle step, then devices. */
+        core_at(core, "pace");
         if (p->pace) p->pace(p->devices_ctx);
+        core_at(core, "idle step");
         const uint64_t before = sched->ticks;
         const Scheduler_Status idle = scheduler_idle(sched);
         if (idle == SCHEDULER_EXITED || idle == SCHEDULER_DEADLOCK) {
@@ -420,11 +430,13 @@ static void run_free_on_core(Parallel *p, Core *core) {
          * wall clock has moved on (with a pace hook) or the burst ends,
          * instead of spinning on the lock. */
         if (sched->ticks == before && scheduler_pick(sched) < 0) {
+          core_at(core, "idle (paced)");
           if (p->pace) wait_core_cv_paced(p, &core->time.idle_ns);
           else wait_core_cv(p, &core->time.idle_ns);
         }
         continue;
       }
+      core_at(core, "idle");
       wait_core_cv(p, &core->time.idle_ns);
       continue;
     }
@@ -440,6 +452,7 @@ static void run_free_on_core(Parallel *p, Core *core) {
 
     const bool timed = core->time.runs++ % PARALLEL_RUN_SAMPLE == 0;
     const uint64_t run_start = timed ? now_ns() : 0;
+    core_at(core, "run");
     const CPU_ExitReason exit_reason = backend->run(thread->thread.cpu_state, p->budget);
     if (timed) {
       const uint64_t ran_ns = (now_ns() - run_start) * PARALLEL_RUN_SAMPLE;
@@ -448,7 +461,9 @@ static void run_free_on_core(Parallel *p, Core *core) {
     }
     host_stall(core);
 
+    core_at(core, "lock after run");
     lock_kernel(p, &core->time.lock_ns);
+    core_at(core, "finish run");
     if (p->ran) p->ran(p->devices_ctx, (uint32_t)(thread - sched->threads));
     p->busy--;
     core->running = -1;
@@ -468,6 +483,7 @@ static void *core_main(void *arg) {
   uint64_t seen = 0, seen_free = 0;
   pthread_mutex_lock(&p->kernel);
   for (;;) {
+    core_at(core, "parked");
     while (p->slice == seen && p->free_gen == seen_free && !p->quit) wait_core_cv(p, &core->time.park_ns);
     if (p->quit) break;
     if (p->free_gen != seen_free) {
@@ -709,7 +725,14 @@ void parallel_set_device_hook(Parallel *p, void (*devices)(void *ctx), void *ctx
 
 /* Serves host calls on the channel until done() (under `channel`) or the
  * deadline (0 = none). */
+/* A wait with no deadline (cores parking) that lasts this long is logged,
+ * again every as long, with each core's state (parallel_log_cores): the
+ * rare Mario Kart 8 Deluxe hang stopped the driver here, time with it. */
+#define PARALLEL_STALL_REPORT_NS 5000000000ull
+
 static void drive_until(Parallel *p, bool (*done)(const Parallel *p), uint64_t deadline) {
+  uint64_t stall_at = deadline ? 0 : now_ns() + PARALLEL_STALL_REPORT_NS;
+  uint32_t stalls = 0;
   pthread_mutex_lock(&p->channel);
   while (!done(p) && (!deadline || now_ns() < deadline)) {
     if (p->call) {
@@ -720,9 +743,34 @@ static void drive_until(Parallel *p, bool (*done)(const Parallel *p), uint64_t d
       pthread_cond_broadcast(&p->channel_cv);
       continue;
     }
-    wait_on_channel_until(p, deadline);
+    if (stall_at && now_ns() >= stall_at) {
+      log_warn("[parallel] the driver has waited %llu s for the cores to park:",
+               (unsigned long long)(++stalls * PARALLEL_STALL_REPORT_NS / 1000000000ull));
+      parallel_log_cores(p);
+      stall_at += PARALLEL_STALL_REPORT_NS;
+    }
+    wait_on_channel_until(p, deadline ? deadline : stall_at);
   }
   pthread_mutex_unlock(&p->channel);
+}
+
+void parallel_log_cores(const Parallel *p) {
+  if (!p) return;
+  log_warn("[parallel] free run %s, status %d, %u active, parked %s, %u busy, slice %llu", p->free_running ? "on" : "off",
+           (int)__atomic_load_n(&p->free_status, __ATOMIC_RELAXED), p->free_active, p->free_parked ? "yes" : "no", p->busy,
+           (unsigned long long)p->slice);
+  for (uint32_t i = 0; i < p->core_count; i++) {
+    const Core *c = &p->cores[i];
+    const char *where = __atomic_load_n(&c->where, __ATOMIC_RELAXED);
+    const int32_t running = __atomic_load_n(&c->running, __ATOMIC_RELAXED);
+    if (running >= 0 && (uint32_t)running < SCHEDULER_MAX_THREADS) {
+      CPU_State *state = p->sched->threads[running].thread.cpu_state;
+      log_warn("[parallel]   core %u: %s, running thread %d at pc 0x%llx", i, where ? where : "?", running + 1,
+               state ? (unsigned long long)p->backend->get_pc(state) : 0ull);
+    } else {
+      log_warn("[parallel]   core %u: %s", i, where ? where : "?");
+    }
+  }
 }
 
 /* The kernel lock, for the driver while cores may be running: a core in

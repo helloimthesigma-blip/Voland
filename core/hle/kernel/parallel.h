@@ -97,4 +97,10 @@ void parallel_set_report_hook(Parallel *p, void (*hook)(void));
 /* True on a core thread. */
 bool parallel_on_core_thread(void);
 
+/* Diagnostics: one log line per core - what it is doing, and the guest
+ * thread and pc of a run in progress. Read without the kernel lock (a
+ * stuck core may hold it); the driver logs it when cores take seconds to
+ * park, and the [threads] dump ends with it. */
+void parallel_log_cores(const Parallel *p);
+
 #endif /* SWITCH_HLE_KERNEL_PARALLEL_H */

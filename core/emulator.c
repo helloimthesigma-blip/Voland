@@ -1950,6 +1950,7 @@ void emulator_dump_threads(Emulator *emulator, bool backtrace) {
    * promised value is ahead of the reached one. */
   log_warn("[threads] gpu thread: %u calls queued, %u done, %s", gpu_thread_queued(&emulator->gpu_thread),
            gpu_thread_progress(&emulator->gpu_thread), gpu_thread_busy(&emulator->gpu_thread) ? "busy" : "idle");
+  parallel_log_cores(emulator->parallel); /* the host side: each core's run or wait */
   for (uint32_t id = 1; id < SYNCPOINT_COUNT; id++) {
     const uint32_t lo = syncpoint_min(&emulator->nvdrv.syncpoints, id), hi = syncpoint_max(&emulator->nvdrv.syncpoints, id);
     if (lo != hi) log_warn("[threads] syncpoint %u: reached %u of %u", id, lo, hi);
