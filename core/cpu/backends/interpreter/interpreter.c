@@ -127,6 +127,12 @@ bool interp_write(Interp_State *s, uint64_t address, const void *data, uint32_t 
     uint8_t *host = vmm_translate_inline(s->l1, address, VMM_PERM_W, &fault);
     if (host) {
       memcpy(host, data, size);
+      if (cpu_watching_range(address, size)) { /* the exclusive-access watch: plain stores to its word too */
+        uint32_t first = 0, now = 0;
+        memcpy(&first, data, size < sizeof(first) ? size : sizeof(first));
+        (void)interp_read(s, g_cpu_watch_gva, &now, sizeof(now));
+        cpu_watch_note(CPU_WATCH_STORE, s->tpidrro_el0, first, size, 0u, now);
+      }
       if (interp_watched(host) && g_interp_watch_writes) {
         g_watch_state = s;
         g_interp_watch_hook(s->regs.pc, s->regs.x[30], address, size, data, true);

@@ -289,6 +289,43 @@ static void test_exclusive_pair(void) {
   CHECK(value == 8);
 }
 
+/* The exclusive-access watch (cpu.h) notes plain stores that overlap its
+ * word too - the MK8 hang's lock word read a value no recorded exclusive
+ * or kernel step wrote. A store that ends right before the word is not
+ * noted; a 4-byte store over it, a byte inside it and an 8-byte store
+ * straddling it are, with the stored value and size. */
+static void test_watch_plain_store(void) {
+  const uint64_t word = DATA_GVA + 8u;
+  cpu_watch_set(word);
+  CPU_Watch_Kind kind = CPU_WATCH_LOAD_EXCLUSIVE;
+  uint32_t value = 0, desired = 0, now = 0;
+  const uint64_t before = cpu_watch_latest(&kind, &value, &desired, &now);
+  static const struct { uint32_t insn; uint64_t x1; bool noted; uint32_t size; } k_stores[] = {
+      {0xB9000801u, 0x8000u, true, 4u},             /* str w1, [x0, #8] */
+      {0x39002401u, 0x11u, true, 1u},               /* strb w1, [x0, #9] */
+      {0xF9000001u, 0x1234u, false, 8u},            /* str x1, [x0]: bytes 0-7 */
+      {0xF8004001u, 0xAABBCCDD00000000ull, true, 8u}, /* stur x1, [x0, #4]: bytes 4-11 */
+  };
+  uint64_t seen = before;
+  for (uint32_t i = 0; i < sizeof(k_stores) / sizeof(k_stores[0]); i++) {
+    load_code(&k_stores[i].insn, 1);
+    reset_state();
+    g_cpu->set_reg(g_state, 0, DATA_GVA);
+    g_cpu->set_reg(g_state, 1, k_stores[i].x1);
+    CHECK(g_cpu->run(g_state, 1) == CPU_EXIT_CYCLES_ELAPSED);
+    const uint64_t latest = cpu_watch_latest(&kind, &value, &desired, &now);
+    if (k_stores[i].noted) {
+      CHECK(latest == seen + 1u && kind == CPU_WATCH_STORE && desired == k_stores[i].size &&
+            value == (uint32_t)k_stores[i].x1);
+      seen = latest;
+    } else {
+      CHECK(latest == seen);
+    }
+  }
+  CHECK(now == 0xAABBCCDDu); /* the word after the straddling store */
+  cpu_watch_set(0);
+}
+
 static void test_bounded_run(void) {
   const uint32_t spin[] = {0x91000400u /* add x0, x0, #1 */, 0x17FFFFFFu /* b -4 */};
   load_code(spin, 2);
@@ -319,6 +356,7 @@ int main(void) {
   test_undefined_and_faults();
   test_system_registers();
   test_exclusive_pair();
+  test_watch_plain_store();
   test_bounded_run();
 
   g_cpu->destroy(g_state);

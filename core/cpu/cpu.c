@@ -53,8 +53,20 @@ void cpu_watch_note(CPU_Watch_Kind kind, uint64_t tls, uint32_t value, uint32_t 
   __atomic_store_n(&r->sequence, sequence, __ATOMIC_RELEASE);
 }
 
+uint64_t cpu_watch_latest(CPU_Watch_Kind *kind, uint32_t *value, uint32_t *desired, uint32_t *now) {
+  const uint64_t last = __atomic_load_n(&g_watch_next, __ATOMIC_ACQUIRE) - 1u;
+  if (!last) return 0;
+  const CPU_Watch_Record *r = &g_watch_ring[last % CPU_WATCH_RING];
+  if (__atomic_load_n(&r->sequence, __ATOMIC_ACQUIRE) != last) return 0;
+  *kind = (CPU_Watch_Kind)r->kind;
+  *value = r->value;
+  *desired = r->desired;
+  *now = r->now;
+  return last;
+}
+
 void cpu_watch_log(void) {
-  static const char *const names[] = {"load-ex", "store-ex", "k-read", "k-write"};
+  static const char *const names[] = {"load-ex", "store-ex", "k-read", "k-write", "store"};
   if (!g_cpu_watch_gva) return;
   const uint64_t next = __atomic_load_n(&g_watch_next, __ATOMIC_ACQUIRE);
   const uint64_t first = next > CPU_WATCH_RING ? next - CPU_WATCH_RING : 1u;

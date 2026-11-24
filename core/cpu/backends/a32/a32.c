@@ -374,10 +374,10 @@ static Interp_Status store_exclusive_shared(A32_State *a, uint32_t address, uint
       return INTERP_FAULT;
     }
     pass = interp_compare_and_swap(host, a->s.exclusive_value, v, size);
-    if (cpu_watching(address))
+    if (cpu_watching_range(address, size))
       watch_store_exclusive(a, address, v[0], CPU_WATCH_MONITOR | CPU_WATCH_GRANULE | (pass ? CPU_WATCH_STORED : 0u));
     interp_exclusive_release(seq, a->s.exclusive_seq, pass);
-  } else if (cpu_watching(address)) {
+  } else if (cpu_watching_range(address, size)) {
     watch_store_exclusive(a, address, v[0], monitor ? CPU_WATCH_MONITOR : 0u);
   }
   /* A full fence after every store-exclusive, whether it stored or not.
@@ -435,7 +435,7 @@ static Interp_Status synchronization(A32_State *a, uint32_t insn) {
     a->s.exclusive_size = size;
     memcpy(a->s.exclusive_value, v, sizeof(v)); /* for the multicore compare-and-swap */
     a->s.exclusive_seq = seq;
-    if (cpu_watching(address)) cpu_watch_note(CPU_WATCH_LOAD_EXCLUSIVE, a->s.tpidrro_el0, v[0], 0u, 0u, v[0]);
+    if (cpu_watching_range(address, size)) cpu_watch_note(CPU_WATCH_LOAD_EXCLUSIVE, a->s.tpidrro_el0, v[0], 0u, 0u, v[0]);
     a32_set_reg(a, rd, v[0]);
     if (size == 8u) a32_set_reg(a, rd + 1u, v[1]);
     if (multicore && ordered == 2u) __atomic_thread_fence(__ATOMIC_SEQ_CST); /* LDAEX: acquire */

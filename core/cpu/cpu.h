@@ -203,15 +203,23 @@ typedef enum CPU_Watch_Kind {
   CPU_WATCH_STORE_EXCLUSIVE, /* value: what the load read, desired: the store, flags: CPU_WATCH_* */
   CPU_WATCH_KERNEL_READ,     /* ArbitrateLock: value: the word, desired: owner | waiters it expected */
   CPU_WATCH_KERNEL_WRITE,    /* value: the word before, desired: after */
+  CPU_WATCH_STORE,           /* any other store overlapping the word: value: its first 4 bytes, desired: its size */
 } CPU_Watch_Kind;
 #define CPU_WATCH_STORED 1u        /* the store-exclusive wrote */
 #define CPU_WATCH_MONITOR 2u       /* its monitor held this address and size */
 #define CPU_WATCH_GRANULE 4u       /* no exclusive store to the granule since the load */
 extern uint64_t g_cpu_watch_gva;   /* 0: off */
 static inline bool cpu_watching(uint64_t gva) { return g_cpu_watch_gva != 0 && gva == g_cpu_watch_gva; }
+/* An access of `size` bytes at `gva` overlaps the watched word (4 bytes). */
+#define CPU_WATCH_WORD_BYTES 4u
+static inline bool cpu_watching_range(uint64_t gva, uint32_t size) {
+  return g_cpu_watch_gva != 0 && gva < g_cpu_watch_gva + CPU_WATCH_WORD_BYTES && gva + size > g_cpu_watch_gva;
+}
 void cpu_watch_set(uint64_t gva);
 /* `now`: the word as it reads after the step. */
 void cpu_watch_note(CPU_Watch_Kind kind, uint64_t tls, uint32_t value, uint32_t desired, uint32_t flags, uint32_t now);
 void cpu_watch_log(void);
+/* The newest record (tests): its sequence number, 0 when there is none. */
+uint64_t cpu_watch_latest(CPU_Watch_Kind *kind, uint32_t *value, uint32_t *desired, uint32_t *now);
 
 #endif /* SWITCH_CPU_CPU_H */
