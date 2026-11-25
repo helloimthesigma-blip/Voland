@@ -586,6 +586,36 @@ static void vector_kill_in_if(void) {
   CHECK(strstr(g_text, "switch (pc)") == NULL && strstr(g_text, "discard;") != NULL);
 }
 
+/* An automatic-LOD sample inside a structured branch takes its level from
+ * derivatives (t0_lod) as in straight code; one pixel, so level 0 here. */
+static void vector_branch_texture(void) {
+  Builder b;
+  begin(&b);
+  put_varying(0, 0.25f, 0.75f, 0.6f, 0.0f);
+  emit(&b, IPA(4, SM_ATTR_GENERIC, 0, (uint32_t)RZ));
+  emit(&b, IPA(5, SM_ATTR_GENERIC + 4u, 0, (uint32_t)RZ));
+  emit(&b, FSETP_R(0, 4, 5, 1)); /* p0 = 0.25 < 0.75 */
+  emit(&b, MOV32I(0, 0));
+  emit(&b, MOV32I(1, 0));
+  emit(&b, MOV32I(2, 0));
+  emit(&b, MOV32I(3, 0));
+  const uint32_t ssy = next_index(&b);
+  emit(&b, SSY(0));
+  const uint32_t bra = next_index(&b);
+  emit(&b, BRA(0, 0, true));
+  emit(&b, TEXS(0, 2, 4, 5, 1, 4, 0)); /* automatic LOD */
+  emit(&b, SYNC());
+  const uint32_t skip = next_index(&b);
+  emit(&b, MOV32I(3, 5));
+  emit(&b, SYNC());
+  const uint32_t end = next_index(&b);
+  emit(&b, EXIT());
+  patch(&b, ssy, SSY(offset_to(ssy, end)));
+  patch(&b, bra, BRA(offset_to(bra, skip), 0, true));
+  finish(&b, "branch_texture", true);
+  CHECK(strstr(g_text, "switch (pc)") == NULL && strstr(g_text, "t0_lod(") != NULL);
+}
+
 /* A PBK/BRK loop inside another; with `two_level`, the inner loop also
  * branches straight out of both - a jump the structured form cannot make
  * (the dispatch loop runs it). */
@@ -1062,6 +1092,7 @@ int main(int argc, char **argv) {
   vector_short_circuit();
   vector_loop_exit();
   vector_kill_in_if();
+  vector_branch_texture();
   nested_loops(false);
   nested_loops(true);
   printf("[wgsl_test] passed (%u vectors%s%s)\n", g_vectors, g_dir ? " written to " : "", g_dir ? g_dir : "");

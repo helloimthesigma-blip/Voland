@@ -863,14 +863,17 @@ static const char k_unbound[] = "vec4<u32>(0u, 0u, 0u, 0x3f800000u)";
 
 /* A sample's level of detail: LZ (level 0), LL (explicit), automatic or
  * LB (automatic + bias) - automatic only where derivatives are defined
- * (Tr.uniform_flow), else level 0 as the reference. */
+ * (Tr.uniform_flow), else level 0 as the reference. Structured branches
+ * (Sc) count: a quad whose lanes take the same path computes its
+ * derivatives as the hardware does; in the dispatch loop the lanes of a
+ * quad run different blocks in each round. */
 typedef enum Lod_Mode { LOD_ZERO, LOD_EXPLICIT, LOD_AUTO, LOD_BIAS } Lod_Mode;
 
 static Ex lod_expr(Tr *t, uint32_t b, Lod_Mode mode, Ex value, Ex c, Ex layer) {
   if (mode == LOD_EXPLICIT) return ex("F(%s)", value.s);
   if (t->vertex || t->compute) /* no derivatives: level 0 */
     return mode == LOD_BIAS ? ex("F(%s)", value.s) : ex("0.0");
-  if (mode == LOD_ZERO || !t->uniform_flow || t->guarded) return ex("0.0");
+  if (mode == LOD_ZERO || !(t->uniform_flow || t->structured) || t->guarded) return ex("0.0");
   if (mode == LOD_BIAS) return ex("(t%u_lod(%s, %s) + F(%s))", b, c.s, layer.s, value.s);
   return ex("t%u_lod(%s, %s)", b, c.s, layer.s);
 }
@@ -3667,7 +3670,8 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   t->sc = &sc;
   sc.why = !sc_enabled() ? "VOLAND_WGSL_DISPATCH" : (t->compute ? "a compute program" : "BRX");
   if (!t->straight && !t->compute && !t->indirect && sc_enabled()) {
-    t->structured = sc_build(t) && sc_loops(t) && sc_regions(t) && sc_emit(t);
+    t->structured = sc_build(t) && sc_loops(t) && sc_regions(t);
+    if (t->structured) t->structured = sc_emit(t); /* set while emitting: lod_expr reads it */
     if (!t->structured) { /* what it emitted goes: the dispatch loop instead */
       t->body.len = 0;
       t->body.overflow = false;
