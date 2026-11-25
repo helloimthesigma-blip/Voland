@@ -47,8 +47,10 @@
 #define JIT_MAX_HINTS 4096u
 
 /* Translation-cache slots for the busiest base registers of a region
- * (emit_walk). */
+ * (emit_walk): room for JIT_TLB_SLOTS, TLB_SLOTS_DEFAULT used (docs/JIT.md
+ * "Loads and stores"). */
 #define JIT_TLB_SLOTS 4u
+#define TLB_SLOTS_DEFAULT 2u
 
 enum {
   L_STATE = 0, /* the parameter */
@@ -312,6 +314,7 @@ typedef struct Ctx {
   uint64_t in_local;
   uint32_t tlb_uses[2][31];
   uint8_t tlb_slot[2][31];
+  uint32_t tlb_slots_used; /* slots 0..n-1 are assigned */
   bool a32;               /* the code is A32 (jit_compile_a32.inc) */
   bool fz;                /* compiled under FPCR = FZ only: FZ-safe fast paths guard on that */
   Fp_Cache fp;            /* scalars of V registers held in locals (fp_cache_*) */
@@ -5773,7 +5776,7 @@ static void emit_tlb_recheck(Ctx *c) {
     lset(c, carried_base[i]);
     state_store64_local(c, carried_offset[i], carried_base[i]);
   }
-  for (uint32_t slot = 0; slot < JIT_TLB_SLOTS; slot++) {
+  for (uint32_t slot = 0; slot < c->tlb_slots_used; slot++) { /* the others are never read */
     i64c(c, TLB_EMPTY);
     lset(c, L_TLB_SLOT + 2u * slot);
   }
@@ -6561,16 +6564,18 @@ static void choose_local_registers(Ctx *c, const Ctx *analysis) {
  * slots; an access made once per call gains nothing over the shared
  * cache it would start from. */
 #define TLB_SLOT_MIN_USES 2u
-/* JIT_TLB_SLOTS_MAX=N in the environment: at most N slots (A/B runs;
- * each slot is two more locals live across the region). */
+/* JIT_TLB_SLOTS_MAX=N in the environment: at most N slots, up to
+ * JIT_TLB_SLOTS (A/B runs; each slot is two more locals live across the
+ * region). */
 static uint32_t tlb_slots_max(void) {
   static int max = -1;
-  if (max < 0) max = getenv("JIT_TLB_SLOTS_MAX") ? atoi(getenv("JIT_TLB_SLOTS_MAX")) : (int)JIT_TLB_SLOTS;
+  if (max < 0) max = getenv("JIT_TLB_SLOTS_MAX") ? atoi(getenv("JIT_TLB_SLOTS_MAX")) : (int)TLB_SLOTS_DEFAULT;
   return (uint32_t)max < JIT_TLB_SLOTS ? (uint32_t)max : JIT_TLB_SLOTS;
 }
 
 static void assign_tlb_slots(Ctx *c, const Ctx *analysis) {
   memset(c->tlb_slot, 0, sizeof(c->tlb_slot));
+  c->tlb_slots_used = 0;
   for (uint32_t slot = 0; slot < tlb_slots_max(); slot++) {
     uint32_t best_uses = TLB_SLOT_MIN_USES - 1u, best_write = 0, best_reg = 0;
     for (uint32_t write = 0; write < 2u; write++) {
@@ -6583,6 +6588,7 @@ static void assign_tlb_slots(Ctx *c, const Ctx *analysis) {
     }
     if (best_uses < TLB_SLOT_MIN_USES) return;
     c->tlb_slot[best_write][best_reg] = (uint8_t)(slot + 1u);
+    c->tlb_slots_used = slot + 1u;
   }
 }
 

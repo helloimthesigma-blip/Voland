@@ -184,10 +184,15 @@ entry's read-and-write walk is the same code.
     regions like the others. A function's stack frame and the heap data
     it works on no longer evict each other: on Celeste's loading, 3.0 G
     SP-based accesses missed 0.2 M times.
-  - The four busiest other base registers of a region get slots of their
-    own (`JIT_TLB_SLOTS`), which start each call from the shared entry
-    and refill it on a miss: a loop reading two buffers keeps both pages.
-    `JIT_TLB_SLOTS_MAX=N` in the environment allows fewer (A/B runs).
+  - The two busiest other base registers of a region get slots of their
+    own, which start each call from the shared entry and refill it on a
+    miss: a loop reading two buffers keeps both pages.
+    `JIT_TLB_SLOTS_MAX=N` in the environment sets 0 to `JIT_TLB_SLOTS`
+    (4) for A/B runs. Four was the default until 2026-11-25. With 64-block
+    regions, two made Super Mario Odyssey's New Donk City faster in six of
+    six browser pairs (+1.2-1.8%); 0 and 1 measured the same as 2 there.
+    Seaside and Luncheon came out even, and Silksong, Mario Kart 8 Deluxe
+    and Tears of the Kingdom were no slower.
   - A region loads and stores only the carried entries it uses.
   - The cache goes from region to region through the state
     (`Jit_State.tlb_*`). A region's prologue takes it only if the
@@ -1025,6 +1030,9 @@ shows it next to the backend name.
   (see "Limits"). SMO's slowest kingdoms each won three of three pairs
   (New Donk City 48.2 -> 49.1 fps, Seaside 50.0 -> 51.4, Luncheon 49.9
   -> 50.7, means); no other game got slower.
+- **0.6.2** (2026-11-25) - two translation-cache slots per region
+  instead of four, and the fence recheck clears only the slots a region
+  uses. New Donk City +1.2-1.8% (six of six pairs); other games even.
 
 ## What a region costs on V8
 
