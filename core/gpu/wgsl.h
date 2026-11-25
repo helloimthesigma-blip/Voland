@@ -261,6 +261,8 @@ typedef struct Wgsl_Result {
   bool ok;             /* false: the program uses something not translated */
   char reason[160];    /* why not, when !ok */
   uint32_t cbuf_slots; /* bit per constant buffer the WGSL reads */
+  bool dispatch;       /* its branches run in the dispatch loop, not as if / loop (wgsl.c) */
+  const char *dispatch_why; /* ... because of this (a constant string), when dispatch */
 } Wgsl_Result;
 
 /* Translates `program` (a pixel program, or a vertex program when

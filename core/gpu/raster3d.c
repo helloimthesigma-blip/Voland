@@ -3709,6 +3709,7 @@ static void assemble_end(Raster_State *rs, Vertex_Cache *cache, Assembler *as) {
 
 #define GPU_SHADER_FAILED UINT32_MAX
 #define GPU_WGSL_BYTES ((size_t)1 << 20)
+#define GPU_DISPATCH_LOGS 24u /* programs logged keeping the dispatch loop */
 #define GPU_VERTEX_BYTES ((size_t)768 * 1024)
 #define GPU_DATA_WORDS (WGSL_DRAW_CONSTANT_WORDS + 2u * SM_CBUF_SLOTS * (CBUF_SLOT_BYTES / 4u))
 /* What one draw's data may hold: the GPU worker binds it through a 2 MiB
@@ -5591,6 +5592,12 @@ static uint32_t gpu_shader_for(Raster3d *r, const Sm_Program *program, const Wgs
       memset(p + 8u + res.length, ' ', padded - res.length);
       gpu_stream_end(r->gpu);
       r->gpu_stats.shaders++;
+      if (res.dispatch) {
+        /* Branches the translator could not structure (wgsl.c): the first few, and why. */
+        if (r->gpu_stats.shaders_dispatch++ < GPU_DISPATCH_LOGS)
+          log_info("[gpu] %s program %llx keeps the dispatch loop: %s", desc->stage == SM_STAGE_VERTEX ? "vertex" : "pixel",
+                   (unsigned long long)program->address, res.dispatch_why);
+      }
     }
   }
   return entry->id;

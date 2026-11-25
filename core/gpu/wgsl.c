@@ -23,6 +23,7 @@
 #include <stdarg.h>
 #include <stddef.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "gpu/texture.h"
@@ -92,6 +93,8 @@ typedef struct Tr {
   bool windows;       /* draws: global memory in GPU mirrors W<k> (desc->global_windows) */
   bool leader[SM_MAX_WORDS];
   bool reached[SM_MAX_WORDS];
+  bool structured;    /* branches as if / loop (Sc, below), not the dispatch loop */
+  struct Sc *sc;
 } Tr;
 
 static bool is_texture_op(uint16_t op);
@@ -2165,6 +2168,23 @@ static bool emit_straight_end(Tr *t, const Sm_Insn *in) {
   return !always;
 }
 
+/* One instruction that is not control flow, under its predicate. */
+static void emit_plain(Tr *t, const Sm_Insn *in, uint32_t pc) {
+  if (in->op == SM_OP_SCHED || in->op == SM_OP_NOP || in->op == SM_OP_BARRIER || in->op == SM_OP_INVALID) return;
+  const uint32_t pr = in->pred & 7u, neg = in->pred & 8u;
+  if (pr == SM_PT && neg) return;
+  if (pr == SM_PT) {
+    emit_insn(t, in, pc);
+  } else {
+    EMIT("if (%s) { ", pred(pr, neg).s);
+    t->guarded = true;
+    emit_insn(t, in, pc);
+    t->guarded = false;
+    EMIT("} ");
+  }
+  EMIT("\n      ");
+}
+
 static void emit_block(Tr *t, uint32_t start) {
   const Sm_Program *p = t->p;
   if (t->straight) EMIT("    ");
@@ -2189,23 +2209,8 @@ static void emit_block(Tr *t, uint32_t start) {
       EMIT("pc = %uu; bar = true; ", next >= p->word_count ? PC_FAULT : next);
       break;
     }
-    if (in->op == SM_OP_SSY || in->op == SM_OP_PBK || in->op == SM_OP_PCNT) {
-      emit_flow_push(t, in);
-    } else if (in->op != SM_OP_SCHED && in->op != SM_OP_NOP && in->op != SM_OP_BARRIER && in->op != SM_OP_INVALID) {
-      const uint32_t pr = in->pred & 7u, neg = in->pred & 8u;
-      if (!(pr == SM_PT && neg)) {
-        if (pr == SM_PT) {
-          emit_insn(t, in, pc);
-        } else {
-          EMIT("if (%s) { ", pred(pr, neg).s);
-          t->guarded = true;
-          emit_insn(t, in, pc);
-          t->guarded = false;
-          EMIT("} ");
-        }
-        EMIT("\n      ");
-      }
-    }
+    if (in->op == SM_OP_SSY || in->op == SM_OP_PBK || in->op == SM_OP_PCNT) emit_flow_push(t, in);
+    else emit_plain(t, in, pc);
     const uint32_t next = norm_pc(in->next);
     if (next >= p->word_count || t->leader[next]) {
       if (t->straight) {
@@ -2221,6 +2226,585 @@ static void emit_block(Tr *t, uint32_t start) {
     pc = next;
   }
   EMIT(t->straight ? "\n" : "\n    }\n");
+}
+
+/* ---- structured control flow -------------------------------------- */
+
+/* Branches as WGSL `if` and `loop` rather than the dispatch loop, where the
+ * program's control flow allows. The GPU's compiler takes about twice as
+ * long over a dispatch loop: Mario Kart 8 Deluxe's 152 KiB pixel shader of
+ * 172 blocks, 2.2 s; the same code without the loop, 0.9 s. Every program
+ * with a branch was one.
+ *
+ * - The flow stack (SSY/PBK/PCNT pushes, SYNC/BRK/CONT pops) is followed
+ *   here: each block is reached with one stack, so each pop goes to one
+ *   block. A block reached with two stacks, CAL/RET, BRX, compute
+ *   programs: the dispatch loop.
+ * - Loops are the natural loops of back edges (the header dominates the
+ *   edge's source); each leaves to one block, its exit, or only ends the
+ *   program.
+ * - A region - the program, or a loop's body with each inner loop as one
+ *   node - is emitted along its nodes' immediate post-dominators: a two-way
+ *   branch is `if (g) { ... } else { ... }` whose arms run up to that
+ *   post-dominator; an edge to the loop's header is `continue`, to its
+ *   exit `break`. A block both arms reach is emitted in each (within a
+ *   budget); a region that still misses a block falls back.
+ * - EXIT leaves the outermost `loop { ... }` (as straight programs do);
+ *   inside a loop it sets `xd` and breaks, each loop passing that on. KIL
+ *   and faults set `xf` too, and a pixel program discards after the
+ *   outermost loop: Apple's GPU compiler (through Tint) drew nothing at all
+ *   from a loop holding a `discard`, even one never reached.
+ * VOLAND_WGSL_DISPATCH (environment): the dispatch loop for every program. */
+
+#define SC_MAX_BLOCKS 1024u
+#define SC_MAX_LOOPS 64u
+#define SC_MAX_ENTRIES 512u /* distinct flow-stack entries */
+#define SC_MAX_BACK_EDGES 256u
+#define SC_NONE 0xffffu
+#define SC_EMPTY 0xfffeu /* the empty flow stack */
+/* Successors past the blocks: the program's ends. */
+#define SC_EXIT (SC_MAX_BLOCKS + 0u)
+#define SC_KILL (SC_MAX_BLOCKS + 1u)
+#define SC_FAULT (SC_MAX_BLOCKS + 2u)
+/* Region node ids: blocks, then each loop as one node of the region around
+ * it, then each region's sink (0: the program's, 1 + l: loop l's). */
+#define SC_LOOP_NODE(l) (SC_MAX_BLOCKS + (l))
+#define SC_SINK(r) (SC_MAX_BLOCKS + SC_MAX_LOOPS + (r))
+#define SC_IDS (SC_MAX_BLOCKS + 2u * SC_MAX_LOOPS + 1u)
+#define SC_MAX_DEPTH 160u /* nested ifs and loops */
+#define SC_DUP_INSNS 512u /* instructions emitted again (blocks both arms of a branch reach) */
+#define SC_MEMBER_WORDS (SC_MAX_BLOCKS / 32u)
+
+/* Where an edge leads in its region. */
+enum { SC_TO_NODE, SC_TO_EXIT, SC_TO_KILL, SC_TO_FAULT, SC_TO_CONTINUE, SC_TO_BREAK, SC_TO_NOTHING, SC_TO_NOWHERE };
+
+typedef struct Sc_Block {
+  uint16_t start;   /* leader pc */
+  uint16_t term;    /* the control instruction ending it, SC_NONE: it runs into the next block */
+  uint16_t succ[2]; /* taken (or only) and not taken: blocks or SC_EXIT/KILL/FAULT; SC_NONE */
+  uint16_t stack;   /* the flow stack it starts with (an entry or SC_EMPTY); SC_NONE: never reached */
+  uint16_t loop;    /* the innermost loop holding it, SC_NONE */
+  uint16_t insns;
+  bool emitted;
+} Sc_Block;
+
+typedef struct Sc_Entry {
+  uint16_t below;  /* the entry under it, SC_EMPTY */
+  uint16_t target; /* block */
+  uint8_t kind;    /* STACK_SSY / STACK_PBK / STACK_PCNT */
+} Sc_Entry;
+
+typedef struct Sc_Loop {
+  uint16_t header, exit, parent; /* exit: SC_NONE if it only ends the program; parent: SC_NONE */
+  uint32_t size;
+  uint32_t member[SC_MEMBER_WORDS];
+} Sc_Loop;
+
+typedef struct Sc {
+  uint16_t block_of[SM_MAX_WORDS];
+  Sc_Block blocks[SC_MAX_BLOCKS];
+  uint32_t count;
+  Sc_Entry entries[SC_MAX_ENTRIES];
+  uint32_t entry_count;
+  Sc_Loop loops[SC_MAX_LOOPS];
+  uint32_t loop_count;
+  uint16_t ipdom[SC_IDS]; /* a region node's immediate post-dominator: a node id or the region's sink */
+  /* One dominator computation over local node numbers: successors and
+   * predecessors (next / prev, compressed rows), the results, scratch. */
+  uint16_t next_off[SC_IDS + 1u], next[4u * SC_IDS], prev_off[SC_IDS + 1u], prev[4u * SC_IDS];
+  uint16_t idom[SC_IDS], po[SC_IDS], order[SC_IDS], cursor[SC_IDS], work[SC_IDS];
+  uint16_t local_of[SC_IDS], id_of[SC_IDS];
+  uint16_t back_from[SC_MAX_BACK_EDGES], back_to[SC_MAX_BACK_EDGES];
+  uint32_t back_count;
+  uint32_t dup, depth, loop_depth;
+  const char *why; /* the reason a program keeps the dispatch loop */
+} Sc;
+
+static bool sc_no(Sc *s, const char *why) {
+  s->why = why;
+  return false;
+}
+
+static bool sc_enabled(void) {
+  static int on = -1;
+  if (on < 0) on = getenv("VOLAND_WGSL_DISPATCH") == NULL;
+  return on != 0;
+}
+
+static bool sc_member(const Sc_Loop *l, uint32_t b) { return (l->member[b / 32u] >> (b % 32u)) & 1u; }
+
+/* `kind` -> `target` pushed on `below`, interned: equal stacks are one id. */
+static uint16_t sc_push(Sc *s, uint16_t below, uint8_t kind, uint16_t target) {
+  for (uint32_t i = 0; i < s->entry_count; i++) {
+    const Sc_Entry *e = &s->entries[i];
+    if (e->below == below && e->kind == kind && e->target == target) return (uint16_t)i;
+  }
+  if (s->entry_count >= SC_MAX_ENTRIES) return SC_NONE;
+  s->entries[s->entry_count] = (Sc_Entry){below, target, kind};
+  return (uint16_t)s->entry_count++;
+}
+
+static uint32_t sc_stack_depth(const Sc *s, uint16_t e) {
+  uint32_t d = 0;
+  for (; e != SC_EMPTY; e = s->entries[e].below) d++;
+  return d;
+}
+
+/* The block at `pc` (SC_FAULT past the end, SC_NONE: not a block). */
+static uint16_t sc_block_at(const Tr *t, uint32_t pc) {
+  if (pc >= t->p->word_count) return SC_FAULT;
+  return t->sc->block_of[pc];
+}
+
+/* Successor `b` reached with `stack`; false if it was reached with another. */
+static bool sc_reach(Sc *s, uint16_t b, uint16_t stack, uint32_t *top) {
+  if (b >= SC_MAX_BLOCKS) return true; /* an end */
+  Sc_Block *k = &s->blocks[b];
+  if (k->stack == SC_NONE) {
+    k->stack = stack;
+    s->work[(*top)++] = b;
+    return true;
+  }
+  return k->stack == stack;
+}
+
+/* The blocks, each one's successors and flow stack. */
+static bool sc_build(Tr *t) {
+  Sc *s = t->sc;
+  const Sm_Program *p = t->p;
+  s->count = s->entry_count = s->loop_count = s->back_count = 0;
+  for (uint32_t pc = 0; pc < p->word_count; pc++) {
+    s->block_of[pc] = SC_NONE;
+    if (!t->leader[pc] || !t->reached[pc]) continue;
+    if (s->count >= SC_MAX_BLOCKS) return sc_no(s, "more blocks than SC_MAX_BLOCKS");
+    s->block_of[pc] = (uint16_t)s->count;
+    s->blocks[s->count++] = (Sc_Block){(uint16_t)pc, SC_NONE, {SC_NONE, SC_NONE}, SC_NONE, SC_NONE, 0, false};
+  }
+  const uint16_t entry = sc_block_at(t, norm_pc(1u));
+  if (entry >= SC_MAX_BLOCKS) return sc_no(s, "no entry block");
+  uint32_t top = 0;
+  s->blocks[entry].stack = SC_EMPTY;
+  s->work[top++] = entry;
+  while (top > 0) {
+    Sc_Block *k = &s->blocks[s->work[--top]];
+    uint16_t stack = k->stack;
+    for (uint32_t pc = k->start;;) {
+      if (pc >= p->word_count) {
+        k->succ[0] = SC_FAULT;
+        break;
+      }
+      const Sm_Insn *in = &p->insns[pc];
+      if (is_control(in->op)) {
+        k->term = (uint16_t)pc;
+        break;
+      }
+      if (in->op == SM_OP_SSY || in->op == SM_OP_PBK || in->op == SM_OP_PCNT) {
+        if (in->target < 0 || (in->pred & 7u) != SM_PT || (in->pred & 8u)) return sc_no(s, "a predicated or indirect flow push");
+        const uint16_t to = sc_block_at(t, norm_pc((uint32_t)in->target));
+        if (to >= SC_MAX_BLOCKS || sc_stack_depth(s, stack) >= FLOW_DEPTH) return sc_no(s, "a flow push too deep or to no block");
+        stack = sc_push(s, stack, in->op == SM_OP_SSY ? STACK_SSY : (in->op == SM_OP_PBK ? STACK_PBK : STACK_PCNT), to);
+        if (stack == SC_NONE) return sc_no(s, "more flow-stack entries than SC_MAX_ENTRIES");
+      } else if (in->op != SM_OP_SCHED) {
+        k->insns++;
+      }
+      const uint32_t next = norm_pc(in->next);
+      if (next >= p->word_count || t->leader[next]) {
+        k->succ[0] = sc_block_at(t, next);
+        break;
+      }
+      pc = next;
+    }
+    if (k->term == SC_NONE) {
+      if (k->succ[0] == SC_NONE || !sc_reach(s, k->succ[0], stack, &top)) return sc_no(s, "a block reached with two flow stacks");
+      continue;
+    }
+    const Sm_Insn *in = &p->insns[k->term];
+    const bool always = !strcmp(control_guard(in).s, "true");
+    uint16_t taken = SC_NONE, taken_stack = stack;
+    switch ((Sm_Op)in->op) {
+    case SM_OP_BRA:
+      if (in->target >= 0) taken = sc_block_at(t, norm_pc((uint32_t)in->target));
+      break;
+    case SM_OP_SYNC: case SM_OP_BRK: case SM_OP_CONT: {
+      const uint8_t kind = in->op == SM_OP_SYNC ? STACK_SSY : (in->op == SM_OP_BRK ? STACK_PBK : STACK_PCNT);
+      uint16_t e = stack;
+      while (e != SC_EMPTY && s->entries[e].kind != kind) e = s->entries[e].below;
+      if (e == SC_EMPTY) {
+        taken = SC_FAULT;
+      } else {
+        taken = s->entries[e].target;
+        taken_stack = in->op == SM_OP_CONT ? e : s->entries[e].below;
+      }
+      break;
+    }
+    case SM_OP_EXIT: taken = SC_EXIT; break;
+    case SM_OP_KIL: taken = SC_KILL; break;
+    default: return sc_no(s, "BRX, CAL or RET"); /* BRX, CAL, RET */
+    }
+    const uint16_t next = always ? SC_NONE : sc_block_at(t, norm_pc(in->next));
+    if (taken == SC_NONE || (!always && next == SC_NONE)) return sc_no(s, "a branch to no block");
+    k->succ[0] = taken;
+    k->succ[1] = next;
+    if (!sc_reach(s, taken, taken_stack, &top)) return sc_no(s, "a block reached with two flow stacks");
+    if (next != SC_NONE && !sc_reach(s, next, stack, &top)) return sc_no(s, "a block reached with two flow stacks");
+  }
+  return true;
+}
+
+/* Immediate dominators over local nodes 0..n-1 from `root` (Cooper,
+ * Harvey and Kennedy): a node's successors are next[next_off[v] ..
+ * next_off[v + 1]), its predecessors prev[...]. Unreached nodes keep
+ * SC_NONE. Retreating edges of the depth-first walk are kept in back_*
+ * (local numbers) when `record`; false if there are too many. */
+static bool sc_dominators(Sc *s, uint32_t n, uint16_t root, bool record) {
+  for (uint32_t v = 0; v < n; v++) s->idom[v] = s->po[v] = SC_NONE;
+  uint32_t count = 0, top = 0;
+  s->back_count = 0;
+  s->po[root] = SC_EMPTY; /* on the walk's stack */
+  s->cursor[root] = s->next_off[root];
+  s->work[top++] = root;
+  while (top > 0) {
+    const uint16_t v = s->work[top - 1u];
+    if (s->cursor[v] < s->next_off[v + 1u]) {
+      const uint16_t w = s->next[s->cursor[v]++];
+      if (s->po[w] == SC_NONE) {
+        s->po[w] = SC_EMPTY;
+        s->cursor[w] = s->next_off[w];
+        s->work[top++] = w;
+      } else if (s->po[w] == SC_EMPTY && record) {
+        if (s->back_count >= SC_MAX_BACK_EDGES) return sc_no(s, "too many back edges");
+        s->back_from[s->back_count] = v;
+        s->back_to[s->back_count++] = w;
+      }
+    } else {
+      top--;
+      s->po[v] = (uint16_t)count;
+      s->order[count++] = v;
+    }
+  }
+  s->idom[root] = root;
+  for (bool changed = true; changed;) {
+    changed = false;
+    for (uint32_t i = count; i-- > 0;) {
+      const uint16_t v = s->order[i];
+      if (v == root) continue;
+      uint16_t d = SC_NONE;
+      for (uint32_t j = s->prev_off[v]; j < s->prev_off[v + 1u]; j++) {
+        uint16_t a = s->prev[j];
+        if (s->idom[a] == SC_NONE) continue;
+        if (d == SC_NONE) {
+          d = a;
+          continue;
+        }
+        uint16_t b = d;
+        while (a != b) {
+          while (s->po[a] < s->po[b]) a = s->idom[a];
+          while (s->po[b] < s->po[a]) b = s->idom[b];
+        }
+        d = a;
+      }
+      if (d != s->idom[v]) {
+        s->idom[v] = d;
+        changed = true;
+      }
+    }
+  }
+  return true;
+}
+
+/* Compressed rows from the edge list in work pairs (from, to) of local
+ * nodes: forward into next/next_off and backward into prev/prev_off (or
+ * the other way round when `reverse`). */
+static void sc_rows(Sc *s, uint32_t n, const uint16_t *from, const uint16_t *to, uint32_t edges, bool reverse) {
+  uint16_t *f_off = reverse ? s->prev_off : s->next_off, *f = reverse ? s->prev : s->next;
+  uint16_t *b_off = reverse ? s->next_off : s->prev_off, *bk = reverse ? s->next : s->prev;
+  for (uint32_t v = 0; v <= n; v++) f_off[v] = b_off[v] = 0;
+  for (uint32_t e = 0; e < edges; e++) {
+    f_off[from[e] + 1u]++;
+    b_off[to[e] + 1u]++;
+  }
+  for (uint32_t v = 0; v < n; v++) {
+    f_off[v + 1u] = (uint16_t)(f_off[v + 1u] + f_off[v]);
+    b_off[v + 1u] = (uint16_t)(b_off[v + 1u] + b_off[v]);
+  }
+  for (uint32_t v = 0; v < n; v++) s->cursor[v] = f_off[v];
+  for (uint32_t e = 0; e < edges; e++) f[s->cursor[from[e]]++] = to[e];
+  for (uint32_t v = 0; v < n; v++) s->cursor[v] = b_off[v];
+  for (uint32_t e = 0; e < edges; e++) bk[s->cursor[to[e]]++] = from[e];
+}
+
+static bool sc_dominates(const Sc *s, uint16_t a, uint16_t b) {
+  for (;;) {
+    if (a == b) return true;
+    const uint16_t up = s->idom[b];
+    if (up == SC_NONE || up == b) return false;
+    b = up;
+  }
+}
+
+/* Edge lists (from, to) of up to 2 * SC_IDS edges. */
+static _Thread_local uint16_t g_sc_from[2u * SC_IDS], g_sc_to[2u * SC_IDS];
+
+/* Natural loops: headers, bodies, nesting, exits. */
+static bool sc_loops(Tr *t) {
+  Sc *s = t->sc;
+  uint32_t edges = 0;
+  for (uint32_t b = 0; b < s->count; b++)
+    for (uint32_t i = 0; i < 2u; i++)
+      if (s->blocks[b].stack != SC_NONE && s->blocks[b].succ[i] < SC_MAX_BLOCKS) {
+        g_sc_from[edges] = (uint16_t)b;
+        g_sc_to[edges++] = s->blocks[b].succ[i];
+      }
+  sc_rows(s, s->count, g_sc_from, g_sc_to, edges, false);
+  if (!sc_dominators(s, s->count, sc_block_at(t, norm_pc(1u)), true)) return sc_no(s, "too many back edges");
+  for (uint32_t e = 0; e < s->back_count; e++) {
+    const uint16_t from = s->back_from[e], header = s->back_to[e];
+    if (!sc_dominates(s, header, from)) return sc_no(s, "irreducible control flow"); /* irreducible */
+    uint32_t l = 0;
+    while (l < s->loop_count && s->loops[l].header != header) l++;
+    if (l == s->loop_count) {
+      if (s->loop_count >= SC_MAX_LOOPS) return sc_no(s, "more loops than SC_MAX_LOOPS");
+      Sc_Loop *nl = &s->loops[s->loop_count++];
+      memset(nl, 0, sizeof(*nl));
+      nl->header = header;
+      nl->member[header / 32u] |= 1u << (header % 32u);
+    }
+    Sc_Loop *lp = &s->loops[l];
+    uint32_t top = 0;
+    if (!sc_member(lp, from)) {
+      lp->member[from / 32u] |= 1u << (from % 32u);
+      s->work[top++] = from;
+    }
+    while (top > 0) {
+      const uint16_t v = s->work[--top];
+      for (uint32_t j = s->prev_off[v]; j < s->prev_off[v + 1u]; j++) {
+        const uint16_t u = s->prev[j];
+        if (sc_member(lp, u) || s->blocks[u].stack == SC_NONE) continue;
+        lp->member[u / 32u] |= 1u << (u % 32u);
+        s->work[top++] = u;
+      }
+    }
+  }
+  for (uint32_t l = 0; l < s->loop_count; l++) {
+    Sc_Loop *lp = &s->loops[l];
+    lp->size = 0;
+    for (uint32_t w = 0; w < SC_MEMBER_WORDS; w++) lp->size += (uint32_t)__builtin_popcount(lp->member[w]);
+  }
+  /* Nesting: the smallest other loop holding the header; bodies nest. */
+  for (uint32_t l = 0; l < s->loop_count; l++) {
+    Sc_Loop *lp = &s->loops[l];
+    lp->parent = SC_NONE;
+    for (uint32_t m = 0; m < s->loop_count; m++) {
+      if (m == l || !sc_member(&s->loops[m], lp->header)) continue;
+      if (lp->parent == SC_NONE || s->loops[m].size < s->loops[lp->parent].size) lp->parent = (uint16_t)m;
+    }
+    if (lp->parent != SC_NONE) {
+      const Sc_Loop *pp = &s->loops[lp->parent];
+      if (pp->size <= lp->size) return sc_no(s, "loops that do not nest");
+      for (uint32_t w = 0; w < SC_MEMBER_WORDS; w++)
+        if (lp->member[w] & ~pp->member[w]) return sc_no(s, "loops that do not nest");
+    }
+  }
+  for (uint32_t b = 0; b < s->count; b++) {
+    uint16_t best = SC_NONE;
+    for (uint32_t l = 0; l < s->loop_count; l++)
+      if (sc_member(&s->loops[l], b) && (best == SC_NONE || s->loops[l].size < s->loops[best].size)) best = (uint16_t)l;
+    s->blocks[b].loop = best;
+  }
+  /* One exit each. */
+  for (uint32_t l = 0; l < s->loop_count; l++) {
+    Sc_Loop *lp = &s->loops[l];
+    lp->exit = SC_NONE;
+    for (uint32_t b = 0; b < s->count; b++) {
+      if (!sc_member(lp, b)) continue;
+      for (uint32_t i = 0; i < 2u; i++) {
+        const uint16_t to = s->blocks[b].succ[i];
+        if (to >= SC_MAX_BLOCKS || sc_member(lp, to)) continue;
+        if (lp->exit == SC_NONE) lp->exit = to;
+        else if (lp->exit != to) return sc_no(s, "a loop with two exits");
+      }
+    }
+  }
+  return true;
+}
+
+/* What successor `to` of a node in loop `ctx`'s region (SC_NONE: the
+ * program's) is there; `node` is the region node it goes on to. */
+static uint32_t sc_target(const Sc *s, uint16_t ctx, uint16_t to, uint16_t *node) {
+  *node = SC_NONE;
+  if (to == SC_NONE) return SC_TO_NOTHING;
+  if (to == SC_EXIT) return SC_TO_EXIT;
+  if (to == SC_KILL) return SC_TO_KILL;
+  if (to == SC_FAULT) return SC_TO_FAULT;
+  if (ctx != SC_NONE && to == s->loops[ctx].header) return SC_TO_CONTINUE;
+  if (ctx != SC_NONE && to == s->loops[ctx].exit) return SC_TO_BREAK;
+  const uint16_t l = s->blocks[to].loop;
+  if (l == ctx && (l == SC_NONE || s->loops[l].header != to)) {
+    *node = to;
+    return SC_TO_NODE;
+  }
+  if (l != SC_NONE && s->loops[l].header == to && s->loops[l].parent == ctx) {
+    *node = (uint16_t)SC_LOOP_NODE(l);
+    return SC_TO_NODE;
+  }
+  return SC_TO_NOWHERE; /* into a loop's middle, or out of two loops at once */
+}
+
+/* A region node's successors: up to two (target kind, node) pairs. */
+static uint32_t sc_node_succ(const Sc *s, uint16_t ctx, uint16_t id, uint32_t kind[2], uint16_t node[2]) {
+  if (id >= SC_MAX_BLOCKS) {
+    kind[0] = sc_target(s, ctx, s->loops[id - SC_MAX_BLOCKS].exit, &node[0]);
+    return 1u;
+  }
+  const Sc_Block *k = &s->blocks[id];
+  kind[0] = sc_target(s, ctx, k->succ[0], &node[0]);
+  if (k->succ[1] == SC_NONE) return 1u;
+  kind[1] = sc_target(s, ctx, k->succ[1], &node[1]);
+  return 2u;
+}
+
+/* Each region's post-dominators, into ipdom by node id. */
+static bool sc_regions(Tr *t) {
+  Sc *s = t->sc;
+  for (uint32_t r = 0; r <= s->loop_count; r++) {
+    const uint16_t ctx = r == 0 ? SC_NONE : (uint16_t)(r - 1u);
+    uint32_t n = 0;
+    for (uint32_t b = 0; b < s->count; b++) {
+      const Sc_Block *k = &s->blocks[b];
+      if (k->stack == SC_NONE || k->loop != ctx) continue;
+      s->local_of[b] = (uint16_t)n;
+      s->id_of[n++] = (uint16_t)b;
+    }
+    for (uint32_t l = 0; l < s->loop_count; l++) {
+      if (s->loops[l].parent != ctx) continue;
+      s->local_of[SC_LOOP_NODE(l)] = (uint16_t)n;
+      s->id_of[n++] = (uint16_t)SC_LOOP_NODE(l);
+    }
+    const uint16_t sink = (uint16_t)n;
+    s->id_of[n++] = (uint16_t)SC_SINK(r);
+    uint32_t edges = 0;
+    for (uint32_t v = 0; v + 1u < n; v++) {
+      uint32_t kind[2];
+      uint16_t node[2];
+      const uint32_t ns = sc_node_succ(s, ctx, s->id_of[v], kind, node);
+      for (uint32_t i = 0; i < ns; i++) {
+        if (kind[i] == SC_TO_NOWHERE) return sc_no(s, "a branch into a loop or out of two");
+        g_sc_from[edges] = (uint16_t)v;
+        g_sc_to[edges++] = kind[i] == SC_TO_NODE ? s->local_of[node[i]] : sink;
+      }
+    }
+    sc_rows(s, n, g_sc_from, g_sc_to, edges, true); /* walked backward from the sink */
+    if (!sc_dominators(s, n, sink, false)) return sc_no(s, "too many back edges");
+    for (uint32_t v = 0; v + 1u < n; v++) {
+      if (s->idom[v] == SC_NONE) return sc_no(s, "a loop that never ends"); /* never reaches an end */
+      s->ipdom[s->id_of[v]] = s->id_of[s->idom[v]];
+    }
+  }
+  return true;
+}
+
+static void sc_emit_end(Tr *t, uint32_t kind) {
+  const char *leave = t->sc->loop_depth > 0 ? "xd = true; break;" : "break;";
+  switch (kind) {
+  case SC_TO_EXIT: EMIT("%s ", leave); break;
+  case SC_TO_KILL: case SC_TO_FAULT: EMIT(t->vertex ? "%s " : "xf = true; %s ", leave); break;
+  case SC_TO_CONTINUE: EMIT("continue; "); break;
+  case SC_TO_BREAK: EMIT("break; "); break;
+  default: break;
+  }
+}
+
+static bool sc_emit_seq(Tr *t, uint16_t ctx, uint16_t id, uint16_t stop);
+
+static bool sc_emit_loop(Tr *t, uint16_t l) {
+  Sc *s = t->sc;
+  s->loop_depth++;
+  EMIT("loop {\n      steps = steps + 1u; if (steps > %uu) { ", MAX_BLOCK_STEPS);
+  sc_emit_end(t, SC_TO_FAULT);
+  EMIT("}\n      ");
+  if (!sc_emit_seq(t, l, s->loops[l].header, (uint16_t)SC_SINK(1u + l))) return false;
+  EMIT("}\n      ");
+  s->loop_depth--;
+  EMIT("if (xd) { break; }\n      ");
+  return true;
+}
+
+static bool sc_emit_arm(Tr *t, uint16_t ctx, uint32_t kind, uint16_t node, uint16_t merge) {
+  if (kind != SC_TO_NODE) {
+    sc_emit_end(t, kind);
+    return true;
+  }
+  return node == merge || sc_emit_seq(t, ctx, node, merge);
+}
+
+static bool sc_emit_node(Tr *t, uint16_t ctx, uint16_t id, uint16_t merge) {
+  Sc *s = t->sc;
+  uint32_t kind[2];
+  uint16_t node[2];
+  if (id >= SC_MAX_BLOCKS) { /* an inner loop; out of it to the enclosing loop's header or exit, too */
+    if (!sc_emit_loop(t, (uint16_t)(id - SC_MAX_BLOCKS))) return false;
+    sc_node_succ(s, ctx, id, kind, node);
+    if (kind[0] != SC_TO_NODE) sc_emit_end(t, kind[0]);
+    return true;
+  }
+  Sc_Block *k = &s->blocks[id];
+  if (k->emitted) {
+    s->dup += k->insns;
+    if (s->dup > SC_DUP_INSNS) return sc_no(s, "more repeated blocks than SC_DUP_INSNS");
+  }
+  k->emitted = true;
+  EMIT("{ ");
+  const Sm_Program *p = t->p;
+  for (uint32_t pc = k->start; pc < p->word_count && pc != k->term;) {
+    const Sm_Insn *in = &p->insns[pc];
+    if (in->op != SM_OP_SSY && in->op != SM_OP_PBK && in->op != SM_OP_PCNT) emit_plain(t, in, pc);
+    const uint32_t next = norm_pc(in->next);
+    if (next >= p->word_count || t->leader[next]) break;
+    pc = next;
+  }
+  EMIT("}\n      ");
+  const uint32_t ns = sc_node_succ(s, ctx, id, kind, node);
+  if (ns == 1u || (kind[0] == kind[1] && node[0] == node[1])) {
+    if (kind[0] != SC_TO_NODE) sc_emit_end(t, kind[0]);
+    return true;
+  }
+  EMIT("if (%s) {\n      ", control_guard(&p->insns[k->term]).s);
+  if (!sc_emit_arm(t, ctx, kind[0], node[0], merge)) return false;
+  EMIT("} else {\n      ");
+  if (!sc_emit_arm(t, ctx, kind[1], node[1], merge)) return false;
+  EMIT("}\n      ");
+  return true;
+}
+
+/* The nodes from `id` along the post-dominators up to `stop` (or the sink). */
+static bool sc_emit_seq(Tr *t, uint16_t ctx, uint16_t id, uint16_t stop) {
+  Sc *s = t->sc;
+  if (++s->depth > SC_MAX_DEPTH) return sc_no(s, "nested deeper than SC_MAX_DEPTH");
+  while (id != stop && id < SC_MAX_BLOCKS + SC_MAX_LOOPS) {
+    const uint16_t merge = s->ipdom[id];
+    if (!sc_emit_node(t, ctx, id, merge)) return false;
+    id = merge;
+  }
+  s->depth--;
+  return true;
+}
+
+static bool sc_emit(Tr *t) {
+  Sc *s = t->sc;
+  s->dup = s->depth = s->loop_depth = 0;
+  const uint16_t entry = sc_block_at(t, norm_pc(1u));
+  uint16_t first = entry;
+  if (s->blocks[entry].loop != SC_NONE) {
+    uint16_t l = s->blocks[entry].loop;
+    while (s->loops[l].parent != SC_NONE) l = s->loops[l].parent;
+    first = (uint16_t)SC_LOOP_NODE(l);
+  }
+  EMIT("    ");
+  if (!sc_emit_seq(t, SC_NONE, first, (uint16_t)SC_SINK(0))) return false;
+  EMIT("\n");
+  for (uint32_t b = 0; b < s->count; b++)
+    if (s->blocks[b].stack != SC_NONE && !s->blocks[b].emitted) return sc_no(s, "a block the regions missed");
+  return true;
 }
 
 /* ---- the whole program -------------------------------------------- */
@@ -3078,7 +3662,18 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
     if (t->reached[pc] && is_flow(program->insns[pc].op)) t->straight = false;
   t->straight_live = true;
   t->uniform_flow = t->straight;
-  for (uint32_t pc = 0; pc < program->word_count && t->ok && (!t->straight || t->straight_live); pc++)
+  t->structured = false;
+  static _Thread_local Sc sc;
+  t->sc = &sc;
+  sc.why = !sc_enabled() ? "VOLAND_WGSL_DISPATCH" : (t->compute ? "a compute program" : "BRX");
+  if (!t->straight && !t->compute && !t->indirect && sc_enabled()) {
+    t->structured = sc_build(t) && sc_loops(t) && sc_regions(t) && sc_emit(t);
+    if (!t->structured) { /* what it emitted goes: the dispatch loop instead */
+      t->body.len = 0;
+      t->body.overflow = false;
+    }
+  }
+  for (uint32_t pc = 0; pc < program->word_count && t->ok && !t->structured && (!t->straight || t->straight_live); pc++)
     if (t->leader[pc] && t->reached[pc]) emit_block(t, pc);
   Out head = {buffer, half, 0, false};
   /* Outputs reference registers too: emit them into a scratch tail first
@@ -3155,6 +3750,8 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   if (t->uses_local) out_add(&head, "  var lm: array<u32, %u>;\n", LOCAL_WORDS);
   if (t->straight) {
     out_add(&head, "  loop {\n");
+  } else if (t->structured) {
+    out_add(&head, "  var xd = false; var xf = false; var steps = 0u;\n  loop {\n");
   } else {
     out_add(&head, "  var fsk: array<u32, %u>; var fst: array<u32, %u>; var fsd = 0u;\n", FLOW_DEPTH, FLOW_DEPTH);
     out_add(&head, "  var cst: array<u32, %u>; var csd = 0u;\n", SM_STACK_DEPTH);
@@ -3176,6 +3773,7 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   head.len += t->body.len;
   head.cap = capacity;
   if (t->straight) out_add(&head, "%s  }\n", t->straight_live ? "    break;\n" : "");
+  else if (t->structured) out_add(&head, t->vertex ? "    break;\n  }\n" : "    break;\n  }\n  if (xf) { discard; }\n");
   else out_add(&head, "    default: { pc = %uu; }\n    }\n  }\n", PC_FAULT);
   if (t->compute) {
     /* Every invocation is at a barrier or done: the workgroup meets (in
@@ -3198,6 +3796,8 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
   res.ok = true;
   res.length = prune_unused_functions(buffer, head.len);
   res.cbuf_slots = t->cbuf_slots;
+  res.dispatch = !t->straight && !t->structured;
+  res.dispatch_why = res.dispatch ? t->sc->why : NULL;
   return res;
 }
 

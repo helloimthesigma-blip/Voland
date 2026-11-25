@@ -79,6 +79,7 @@ static uint64_t SYNC(void) { return op_top(0xf0f8) | GUARD | 0xfull; }
 static uint64_t PBK(int32_t off) { return op_top(0xe2a0) | branch(off); }
 static uint64_t BRK(uint32_t p, bool negate) { return op_top(0xe340) | ((uint64_t)p << 16) | ((uint64_t)negate << 19) | 0xfull; }
 static uint64_t EXIT(void) { return op_top(0xe300) | GUARD | 0xfull; }
+static uint64_t EXIT_P(uint32_t p, bool negate) { return op_top(0xe300) | ((uint64_t)p << 16) | ((uint64_t)negate << 19) | 0xfull; }
 static uint64_t BRX(uint32_t a, int32_t off) { return op_top(0xe250) | GUARD | branch(off) | ra(a) | 0xfull; }
 static uint64_t KIL_P(uint32_t p) { return op_top(0xe330) | ((uint64_t)p << 16) | 0xfull; }
 static uint64_t ALD(uint32_t d, uint32_t addr, uint32_t n) { return op_top(0xefd8) | GUARD | ((uint64_t)(n - 1u) << 47) | rc(RZ) | ((uint64_t)addr << 20) | ra(RZ) | rd(d); }
@@ -138,6 +139,8 @@ static void emit(Builder *b, uint64_t insn) {
 
 static uint32_t next_index(const Builder *b) { return b->words % 4u == 0 ? b->words + 1u : b->words; }
 static int32_t offset_to(uint32_t from_index, uint32_t to_index) { return ((int32_t)to_index - (int32_t)from_index - 1) * 8; }
+/* Rewrites the instruction at `at` (forward branches, once their target is known). */
+static void patch(Builder *b, uint32_t at, uint64_t insn) { memcpy(b->bytes + SM_SPH_BYTES + 8u * at, &insn, 8); }
 
 /* ---- the reference run -------------------------------------------- */
 
@@ -459,6 +462,171 @@ static void vector_branches(void) {
   w = PBK(offset_to(pbk, end));
   memcpy(b.bytes + SM_SPH_BYTES + 8u * pbk, &w, 8);
   finish(&b, "branches", false);
+}
+
+/* Structured control flow (wgsl.c, Sc): if / else nested two deep through
+ * SSY/SYNC, with no dispatch loop. */
+static void vector_nested_ifs(void) {
+  Builder b;
+  begin(&b);
+  g_cb[0] = 4;
+  g_cb[1] = 2;
+  emit(&b, MOV32I(4, 3));
+  emit(&b, ISETP_C(0, 4, CB_SLOT, 0, 3)); /* p0 = 3 <= 4 */
+  emit(&b, ISETP_C(1, 4, CB_SLOT, 4, 1)); /* p1 = 3 < 2: false */
+  const uint32_t ssy1 = next_index(&b);
+  emit(&b, SSY(0));
+  const uint32_t bra1 = next_index(&b);
+  emit(&b, BRA(0, 0, true));
+  emit(&b, MOV32I(0, 1));
+  const uint32_t ssy2 = next_index(&b);
+  emit(&b, SSY(0));
+  const uint32_t bra2 = next_index(&b);
+  emit(&b, BRA(0, 1, true));
+  emit(&b, MOV32I(1, 10));
+  emit(&b, SYNC());
+  const uint32_t else2 = next_index(&b);
+  emit(&b, MOV32I(1, 20));
+  emit(&b, SYNC());
+  const uint32_t end2 = next_index(&b);
+  emit(&b, MOV32I(2, 100));
+  emit(&b, SYNC());
+  const uint32_t else1 = next_index(&b);
+  emit(&b, MOV32I(0, 2));
+  emit(&b, SYNC());
+  const uint32_t end1 = next_index(&b);
+  emit(&b, MOV32I(3, 7));
+  emit(&b, EXIT());
+  patch(&b, ssy1, SSY(offset_to(ssy1, end1)));
+  patch(&b, bra1, BRA(offset_to(bra1, else1), 0, true));
+  patch(&b, ssy2, SSY(offset_to(ssy2, end2)));
+  patch(&b, bra2, BRA(offset_to(bra2, else2), 1, true));
+  finish(&b, "nested_ifs", false);
+  CHECK(strstr(g_text, "switch (pc)") == NULL);
+}
+
+/* `if (p0 && p1)`: both conditions branch to one else block, which the
+ * structured form emits in both arms. */
+static void vector_short_circuit(void) {
+  Builder b;
+  begin(&b);
+  g_cb[0] = 4;
+  g_cb[1] = 2;
+  emit(&b, MOV32I(4, 3));
+  emit(&b, ISETP_C(0, 4, CB_SLOT, 0, 3)); /* p0 = 3 <= 4 */
+  emit(&b, ISETP_C(1, 4, CB_SLOT, 4, 1)); /* p1 = 3 < 2: false */
+  emit(&b, MOV32I(0, 5));
+  emit(&b, MOV32I(2, 6));
+  const uint32_t ssy = next_index(&b);
+  emit(&b, SSY(0));
+  const uint32_t bra1 = next_index(&b);
+  emit(&b, BRA(0, 0, true));
+  const uint32_t bra2 = next_index(&b);
+  emit(&b, BRA(0, 1, true));
+  emit(&b, MOV32I(1, 1));
+  emit(&b, SYNC());
+  const uint32_t els = next_index(&b);
+  emit(&b, MOV32I(1, 2));
+  emit(&b, IADD32I(0, 0, 1));
+  emit(&b, SYNC());
+  const uint32_t end = next_index(&b);
+  emit(&b, MOV32I(3, 9));
+  emit(&b, EXIT());
+  patch(&b, ssy, SSY(offset_to(ssy, end)));
+  patch(&b, bra1, BRA(offset_to(bra1, els), 0, true));
+  patch(&b, bra2, BRA(offset_to(bra2, els), 1, true));
+  finish(&b, "short_circuit", false);
+  CHECK(strstr(g_text, "switch (pc)") == NULL);
+}
+
+/* EXIT inside a loop: out of the loop and the program. */
+static void vector_loop_exit(void) {
+  Builder b;
+  begin(&b);
+  g_cb[0] = 3;
+  emit(&b, MOV32I(0, 0));
+  emit(&b, MOV32I(1, 7));
+  emit(&b, MOV32I(2, 8));
+  emit(&b, MOV32I(3, 9));
+  const uint32_t loop = next_index(&b);
+  emit(&b, IADD32I(0, 0, 1));
+  emit(&b, ISETP_C(0, 0, CB_SLOT, 0, 1)); /* p0 = r0 < 3 */
+  emit(&b, EXIT_P(0, true));              /* @!P0 EXIT */
+  emit(&b, IADD32I(1, 1, 1));
+  const uint32_t bra = next_index(&b);
+  emit(&b, BRA(offset_to(bra, loop), (uint32_t)PT, false));
+  finish(&b, "loop_exit", false);
+  CHECK(strstr(g_text, "switch (pc)") == NULL && strstr(g_text, "xd = true;") != NULL);
+}
+
+/* KIL inside an if: the pixel is discarded. */
+static void vector_kill_in_if(void) {
+  Builder b;
+  begin(&b);
+  put_varying(0, 1.0f, 0.0f, 0.0f, 0.0f);
+  emit(&b, IPA(4, SM_ATTR_GENERIC, 0, (uint32_t)RZ));
+  emit(&b, IPA(5, SM_ATTR_GENERIC + 4u, 0, (uint32_t)RZ));
+  emit(&b, FSETP_R(0, 4, 5, 4)); /* p0 = 1 > 0 */
+  emit(&b, MOV32I(0, 1));
+  const uint32_t ssy = next_index(&b);
+  emit(&b, SSY(0));
+  const uint32_t bra = next_index(&b);
+  emit(&b, BRA(0, 0, true));
+  emit(&b, KIL_P((uint32_t)PT));
+  emit(&b, SYNC());
+  const uint32_t skip = next_index(&b);
+  emit(&b, MOV32I(0, 2));
+  emit(&b, SYNC());
+  const uint32_t end = next_index(&b);
+  emit(&b, MOV32I(1, 3));
+  emit(&b, EXIT());
+  patch(&b, ssy, SSY(offset_to(ssy, end)));
+  patch(&b, bra, BRA(offset_to(bra, skip), 0, true));
+  finish(&b, "kill_in_if", false);
+  CHECK(strstr(g_text, "switch (pc)") == NULL && strstr(g_text, "discard;") != NULL);
+}
+
+/* A PBK/BRK loop inside another; with `two_level`, the inner loop also
+ * branches straight out of both - a jump the structured form cannot make
+ * (the dispatch loop runs it). */
+static void nested_loops(bool two_level) {
+  Builder b;
+  begin(&b);
+  g_cb[0] = 3;
+  g_cb[1] = 4;
+  emit(&b, MOV32I(0, 0));
+  emit(&b, MOV32I(1, 0));
+  emit(&b, MOV32I(3, 0));
+  const uint32_t pbk1 = next_index(&b);
+  emit(&b, PBK(0));
+  const uint32_t outer = next_index(&b);
+  emit(&b, MOV32I(2, 0));
+  const uint32_t pbk2 = next_index(&b);
+  emit(&b, PBK(0));
+  const uint32_t inner = next_index(&b);
+  emit(&b, IADD32I(2, 2, 1));
+  emit(&b, IADD32I(1, 1, 1));
+  emit(&b, ISETP_C(1, 2, CB_SLOT, 0, 1)); /* p1 = r2 < 3 */
+  emit(&b, ISETP_C(2, 1, CB_SLOT, 4, 4)); /* p2 = r1 > 4 */
+  const uint32_t out = next_index(&b);
+  if (two_level) emit(&b, BRA(0, 2, false)); /* @P2 BRA outer_end */
+  emit(&b, BRK(1, true));                    /* @!P1 BRK */
+  const uint32_t bra_inner = next_index(&b);
+  emit(&b, BRA(offset_to(bra_inner, inner), (uint32_t)PT, false));
+  const uint32_t inner_end = next_index(&b);
+  emit(&b, IADD32I(0, 0, 1));
+  emit(&b, ISETP_C(0, 0, CB_SLOT, 0, 1)); /* p0 = r0 < 3 */
+  emit(&b, BRK(0, true));                 /* @!P0 BRK */
+  const uint32_t bra_outer = next_index(&b);
+  emit(&b, BRA(offset_to(bra_outer, outer), (uint32_t)PT, false));
+  const uint32_t outer_end = next_index(&b);
+  emit(&b, MOV32I(3, 0x55));
+  emit(&b, EXIT());
+  patch(&b, pbk1, PBK(offset_to(pbk1, outer_end)));
+  patch(&b, pbk2, PBK(offset_to(pbk2, inner_end)));
+  if (two_level) patch(&b, out, BRA(offset_to(out, outer_end), 2, false));
+  finish(&b, two_level ? "two_level_break" : "nested_loops", false);
+  CHECK((strstr(g_text, "switch (pc)") != NULL) == two_level);
 }
 
 static void vector_select_texture(void) {
@@ -878,6 +1046,7 @@ int main(int argc, char **argv) {
   vector_i2i_abs_neg();
   vertex_pull_vectors();
   vector_branches();
+  CHECK(strstr(g_text, "switch (pc)") == NULL); /* if / loop, not the dispatch loop */
   vector_select_texture();
   vector_texture_half();
   vector_pset();
@@ -889,6 +1058,12 @@ int main(int argc, char **argv) {
   vector_kill();
   vector_ldc();
   vector_brx_bundle();
+  vector_nested_ifs();
+  vector_short_circuit();
+  vector_loop_exit();
+  vector_kill_in_if();
+  nested_loops(false);
+  nested_loops(true);
   printf("[wgsl_test] passed (%u vectors%s%s)\n", g_vectors, g_dir ? " written to " : "", g_dir ? g_dir : "");
   return 0;
 }

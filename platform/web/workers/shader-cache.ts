@@ -13,8 +13,10 @@
 
 /* 2: draws read constant buffers from the pool (stream version 9).
  * 3: texture helpers follow each texture's use, which changed the text of
- *    nearly every shader: the old entries would be prewarmed for nothing. */
-export const SHADER_CACHE_VERSION = 3;
+ *    nearly every shader: the old entries would be prewarmed for nothing.
+ * 4: branches as if / loop instead of the dispatch loop (core/gpu/wgsl.c),
+ *    again nearly every shader. */
+export const SHADER_CACHE_VERSION = 4;
 const CACHE_DIRECTORY = "shader-cache";
 /* Bounds per title: the newest entries win. */
 const MAX_SHADERS = 4096;
