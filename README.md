@@ -4,7 +4,7 @@ A Nintendo Switch emulator that runs in your browser. A C11 core compiled to
 WebAssembly, its own ARM64 → WebAssembly JIT, and a WebGPU renderer. Nothing
 to install, no keys, and most games need no firmware.
 
-> **Status:** Phase 4 (First Boot). All nine games we test play at full or near-full speed during actual play on an M4 Mac mini: Hollow Knight, Silksong, Celeste and Nine Sols, plus Mario Odyssey, Mario Kart 8 Deluxe, Smash Bros. Ultimate, Animal Crossing and Tears of the Kingdom. Recent work on Tears of the Kingdom cut Chrome's memory for it from ~16 GB to ~11 GB (Chrome had kept every shader alive), stopped it slowing down over long sessions, and sped up its floating-point code in the JIT (Lookout Landing 8.2 -> 9.4 fps); before that came fixes for its boot crash, over-exposed picture and lighting artifacts, Mario Kart's washed-out Cloudtop Cruise storm, and a rare boot crash in 64-bit games. Still open: Tears of the Kingdom's low frame rate and rare Mario Kart crashes. The full task list is in [DESIGN.md §25](docs/DESIGN.md#25-development-phases), per-game details in [NEW_GAMES.md](docs/NEW_GAMES.md).
+> **Status:** Phase 4 (First Boot). All nine games we test play at full or near-full speed during actual play on an M4 Mac mini: Hollow Knight, Silksong, Celeste and Nine Sols, plus Mario Odyssey, Mario Kart 8 Deluxe, Smash Bros. Ultimate, Animal Crossing and Tears of the Kingdom. Recent work fixed Mario Kart's rare mid-race freeze (in the browser build, memory reads could catch another core's half-finished write), and turned the GPU shaders of branching game code into plain if/loop code, which cuts first-visit shader waits by about a quarter and lets them use mipmaps - Mario Odyssey's longest pause is now about four frames in every kingdom. Still open: Tears of the Kingdom's low frame rate, and short pauses the first time a scene's shaders are seen. The full task list is in [DESIGN.md §25](docs/DESIGN.md#25-development-phases), per-game details in [NEW_GAMES.md](docs/NEW_GAMES.md).
 
 ### Where each game stands
 
@@ -20,8 +20,8 @@ cap is 60 unless noted.
 | Hollow Knight: Silksong | Bellhart, Bonetown | 100% | 57-58 | none known |
 | Celeste | Chapter 3 (Celestial Resort) | 100% | 60 | none known |
 | Nine Sols | the first cave | 100% | 45 | |
-| Super Mario Odyssey | ten kingdoms, walking (Cap, Cascade, Sand, Wooded, Lake, Seaside, Snow, Luncheon, Bowser's, Moon) and New Donk City | 92-100% in most, 82-99% in Luncheon | 37-60 by kingdom | a kingdom's first seconds stutter while its shaders compile; the camera tutorial needs the right stick pushed up |
-| Mario Kart 8 Deluxe (32-bit) | Grand Prix races, all four races of a cup | 98-100% | 45-58 in races | the first visit to a course pauses while its shaders are built (about 25 s before the first race); rare crashes or freezes during Grand Prix runs |
+| Super Mario Odyssey | ten kingdoms, walking (Cap, Cascade, Sand, Wooded, Lake, Seaside, Snow, Luncheon, Bowser's, Moon) and New Donk City | 100% | 47-60 by kingdom (longest pause about 65 ms) | a kingdom's first seconds stutter while its shaders compile; the camera tutorial needs the right stick pushed up |
+| Mario Kart 8 Deluxe (32-bit) | Grand Prix races, all four races of a cup | 98-100% | 45-58 in races | the first visit to a course pauses while its shaders are built (about 15-20 s before the first race) |
 | Super Smash Bros. Ultimate | Battlefield fights | 94-100% | 32-59 (depends on the fight) | none known |
 | Animal Crossing: New Horizons | arrival on the island | 100% | 29 (the game's cap is 30) | generating the island takes a few minutes |
 | Tears of the Kingdom | the cave beneath Hyrule Castle, Great Sky Island, Lookout Landing at night | 99-100% | 12-13 in the cave, 9-10 at Lookout Landing (the game's cap is 30) | none known besides the frame rate |
