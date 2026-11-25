@@ -210,8 +210,8 @@ _Static_assert(OFF_SP == OFF_X(31), "spill/reload move x30 and SP as one pair");
 
 /* Regions: the entry block plus blocks in the same page it reaches by
  * direct branches, in one function (docs/JIT.md). */
-#define JIT_MAX_REGION_BLOCKS 64u
-#define REGION_BLOCKS_DEFAULT 32u /* region_blocks_max() */
+#define JIT_MAX_REGION_BLOCKS 128u
+#define REGION_BLOCKS_DEFAULT 64u /* region_blocks_max(); docs/JIT.md "Limits" */
 
 typedef struct Region_Block {
   uint64_t pc;

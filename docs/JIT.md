@@ -434,15 +434,26 @@ What joins a region:
   is read from the GOT at compile time. The prediction is guarded, so a
   stale GOT only costs an exit, never correctness.
 
-Limits: 32 blocks per region (the environment variable
-`JIT_MAX_REGION_BLOCKS` sets 1-64 for A/B runs; 64 was no clear gain,
-16 and 8 were slower: Hollow Knight's fight 50.2 and 45.2-45.9 fps against
-51.0-52.4 at 32; in Super Mario Odyssey's New Donk City 64 gave 48.8-49.1
-against 48.4-48.6, +0.8% in three of three runs, too small to change the
-default without the other games), 128 instructions per block
+Limits: 64 blocks per region (the environment variable
+`JIT_MAX_REGION_BLOCKS` sets 1-128 for A/B runs), 128 instructions per block
 (`JIT_MAX_BLOCK_INSNS`), and four code pages (`JIT_MAX_REGION_PAGES`),
 each validated by its own range hash.
 `voland-cli --jit-no-calls` turns call spanning off.
+
+The block limit was 32 until 2026-11-25. Measured in the browser on the
+mini, one browser profile per test, alternating, three pairs each:
+- Super Mario Odyssey, where the game's main thread holds a core: 64
+  blocks gave New Donk City 48.6-49.3 against 47.7-48.7 fps, Seaside
+  51.2-51.7 against 48.5-51.0, Luncheon 50.6-50.7 against 49.3-50.3.
+  Each won all three pairs.
+- 128 against 64 was within noise (New Donk City 49.0-49.4 against
+  48.3-49.5, Seaside 50.6-52.1 against 50.5-51.7).
+- No other game got slower at 64: Silksong at Bellhart (57.4 against
+  56.6 fps on average, noisy), Mario Kart 8 Deluxe races (57.4 against
+  57.2), Tears of the Kingdom at Lookout Landing ~3 minutes in (12.5
+  against 11.5).
+- Smaller regions were slower: Hollow Knight's fight ran 50.2 fps at 16
+  and 45.2-45.9 at 8, against 51.0-52.4 at 32.
 
 Before a branch to another region block, the code checks that the
 target block's instructions still fit the budget. If they do not, the
@@ -1010,6 +1021,10 @@ shows it next to the backend name.
   Cappy throws after loading 54.7 -> 57.2 fps, its Mushroom Kingdom
   56.7 -> 59.7 fps; TOTK at Lookout Landing
   ~3 minutes in 10.5 -> 13.6 fps (means of three pairs).
+- **0.6.1** (2026-11-25) - regions of up to 64 blocks instead of 32
+  (see "Limits"). SMO's slowest kingdoms each won three of three pairs
+  (New Donk City 48.2 -> 49.1 fps, Seaside 50.0 -> 51.4, Luncheon 49.9
+  -> 50.7, means); no other game got slower.
 
 ## What a region costs on V8
 
