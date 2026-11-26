@@ -231,7 +231,12 @@ static uint32_t ftype(void) { return pick(8) == 0 ? 3u : pick(2); } /* single/do
 static uint32_t fp_vreg(void) { return pick(4) ? 16u + pick(12) : vreg(); }
 static uint32_t gen_simd_inline(void) {
   const uint32_t q = pick(4) ? 1u : 0u, u = pick(2);
-  switch (pick(13)) {
+  switch (pick(14)) {
+  case 13: { /* ADDV, SMAXV/UMAXV, SMINV/UMINV (sometimes SADDLV/UADDLV, FMAXNMV: the helper) */
+    static const uint32_t opcodes[5] = {0x1B, 0x0A, 0x1A, 0x03, 0x0C};
+    return 0x0E300800u | (q << 30) | (u << 29) | (pick(4) << 22) | (opcodes[pick(4) ? pick(3) : 3u + pick(2)] << 12) |
+           (vreg() << 5) | vreg();
+  }
   case 12: /* SSHL/USHL (register), (S|U)ADDL/(S|U)SUBL(2), SQXTN(2)/UQXTN */
     switch (pick(3)) {
     case 0: /* mostly 32-bit lanes, the ones the JIT shifts itself; counts mostly from V28-V31 (random bits) */
@@ -337,8 +342,12 @@ static uint32_t gen_simd_fp(void) {
              ((post ? (pick(2) ? 31u : 24u + pick(4)) : 0u) << 16) | (pick(8) << 13) | (pick(2) << 12) |
              (pick(4) << 10) | (base_reg() << 5) | vreg();
     }
-    return 0x0C000000u | (pick(2) << 30) | (pick(2) << 23) | (pick(2) << 22) | ((pick(2) ? 31u : 24u + pick(4)) << 16) |
-           (pick(16) << 12) | (pick(4) << 10) | (base_reg() << 5) | vreg();
+    {
+      const uint32_t post = pick(2); /* offset forms need Rm = 0 */
+      return 0x0C000000u | (pick(2) << 30) | (post << 23) | (pick(2) << 22) |
+             ((post ? (pick(2) ? 31u : 24u + pick(4)) : 0u) << 16) | (pick(16) << 12) | (pick(4) << 10) |
+             (base_reg() << 5) | vreg();
+    }
   case 13: { /* vector FP three same (FADD/FSUB/FMUL/FDIV/FMLA/FMLS & co.) and by element */
     const uint32_t v_rd = 16u + pick(16), v_rn = 16u + pick(16), v_rm = 16u + pick(16);
     if (pick(2)) {
@@ -594,6 +603,19 @@ static void run_case(uint32_t iteration) {
       i--;
       continue;
     }
+    if (i + 10u < length && pick(48) == 0) { /* FZ: negative subnormals flushed to -0 (IDC set), or raising IDC */
+      const uint32_t fz[10] = {
+          0xD2A02009u, 0xD51B4409u,                        /* FPCR = FZ */
+          pick(2) ? 0xD280120Bu : 0xD280020Bu, 0xD51B442Bu, /* FPSR = IXC | IDC, or IXC */
+          0x52800029u, 0x72B00009u, 0x4E040D3Cu,           /* v28 = 4 x 0x80000001 */
+          0x4F03F61Du,                                     /* fmov v29.4s, #1.0 */
+          0x6E3DDF9Eu,                                     /* fmul v30.4s, v28.4s, v29.4s: -0 */
+          0x4E3DCF9Fu,                                     /* fmla v31.4s, v28.4s, v29.4s */
+      };
+      for (uint32_t k = 0; k < 10u; k++) code[i++] = fz[k];
+      code[i] = 0xD53B442Bu; /* mrs x11, fpsr */
+      continue;
+    }
     if (i + 6u < length && pick(48) == 0) { /* FMAXNM(P) of quiet NaNs and numbers: the numbers (wasm's max: NaN) */
       static const uint32_t nm[6] = {
           0x52800029u, 0x72AFF809u, 0x4E040D3Cu, /* v28 = 4 x 0x7FC00001 (quiet) */
@@ -699,9 +721,9 @@ static void run_case(uint32_t iteration) {
   const uint32_t nzcv = (uint32_t)pick(16) << 28;
   /* FP environment: mostly the default, sometimes FZ/DN/rounding modes; FPSR flags clear or sticky-set. */
   g_fpcr = pick(4) ? 0u : (pick(2) << 24) | (pick(2) << 25) | (pick(4) << 22);
-  /* clear, IXC, IXC and UFC (any finite IEEE result is then exact), with IOC as well (NaNs too), or
-   * IXC and OFC (an overflow to infinity then raises nothing new) */
-  g_fpsr = pick(2) ? 0u : pick(2) ? 0x10u : pick(2) ? 0x18u : pick(2) ? 0x19u : 0x14u;
+  /* clear, IXC, IXC and UFC (any finite IEEE result is then exact), with IOC as well (NaNs too),
+   * IXC and OFC (an overflow to infinity then raises nothing new), or IXC and IDC (FZ's flushed inputs) */
+  g_fpsr = pick(2) ? 0u : pick(2) ? 0x10u : pick(2) ? 0x18u : pick(2) ? 0x19u : pick(2) ? 0x14u : 0x90u;
   for (uint32_t i = 0; i < DATA_BYTES; i++) g_data_init[i] = (uint8_t)rnd();
   { /* the stub's GOT slot: mostly a real function */
     const uint32_t choice = pick(4);

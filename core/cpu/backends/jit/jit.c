@@ -857,9 +857,94 @@ static void print_fp_why(void) {
   log_warn("%s", line);
 }
 
+/* The same for vector single-precision FMLA (by element and three same)
+ * and FCMEQ/FCMGE/FCMGT (register): per call, which of the fast arm's
+ * guards (jit_compile.c emit_vector_fp VFP_MLA, emit_compare_lanes_ok)
+ * some active lane misses. */
+enum { MLA_WHY_CALLS, MLA_WHY_FPCR, MLA_WHY_IXC_CLEAR, MLA_WHY_IOC_CLEAR, MLA_WHY_IN_NAN, MLA_WHY_IN_INF, MLA_WHY_IN_SUBNORMAL,
+       MLA_WHY_TINY, MLA_WHY_MIDPOINT, MLA_WHY_NOT_FINITE, MLA_WHY_KINDS };
+static const char *const mla_why_names[MLA_WHY_KINDS] = {"calls", "FPCR other than FZ/DN", "IXC clear", "IOC clear", "input NaN",
+                                                         "input inf", "input subnormal", "result tiny",
+                                                         "f32 midpoint", "result not finite"};
+enum { WHY_FMLA, WHY_FCMP, WHY_OPS };
+static uint64_t g_mla_why[WHY_OPS][MLA_WHY_KINDS];
+#define FCMP_VECTOR_MASK 0x9F60E400u /* Q, U, E (bit 23) and opcode bits 13:11 free: single, three same 11xxx */
+#define FCMP_VECTOR 0x0E20E400u
+#define FMLA_ELEMENT_MASK 0xBFC0F400u /* Q free; U=0, single, opcode 0001 */
+#define FMLA_ELEMENT 0x0F801000u
+#define FMLA_VECTOR_MASK 0xBFE0FC00u /* Q free; U=0, single, FMLA */
+#define FMLA_VECTOR 0x0E20CC00u
+#define FPCR_FZ_DN 0x3000000u
+#define F64_BELOW_F32_MASK ((1ull << 29) - 1u) /* f64 fraction bits below an f32's */
+#define F64_F32_MIDPOINT (1ull << 28)
+#define F32_MIN_NORMAL 0x1p-126
+#define LANE_BITS 32u
+
+static uint32_t v_lane(const Interp_State *s, uint32_t reg, uint32_t lane) {
+  const uint64_t half = lane < 2u ? s->v[reg].lo : s->v[reg].hi;
+  return (uint32_t)(half >> (LANE_BITS * (lane & 1u)));
+}
+
+static void mla_why_input(uint32_t value, bool seen[MLA_WHY_KINDS]) {
+  const uint32_t kind = fp_why_class(value, FP_WHY_IN_ZERO);
+  if (kind == FP_WHY_IN_NAN) seen[MLA_WHY_IN_NAN] = true;
+  else if (kind == FP_WHY_IN_INF) seen[MLA_WHY_IN_INF] = true;
+  else if (kind == FP_WHY_IN_SUBNORMAL) seen[MLA_WHY_IN_SUBNORMAL] = true;
+}
+
+static void mla_why(const Interp_State *s, uint32_t insn) {
+  const bool element = (insn & FMLA_ELEMENT_MASK) == FMLA_ELEMENT;
+  const bool compare = (insn & FCMP_VECTOR_MASK) == FCMP_VECTOR && (bits(insn, 13, 11) == 4u || bits(insn, 13, 11) == 5u);
+  if (!element && !compare && (insn & FMLA_VECTOR_MASK) != FMLA_VECTOR) return;
+  bool seen[MLA_WHY_KINDS] = {false};
+  seen[MLA_WHY_IOC_CLEAR] = !(s->fpsr & 0x1u);
+  seen[MLA_WHY_CALLS] = true;
+  seen[MLA_WHY_FPCR] = (s->fpcr & ~FPCR_FZ_DN) != 0;
+  seen[MLA_WHY_IXC_CLEAR] = !(s->fpsr & 0x10u);
+  const uint32_t n = bits(insn, 9, 5), m = bits(insn, 20, 16), d = bits(insn, 4, 0);
+  const uint32_t index = (bit(insn, 11) << 1) | bit(insn, 21), lanes = bit(insn, 30) ? 4u : 2u;
+  for (uint32_t i = 0; i < lanes; i++) {
+    const uint32_t a = v_lane(s, n, i), b = v_lane(s, m, element ? index : i), c = v_lane(s, d, i);
+    mla_why_input(a, seen);
+    mla_why_input(b, seen);
+    if (compare) continue; /* no addend, no rounding */
+    mla_why_input(c, seen);
+    float fa, fb, fc;
+    memcpy(&fa, &a, sizeof(fa));
+    memcpy(&fb, &b, sizeof(fb));
+    memcpy(&fc, &c, sizeof(fc));
+    const double r = (double)fc + (double)fa * (double)fb;
+    uint64_t rb;
+    memcpy(&rb, &r, sizeof(rb));
+    if ((rb & F64_BELOW_F32_MASK) == F64_F32_MIDPOINT) seen[MLA_WHY_MIDPOINT] = true;
+    if (r != 0 && (r < 0 ? -r : r) <= F32_MIN_NORMAL) seen[MLA_WHY_TINY] = true;
+    const float rf = (float)r;
+    if (!(rf - rf == 0.0f)) seen[MLA_WHY_NOT_FINITE] = true;
+  }
+  for (uint32_t k = 0; k < MLA_WHY_KINDS; k++) {
+    if (seen[k]) __atomic_add_fetch(&g_mla_why[compare ? WHY_FCMP : WHY_FMLA][k], 1u, __ATOMIC_RELAXED);
+  }
+}
+
+static void print_mla_why(void) {
+  static const char *const ops[WHY_OPS] = {"FMLA", "FCMEQ/GE/GT"};
+  for (uint32_t o = 0; o < WHY_OPS; o++) {
+    if (!g_mla_why[o][MLA_WHY_CALLS]) continue;
+    char line[512];
+    int at = snprintf(line, sizeof(line), "[jit]   vector single %s in the helper:", ops[o]);
+    for (uint32_t k = 0; k < MLA_WHY_KINDS && at > 0 && at < (int)sizeof(line); k++) {
+      at += snprintf(line + at, sizeof(line) - (size_t)at, " %s %llu;", mla_why_names[k],
+                     (unsigned long long)g_mla_why[o][k]);
+      g_mla_why[o][k] = 0;
+    }
+    log_warn("%s", line);
+  }
+}
+
 void jit_print_fallback_profile(uint32_t top) {
   print_cold_profile(top / 2u);
   print_fp_why();
+  print_mla_why();
   uint64_t total = 0;
   for (uint32_t i = 0; i < FALLBACK_SLOTS; i++) total += g_fallback_count[i];
   log_warn("[jit]   fallbacks: %llu in all since the last report", (unsigned long long)total);
@@ -937,7 +1022,10 @@ uint32_t jit_helper_simd(Jit_State *state, uint32_t insn) {
     return a32_execute((A32_State *)state, insn) == INTERP_CONTINUE ? 0u : 1u;
   }
   const bool why = g_fallback_profile && fp_why_inputs(&state->interp, insn);
-  if (g_fallback_profile) profile_fallback(insn);
+  if (g_fallback_profile) {
+    profile_fallback(insn);
+    mla_why(&state->interp, insn);
+  }
   if (state->interp.fpcr != 0) st->simd_fpcr_nonzero++;
   else if (!(state->interp.fpsr & 0x10u)) st->simd_ixc_clear++;
   st->last_fpcr = state->interp.fpcr;

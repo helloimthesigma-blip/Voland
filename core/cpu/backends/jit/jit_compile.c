@@ -4136,7 +4136,26 @@ typedef enum Vector_Fp_Op { VFP_ADD, VFP_SUB, VFP_MUL, VFP_DIV, VFP_MLA, VFP_MLS
 /* V[d] = max or min of L_VA and L_VB lane by lane: exact without NaNs
  * (FMAX and FMAXNM agree then) and with FPCR as fz_safe arms assume;
  * wasm orders -0 below +0 as ARM does. */
-static void emit_vector_fp_min_max(Ctx *c, bool max, bool dbl, bool q, uint32_t d) {
+/* JIT_FLUSH_RETRY=1 in the environment: vector FP exact arms retry
+ * natively on FZ-flushed inputs (fp_else_flushed). Off by default: at
+ * TOTK's Lookout Landing it cut helper calls ~75% but the retries' code
+ * cost more fps than the calls (A/B, 2026-11-26). */
+static bool flush_retry(const Ctx *c) {
+  static int on = -1;
+  if (on < 0) on = getenv("JIT_FLUSH_RETRY") != NULL;
+  return on != 0 && c->fz;
+}
+static void emit_flush_lanes(Ctx *c, uint32_t local, bool dbl);
+static void fp_else_flushed(Ctx *c, const uint32_t *locals, uint32_t count, bool dbl);
+static void fp_end_flushed(Ctx *c);
+static void emit_lane_subnormal(Ctx *c, uint32_t local, bool dbl);
+static const uint32_t k_fp_inputs[3] = {L_VA, L_VB, L_VD};
+/* `flushed`: fp_else_flushed's retry. */
+static void emit_vector_fp_min_max_as(Ctx *c, bool max, bool dbl, bool q, uint32_t d, bool flushed) {
+  if (flushed) {
+    emit_flush_lanes(c, L_VA, dbl);
+    emit_flush_lanes(c, L_VB, dbl);
+  }
   lget(c, L_VA);
   lget(c, L_VB);
   if (dbl) simd(c, max ? WASM_SIMD_F64X2_MAX : WASM_SIMD_F64X2_MIN);
@@ -4156,19 +4175,44 @@ static void emit_vector_fp_min_max(Ctx *c, bool max, bool dbl, bool q, uint32_t 
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   store_v(c, d, L_VR, q);
-  Sync none = {0};
-  fp_else_exact(c, &none);
+  if (flush_retry(c) && !flushed) {
+    fp_else_flushed(c, k_fp_inputs, 2u, dbl);
+    emit_vector_fp_min_max_as(c, max, dbl, q, d, true);
+    fp_end_flushed(c);
+  } else {
+    Sync none = {0};
+    fp_else_exact(c, &none);
+  }
+}
+static void emit_vector_fp_min_max(Ctx *c, bool max, bool dbl, bool q, uint32_t d) {
+  emit_vector_fp_min_max_as(c, max, dbl, q, d, false);
 }
 
 /* rd = op(rn, rm or the broadcast element) over 2 or 4 lanes. L_VB must
  * hold the second operand already. */
 static void emit_vector_nan_lanes(Ctx *c, bool dbl);
 static void emit_nan_lanes_ok(Ctx *c, bool dbl, bool q);
-static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t n, uint32_t d) {
+static void emit_vector_fp_as(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t n, uint32_t d, bool flushed);
+/* The exact arm of emit_vector_fp: the flushed retry under FZ, else the helper. */
+static void vector_fp_else(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t n, uint32_t d, bool flushed) {
+  if (flush_retry(c) && !flushed) {
+    fp_else_flushed(c, k_fp_inputs, vop == VFP_MLA || vop == VFP_MLS ? 3u : 2u, dbl);
+    emit_vector_fp_as(c, vop, dbl, q, n, d, true);
+    fp_end_flushed(c);
+  } else {
+    Sync none = {0};
+    fp_else_exact(c, &none);
+  }
+}
+static void emit_vector_fp_as(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t n, uint32_t d, bool flushed) {
   static const uint32_t ops32[4] = {WASM_SIMD_F32X4_ADD, WASM_SIMD_F32X4_SUB, WASM_SIMD_F32X4_MUL, WASM_SIMD_F32X4_DIV};
   static const uint32_t ops64[4] = {WASM_SIMD_F64X2_ADD, WASM_SIMD_F64X2_SUB, WASM_SIMD_F64X2_MUL, WASM_SIMD_F64X2_DIV};
   load_v(c, n);
   lset(c, L_VA);
+  if (flushed && vop != VFP_MAX && vop != VFP_MIN) { /* emit_vector_fp_min_max flushes its own */
+    emit_flush_lanes(c, L_VA, dbl);
+    emit_flush_lanes(c, L_VB, dbl);
+  }
   if (vop == VFP_MLA || vop == VFP_MLS) { /* single precision only */
     if (vop == VFP_MLS) {
       lget(c, L_VA);
@@ -4177,6 +4221,7 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
     }
     load_v(c, d);
     lset(c, L_VD);
+    if (flushed) emit_flush_lanes(c, L_VD, false);
     emit_fused_pair(c, false);
     lset(c, L_VR);
     emit_fused_pair(c, true);
@@ -4188,6 +4233,16 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
       emit_off_midpoints(c, L_VR2);
       op(c, WASM_OP_I32_AND);
       emit_no_tiny_singles(c, L_VR2);
+      op(c, WASM_OP_I32_AND);
+    }
+    if (c->fz) { /* FZ: no subnormal input left unflushed */
+      emit_lane_subnormal(c, L_VA, false);
+      emit_lane_subnormal(c, L_VB, false);
+      simd(c, WASM_SIMD_V128_OR);
+      emit_lane_subnormal(c, L_VD, false);
+      simd(c, WASM_SIMD_V128_OR);
+      simd(c, WASM_SIMD_V128_NOT);
+      emit_all_lanes(c, q);
       op(c, WASM_OP_I32_AND);
     }
     lset(c, L_PASS);
@@ -4203,7 +4258,7 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
     lget(c, L_PASS);
     op(c, WASM_OP_I32_AND);
   } else if (vop == VFP_MAX || vop == VFP_MIN) {
-    emit_vector_fp_min_max(c, vop == VFP_MAX, dbl, q, d);
+    emit_vector_fp_min_max_as(c, vop == VFP_MAX, dbl, q, d, flushed);
     return;
   } else {
     lget(c, L_VA);
@@ -4246,17 +4301,18 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
     open_if(c, WASM_BLOCK_VOID);
     emit_vector_nan_lanes(c, dbl);
     store_v(c, d, L_VR, q);
-    Sync none = {0};
-    fp_else_exact(c, &none);
+    vector_fp_else(c, vop, dbl, q, n, d, flushed);
     end_(c);
     return;
   }
-  emit_fp_env_ok_as(c, vop != VFP_MLA && vop != VFP_MLS);
+  emit_fp_env_ok_as(c, true); /* FMLA/FMLS: FZ-safe with the subnormal checks (TOTK runs FZ) */
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   store_v(c, d, L_VR, q);
-  Sync none = {0};
-  fp_else_exact(c, &none);
+  vector_fp_else(c, vop, dbl, q, n, d, flushed);
+}
+static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t n, uint32_t d) {
+  emit_vector_fp_as(c, vop, dbl, q, n, d, false);
 }
 
 /* ---- NaN lanes once the flags they raise are recorded --------------
@@ -4371,6 +4427,58 @@ static void emit_fpsr_flag_lanes(Ctx *c, uint32_t flag) {
   i32c(c, 1);
   op(c, WASM_OP_I32_SUB);
   simd(c, WASM_SIMD_I32X4_SPLAT);
+}
+
+/* The subnormal lanes of `local` become the signed zero FZ flushes them
+ * to (emit_fp_else_flushed's retry). */
+static void emit_flush_lanes(Ctx *c, uint32_t local, bool dbl) {
+  lget(c, local);
+  emit_lane_subnormal(c, local, dbl);
+  v128_splat_bits(c, dbl ? ~FP_SIGN_D : (uint64_t)(uint32_t)~FP_SIGN_S, dbl); /* keep the sign */
+  simd(c, WASM_SIMD_V128_AND);
+  simd(c, WASM_SIMD_V128_ANDNOT);
+  lset(c, local);
+}
+
+/* The exact arm of a vector FP fast path whose inputs are `locals`, in a
+ * region compiled FZ-capable: with FPCR.FZ and FPSR.IDC set and a
+ * subnormal input lane, the operation again natively on the inputs flushed
+ * - the architecture's flushed zeros, raising nothing new; otherwise the
+ * helper. Opens that retry; the caller emits it (its own exact arm the
+ * helper) and closes with fp_end_flushed. Cold code: TOTK feeds subnormal
+ * lanes to vector FMUL/FMLA/compares under FZ all the time, but flushing
+ * on the fast path cost more than the helper calls it saved; this retry
+ * too, so far (flush_retry). */
+static void fp_else_flushed(Ctx *c, const uint32_t *locals, uint32_t count, bool dbl) {
+  jit_note_fast_path(c->insn);
+  else_(c);
+  for (uint32_t i = 0; i < count; i++) {
+    emit_lane_subnormal(c, locals[i], dbl);
+    if (i) simd(c, WASM_SIMD_V128_OR);
+  }
+  simd(c, WASM_SIMD_V128_ANY_TRUE);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPCR);
+  i32c(c, (int32_t)FPCR_FZ_ONLY);
+  op(c, WASM_OP_I32_AND);
+  op(c, WASM_OP_I32_EQZ);
+  op(c, WASM_OP_I32_EQZ);
+  op(c, WASM_OP_I32_AND);
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
+  i32c(c, (int32_t)FPSR_IDC);
+  op(c, WASM_OP_I32_AND);
+  op(c, WASM_OP_I32_EQZ);
+  op(c, WASM_OP_I32_EQZ);
+  op(c, WASM_OP_I32_AND);
+  open_if(c, WASM_BLOCK_VOID);
+}
+static void fp_end_flushed(Ctx *c) {
+  Sync none = {0};
+  else_(c);
+  emit_direct_call(c, &none);
+  end_(c);
+  end_(c);
 }
 
 /* FSQRT (vector). Negative and NaN lanes as the scalar form (emit_fsqrt):
@@ -4832,9 +4940,8 @@ static void v128_fp_zero(Ctx *c, bool dbl) {
 /* i32 guard for a compare of L_VA with L_VB: FPCR as fz_safe arms assume,
  * and every active lane exact natively. A NaN lane compares false, as in
  * wasm, raising IOC (FCMEQ: from a signalling NaN only), so it is native
- * once IOC is set - TOTK's FCMGTs met NaNs ~90k times a report, every one
- * in the helper. Under FZ a subnormal lane compares as zero and raises
- * IDC: the exact arm. */
+ * once IOC is set. Under FZ a subnormal lane compares as zero and raises
+ * IDC: the exact arm (and its flushed retry, fp_else_flushed). */
 static void emit_compare_lanes_ok(Ctx *c, Fp_Compare cmp, bool dbl, bool q) {
   if (cmp == FCMP_EQ) {
     emit_lane_snan(c, L_VA, dbl);
@@ -4956,8 +5063,8 @@ static void emit_vector_fp_to_int(Ctx *c, bool dbl, bool q, bool is_unsigned, ui
 
 /* V[d] = lane masks of V[n] cmp (V[m] or 0.0), native under
  * emit_compare_lanes_ok. `absolute`: FACGE/FACGT. */
-static void emit_vector_fp_compare(Ctx *c, Fp_Compare cmp, bool dbl, bool q, bool with_zero, bool absolute,
-                                   uint32_t n, uint32_t m, uint32_t d) {
+static void emit_vector_fp_compare_as(Ctx *c, Fp_Compare cmp, bool dbl, bool q, bool with_zero, bool absolute,
+                                      uint32_t n, uint32_t m, uint32_t d, bool flushed) {
   static const uint32_t ops32[5] = {WASM_SIMD_F32X4_EQ, WASM_SIMD_F32X4_GE, WASM_SIMD_F32X4_GT, WASM_SIMD_F32X4_LE,
                                     WASM_SIMD_F32X4_LT};
   static const uint32_t ops64[5] = {WASM_SIMD_F64X2_EQ, WASM_SIMD_F64X2_GE, WASM_SIMD_F64X2_GT, WASM_SIMD_F64X2_LE,
@@ -4972,6 +5079,10 @@ static void emit_vector_fp_compare(Ctx *c, Fp_Compare cmp, bool dbl, bool q, boo
     if (absolute) simd(c, dbl ? WASM_SIMD_F64X2_ABS : WASM_SIMD_F32X4_ABS);
   }
   lset(c, L_VB);
+  if (flushed) {
+    emit_flush_lanes(c, L_VA, dbl);
+    emit_flush_lanes(c, L_VB, dbl);
+  }
   emit_compare_lanes_ok(c, cmp, dbl, q);
   fp_fast_arm(c);
   lget(c, L_VA);
@@ -4979,8 +5090,18 @@ static void emit_vector_fp_compare(Ctx *c, Fp_Compare cmp, bool dbl, bool q, boo
   simd(c, dbl ? ops64[cmp] : ops32[cmp]);
   lset(c, L_VR);
   store_v(c, d, L_VR, q);
-  Sync none = {0};
-  fp_else_exact(c, &none);
+  if (flush_retry(c) && !flushed) {
+    fp_else_flushed(c, k_fp_inputs, 2u, dbl);
+    emit_vector_fp_compare_as(c, cmp, dbl, q, with_zero, absolute, n, m, d, true);
+    fp_end_flushed(c);
+  } else {
+    Sync none = {0};
+    fp_else_exact(c, &none);
+  }
+}
+static void emit_vector_fp_compare(Ctx *c, Fp_Compare cmp, bool dbl, bool q, bool with_zero, bool absolute,
+                                   uint32_t n, uint32_t m, uint32_t d) {
+  emit_vector_fp_compare_as(c, cmp, dbl, q, with_zero, absolute, n, m, d, false);
 }
 
 /* Scalar SCVTF/UCVTF/FCVTZS/FCVTZU (vector forms on one element): V[d]
@@ -5122,6 +5243,44 @@ static bool c_simd_pairwise(Ctx *c, uint32_t insn) {
   simd(c, wop);
   lset(c, L_VR);
   store_v(c, bits(insn, 4, 0), L_VR, q);
+  return true;
+}
+
+/* ADDV, SMAXV/UMAXV, SMINV/UMINV: the active bytes halved log2(lanes)
+ * times (the upper half shuffled onto the lower, then the lane op), and
+ * element 0 kept, the rest of V[d] zeroed. TOTK's ADDV .4S was its
+ * busiest helper call at Lookout Landing (~230k a report). */
+static bool c_simd_across(Ctx *c, uint32_t insn) {
+  if (bit(insn, 31) || bits(insn, 28, 24) != 0x0E || bits(insn, 21, 17) != 0x18 || bits(insn, 11, 10) != 2u) {
+    return false;
+  }
+  const bool q = bit(insn, 30), u = bit(insn, 29);
+  const uint32_t size = bits(insn, 23, 22), opcode = bits(insn, 16, 12);
+  if (size == 3u || (size == 2u && !q)) return false;
+  static const uint32_t add[3] = {WASM_SIMD_I8X16_ADD, WASM_SIMD_I16X8_ADD, WASM_SIMD_I32X4_ADD};
+  static const uint32_t min_s[3] = {WASM_SIMD_I8X16_MIN_S, WASM_SIMD_I16X8_MIN_S, WASM_SIMD_I32X4_MIN_S};
+  uint32_t wop;
+  if (opcode == 0x1B && !u) wop = add[size]; /* ADDV */
+  else if (opcode == 0x0A || opcode == 0x1A) wop = min_s[size] + (opcode == 0x0A ? 2u : 0u) + (u ? 1u : 0u);
+  else return false;
+  const uint32_t esize = 1u << size;
+  load_v(c, bits(insn, 9, 5));
+  lset(c, L_VA);
+  for (uint32_t half = (q ? SIMD_LANE_BYTES : SIMD_LANE_BYTES / 2u) / 2u; half >= esize; half /= 2u) {
+    uint8_t lanes[SIMD_LANE_BYTES];
+    for (uint32_t i = 0; i < SIMD_LANE_BYTES; i++) lanes[i] = (uint8_t)(i < half ? half + i : i);
+    lget(c, L_VA);
+    lget(c, L_VA);
+    lget(c, L_VA);
+    v128_shuffle(c, lanes);
+    simd(c, wop);
+    lset(c, L_VA);
+  }
+  lget(c, L_VA);
+  v128_const(c, (1ull << (esize * 8u)) - 1u, 0); /* element 0 only */
+  simd(c, WASM_SIMD_V128_AND);
+  lset(c, L_VR);
+  store_v(c, bits(insn, 4, 0), L_VR, true);
   return true;
 }
 
@@ -5516,8 +5675,8 @@ static bool c_vector_int_arith(Ctx *c, uint32_t insn) {
 static bool c_simd_fp(Ctx *c, uint32_t insn) {
   if (c_scalar_fp_fast(c, insn) || c_vector_fp_fast(c, insn) || c_vector_int_fast(c, insn) ||
       c_vector_int_arith(c, insn) || c_simd_copy(c, insn) ||
-      c_simd_misc_fp(c, insn) || c_simd_pairwise(c, insn) || c_simd_shift_long(c, insn) || c_simd_table(c, insn) ||
-      c_simd_narrow_shift(c, insn))
+      c_simd_misc_fp(c, insn) || c_simd_pairwise(c, insn) || c_simd_across(c, insn) || c_simd_shift_long(c, insn) ||
+      c_simd_table(c, insn) || c_simd_narrow_shift(c, insn))
     return true;
   Sync sync = {0};
   simd_fp_sync(insn, &sync);
@@ -5625,8 +5784,8 @@ static void address_from_base(Ctx *c, uint32_t n, bool post, uint64_t offset) {
  * between memory and the register file; one lane, or LD1R's replicated
  * element, is a single element. The access is checked as a whole (inline
  * or through the scratch, all or nothing), then the base advances by the
- * immediate (the bytes moved) or by Xm. LD2-LD4's interleaving stays
- * with the interpreter. */
+ * immediate (the bytes moved) or by Xm. LD2/ST2 interleave with shuffles
+ * (emit_struct2); LD3/LD4 stay with the interpreter. */
 #define STRUCT_MAX_BYTES 64u
 
 /* Stores `count` consecutive registers from t (wrapping at V31), `bytes`
@@ -5689,6 +5848,98 @@ static void emit_lane_store(Ctx *c, uint32_t lsize, uint32_t t, uint32_t index) 
   end_(c); /* $done */
 }
 
+/* LD2/ST2 (multiple structures): memory holds element i of V[t], then
+ * element i of V[t+1], for each i. interleave_lanes: chunk `chunk` (16
+ * bytes) of that image as a shuffle of (V[t], V[t+1]); deinterleave_lanes:
+ * register r's bytes as a shuffle of the image's two chunks. */
+static void interleave_lanes(uint8_t lanes[SIMD_LANE_BYTES], uint32_t esize, uint32_t chunk) {
+  for (uint32_t i = 0; i < SIMD_LANE_BYTES; i++) {
+    const uint32_t k = chunk * SIMD_LANE_BYTES + i, within = k % (2u * esize);
+    lanes[i] = (uint8_t)((within < esize ? 0u : SIMD_LANE_BYTES) + k / (2u * esize) * esize + within % esize);
+  }
+}
+static void deinterleave_lanes(uint8_t lanes[SIMD_LANE_BYTES], uint32_t esize, uint32_t r) {
+  for (uint32_t j = 0; j < SIMD_LANE_BYTES; j++) lanes[j] = (uint8_t)(j / esize * 2u * esize + r * esize + j % esize);
+}
+
+/* The 16 bytes of `local` to `base` + offset. */
+static void emit_v128_store_to(Ctx *c, uint32_t base, uint64_t offset, uint32_t local) {
+  for (uint32_t half = 0; half < 2u; half++) {
+    lget(c, base);
+    lget(c, local);
+    simd(c, WASM_SIMD_I64X2_EXTRACT_LANE);
+    wasm_u8(c->b, (uint8_t)half);
+    mem(c, WASM_OP_I64_STORE, ALIGN_1, offset + half * V_HIGH_HALF);
+  }
+}
+
+/* LD2/ST2 of V[t] and V[t+1] (wrapping at V31) at L_ADDR, `esize` bytes
+ * per element: the image in L_VD (and L_VR, for 32 bytes). Stores go
+ * inline or staged in the scratch, as emit_vector_store_regs. TOTK's
+ * ST2 .2S were ~200k helper calls a report at Lookout Landing. */
+static void emit_struct2(Ctx *c, bool load, bool q, uint32_t esize, uint32_t t) {
+  const uint32_t total = 2u * (q ? SIMD_LANE_BYTES : SIMD_LANE_BYTES / 2u);
+  const uint32_t chunks = total / SIMD_LANE_BYTES, t2 = (t + 1u) % 32u;
+  static const uint32_t image[2] = {L_VD, L_VR};
+  uint8_t lanes[SIMD_LANE_BYTES];
+  if (load) {
+    emit_load_address(c, total);
+    for (uint32_t k = 0; k < chunks; k++) {
+      lget(c, L_HOST);
+      mem(c, WASM_OP_I64_LOAD, ALIGN_1, (uint64_t)k * SIMD_LANE_BYTES);
+      simd(c, WASM_SIMD_I64X2_SPLAT);
+      lget(c, L_HOST);
+      mem(c, WASM_OP_I64_LOAD, ALIGN_1, (uint64_t)k * SIMD_LANE_BYTES + V_HIGH_HALF);
+      simd(c, WASM_SIMD_I64X2_REPLACE_LANE);
+      wasm_u8(c->b, 1u);
+      lset(c, image[k]);
+    }
+    for (uint32_t r = 0; r < 2u; r++) {
+      deinterleave_lanes(lanes, esize, r);
+      lget(c, L_VD);
+      lget(c, chunks > 1u ? L_VR : L_VD);
+      v128_shuffle(c, lanes);
+      lset(c, L_VA);
+      store_v(c, r ? t2 : t, L_VA, q);
+    }
+    return;
+  }
+  load_v(c, t);
+  lset(c, L_VA);
+  load_v(c, t2);
+  lset(c, L_VB);
+  for (uint32_t k = 0; k < chunks; k++) {
+    interleave_lanes(lanes, esize, k);
+    lget(c, L_VA);
+    lget(c, L_VB);
+    v128_shuffle(c, lanes);
+    lset(c, image[k]);
+  }
+  open_block(c); /* $done */
+  const uint32_t done = c->depth;
+  open_block(c); /* $slow */
+  emit_walk(c, total, VMM_PERM_W, c->depth);
+  for (uint32_t k = 0; k < chunks; k++) emit_v128_store_to(c, L_HOST, (uint64_t)k * SIMD_LANE_BYTES, image[k]);
+  br(c, done);
+  end_(c);
+  lget(c, L_STATE);
+  i64c(c, OFF_SCRATCH);
+  op(c, WASM_OP_I64_ADD);
+  lset(c, L_HOST);
+  for (uint32_t k = 0; k < chunks; k++) emit_v128_store_to(c, L_HOST, (uint64_t)k * SIMD_LANE_BYTES, image[k]);
+  lget(c, L_STATE);
+  lget(c, L_ADDR);
+  i32c(c, total);
+  op(c, WASM_OP_CALL);
+  wasm_uleb(c->b, FUNC_WRITE);
+  op(c, WASM_OP_I32_EQZ);
+  hint(c, false);
+  open_if(c, WASM_BLOCK_VOID);
+  leave_via_interpreter(c);
+  end_(c);
+  end_(c); /* $done */
+}
+
 /* The base writeback of a post-indexed structure transfer. */
 static void struct_writeback(Ctx *c, uint32_t n, uint32_t m, uint32_t bytes) {
   lget(c, L_BASE);
@@ -5706,13 +5957,21 @@ static bool c_simd_struct(Ctx *c, uint32_t insn) {
   const uint32_t reg_bytes = q ? 16u : 8u;
   if (!bit(insn, 24)) { /* multiple structures */
     if (bit(insn, 21)) return false;
+    if (bits(insn, 15, 12) == 0x8) { /* LD2/ST2 */
+      const uint32_t size = bits(insn, 11, 10);
+      if (size == 3u && !q) return false;
+      address_from_base(c, n, true, 0);
+      emit_struct2(c, load, q, 1u << size, t);
+      if (post) struct_writeback(c, n, m, 2u * reg_bytes);
+      return true;
+    }
     uint32_t count;
     switch (bits(insn, 15, 12)) {
     case 0x7: count = 1; break;
     case 0xA: count = 2; break;
     case 0x6: count = 3; break;
     case 0x2: count = 4; break;
-    default: return false; /* LD2-LD4 */
+    default: return false; /* LD3/LD4 */
     }
     const uint32_t total = count * reg_bytes;
     address_from_base(c, n, true, 0);

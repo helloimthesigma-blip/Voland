@@ -344,7 +344,15 @@ retires it.
     Silksong's direct SIMD&FP calls: ~10M -> ~1M per 10 s. FCCMP, SSHL/USHL
     (32-bit lanes), (S|U)ADDL/(S|U)SUBL and SQXTN have fast paths too.
     The parallel jit report counts direct SIMD&FP calls and the last FPCR,
-    and `VOLAND_JIT_FALLBACKS=N` lists what still goes through them.
+    and `VOLAND_JIT_FALLBACKS=N` lists what still goes through them (and
+    classifies the vector single FMLA and FCMEQ/GE/GT calls by the guard
+    their lanes miss: NaN, infinity, subnormal, tiny result, midpoint).
+  - Under FZ a subnormal input lane is flushed to a signed zero (and
+    raises IDC). `JIT_FLUSH_RETRY=1` gives vector FP exact arms a native
+    retry on flushed inputs when FZ and IDC are set; off by default -
+    it cut TOTK's helper calls ~75% but its cold code (+15% module
+    bytes) cost more fps than the calls (2026-11-26). Flushing on the
+    fast path itself lost too.
   - `jit_diff_test` puts FADD, MSR FPSR/FPCR, FADD in a row, and runs of
     scalar arithmetic among other writers of the same V registers (LDR,
     FMOV from a general register, vector FADD, INS, MOVI, short B.cond).
@@ -1046,6 +1054,17 @@ shows it next to the backend name.
   never caught a broken NaN guard here: IOC is sticky and later code
   raises it anyway). Lookout Landing ~3 min, three alternating pairs
   each: FSQRT 12.75 -> 12.92 fps, the rest on top 13.18 -> 13.42.
+- **0.6.4** (2026-11-26) - vector FMLA/FMLS (three same and by
+  element) FZ-safe: their guard took FPCR 0 only, so under TOTK's FZ
+  every one went to the helper; now subnormal inputs (n, m, the addend)
+  go to the exact arm instead. ADDV, SMAXV/UMAXV, SMINV/UMINV natively
+  (halving shuffles); LD2/ST2 (multiple structures) natively (interleave
+  shuffles, stored inline or staged as ST1). `JIT_FLUSH_RETRY` (above).
+  jit_diff_test: FPSR seeded with IDC, an FZ flush sequence, across-lanes
+  forms, and LD/ST multiple offset forms with Rm = 0 (all were
+  unallocated before). Lookout Landing helper calls 17-19M -> ~5M per
+  20 s measure; fps 11.7 -> 12.7 and 10.8 -> 13.1 in two 4-pair runs
+  (7 of 8 pairs) taken while the mini was busy with other work.
 
 ## What a region costs on V8
 
