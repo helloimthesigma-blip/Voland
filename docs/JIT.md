@@ -1018,7 +1018,7 @@ shows it next to the backend name.
   Lookout Landing: single-precision helper calls per fallback report
   549 k -> 19 k; 4 alternating browser pairs 8.46 -> 9.20 fps (3 of 4
   faster - within this rig's noise). What remains is vector: FCVTL,
-  FCVTN, FMLA/FMUL by element, FMAXP/FADDP.
+  FCVTN, FMLA/FMUL by element, FMAXP/FADDP. (0.6.3: FSQRT, the compares, FMAXP & co. and FCVTZS/U.)
 
 - **0.6.0** (2026-11-23) - hot code across sessions: the region entries
   a title compiled are stored per title and code key, and compile on
@@ -1033,6 +1033,19 @@ shows it next to the backend name.
 - **0.6.2** (2026-11-25) - two translation-cache slots per region
   instead of four, and the fence recheck clears only the slots a region
   uses. New Donk City +1.2-1.8% (six of six pairs); other games even.
+- **0.6.3** (2026-11-26) - more of TOTK's vector FP natively (it runs
+  under FPCR = FZ; a profile at Lookout Landing had ~3% of each guest
+  core in the helper's FSQRT alone): vector FSQRT (negative and NaN
+  lanes as the scalar form); FCMEQ/FCMGE/FCMGT/FACGE/FACGT and the
+  compares with zero take NaN lanes natively once IOC is set (FCMEQ's
+  quiet NaNs always) - they compare false in wasm too; FMAXP/FMINP/
+  FMAXNMP/FMINNMP (FADDP's shuffles, then FMAX's guard); vector FCVTZS/
+  FCVTZU FZ-safe, and for singles NaN or out-of-range lanes once IOC is
+  set (wasm's saturating truncation gives the architecture's results).
+  jit_diff_test gained targeted sequences for each (its random streams
+  never caught a broken NaN guard here: IOC is sticky and later code
+  raises it anyway). Lookout Landing ~3 min, three alternating pairs
+  each: FSQRT 12.75 -> 12.92 fps, the rest on top 13.18 -> 13.42.
 
 ## What a region costs on V8
 

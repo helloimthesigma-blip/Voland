@@ -4133,6 +4133,33 @@ static void emit_fused_pair(Ctx *c, bool high) {
 
 typedef enum Vector_Fp_Op { VFP_ADD, VFP_SUB, VFP_MUL, VFP_DIV, VFP_MLA, VFP_MLS, VFP_MAX, VFP_MIN } Vector_Fp_Op;
 
+/* V[d] = max or min of L_VA and L_VB lane by lane: exact without NaNs
+ * (FMAX and FMAXNM agree then) and with FPCR as fz_safe arms assume;
+ * wasm orders -0 below +0 as ARM does. */
+static void emit_vector_fp_min_max(Ctx *c, bool max, bool dbl, bool q, uint32_t d) {
+  lget(c, L_VA);
+  lget(c, L_VB);
+  if (dbl) simd(c, max ? WASM_SIMD_F64X2_MAX : WASM_SIMD_F64X2_MIN);
+  else simd(c, max ? WASM_SIMD_F32X4_MAX : WASM_SIMD_F32X4_MIN);
+  lset(c, L_VR);
+  static const uint32_t sources[2] = {L_VA, L_VB};
+  for (uint32_t i = 0; i < 2u; i++) {
+    lget(c, sources[i]);
+    lget(c, sources[i]);
+    simd(c, dbl ? WASM_SIMD_F64X2_EQ : WASM_SIMD_F32X4_EQ);
+  }
+  simd(c, WASM_SIMD_V128_AND);
+  and_lanes_not_subnormal(c, L_VA, dbl);
+  and_lanes_not_subnormal(c, L_VB, dbl);
+  emit_all_lanes(c, q);
+  emit_fpcr_mode(c, true);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  store_v(c, d, L_VR, q);
+  Sync none = {0};
+  fp_else_exact(c, &none);
+}
+
 /* rd = op(rn, rm or the broadcast element) over 2 or 4 lanes. L_VB must
  * hold the second operand already. */
 static void emit_vector_nan_lanes(Ctx *c, bool dbl);
@@ -4175,28 +4202,8 @@ static void emit_vector_fp(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32_t 
     emit_all_lanes(c, q);
     lget(c, L_PASS);
     op(c, WASM_OP_I32_AND);
-  } else if (vop == VFP_MAX || vop == VFP_MIN) { /* exact without NaNs (FPCR 0) */
-    lget(c, L_VA);
-    lget(c, L_VB);
-    if (dbl) simd(c, vop == VFP_MAX ? WASM_SIMD_F64X2_MAX : WASM_SIMD_F64X2_MIN);
-    else simd(c, vop == VFP_MAX ? WASM_SIMD_F32X4_MAX : WASM_SIMD_F32X4_MIN);
-    lset(c, L_VR);
-    static const uint32_t sources[2] = {L_VA, L_VB};
-    for (uint32_t i = 0; i < 2u; i++) {
-      lget(c, sources[i]);
-      lget(c, sources[i]);
-      simd(c, dbl ? WASM_SIMD_F64X2_EQ : WASM_SIMD_F32X4_EQ);
-    }
-    simd(c, WASM_SIMD_V128_AND);
-    and_lanes_not_subnormal(c, L_VA, dbl);
-    and_lanes_not_subnormal(c, L_VB, dbl);
-    emit_all_lanes(c, q);
-    emit_fpcr_mode(c, true);
-    op(c, WASM_OP_I32_AND);
-    fp_fast_arm(c);
-    store_v(c, d, L_VR, q);
-    Sync none = {0};
-    fp_else_exact(c, &none);
+  } else if (vop == VFP_MAX || vop == VFP_MIN) {
+    emit_vector_fp_min_max(c, vop == VFP_MAX, dbl, q, d);
     return;
   } else {
     lget(c, L_VA);
@@ -4340,6 +4347,99 @@ static void emit_nan_lanes_ok(Ctx *c, bool dbl, bool q) {
   op(c, WASM_OP_I32_AND);
 }
 
+/* Lane mask: local is subnormal (below the smallest normal, not zero;
+ * NaN lanes compare false). */
+static void emit_lane_subnormal(Ctx *c, uint32_t local, bool dbl) {
+  lget(c, local);
+  simd(c, dbl ? WASM_SIMD_F64X2_ABS : WASM_SIMD_F32X4_ABS);
+  if (dbl) f64c(c, FP_MIN_NORMAL_D);
+  else f32c(c, FP_MIN_NORMAL_S);
+  simd(c, dbl ? WASM_SIMD_F64X2_SPLAT : WASM_SIMD_F32X4_SPLAT);
+  simd(c, dbl ? WASM_SIMD_F64X2_LT : WASM_SIMD_F32X4_LT);
+  emit_lane_zero(c, local, dbl);
+  simd(c, WASM_SIMD_V128_ANDNOT);
+}
+
+/* v128: all ones when FPSR.flag is already set (raising it again changes
+ * nothing), else zeros. */
+static void emit_fpsr_flag_lanes(Ctx *c, uint32_t flag) {
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPSR);
+  i32c(c, (int32_t)flag);
+  op(c, WASM_OP_I32_AND);
+  op(c, WASM_OP_I32_EQZ);
+  i32c(c, 1);
+  op(c, WASM_OP_I32_SUB);
+  simd(c, WASM_SIMD_I32X4_SPLAT);
+}
+
+/* FSQRT (vector). Negative and NaN lanes as the scalar form (emit_fsqrt):
+ * the default NaN for a number or under DN, else the NaN made quiet;
+ * native when that raises nothing new (IOC already set, or a quiet NaN).
+ * The other lanes are native when every result is normal or the input a
+ * zero, with FPCR as assumed and IXC already set. TOTK at Lookout Landing
+ * spent ~3% of each guest core in the helper's fp_sqrt. */
+static void emit_vector_fsqrt(Ctx *c, bool dbl, bool q, uint32_t n, uint32_t d) {
+  const uint32_t splat = dbl ? WASM_SIMD_F64X2_SPLAT : WASM_SIMD_F32X4_SPLAT;
+  load_v(c, n);
+  lset(c, L_VA);
+  lget(c, L_VA);
+  simd(c, dbl ? WASM_SIMD_F64X2_SQRT : WASM_SIMD_F32X4_SQRT);
+  lset(c, L_VR);
+  lget(c, L_VA); /* L_VB: the negative numbers and the NaNs */
+  if (dbl) f64c(c, 0);
+  else f32c(c, 0);
+  simd(c, splat);
+  simd(c, dbl ? WASM_SIMD_F64X2_LT : WASM_SIMD_F32X4_LT);
+  lset(c, L_VD); /* the negative numbers: they raise IOC */
+  lget(c, L_VD);
+  emit_lane_nan(c, L_VA, dbl);
+  simd(c, WASM_SIMD_V128_OR);
+  lset(c, L_VB);
+  /* Per lane, those raise nothing new (no sNaN or negative number, or IOC
+   * already set)... */
+  lget(c, L_VD);
+  emit_lane_snan(c, L_VA, dbl);
+  simd(c, WASM_SIMD_V128_OR);
+  simd(c, WASM_SIMD_V128_NOT);
+  emit_fpsr_flag_lanes(c, FPSR_IOC);
+  simd(c, WASM_SIMD_V128_OR);
+  /* ...and the others give a normal result or take a zero's root */
+  emit_lane_normal(c, L_VR, dbl);
+  emit_lane_zero(c, L_VA, dbl);
+  simd(c, WASM_SIMD_V128_OR);
+  lget(c, L_VB);
+  simd(c, WASM_SIMD_V128_BITSELECT);
+  if (c->fz) { /* FZ: a subnormal input is a zero (and IDC) */
+    emit_lane_subnormal(c, L_VA, dbl);
+    simd(c, WASM_SIMD_V128_ANDNOT);
+  }
+  emit_all_lanes(c, q);
+  emit_fp_env_ok_as(c, true);
+  op(c, WASM_OP_I32_AND);
+  fp_fast_arm(c);
+  emit_lane_quieted(c, L_VA, dbl); /* NaN lanes: the NaN made quiet, unless DN... */
+  v128_splat_bits(c, dbl ? F64_DEFAULT_NAN : F32_DEFAULT_NAN, dbl); /* ...else the default NaN */
+  emit_lane_nan(c, L_VA, dbl);
+  i32c(c, 0); /* all ones when DN is clear */
+  lget(c, L_STATE);
+  mem(c, WASM_OP_I32_LOAD, ALIGN_4, OFF_FPCR);
+  i32c(c, (int32_t)FPCR_DN);
+  op(c, WASM_OP_I32_AND);
+  op(c, WASM_OP_I32_EQZ);
+  op(c, WASM_OP_I32_SUB);
+  simd(c, WASM_SIMD_I32X4_SPLAT);
+  simd(c, WASM_SIMD_V128_AND);
+  simd(c, WASM_SIMD_V128_BITSELECT);
+  lget(c, L_VR);
+  lget(c, L_VB);
+  simd(c, WASM_SIMD_V128_BITSELECT);
+  lset(c, L_VR);
+  store_v(c, d, L_VR, q);
+  Sync none = {0};
+  fp_else_exact(c, &none);
+}
+
 static void pairwise_lanes(uint8_t lanes[SIMD_LANE_BYTES], uint32_t esize, uint32_t count, bool odd);
 
 /* FADDP (vector): the pairs of n, then of m, added - the even and odd
@@ -4374,6 +4474,30 @@ static void emit_vector_fp_pairwise_add(Ctx *c, bool dbl, bool q, uint32_t n, ui
   fp_else_exact(c, &none);
 }
 
+/* FMAXP/FMINP/FMAXNMP/FMINNMP (vector): the pairs' even and odd elements
+ * shuffled apart as for FADDP, then emit_vector_fp_min_max. TOTK's FMAXPs
+ * were ~90k helper calls a report. */
+static void emit_vector_fp_pairwise_min_max(Ctx *c, bool max, bool dbl, bool q, uint32_t n, uint32_t m,
+                                            uint32_t d) {
+  const uint32_t esize = dbl ? 8u : 4u, count = (q ? SIMD_LANE_BYTES : SIMD_LANE_BYTES / 2u) / esize;
+  uint8_t even[SIMD_LANE_BYTES], odd[SIMD_LANE_BYTES];
+  pairwise_lanes(even, esize, count, false);
+  pairwise_lanes(odd, esize, count, true);
+  load_v(c, n);
+  lset(c, L_VD);
+  load_v(c, m);
+  lset(c, L_VR);
+  lget(c, L_VD);
+  lget(c, L_VR);
+  v128_shuffle(c, even);
+  lset(c, L_VA);
+  lget(c, L_VD);
+  lget(c, L_VR);
+  v128_shuffle(c, odd);
+  lset(c, L_VB);
+  emit_vector_fp_min_max(c, max, dbl, q, d);
+}
+
 typedef enum Fp_Compare { FCMP_EQ, FCMP_GE, FCMP_GT, FCMP_LE, FCMP_LT } Fp_Compare;
 static void emit_vector_fp_compare(Ctx *c, Fp_Compare cmp, bool dbl, bool q, bool with_zero, bool absolute,
                                    uint32_t n, uint32_t m, uint32_t d);
@@ -4404,6 +4528,9 @@ static bool c_vector_fp_fast(Ctx *c, uint32_t insn) {
       return true;
     case 0x12: /* FADDP (vector) */
       emit_vector_fp_pairwise_add(c, dbl, q, rn, bits(insn, 20, 16), rd);
+      return true;
+    case 0x16: case 0x10: case 0x1E: case 0x18: /* FMAXP, FMAXNMP, FMINP, FMINNMP (vector) */
+      emit_vector_fp_pairwise_min_max(c, key < 0x18, dbl, q, rn, bits(insn, 20, 16), rd);
       return true;
     default:
       break;
@@ -4702,12 +4829,32 @@ static void v128_fp_zero(Ctx *c, bool dbl) {
   simd(c, dbl ? WASM_SIMD_F64X2_SPLAT : WASM_SIMD_F32X4_SPLAT);
 }
 
-/* i32 guard: no active lane of `local` is a NaN, and FPCR is 0. */
-static void emit_lanes_ordered(Ctx *c, uint32_t local, bool dbl, bool q) {
-  lget(c, local);
-  lget(c, local);
-  simd(c, dbl ? WASM_SIMD_F64X2_EQ : WASM_SIMD_F32X4_EQ);
-  and_lanes_not_subnormal(c, local, dbl); /* FZ compares them as zero (and raises IDC) */
+/* i32 guard for a compare of L_VA with L_VB: FPCR as fz_safe arms assume,
+ * and every active lane exact natively. A NaN lane compares false, as in
+ * wasm, raising IOC (FCMEQ: from a signalling NaN only), so it is native
+ * once IOC is set - TOTK's FCMGTs met NaNs ~90k times a report, every one
+ * in the helper. Under FZ a subnormal lane compares as zero and raises
+ * IDC: the exact arm. */
+static void emit_compare_lanes_ok(Ctx *c, Fp_Compare cmp, bool dbl, bool q) {
+  if (cmp == FCMP_EQ) {
+    emit_lane_snan(c, L_VA, dbl);
+    emit_lane_snan(c, L_VB, dbl);
+    simd(c, WASM_SIMD_V128_OR);
+    simd(c, WASM_SIMD_V128_NOT);
+  } else {
+    emit_lane_nan(c, L_VA, dbl);
+    emit_lane_nan(c, L_VB, dbl);
+    simd(c, WASM_SIMD_V128_OR);
+    simd(c, WASM_SIMD_V128_NOT);
+  }
+  emit_fpsr_flag_lanes(c, FPSR_IOC);
+  simd(c, WASM_SIMD_V128_OR);
+  if (c->fz) {
+    emit_lane_subnormal(c, L_VA, dbl);
+    emit_lane_subnormal(c, L_VB, dbl);
+    simd(c, WASM_SIMD_V128_OR);
+    simd(c, WASM_SIMD_V128_ANDNOT);
+  }
   emit_all_lanes(c, q);
   emit_fpcr_mode(c, true);
   op(c, WASM_OP_I32_AND);
@@ -4745,7 +4892,8 @@ static void emit_vector_int_to_fp(Ctx *c, bool dbl, bool q, bool is_unsigned, ui
 }
 
 /* Vector FCVTZS/FCVTZU: every active lane in range (no saturation, no
- * NaN: no IOC), then truncation, which only ever sets the sticky IXC. */
+ * NaN: no IOC) - or, for singles, IOC already set - then truncation,
+ * which only ever sets the sticky IXC. TOTK runs these under FZ. */
 static void emit_vector_fp_to_int(Ctx *c, bool dbl, bool q, bool is_unsigned, uint32_t n, uint32_t d) {
   load_v(c, n);
   lset(c, L_VA);
@@ -4769,8 +4917,16 @@ static void emit_vector_fp_to_int(Ctx *c, bool dbl, bool q, bool is_unsigned, ui
     simd(c, WASM_SIMD_F64X2_LT);
   }
   simd(c, WASM_SIMD_V128_AND);
+  if (!dbl) { /* saturating, NaN to 0: the architecture's results, raising IOC */
+    emit_fpsr_flag_lanes(c, FPSR_IOC);
+    simd(c, WASM_SIMD_V128_OR);
+  }
+  if (c->fz) { /* FZ: a subnormal input is a zero (and IDC, not IXC) */
+    emit_lane_subnormal(c, L_VA, dbl);
+    simd(c, WASM_SIMD_V128_ANDNOT);
+  }
   emit_all_lanes(c, q);
-  emit_fp_env_ok(c);
+  emit_fp_env_ok_as(c, true); /* truncation ignores the rounding mode */
   op(c, WASM_OP_I32_AND);
   fp_fast_arm(c);
   if (!dbl) {
@@ -4798,8 +4954,8 @@ static void emit_vector_fp_to_int(Ctx *c, bool dbl, bool q, bool is_unsigned, ui
   fp_else_exact(c, &none);
 }
 
-/* V[d] = lane masks of V[n] cmp (V[m] or 0.0): exact without NaNs and
- * with FPCR 0 (FZ would compare denormals as zero). `absolute`: FACGE/FACGT. */
+/* V[d] = lane masks of V[n] cmp (V[m] or 0.0), native under
+ * emit_compare_lanes_ok. `absolute`: FACGE/FACGT. */
 static void emit_vector_fp_compare(Ctx *c, Fp_Compare cmp, bool dbl, bool q, bool with_zero, bool absolute,
                                    uint32_t n, uint32_t m, uint32_t d) {
   static const uint32_t ops32[5] = {WASM_SIMD_F32X4_EQ, WASM_SIMD_F32X4_GE, WASM_SIMD_F32X4_GT, WASM_SIMD_F32X4_LE,
@@ -4816,9 +4972,7 @@ static void emit_vector_fp_compare(Ctx *c, Fp_Compare cmp, bool dbl, bool q, boo
     if (absolute) simd(c, dbl ? WASM_SIMD_F64X2_ABS : WASM_SIMD_F32X4_ABS);
   }
   lset(c, L_VB);
-  emit_lanes_ordered(c, L_VA, dbl, q);
-  emit_lanes_ordered(c, L_VB, dbl, q);
-  op(c, WASM_OP_I32_AND);
+  emit_compare_lanes_ok(c, cmp, dbl, q);
   fp_fast_arm(c);
   lget(c, L_VA);
   lget(c, L_VB);
@@ -4898,6 +5052,10 @@ static bool c_simd_misc_fp(Ctx *c, uint32_t insn) {
     return true;
   }
   if (scalar || !hi) return false;
+  if (opcode == 0x1F && u) { /* FSQRT */
+    emit_vector_fsqrt(c, dbl, q, rn, rd);
+    return true;
+  }
   if (opcode == 0x0F) { /* FABS / FNEG: sign bit operations, no exceptions */
     const uint64_t sign = dbl ? FP_SIGN_D : (uint64_t)FP_SIGN_S << 32 | FP_SIGN_S;
     load_v(c, rn);

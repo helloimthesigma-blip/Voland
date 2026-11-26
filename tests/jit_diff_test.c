@@ -373,7 +373,8 @@ static uint32_t cache_vreg(void) { return 16u + pick(4); }
 static uint32_t gen_fp_cache_mix(void) {
   const uint32_t type = pick(2) << 22, d = cache_vreg(), n = cache_vreg(), m = cache_vreg();
   static const uint32_t arith[5] = {0u, 1u, 2u, 3u, 8u}; /* FMUL FDIV FADD FSUB FNMUL */
-  switch (pick(17)) {
+  switch (pick(18)) {
+  case 17: return 0x2EA1F800u | (pick(2) << 30) | type | (n << 5) | d;                  /* FSQRT (vector): .2S/.4S/.2D (.1D: reserved) */
   case 15: return 0x4EA04400u | (pick(2) << 29) | ((28u + pick(4)) << 16) | (n << 5) | d; /* SSHL/USHL v.4s, counts from V28-V31 */
   case 10: return 0x1F000000u | type | (pick(2) << 21) | (m << 16) | (pick(2) << 15) | (cache_vreg() << 10) | (n << 5) | d; /* FMADD family */
   case 11: return 0x1E204800u | type | (m << 16) | (pick(4) << 12) | (n << 5) | d;      /* FMAX/FMIN/FMAXNM/FMINNM */
@@ -566,6 +567,40 @@ static void run_case(uint32_t iteration) {
           0x52AFE00Cu, 0x4E040D98u, 0x6E38DF19u, /* v24 = 4 x 1.7e38; fmul v25 = v24 * v24 overflows (OFC) */
       };
       for (uint32_t k = 0; k < 13u; k++) code[i++] = nans[k];
+      i--;
+      continue;
+    }
+    if (i + 7u < length && pick(48) == 0) { /* FCMGT on quiet NaNs with IOC clear: it raises IOC */
+      static const uint32_t cmp[7] = {
+          0xD280020Bu, 0xD51B442Bu,              /* FPSR = IXC */
+          0x52800029u, 0x72AFF809u, 0x4E040D3Cu, /* v28 = 4 x 0x7FC00001 (quiet) */
+          0x6EBCE79Du,                           /* fcmgt v29.4s, v28.4s, v28.4s */
+          0xD53B442Bu,                           /* mrs x11, fpsr: IOC, whatever later code raises */
+      };
+      for (uint32_t k = 0; k < 7u; k++) code[i++] = cmp[k];
+      i--;
+      continue;
+    }
+    if (i + 8u < length && pick(48) == 0) { /* FCVTZS: quiet NaNs with IOC clear (IOC), or subnormals under FZ (IDC) */
+      const bool fz = pick(2);
+      const uint32_t cvt[8] = {
+          fz ? 0xD2A02009u : 0xD503201Fu, fz ? 0xD51B4409u : 0xD503201Fu, /* FPCR = FZ, or NOPs */
+          0xD280020Bu, 0xD51B442Bu,                                        /* FPSR = IXC */
+          fz ? 0x52800029u : 0x72AFF809u, 0x4E040D3Cu,                     /* v28 = 4 x 0x00000001, or 0x7FC0xxxx */
+          0x4EA1BB9Du,                                                     /* fcvtzs v29.4s, v28.4s */
+          0xD53B442Bu,                                                     /* mrs x11, fpsr */
+      };
+      for (uint32_t k = 0; k < 8u; k++) code[i++] = cvt[k];
+      i--;
+      continue;
+    }
+    if (i + 6u < length && pick(48) == 0) { /* FMAXNM(P) of quiet NaNs and numbers: the numbers (wasm's max: NaN) */
+      static const uint32_t nm[6] = {
+          0x52800029u, 0x72AFF809u, 0x4E040D3Cu, /* v28 = 4 x 0x7FC00001 (quiet) */
+          0x4F03F61Du,                           /* fmov v29.4s, #1.0 */
+          0x4E3DC79Eu, 0x6E3DC79Fu,              /* fmaxnm v30.4s, fmaxnmp v31.4s = v28, v29 */
+      };
+      for (uint32_t k = 0; k < 6u; k++) code[i++] = nm[k];
       i--;
       continue;
     }
