@@ -273,7 +273,8 @@ async function boot(): Promise<BootResult | null> {
             noWriteStaging: new URLSearchParams(location.search).get("writestaging") === "0",
             noLookAhead: new URLSearchParams(location.search).get("lookahead") === "0",
             skipBuilding: Number(new URLSearchParams(location.search).get("skipbuilding") ?? DEFAULT_SKIP_BUILDING) || 0,
-            shaderSalt: Number(new URLSearchParams(location.search).get("shadersalt")) || 0 } satisfies MainToGPUMessage,
+            shaderSalt: Number(new URLSearchParams(location.search).get("shadersalt")) || 0,
+            framePace: new URLSearchParams(location.search).get("framepace") !== "0" } satisfies MainToGPUMessage,
           [offscreen],
         );
         startVideoWorker(memory, layout);
@@ -342,11 +343,13 @@ async function boot(): Promise<BootResult | null> {
   /* tools/perf.mjs gpurecord: the GPU worker arms first, then the core marks the stream at its next present. */
   let debugRecordResolve: ((result: { readonly bytes: number; readonly error: string }) => void) | null = null;
   let debugNanResolve: ((report: string) => void) | null = null;
+  let debugShownResolve: ((report: string) => void) | null = null;
   (globalThis as unknown as {
     __volandDebug?: {
       dumpTargets: () => Promise<readonly DebugTargetImage[]>;
       recordGpu: (presents: number, url: string) => Promise<{ readonly bytes: number; readonly error: string }>;
       nanScan: () => Promise<string>;
+      shownFrames: (reset: boolean) => Promise<string>;
     };
   }).__volandDebug = {
     dumpTargets: (): Promise<readonly DebugTargetImage[]> =>
@@ -358,6 +361,11 @@ async function boot(): Promise<BootResult | null> {
       new Promise((resolve) => {
         debugNanResolve = resolve;
         gpuWorker.postMessage({ type: "debug-nan-scan" } satisfies MainToGPUMessage);
+      }),
+    shownFrames: (reset: boolean): Promise<string> =>
+      new Promise((resolve) => {
+        debugShownResolve = resolve;
+        gpuWorker.postMessage({ type: "debug-shown-frames", reset } satisfies MainToGPUMessage);
       }),
     recordGpu: (presents: number, url: string): Promise<{ readonly bytes: number; readonly error: string }> =>
       new Promise((resolve) => {
@@ -376,6 +384,11 @@ async function boot(): Promise<BootResult | null> {
       if (msg.type === "debug-nan-scanned") {
         debugNanResolve?.(msg.report);
         debugNanResolve = null;
+        return;
+      }
+      if (msg.type === "debug-shown-frames") {
+        debugShownResolve?.(msg.report);
+        debugShownResolve = null;
         return;
       }
       if (msg.type === "debug-gpu-record-armed") {

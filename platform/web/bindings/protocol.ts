@@ -229,6 +229,9 @@ export type MainToGPUMessage =
        * the GPU's compiler and the persistent shader cache stays out of
        * it - a title's first visit to each scene, as often as wanted. */
       readonly shaderSalt: number;
+      /* Guest frames reach the screen on an even cadence (gpu.worker.ts
+       * FramePacer); ?framepace=0: at the first refresh after each is drawn. */
+      readonly framePace: boolean;
     }
   | { readonly type: "resize"; readonly width: number; readonly height: number }
   /* The title that just loaded (lifecycle): its persistent shader cache
@@ -238,6 +241,9 @@ export type MainToGPUMessage =
   | { readonly type: "debug-dump-targets" }
   /* Diagnostics: render targets holding NaN or infinite texels (debug-nan-scanned). */
   | { readonly type: "debug-nan-scan" }
+  /* Diagnostics (tools/perf.mjs measure): the times between frames shown
+   * on screen since the last request (debug-shown-frames); reset: start over. */
+  | { readonly type: "debug-shown-frames"; readonly reset: boolean }
   /* Diagnostics: records from the next recording mark until `presents` presents, POSTed to `url` in pieces. */
   | { readonly type: "debug-gpu-record"; readonly presents: number; readonly url: string }
   /* Save states: read back these surfaces after running the stream up to
@@ -267,6 +273,7 @@ export type GPUToMainMessage =
   | { readonly type: "debug-targets"; readonly targets: readonly DebugTargetImage[] }
   | { readonly type: "debug-gpu-record-armed" }
   | { readonly type: "debug-nan-scanned"; readonly report: string }
+  | { readonly type: "debug-shown-frames"; readonly report: string }
   | { readonly type: "debug-gpu-recorded"; readonly bytes: number; readonly error: string }
   /* Rows of width * bytesPerPixel per surface, in request order (null: unreadable). */
   | { readonly type: "gpu-readback"; readonly pixels: readonly (ArrayBuffer | null)[] };

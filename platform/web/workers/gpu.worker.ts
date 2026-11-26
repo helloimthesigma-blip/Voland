@@ -217,6 +217,170 @@ async function readbackSurfaces(after: number, surfaces: readonly GpuReadbackSur
 /* Pipelines are built ahead of the draws the stream holds (?lookahead=0: as the draws ask). */
 let lookAhead = true;
 
+/* Frames on screen. A worker requestAnimationFrame tick is one screen
+ * refresh. Unpaced (?framepace=0), a present draws straight into the
+ * canvas and is shown at the next refresh. Paced (the default), a present draws into a held
+ * texture, and a tick copies the oldest held frame to the canvas once
+ * `cadence` refreshes have passed since the last one shown - the whole
+ * number of refreshes nearest the recent time between the guest's frames
+ * - or at once when another frame is waiting, so no latency builds up.
+ * A 30 fps game whose frames land near a refresh boundary otherwise
+ * alternates 1 and 3 refreshes (Animal Crossing's island: of 575 frames
+ * 72 under 24 ms and 103 at 40-60 ms; paced 53 and 8, and 563 of 624 on
+ * the 33 ms cadence). Mario Kart (60 fps) shows more of its frames - two
+ * presents within one refresh lose one unpaced (50-53 shown/s vs 55-56);
+ * Tears of the Kingdom's ~13 fps lands at 4 refreshes nearly every time.
+ * Both modes keep a histogram of the times between frames shown
+ * (debug-shown-frames; tools/perf.mjs prints it after each measure). */
+const PACE_HELD = 3; /* one drawing, one waiting, one spare: never a wait on a copy */
+const PACE_WAITING_MAX = PACE_HELD - 1;
+const PACE_MAX_CADENCE = 4; /* refreshes; slower games show each frame as it comes */
+const PACE_EMA = 0.1; /* weight of the newest interval in the running means */
+const DEFAULT_REFRESH_MS = 1000 / 60;
+const REFRESH_SANE_MS = 50; /* longer ticks are stalls, not the display's period */
+const SHOWN_BUCKETS_MS = [24, 40, 60, 100, 250]; /* as tools/perf.mjs */
+const SHOWN_GAP_MS = 50;
+
+class FramePacer {
+  private readonly held: (GPUTexture | null)[] = new Array<GPUTexture | null>(PACE_HELD).fill(null);
+  private readonly waiting: number[] = [];
+  private drawing = -1;
+  private frameMs = 0;
+  private lastArrival = 0;
+  private refreshMs = DEFAULT_REFRESH_MS;
+  private lastTick = 0;
+  private ticks = 0;
+  private shownTick = 0;
+  private presents = 0;
+  private seenPresents = 0;
+  private lastShown = 0;
+  private windowStart = performance.now();
+  private shown = 0;
+  private gaps = 0;
+  private maxGapMs = 0;
+  private histogram = new Array<number>(SHOWN_BUCKETS_MS.length + 1).fill(0);
+
+  constructor(private readonly renderer: Renderer, private readonly paced: boolean) {
+    const tick = (t: number): void => {
+      this.tick(t);
+      self.requestAnimationFrame(tick);
+    };
+    self.requestAnimationFrame(tick);
+  }
+
+  /** Where a present draws: the canvas, or (paced) a held texture. */
+  target(width: number, height: number): { view: GPUTextureView; format: GPUTextureFormat; width: number; height: number } {
+    const { renderer } = this;
+    if (!this.paced) {
+      resizeCanvas(renderer.canvas, width, height);
+      return { view: renderer.context.getCurrentTexture().createView(), format: renderer.format, width, height };
+    }
+    if (this.waiting.length >= PACE_WAITING_MAX) this.waiting.shift(); /* the ticks fell behind: drop the oldest */
+    let slot = 0;
+    while (this.waiting.includes(slot)) slot++;
+    let texture = this.held[slot] ?? null;
+    if (!texture || texture.width !== width || texture.height !== height) {
+      texture?.destroy();
+      texture = renderer.device.createTexture({
+        size: [width, height], format: renderer.format,
+        usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+      });
+      this.held[slot] = texture;
+    }
+    this.drawing = slot;
+    return { view: texture.createView(), format: renderer.format, width, height };
+  }
+
+  /** A present was drawn and submitted. */
+  presented(): void {
+    this.presents++;
+    const now = performance.now();
+    if (this.lastArrival) {
+      const interval = now - this.lastArrival;
+      this.frameMs = this.frameMs ? this.frameMs + PACE_EMA * (interval - this.frameMs) : interval;
+    }
+    this.lastArrival = now;
+    if (this.paced && this.drawing >= 0) {
+      this.waiting.push(this.drawing);
+      this.drawing = -1;
+    }
+  }
+
+  private cadence(): number {
+    return Math.min(PACE_MAX_CADENCE, Math.max(1, Math.round(this.frameMs / this.refreshMs)));
+  }
+
+  private tick(t: number): void {
+    if (this.lastTick) {
+      const period = t - this.lastTick;
+      if (period > 0 && period < REFRESH_SANE_MS) this.refreshMs += PACE_EMA * (period - this.refreshMs);
+    }
+    this.lastTick = t;
+    this.ticks++;
+    if (!this.paced) {
+      if (this.presents !== this.seenPresents) {
+        this.seenPresents = this.presents;
+        this.record(t);
+      }
+      return;
+    }
+    if (!this.waiting.length) return;
+    if (this.ticks - this.shownTick < this.cadence() && this.waiting.length < PACE_WAITING_MAX) return;
+    const slot = this.waiting.shift() ?? 0;
+    const texture = this.held[slot];
+    if (!texture) return;
+    const { renderer } = this;
+    resizeCanvas(renderer.canvas, texture.width, texture.height);
+    const encoder = renderer.device.createCommandEncoder();
+    encoder.copyTextureToTexture({ texture }, { texture: renderer.context.getCurrentTexture() },
+      [texture.width, texture.height]);
+    renderer.device.queue.submit([encoder.finish()]);
+    this.shownTick = this.ticks;
+    this.record(t);
+  }
+
+  private record(t: number): void {
+    if (this.lastShown) {
+      const gap = t - this.lastShown;
+      const bucket = SHOWN_BUCKETS_MS.findIndex((limit) => gap < limit);
+      const index = bucket < 0 ? SHOWN_BUCKETS_MS.length : bucket;
+      this.histogram[index] = (this.histogram[index] ?? 0) + 1;
+      this.maxGapMs = Math.max(this.maxGapMs, gap);
+      if (gap > SHOWN_GAP_MS) this.gaps++;
+    }
+    this.lastShown = t;
+    this.shown++;
+  }
+
+  /** The frames shown since the last report (or reset). */
+  report(reset: boolean): string {
+    const seconds = (performance.now() - this.windowStart) / 1000;
+    const text = `shown frames (${this.paced ? "paced" : "unpaced"}): ${(this.shown / Math.max(seconds, 1e-3)).toFixed(2)}/s` +
+      ` | gaps > ${SHOWN_GAP_MS} ms: ${this.gaps} (max ${this.maxGapMs.toFixed(0)} ms)` +
+      ` | shown frame times <24/24-40/40-60/60-100/100-250/250+ ms: ${this.histogram.join("/")}` +
+      ` | refresh ${this.refreshMs.toFixed(1)} ms, guest frame ${this.frameMs.toFixed(1)} ms, cadence ${this.cadence()}`;
+    if (reset) {
+      this.windowStart = performance.now();
+      this.shown = 0;
+      this.gaps = 0;
+      this.maxGapMs = 0;
+      this.histogram = this.histogram.map(() => 0);
+    }
+    return text;
+  }
+}
+
+function resizeCanvas(canvas: OffscreenCanvas, width: number, height: number): void {
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width;
+    canvas.height = height;
+  }
+}
+
+/* Pacing (init; ?framepace=0 turns it off) and the stream's pacer, for debug-shown-frames. */
+let framePace = true;
+let pacer: FramePacer | null = null;
+
 async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, headerBase: number): Promise<void> {
   const buffer = memory.buffer;
   const words = new Int32Array(buffer, headerBase, 12);
@@ -229,17 +393,15 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
   const capacity = Number(Atomics.load(wide, OFF_CAPACITY / 8));
   log("info", `GPU stream: ring 0x${ringBase.toString(16)} (${capacity >> 10} KiB)`);
   let presented = 0;
+  const frames = new FramePacer(renderer, framePace);
+  pacer = frames;
+  if (framePace) log("info", "frame pacing on: frames shown on an even cadence");
   const executor = new GpuExecutor(renderer.device, {
-    presentTarget: (width, height) => {
-      if (renderer.canvas.width !== width || renderer.canvas.height !== height) {
-        renderer.canvas.width = width;
-        renderer.canvas.height = height;
-      }
-      return { view: renderer.context.getCurrentTexture().createView(), format: renderer.format, width, height };
-    },
+    presentTarget: (width, height) => frames.target(width, height),
     presented: (width, height) => {
       if (++presented === 1) log("info", `first WebGPU frame presented: ${width}x${height}`);
       webgpuPresents++;
+      frames.presented();
     },
     log,
   });
@@ -449,7 +611,8 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
     return;
   }
   const format = gpu.getPreferredCanvasFormat();
-  context.configure({ device, format, alphaMode: "opaque" });
+  /* COPY_DST: FramePacer copies held frames in. */
+  context.configure({ device, format, alphaMode: "opaque", usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_DST });
 
   const module = device.createShaderModule({ code: BLIT_SHADER });
   const pipeline = device.createRenderPipeline({
@@ -505,6 +668,13 @@ self.addEventListener("message", (event: MessageEvent<MainToGPUMessage>) => {
     self.postMessage(reply);
     return;
   }
+  if (event.data.type === "debug-shown-frames") {
+    const reply: GPUToMainMessage = {
+      type: "debug-shown-frames", report: pacer?.report(event.data.reset) ?? "shown frames: no WebGPU stream yet",
+    };
+    self.postMessage(reply);
+    return;
+  }
   if (event.data.type === "debug-dump-targets") {
     const executor = activeExecutor;
     log("info", `debug-dump-targets: ${executor ? "reading back" : "no WebGPU executor"}`);
@@ -533,6 +703,7 @@ self.addEventListener("message", (event: MessageEvent<MainToGPUMessage>) => {
     if (event.data.trivialShaders) (globalThis as { TRIVIAL_SHADERS?: boolean }).TRIVIAL_SHADERS = true;
     if (event.data.noWriteStaging) (globalThis as { NO_WRITE_STAGING?: boolean }).NO_WRITE_STAGING = true;
     lookAhead = !event.data.noLookAhead;
+    framePace = event.data.framePace;
     if (event.data.skipBuilding) (globalThis as { SKIP_BUILDING?: number }).SKIP_BUILDING = event.data.skipBuilding;
     if (event.data.shaderSalt) {
       (globalThis as { SHADER_SALT?: number }).SHADER_SALT = event.data.shaderSalt;

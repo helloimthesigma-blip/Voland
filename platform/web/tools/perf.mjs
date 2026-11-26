@@ -867,6 +867,7 @@ async function main() {
         } else if (cmd === "measure") {
           const before = await sample();
           await page.evaluate(() => window.__VOLAND_RESP__?.reset());
+          await page.evaluate(() => globalThis.__volandDebug?.shownFrames?.(true));
           const startedAt = Date.now();
           await sleep(Number(arg) * 1000);
           const after = await sample();
@@ -879,6 +880,9 @@ async function main() {
                  (gaps ? ` | frame gaps > 50 ms: ${gaps.presentGapCount} (max ${gaps.presentGapMaxMs.toFixed(0)} ms)` +
                          ` | frame times <24/24-40/40-60/60-100/100-250/250+ ms: ${gaps.presentHistogram.join("/")}` : "");
           if (gaps?.presentGaps.length) console.log(`  frame gaps (s:ms): ${gaps.presentGaps.join(" ")}`);
+          /* The frames the screen showed (the GPU worker's ticks), next to the game's own above. */
+          const shown = await page.evaluate(() => globalThis.__volandDebug?.shownFrames?.(false) ?? null);
+          if (shown) console.log(`  ${shown}`);
         } else if (cmd === "cheat") {
           const name = lines[done].slice(cmd.length).trim();
           const box = page.locator(".voland-cheats label", { hasText: name }).first().locator("input");
