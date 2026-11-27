@@ -109,7 +109,14 @@ struct Gpu_Stream;
  * Render targets are not counted: they hold pixels nothing else has. */
 #define RASTER_GPU_TEXTURE_BUDGET_BYTES ((uint64_t)2048 * 1024 * 1024)
 #define RASTER_GPU_SURFACE_BUCKETS 8192u /* the address index over them (a power of two) */
-#define RASTER_GPU_SHADERS 1024u
+/* Translated GPU shaders by descriptor hash (a power of two), probed at
+ * most RASTER_GPU_SHADER_PROBES slots; past that one entry is replaced.
+ * Tears of the Kingdom reaches ~1300 descriptors in its first minutes at
+ * Lookout Landing: 1024 slots filled, were cleared and everything was
+ * translated again: ~3000 translations for ~1300 shaders, 2.7 s of the
+ * GPU thread against 1.5 s with one translation each. */
+#define RASTER_GPU_SHADERS 8192u
+#define RASTER_GPU_SHADER_PROBES 32u
 /* 3D textures and cube maps assembled from render targets. Mario Kart 8
  * Deluxe's later courses use more than 32 a frame: a 32-slot ring rebuilt
  * one GPU texture per miss, ~26000 in under a minute. */

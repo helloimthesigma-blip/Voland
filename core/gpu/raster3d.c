@@ -5571,19 +5571,20 @@ static uint32_t gpu_texture_layers_of(const Raster3d *r, const Raster3d_Gpu_Surf
 #define MS_PER_SECOND 1000.0
 #define NS_PER_MS_F 1e6
 static uint32_t gpu_shader_for(Raster3d *r, const Sm_Program *program, const Wgsl_Program_Desc *desc) {
+  _Static_assert((RASTER_GPU_SHADERS & (RASTER_GPU_SHADERS - 1u)) == 0, "RASTER_GPU_SHADERS is a power of two");
   const uint64_t key = wgsl_desc_hash(desc, program);
-  uint32_t slot = (uint32_t)(key % RASTER_GPU_SHADERS);
+  const uint32_t slot = (uint32_t)key & (RASTER_GPU_SHADERS - 1u);
   Raster3d_Gpu_Shader *entry = NULL;
-  for (uint32_t probe_i = 0; probe_i < RASTER_GPU_SHADERS; probe_i++) {
-    Raster3d_Gpu_Shader *e = &r->gpu_shaders[(slot + probe_i) % RASTER_GPU_SHADERS];
+  for (uint32_t probe_i = 0; probe_i < RASTER_GPU_SHADER_PROBES; probe_i++) {
+    Raster3d_Gpu_Shader *e = &r->gpu_shaders[(slot + probe_i) & (RASTER_GPU_SHADERS - 1u)];
     if (e->id == 0 || e->key == key) {
       entry = e;
       break;
     }
   }
-  if (!entry) { /* full: start over (the GPU side keeps its pipelines by id) */
-    memset(r->gpu_shaders, 0, sizeof(Raster3d_Gpu_Shader) * RASTER_GPU_SHADERS);
+  if (!entry) { /* a crowded run of slots: replace its first (the GPU side keeps its pipelines by id) */
     entry = &r->gpu_shaders[slot];
+    entry->id = 0;
   }
   if (entry->id == 0) {
     entry->key = key;
