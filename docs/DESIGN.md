@@ -2393,8 +2393,8 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ### Phase 4 — First Boot
 
-- [ ] **GPU command ring** (§13): versioned records, CPU-side decode, GPU-side drain. *v3.40: CPU-side GPFIFO decode, host methods and the DMA copy engine are done (`gpu/gpu_channel.{h,c}`); the ring to the GPU worker and the 3D/compute engines remain.*
-- [ ] Minimal shader path (stall-on-compile, no cache yet)
+- [x] **GPU command ring** (§13): versioned records, CPU-side decode, GPU-side drain. *v3.40: CPU-side GPFIFO decode, host methods and the DMA copy engine are done (`gpu/gpu_channel.{h,c}`); the ring to the GPU worker and the 3D/compute engines remain.* *2026-11-27: done long since - the record stream (`gpu/gpu_stream`, `gpu_records.h`, docs/GPU_COMMAND_STREAM.md), the GPU thread's 3D/compute engines (`gpu_thread`, `raster3d`, `compute`) and the WebGPU worker's drain.*
+- [x] Minimal shader path (stall-on-compile, no cache yet) *2026-11-27: superseded by the full path - Maxwell decode to WGSL (`gpu/maxwell_shader`, `gpu/wgsl`), look-ahead async pipelines and the OPFS pipeline cache.*
 - [x] **vi: + buffer queue (nvnflinger)** — the present contract; without it Phase 4 has no screen. *v3.39: `hle/services/vi/` - IGraphicBufferProducer over parcels, vsync compositor with block-linear deswizzle into the §6 slots.*
 - [x] hid: **shared-memory writer (N independent npads + style bits — enables same-console multiplayer, §20)**. *v3.38: `hle/services/hid/hid.{h,c}` over the new shared-memory kernel object; input region sampled at 200Hz virtual time.*
 - [x] fsp-srv (RomFS on decrypted input), applet, time (virtual-time-backed). *v3.39: plus set, apm, offline bsd/nifm, pl (platform font), psm, ts; libnx homebrew boots through all of them.*
@@ -2411,16 +2411,16 @@ Build-verified: both the `native-noop` and `web` presets configure, compile, and
 
 ### Phase 6 — System Features
 
-- [ ] Save data (OPFS), settings (IndexedDB), library/settings UI
+- [x] Save data (OPFS), settings (IndexedDB), library/settings UI *2026-11-27: game saves in OPFS with a browse/import/backup panel (`ui/SavesPanel.tsx`), save states, per-game settings and the game library (`ui/GameLibrary.tsx`).*
 - [ ] Compatibility DB in the library UI
 - [ ] Improved shader pipeline + ASTC transcode cache
-- [ ] **Real video decode**: WebCodecs path per §13 (bitstream reconstruction, block-linear write-back, VIC)
+- [x] **Real video decode**: WebCodecs path per §13 (bitstream reconstruction, block-linear write-back, VIC) *2026-11-27: `workers/video.worker.ts` feeds `core/video`'s reconstructed H.264/VP9 bitstreams to a hardware VideoDecoder; the core's VIC converts the NV12 frames.*
 - [ ] Stub upgrade map, first tier (§12): controller applet + swkbd overlays, set:sys locale, apm mode toggle, account profiles, caps screenshots
 
 ### Phase 7 — Advanced Features
 
-- [ ] LayeredFS mods, amiibo
-- [ ] **Mod repositories** (add-a-repo, §19): manifest fetch + SHA-256-verified install/update; guest-side content only; zero shipped repos, no CORS proxy
+- [ ] LayeredFS mods, amiibo *2026-11-27: LayeredFS, IPS/pchtxt, exefs replacement and cheats are done (docs/MODS.md); amiibo (nfp) is not.*
+- [x] **Mod repositories** (add-a-repo, §19): manifest fetch + SHA-256-verified install/update; guest-side content only; zero shipped repos, no CORS proxy *2026-11-27: `ui/ModRepos.tsx` - add a repository by URL, install/update with the archive's SHA-256 checked; none shipped.*
 - [ ] **Save backup & sync framework** + Google Drive and OneDrive backends (§15) — depends only on Phase 6 OPFS saves; deliberately ahead of the companion server
 - [ ] AOT pre-translation (opt-in per game; the answer to per-session compile cost, §11)
 - [ ] Improved audio accuracy
