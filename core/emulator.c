@@ -1911,12 +1911,30 @@ static uint64_t g_stream_wait_ns;
 
 uint64_t emulator_stream_wait_ns(void) { return __atomic_load_n(&g_stream_wait_ns, __ATOMIC_RELAXED); }
 
+/* Waits less than this apart are one blockage; one that lasts
+ * STREAM_BLOCK_LOG_MS is logged (TOTK froze ~10 s at Lookout Landing with
+ * a GPU-thread record that long: was it waiting on the GPU worker?). */
+#define STREAM_BLOCK_GAP_MS 1.0
+#define STREAM_BLOCK_LOG_MS 1000.0
+
 static void gpu_stream_wait(void *user, volatile int32_t *word, int32_t expected) {
   (void)user;
 #ifdef __EMSCRIPTEN__
+  static _Thread_local double block_from, last_end;
+  static _Thread_local bool block_logged;
   const double started = emscripten_get_now();
+  if (started - last_end > STREAM_BLOCK_GAP_MS) {
+    if (block_logged) log_warn("[gpu] the stream stayed full for %.0f ms (the GPU worker behind)", last_end - block_from);
+    block_from = started;
+    block_logged = false;
+  }
   (void)__builtin_wasm_memory_atomic_wait32((int32_t *)word, expected, GPU_STREAM_WAIT_NS);
-  __atomic_fetch_add(&g_stream_wait_ns, (uint64_t)((emscripten_get_now() - started) * NS_PER_MS), __ATOMIC_RELAXED);
+  last_end = emscripten_get_now();
+  __atomic_fetch_add(&g_stream_wait_ns, (uint64_t)((last_end - started) * NS_PER_MS), __ATOMIC_RELAXED);
+  if (!block_logged && last_end - block_from >= STREAM_BLOCK_LOG_MS) {
+    block_logged = true;
+    log_warn("[gpu] the stream has been full for %.0f ms (the GPU worker behind)", last_end - block_from);
+  }
 #else
   (void)word;
   (void)expected;

@@ -50,11 +50,18 @@ uint64_t gpu_thread_run_ns(const Gpu_Thread *t) { (void)t; return 0; }
 #include <string.h>
 #include <time.h>
 
+#include "common/log.h"
+
 /* Several frames of submissions (a fight frame queues ~60 KB of GPFIFO
  * entries and display calls). */
 #define QUEUE_BYTES (32u * 1024u * 1024u)
 #define RECORD_ALIGN 16u
 #define NS_PER_SECOND 1000000000ull
+/* A record that runs this long holds the guest up (it waits on the GPU's
+ * fences): said in the log, with how long (TOTK at Lookout Landing froze
+ * ~10 s now and then, the GPU thread busy). */
+#define SLOW_RECORD_NS (250ull * 1000000ull)
+#define NS_PER_MS 1000000ull
 
 typedef struct Record {
   Gpu_Thread_Fn fn;
@@ -111,7 +118,9 @@ static void *thread_main(void *arg) {
     clock_gettime(CLOCK_MONOTONIC, &from);
     r.fn(r.user, payload, r.bytes);
     clock_gettime(CLOCK_MONOTONIC, &to);
-    __atomic_store_n(&p->run_ns, p->run_ns + elapsed_ns(&from, &to), __ATOMIC_RELAXED);
+    const uint64_t ran = elapsed_ns(&from, &to);
+    __atomic_store_n(&p->run_ns, p->run_ns + ran, __ATOMIC_RELAXED);
+    if (ran >= SLOW_RECORD_NS) log_warn("[gpu] a GPU thread record ran %llu ms", (unsigned long long)(ran / NS_PER_MS));
     pthread_mutex_unlock(&p->state);
     pthread_mutex_lock(&p->mutex);
     p->head += r.size;

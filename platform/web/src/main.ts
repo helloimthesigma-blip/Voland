@@ -49,6 +49,7 @@ const TOTAL_MEMORY_BYTES = 5_637_144_576n; // ~5.25GiB
 const TOTAL_MEMORY_PAGES = TOTAL_MEMORY_BYTES / WASM_PAGE_BYTES; // 86016n
 
 const WORKER_READY_TIMEOUT_MS = 10_000;
+const MS_PER_SECOND = 1000;
 /* A draw into targets drawn in each of the last 2 frames skips a pipeline
  * still being built instead of freezing the game for it (gpu-executor.ts;
  * ?skipbuilding=0 waits for every pipeline, 2 asks for 3 frames, 1 and 3
@@ -441,6 +442,19 @@ async function boot(): Promise<BootResult | null> {
         const cpuSpeed = new URLSearchParams(location.search).get("cpuspeed");
         if (cpuSpeed !== null && Number.isFinite(Number(cpuSpeed))) {
           cpuWorker.postMessage({ type: "set-cpu-speed", percent: Number(cpuSpeed) } satisfies MainToCPUMessage);
+        }
+        /* ?date=YYYY-MM-DD: the console's clock starts on that day, at the
+         * time of day it is here, and runs on from there. */
+        const date = new URLSearchParams(location.search).get("date");
+        if (date !== null && /^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(date)) {
+          const now = new Date();
+          const [year, month, day] = date.split("-").map(Number);
+          const then = new Date(now);
+          then.setFullYear(year ?? now.getFullYear(), (month ?? 1) - 1, day ?? 1);
+          if (Number.isFinite(then.getTime())) {
+            const seconds = Math.round((then.getTime() - now.getTime()) / MS_PER_SECOND);
+            cpuWorker.postMessage({ type: "set-clock-offset", seconds } satisfies MainToCPUMessage);
+          }
         }
         /* ?cores=N: host threads for guest threads (0 = serial). */
         const cores = new URLSearchParams(location.search).get("cores");

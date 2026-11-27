@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "common/log.h"
 #include "gpu/bc_encode.h"
@@ -5558,6 +5559,10 @@ static uint32_t gpu_texture_layers_of(const Raster3d *r, const Raster3d_Gpu_Surf
 /* The GPU shader for `program` under `desc`: translated (and sent as a
  * SHADER record) the first time, cached by the descriptor hash after.
  * GPU_SHADER_FAILED when it does not translate. */
+/* A translation this slow is logged (it stalls the GPU thread). */
+#define SLOW_TRANSLATE_MS 50.0
+#define MS_PER_SECOND 1000.0
+#define NS_PER_MS_F 1e6
 static uint32_t gpu_shader_for(Raster3d *r, const Sm_Program *program, const Wgsl_Program_Desc *desc) {
   const uint64_t key = wgsl_desc_hash(desc, program);
   uint32_t slot = (uint32_t)(key % RASTER_GPU_SHADERS);
@@ -5575,7 +5580,15 @@ static uint32_t gpu_shader_for(Raster3d *r, const Sm_Program *program, const Wgs
   }
   if (entry->id == 0) {
     entry->key = key;
+    struct timespec from, to;
+    timespec_get(&from, TIME_UTC);
     const Wgsl_Result res = wgsl_translate(program, desc, r->gpu_wgsl, GPU_WGSL_BYTES);
+    timespec_get(&to, TIME_UTC);
+    const double ms = (double)(to.tv_sec - from.tv_sec) * MS_PER_SECOND + (double)(to.tv_nsec - from.tv_nsec) / NS_PER_MS_F;
+    if (ms >= SLOW_TRANSLATE_MS) /* the GPU thread (and the guest waiting on it) stood still that long */
+      log_warn("[gpu] slow translation: %s program %llx, %u words, %zu bytes of WGSL%s, %.0f ms",
+               desc->stage == SM_STAGE_VERTEX ? "vertex" : "pixel", (unsigned long long)program->address,
+               program->word_count, res.ok ? res.length : 0, res.dispatch ? " (dispatch loop)" : "", ms);
     if (!res.ok) {
       if (desc->stage == SM_STAGE_VERTEX)
         log_warn("[gpu] vertex program %llx stays on the CPU: %s", (unsigned long long)program->address, res.reason);

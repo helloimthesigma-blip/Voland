@@ -411,6 +411,8 @@ let paused = false;
 let frameSkip = 0;
 /** Docked or handheld (set-docked); applied to every core load. */
 let docked = false;
+/** Seconds the console clock runs from the host's (set-clock-offset, ?date=). */
+let clockOffsetSeconds = 0;
 /** The renderer the main thread chose (set-gpu-mode); applied to every core load. */
 let gpuMode = false;
 /** Block-compressed formats the GPU samples (set-gpu-compression). */
@@ -1339,7 +1341,7 @@ function loadGame(file: File): CPUToMainMessage {
   readCache.clear();
   chunksSeen.clear();
   const loadingCore = core;
-  loadingCore._emulator_set_rtc_ffi(BigInt(Math.floor(Date.now() / 1000)));
+  loadingCore._emulator_set_rtc_ffi(BigInt(Math.floor(Date.now() / 1000) + clockOffsetSeconds));
   loadingCore._emulator_set_utc_offset_ffi(-new Date().getTimezoneOffset() * SECONDS_PER_MINUTE);
   loadingCore._emulator_set_frame_skip_ffi(frameSkip);
   loadingCore._emulator_set_docked_ffi(docked ? 1 : 0);
@@ -1663,6 +1665,12 @@ self.addEventListener("message", (event: MessageEvent<MainToCPUMessage>) => {
   if (msg.type === "set-gpu-async") {
     gpuAsync = msg.on;
     if (core) applyGpuAsync(core);
+    return;
+  }
+
+  if (msg.type === "set-clock-offset") {
+    clockOffsetSeconds = msg.seconds;
+    log("info", `console clock ${msg.seconds >= 0 ? "+" : ""}${msg.seconds} s from the host's (from the next load)`);
     return;
   }
 

@@ -83,6 +83,9 @@ export type MainToCPUMessage =
   | { readonly type: "set-frame-skip"; readonly frames: number }
   /* Docked or handheld, a user setting: the operation mode titles see. */
   | { readonly type: "set-docked"; readonly docked: boolean }
+  /* The console clock: seconds added to the host clock when a game loads
+   * (?date=YYYY-MM-DD - another season in Animal Crossing, say). */
+  | { readonly type: "set-clock-offset"; readonly seconds: number }
   | { readonly type: "set-gpu-async"; readonly on: boolean }
   | { readonly type: "set-render-workers"; readonly count: number }
   | { readonly type: "dump-threads"; readonly backtrace: boolean }

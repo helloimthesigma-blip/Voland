@@ -204,6 +204,8 @@ const CUBE_FACES = 6;
 const SLOW_PASS_END_MS = 50;
 const SLOW_PASS_LOGS = 20;
 const RECENT_CREATES = 8;
+/* A frame whose GPU work takes longer than this is logged (watchQueue). */
+const SLOW_QUEUE_MS = 1000;
 /* A memory report (textures by kind, storage buffers) every this many presents. */
 const MEMORY_REPORT_PRESENTS = 300;
 /* Render-target shapes the memory report names (the most numerous). */
@@ -623,6 +625,7 @@ export class GpuExecutor {
    * GPU process compiles them, which can hold up the page's frames. */
   private newPipelines = 0;
   private newModules = 0;
+  private largestNewModule = 0; /* characters of WGSL, this frame */
   /* Look-ahead (scanAhead): the stream offset scanned to, what the records
    * between the executor and there define, and the pipelines being built. */
   private aheadAt = 0;
@@ -1300,6 +1303,7 @@ export class GpuExecutor {
       if (code === undefined) throw new Error(`no shader text ${hash}`);
       module = this.device.createShaderModule({ code });
       this.newModules++;
+      this.largestNewModule = Math.max(this.largestNewModule, code.length);
       if (this.madeModules.has(hash)) this.stats.modulesRemade++;
       else this.madeModules.add(hash);
       if (this.liveModules.size >= LIVE_MODULE_LIMIT) {
@@ -2557,6 +2561,21 @@ export class GpuExecutor {
     this.stats.copies++;
   }
 
+  /** A frame the GPU takes over SLOW_QUEUE_MS to finish holds the guest
+   * up (its fences wait): said in the log with what was new in it - a
+   * shader the driver takes seconds to compile shows here, not in this
+   * thread (TOTK at Lookout Landing stalled ~10 s now and then). */
+  private watchQueue(): void {
+    const present = this.stats.presents, pipelines = this.newPipelines, modules = this.newModules;
+    const largest = this.largestNewModule, submitted = performance.now();
+    void this.device.queue.onSubmittedWorkDone().then(() => {
+      const ms = performance.now() - submitted;
+      if (ms < SLOW_QUEUE_MS) return;
+      this.host.log("warn", `GPU queue: present ${present} done ${ms.toFixed(0)} ms after its submit ` +
+        `(${pipelines} new pipelines, ${modules} new shader modules, largest ${largest} characters)`);
+    });
+  }
+
   private present(p: Present): void {
     const src = this.textures.get(p.id);
     const width = p.rect[2] ?? 0, height = p.rect[3] ?? 0;
@@ -2581,6 +2600,7 @@ export class GpuExecutor {
       GPUColorWrite.RED | GPUColorWrite.GREEN | GPUColorWrite.BLUE);
     this.flush();
     this.stats.presents++;
+    this.watchQueue();
     if (this.newPipelines || this.newModules) {
       /* Wall-clock time, to line a page stall up with a burst of builds. */
       this.host.log("info", `new GPU programs at ${((performance.timeOrigin + performance.now()) / 1000).toFixed(1)}: ` +
@@ -2591,6 +2611,7 @@ export class GpuExecutor {
       this.unskippable.clear();
       this.newPipelines = 0;
       this.newModules = 0;
+      this.largestNewModule = 0;
       this.aheadBuilt = 0;
       this.aheadWaitMs = 0;
       this.skippedDraws = 0;
