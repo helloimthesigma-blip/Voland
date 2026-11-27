@@ -1065,6 +1065,33 @@ shows it next to the backend name.
   unallocated before). Lookout Landing helper calls 17-19M -> ~5M per
   20 s measure; fps 11.7 -> 12.7 and 10.8 -> 13.1 in two 4-pair runs
   (7 of 8 pairs) taken while the mini was busy with other work.
+- **0.6.5** (2026-11-27) - FRECPE and FRSQRTE (single precision, vector
+  and scalar), vector FABD, SQXTUN, SHLL, (S|U)ADDW/(S|U)SUBW and the
+  scalar single FRECPS/FRSQRTS natively. The estimates: for a normal
+  input the estimate's fraction depends only on input bits 22-15
+  (FRSQRTE: also the exponent's parity), so a 256/512-entry table filled
+  from the interpreter's own estimates gives it, and the exponent
+  (FRECPE: and the sign) is arithmetic. Lanes
+  that are zero, subnormal, infinite, NaN, negative (FRSQRTE) or whose
+  estimate would be subnormal (FRECPE) take the helper. At Lookout
+  Landing they were ~33k of ~420k helper calls per fallback report.
+  Vector FABD (the top one, ~22k) takes FSUB's fast arms and its NaN-lane
+  fix-up, then clears the sign bits (FPAbs clears a NaN's too). SQXTUN
+  is wasm's unsigned saturating narrow (of signed lanes, as the
+  architecture's), QC set as SQXTN's; SHLL an unsigned widen and a shift
+  by the element size; the W forms widen m only. Together ~42k more.
+  FRECPS and FRSQRTS (~31k) are FMSUB's fused f64 arm with 2.0 or 3.0
+  as the addend, FRSQRTS halving the f64 sum (exact; the result is not
+  tiny, so the f32 rounding is of the same bits); inf * 0 (2.0 or 1.5
+  without IOC) is a NaN there and takes the helper.
+  jit_diff_test: targeted sequences of the estimates on normal numbers of
+  every exponent, and of FABD with IXC (or IOC, UFC and IXC) recorded and
+  a negative NaN lane, of SQXTUN, SHLL and the W forms on mixed lanes
+  with FPSR read back, and of FRECPS/FRSQRTS near 1 (and inf * 0). A wrong exponent bias in either estimate, a
+  scalar form keeping the upper lanes, a dropped abs in either FABD arm,
+  a signed narrow for SQXTUN, a wrong SHLL shift, a widened n for
+  UADDW, and FRSQRTS unhalved, the two constants swapped or n*m added
+  were each caught; the random streams caught none of them.
 
 ## What a region costs on V8
 

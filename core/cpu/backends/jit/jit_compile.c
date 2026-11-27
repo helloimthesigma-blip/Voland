@@ -3345,9 +3345,19 @@ static void emit_fp_arith(Ctx *c, bool dbl, uint32_t opcode, bool two, uint32_t 
  * as one rounding unless the f64 sum sits exactly on an f32 midpoint.
  * FZ-safe (Silksong runs with FZ: every FMADD took softfloat): no input
  * subnormal, and the result is never tiny. */
-static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t m, uint32_t a, uint32_t d) {
-  load_fp(c, a, false);
-  op(c, WASM_OP_F64_PROMOTE_F32);
+#define F64_ONE 0x3FF0000000000000ull
+#define F64_HALF 0x3FE0000000000000ull
+/* The addend is S[a], or (FRECPS, FRSQRTS) the f64 constant `addend_bits`
+ * when that is non-zero; `halve` halves the sum (FRSQRTS), exactly in f64
+ * - the f32 rounding is then of the same bits, as the result is not tiny. */
+static void emit_fp_fused_single_as(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t m, uint32_t a, uint64_t addend_bits,
+                                    bool halve, uint32_t d) {
+  if (addend_bits) {
+    f64c(c, addend_bits);
+  } else {
+    load_fp(c, a, false);
+    op(c, WASM_OP_F64_PROMOTE_F32);
+  }
   ltee(c, L_FD2);
   if (o1) op(c, WASM_OP_F64_NEG);
   lset(c, L_FD6); /* the addend */
@@ -3362,6 +3372,12 @@ static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t 
   ltee(c, L_FD7); /* the product, exact */
   lget(c, L_FD6);
   op(c, WASM_OP_F64_ADD);
+  const uint32_t sum = halve ? L_FD5 : L_FD;
+  if (halve) {
+    ltee(c, L_FD5);
+    f64c(c, F64_HALF);
+    op(c, WASM_OP_F64_MUL);
+  }
   ltee(c, L_FD);
   op(c, WASM_OP_F32_DEMOTE_F64);
   lset(c, L_FS);
@@ -3380,13 +3396,13 @@ static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t 
    * to the f32 the fused operation gives (half to even), only a rounded
    * one could round twice. Sums of floats of similar size sit on
    * midpoints often (Silksong's FMADDs all took softfloat without this). */
-  lget(c, L_FD);
+  lget(c, sum);
   op(c, WASM_OP_I64_REINTERPRET_F64);
   i64c(c, (1ull << F32_EXTRA_BITS) - 1u);
   op(c, WASM_OP_I64_AND);
   i64c(c, F32_MIDPOINT);
   op(c, WASM_OP_I64_NE);
-  emit_sum_exact64(c, L_FD6, L_FD7, false, L_FD);
+  emit_sum_exact64(c, L_FD6, L_FD7, false, sum);
   op(c, WASM_OP_I32_OR);
   op(c, WASM_OP_I32_AND);
   emit_fp_env_ok_as(c, true);
@@ -3394,6 +3410,21 @@ static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t 
   fp_fast_arm(c);
   store_fp_local(c, d, false, L_FS);
   fp_else_exact_scalar(c, d, false);
+}
+static void emit_fp_fused_single(Ctx *c, bool o1, bool o0, uint32_t n, uint32_t m, uint32_t a, uint32_t d) {
+  emit_fp_fused_single_as(c, o1, o0, n, m, a, 0, false, d);
+}
+
+/* FRECPS / FRSQRTS (scalar, single): 2 - n*m and (3 - n*m) / 2, fused.
+ * inf * 0 (2.0 or 1.5, no IOC) makes a NaN here: the helper takes it. */
+#define F64_TWO_BITS 0x4000000000000000ull
+#define F64_THREE_BITS 0x4008000000000000ull
+static bool c_simd_scalar_step(Ctx *c, uint32_t insn) {
+  if ((insn & 0xFF60FC00u) != 0x5E20FC00u) return false; /* single only */
+  const bool rsqrt = bit(insn, 23);
+  emit_fp_fused_single_as(c, false, true, bits(insn, 9, 5), bits(insn, 20, 16), 0,
+                          rsqrt ? F64_THREE_BITS : F64_TWO_BITS, rsqrt, bits(insn, 4, 0));
+  return true;
 }
 
 /* FMAX/FMIN/FMAXNM/FMINNM without NaNs and with FPCR 0: the result is
@@ -3689,8 +3720,6 @@ static uint8_t fp_round_op(uint32_t mode, bool dbl) {
  * NaNs. Clobbers L_FS2 / L_FD2. */
 #define F32_ONE 0x3F800000u
 #define F32_HALF 0x3F000000u
-#define F64_ONE 0x3FF0000000000000ull
-#define F64_HALF 0x3FE0000000000000ull
 static void emit_round_value(Ctx *c, uint32_t mode, bool dbl, uint32_t x) {
   lget(c, x);
   if (mode != FP_ROUND_AWAY) {
@@ -4131,7 +4160,10 @@ static void emit_fused_pair(Ctx *c, bool high) {
   simd(c, WASM_SIMD_F64X2_ADD);
 }
 
-typedef enum Vector_Fp_Op { VFP_ADD, VFP_SUB, VFP_MUL, VFP_DIV, VFP_MLA, VFP_MLS, VFP_MAX, VFP_MIN } Vector_Fp_Op;
+/* VFP_ABD: FABD, |n - m| (FPAbs of FSUB's result, its NaNs included). */
+typedef enum Vector_Fp_Op {
+  VFP_ADD, VFP_SUB, VFP_MUL, VFP_DIV, VFP_MLA, VFP_MLS, VFP_MAX, VFP_MIN, VFP_ABD
+} Vector_Fp_Op;
 
 /* V[d] = max or min of L_VA and L_VB lane by lane: exact without NaNs
  * (FMAX and FMAXNM agree then) and with FPCR as fz_safe arms assume;
@@ -4261,11 +4293,13 @@ static void emit_vector_fp_as(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32
     emit_vector_fp_min_max_as(c, vop == VFP_MAX, dbl, q, d, flushed);
     return;
   } else {
+    const Vector_Fp_Op arith = vop == VFP_ABD ? VFP_SUB : vop;
     lget(c, L_VA);
     lget(c, L_VB);
-    simd(c, dbl ? ops64[vop] : ops32[vop]);
+    simd(c, dbl ? ops64[arith] : ops32[arith]);
+    if (vop == VFP_ABD) simd(c, dbl ? WASM_SIMD_F64X2_ABS : WASM_SIMD_F32X4_ABS);
     lset(c, L_VR);
-    if (vop == VFP_ADD || vop == VFP_SUB) {
+    if (arith == VFP_ADD || arith == VFP_SUB) {
       emit_lane_finite(c, L_VR, dbl);
       and_lanes_not_subnormal(c, L_VR, dbl);
     } else { /* normal, or an exact zero: x*0, 0/x */
@@ -4300,6 +4334,11 @@ static void emit_vector_fp_as(Ctx *c, Vector_Fp_Op vop, bool dbl, bool q, uint32
     emit_nan_lanes_ok(c, dbl, q);
     open_if(c, WASM_BLOCK_VOID);
     emit_vector_nan_lanes(c, dbl);
+    if (vop == VFP_ABD) {
+      lget(c, L_VR);
+      simd(c, dbl ? WASM_SIMD_F64X2_ABS : WASM_SIMD_F32X4_ABS);
+      lset(c, L_VR);
+    }
     store_v(c, d, L_VR, q);
     vector_fp_else(c, vop, dbl, q, n, d, flushed);
     end_(c);
@@ -4548,6 +4587,119 @@ static void emit_vector_fsqrt(Ctx *c, bool dbl, bool q, uint32_t n, uint32_t d) 
   fp_else_exact(c, &none);
 }
 
+/* FRECPE / FRSQRTE (vector and scalar, singles). For a normal input the
+ * estimate's fraction depends only on input bits 22-15 (FRSQRTE: and the
+ * exponent's parity, bit 23), so a table holds it, filled from the
+ * interpreter's own estimates; the exponent (and FRECPE's sign) is
+ * arithmetic. */
+#define ESTIMATE_INDEX_SHIFT 15u
+#define ESTIMATE_RECIP_ENTRIES 256u   /* input bits 22-15 */
+#define ESTIMATE_RSQRT_ENTRIES 512u   /* input bits 23-15 */
+#define ESTIMATE_FRACTION_MASK 0x7F8000u
+#define ESTIMATE_RECIP_EXP_BIAS 253u  /* FRECPE: result exponent = 253 - exponent */
+#define ESTIMATE_RSQRT_EXP_BIAS 380u  /* FRSQRTE: (380 - exponent) / 2 */
+#define F32_EXP_SHIFT 23u
+#define F32_EXP_FIELD 0xFFu
+#define F32_MIN_NORMAL_BITS 0x00800000u
+#define F32_HALF_EXP_BIAS 126u        /* 0.5: an even exponent with a zero fraction */
+/* FRECPE's normal results: exponents 1..252 (253 and 254 give subnormals,
+ * or zero under FZ); FRSQRTE's: every positive normal. */
+#define ESTIMATE_RECIP_NORMAL_SPAN (252u << F32_EXP_SHIFT)
+#define ESTIMATE_RSQRT_NORMAL_SPAN (254u << F32_EXP_SHIFT)
+static uint32_t g_estimate_recip[ESTIMATE_RECIP_ENTRIES];
+static uint32_t g_estimate_rsqrt[ESTIMATE_RSQRT_ENTRIES];
+static const uint32_t *estimate_table(bool rsqrt) {
+  static bool built;
+  if (!__atomic_load_n(&built, __ATOMIC_ACQUIRE)) {
+    uint32_t fpsr = 0;
+    FP_Env env = {.fpcr = 0, .fpsr = &fpsr};
+    for (uint32_t i = 0; i < ESTIMATE_RSQRT_ENTRIES; i++) {
+      const uint64_t op = ((uint64_t)F32_HALF_EXP_BIAS << F32_EXP_SHIFT) + ((uint64_t)i << ESTIMATE_INDEX_SHIFT);
+      g_estimate_rsqrt[i] = (uint32_t)fp_rsqrt_estimate(FP_SINGLE, op, &env) & ESTIMATE_FRACTION_MASK;
+      if (i < ESTIMATE_RECIP_ENTRIES) {
+        g_estimate_recip[i] = (uint32_t)fp_recip_estimate(FP_SINGLE, op, &env) & ESTIMATE_FRACTION_MASK;
+      }
+    }
+    __atomic_store_n(&built, true, __ATOMIC_RELEASE);
+  }
+  return rsqrt ? g_estimate_rsqrt : g_estimate_recip;
+}
+/* Native when every lane is a normal number with a normal estimate (and
+ * for FRSQRTE positive): those raise nothing, whatever FPCR says. TOTK at
+ * Lookout Landing sent ~33k of them per fallback report to the helper. */
+static void emit_fp_estimate(Ctx *c, bool rsqrt, bool scalar, bool q, uint32_t n, uint32_t d) {
+  const uint32_t lanes = scalar ? 1u : q ? 4u : 2u;
+  const uint64_t table = (uint64_t)(uintptr_t)estimate_table(rsqrt);
+  load_v(c, n);
+  lset(c, L_VA);
+  if (scalar) v128_const(c, 0, 0); /* the scalar form clears the rest of V[d] */
+  else lget(c, L_VA);
+  lset(c, L_VR);
+  for (uint32_t lane = 0; lane < lanes; lane++) {
+    lget(c, L_VA);
+    simd(c, WASM_SIMD_I32X4_EXTRACT_LANE);
+    wasm_u8(c->b, (uint8_t)lane);
+    if (!rsqrt) {
+      i32c(c, (int32_t)~FP_SIGN_S);
+      op(c, WASM_OP_I32_AND);
+    }
+    i32c(c, (int32_t)F32_MIN_NORMAL_BITS);
+    op(c, WASM_OP_I32_SUB);
+    i32c(c, (int32_t)(rsqrt ? ESTIMATE_RSQRT_NORMAL_SPAN : ESTIMATE_RECIP_NORMAL_SPAN));
+    op(c, WASM_OP_I32_LT_U);
+    if (lane) op(c, WASM_OP_I32_AND);
+  }
+  fp_fast_arm(c);
+  for (uint32_t lane = 0; lane < lanes; lane++) {
+    lget(c, L_VR);
+    lget(c, L_VA);
+    simd(c, WASM_SIMD_I32X4_EXTRACT_LANE);
+    wasm_u8(c->b, (uint8_t)lane);
+    op(c, WASM_OP_I64_EXTEND_I32_U);
+    lset(c, L_T0);
+    /* the table's fraction */
+    lget(c, L_T0);
+    i64c(c, ESTIMATE_INDEX_SHIFT);
+    op(c, WASM_OP_I64_SHR_U);
+    i64c(c, (rsqrt ? ESTIMATE_RSQRT_ENTRIES : ESTIMATE_RECIP_ENTRIES) - 1u);
+    op(c, WASM_OP_I64_AND);
+    i64c(c, 2u);
+    op(c, WASM_OP_I64_SHL);
+    i64c(c, table);
+    op(c, WASM_OP_I64_ADD);
+    mem(c, WASM_OP_I32_LOAD, ALIGN_4, 0);
+    /* | the exponent: FRSQRTE (380 - e) / 2, FRECPE 253 - e and the sign */
+    i32c(c, (int32_t)(rsqrt ? ESTIMATE_RSQRT_EXP_BIAS : ESTIMATE_RECIP_EXP_BIAS));
+    lget(c, L_T0);
+    i64c(c, F32_EXP_SHIFT);
+    op(c, WASM_OP_I64_SHR_U);
+    op(c, WASM_OP_I32_WRAP_I64);
+    i32c(c, (int32_t)F32_EXP_FIELD);
+    op(c, WASM_OP_I32_AND);
+    op(c, WASM_OP_I32_SUB);
+    if (rsqrt) {
+      i32c(c, 1);
+      op(c, WASM_OP_I32_SHR_U);
+    }
+    i32c(c, (int32_t)F32_EXP_SHIFT);
+    op(c, WASM_OP_I32_SHL);
+    op(c, WASM_OP_I32_OR);
+    if (!rsqrt) {
+      lget(c, L_T0);
+      op(c, WASM_OP_I32_WRAP_I64);
+      i32c(c, (int32_t)FP_SIGN_S);
+      op(c, WASM_OP_I32_AND);
+      op(c, WASM_OP_I32_OR);
+    }
+    simd(c, WASM_SIMD_I32X4_REPLACE_LANE);
+    wasm_u8(c->b, (uint8_t)lane);
+    lset(c, L_VR);
+  }
+  store_v(c, d, L_VR, q && !scalar);
+  Sync none = {0};
+  fp_else_exact(c, &none);
+}
+
 static void pairwise_lanes(uint8_t lanes[SIMD_LANE_BYTES], uint32_t esize, uint32_t count, bool odd);
 
 /* FADDP (vector): the pairs of n, then of m, added - the even and odd
@@ -4647,6 +4799,7 @@ static bool c_vector_fp_fast(Ctx *c, uint32_t insn) {
     switch (key) {
     case 0x02: vop = VFP_ADD; break;
     case 0x0A: vop = VFP_SUB; break;
+    case 0x1A: vop = VFP_ABD; break;
     case 0x13: vop = VFP_MUL; break;
     case 0x17: vop = VFP_DIV; break;
     case 0x01: vop = VFP_MLA; break;
@@ -5172,6 +5325,10 @@ static bool c_simd_misc_fp(Ctx *c, uint32_t insn) {
     emit_scalar_lane_convert(c, false, dbl, u, rn, rd, mode);
     return true;
   }
+  if (opcode == 0x1D && hi && !dbl) { /* FRECPE / FRSQRTE */
+    emit_fp_estimate(c, u, scalar, q, rn, rd);
+    return true;
+  }
   if (scalar || !hi) return false;
   if (opcode == 0x1F && u) { /* FSQRT */
     emit_vector_fsqrt(c, dbl, q, rn, rd);
@@ -5497,15 +5654,16 @@ static void emit_vector_shift_by_register(Ctx *c, bool u, bool q, uint32_t n, ui
 }
 
 /* SADDL/UADDL/SSUBL/USUBL (and the "2" forms on the upper halves): both
- * sources widened, then added or subtracted at twice the lane size. */
-static void emit_vector_add_sub_long(Ctx *c, bool u, bool upper, bool sub, uint32_t size, uint32_t n, uint32_t m,
-                                     uint32_t d) {
+ * sources widened, then added or subtracted at twice the lane size; the
+ * W forms (SADDW/UADDW/SSUBW/USUBW) widen m only. */
+static void emit_vector_add_sub_long(Ctx *c, bool u, bool upper, bool sub, bool wide, uint32_t size, uint32_t n,
+                                     uint32_t m, uint32_t d) {
   static const uint32_t extend[3] = {WASM_SIMD_I16X8_EXTEND_LOW_I8X16_S, WASM_SIMD_I32X4_EXTEND_LOW_I16X8_S,
                                      WASM_SIMD_I64X2_EXTEND_LOW_I32X4_S};
   /* low_s, high_s, low_u, high_u */
   const uint32_t widen = extend[size] + (u ? 2u : 0u) + (upper ? 1u : 0u);
   load_v(c, n);
-  simd(c, widen);
+  if (!wide) simd(c, widen);
   load_v(c, m);
   simd(c, widen);
   int_op(c, sub ? IOP_SUB : IOP_ADD, size + 1u);
@@ -5513,11 +5671,15 @@ static void emit_vector_add_sub_long(Ctx *c, bool u, bool upper, bool sub, uint3
   store_v(c, d, L_VR, true);
 }
 
-/* SQXTN/SQXTN2 from 16- or 32-bit lanes: wasm's signed saturating narrow;
+/* SQXTN/SQXTN2 (and SQXTUN/SQXTUN2: `to_unsigned`) from 16- or 32-bit
+ * lanes: wasm's saturating narrows of signed lanes, to signed or unsigned;
  * FPSR.QC is set when widening the result back does not give the source. */
-static void emit_vector_sqxtn(Ctx *c, uint32_t size, bool upper, uint32_t n, uint32_t d) {
-  static const uint32_t narrow[2] = {WASM_SIMD_I8X16_NARROW_I16X8_S, WASM_SIMD_I16X8_NARROW_I32X4_S};
-  static const uint32_t widen[2] = {WASM_SIMD_I16X8_EXTEND_LOW_I8X16_S, WASM_SIMD_I32X4_EXTEND_LOW_I16X8_S};
+static void emit_vector_sqxtn(Ctx *c, uint32_t size, bool upper, bool to_unsigned, uint32_t n, uint32_t d) {
+  const uint32_t narrow[2] = {WASM_SIMD_I8X16_NARROW_I16X8_S + (to_unsigned ? 1u : 0u),
+                              WASM_SIMD_I16X8_NARROW_I32X4_S + (to_unsigned ? 1u : 0u)};
+  /* low_s, high_s, low_u */
+  const uint32_t widen[2] = {WASM_SIMD_I16X8_EXTEND_LOW_I8X16_S + (to_unsigned ? 2u : 0u),
+                             WASM_SIMD_I32X4_EXTEND_LOW_I16X8_S + (to_unsigned ? 2u : 0u)};
   static const uint32_t all_true[2] = {WASM_SIMD_I16X8_ALL_TRUE, WASM_SIMD_I32X4_ALL_TRUE};
   load_v(c, n);
   ltee(c, L_VA);
@@ -5585,10 +5747,10 @@ static bool c_vector_int_arith(Ctx *c, uint32_t insn) {
     emit_vector_shift_by_register(c, u, q, rn, rm, rd);
     return true;
   }
-  if (!bit(insn, 10) && !bit(insn, 11) && (bits(insn, 15, 12) == 0x0 || bits(insn, 15, 12) == 0x2)) {
-    /* three different: (S|U)ADDL, (S|U)SUBL */
+  if (!bit(insn, 10) && !bit(insn, 11) && bits(insn, 15, 12) <= 0x3) {
+    /* three different: (S|U)ADDL, (S|U)ADDW, (S|U)SUBL, (S|U)SUBW */
     if (size == 3u) return false;
-    emit_vector_add_sub_long(c, u, q, bits(insn, 15, 12) == 0x2, size, rn, rm, rd);
+    emit_vector_add_sub_long(c, u, q, bit(insn, 13), bit(insn, 12), size, rn, rm, rd);
     return true;
   }
   if (bit(insn, 10)) { /* three same */
@@ -5643,8 +5805,24 @@ static bool c_vector_int_arith(Ctx *c, uint32_t insn) {
     return true;
   }
   if (bits(insn, 20, 17) != 0 || bits(insn, 11, 10) != 2) return false;
-  if (!u && bits(insn, 16, 12) == 0x14 && size < 2u) { /* SQXTN */
-    emit_vector_sqxtn(c, size, q, rn, rd);
+  if (bits(insn, 16, 12) == 0x14 && !u && size < 2u) { /* SQXTN */
+    emit_vector_sqxtn(c, size, q, false, rn, rd);
+    return true;
+  }
+  if (bits(insn, 16, 12) == 0x12 && u && size < 2u) { /* SQXTUN */
+    emit_vector_sqxtn(c, size, q, true, rn, rd);
+    return true;
+  }
+  if (bits(insn, 16, 12) == 0x13 && u && size < 3u) { /* SHLL/SHLL2: widened, shifted by the element size */
+    static const uint32_t extend[3] = {WASM_SIMD_I16X8_EXTEND_LOW_I8X16_S, WASM_SIMD_I32X4_EXTEND_LOW_I16X8_S,
+                                       WASM_SIMD_I64X2_EXTEND_LOW_I32X4_S};
+    static const uint32_t shl[3] = {WASM_SIMD_I16X8_SHL, WASM_SIMD_I32X4_SHL, WASM_SIMD_I64X2_SHL};
+    load_v(c, rn);
+    simd(c, extend[size] + 2u + (q ? 1u : 0u)); /* low_u, high_u */
+    i32c(c, (int32_t)(8u << size));
+    simd(c, shl[size]);
+    lset(c, L_VR);
+    store_v(c, rd, L_VR, true);
     return true;
   }
   /* Two-register misc. */
@@ -5673,8 +5851,8 @@ static bool c_vector_int_arith(Ctx *c, uint32_t insn) {
 }
 
 static bool c_simd_fp(Ctx *c, uint32_t insn) {
-  if (c_scalar_fp_fast(c, insn) || c_vector_fp_fast(c, insn) || c_vector_int_fast(c, insn) ||
-      c_vector_int_arith(c, insn) || c_simd_copy(c, insn) ||
+  if (c_scalar_fp_fast(c, insn) || c_simd_scalar_step(c, insn) || c_vector_fp_fast(c, insn) ||
+      c_vector_int_fast(c, insn) || c_vector_int_arith(c, insn) || c_simd_copy(c, insn) ||
       c_simd_misc_fp(c, insn) || c_simd_pairwise(c, insn) || c_simd_across(c, insn) || c_simd_shift_long(c, insn) ||
       c_simd_table(c, insn) || c_simd_narrow_shift(c, insn))
     return true;

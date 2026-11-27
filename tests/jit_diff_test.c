@@ -382,7 +382,8 @@ static uint32_t cache_vreg(void) { return 16u + pick(4); }
 static uint32_t gen_fp_cache_mix(void) {
   const uint32_t type = pick(2) << 22, d = cache_vreg(), n = cache_vreg(), m = cache_vreg();
   static const uint32_t arith[5] = {0u, 1u, 2u, 3u, 8u}; /* FMUL FDIV FADD FSUB FNMUL */
-  switch (pick(18)) {
+  switch (pick(19)) {
+  case 18: return 0x0EA1D800u | (pick(2) << 30) | (pick(2) << 29) | (pick(4) == 0 ? 1u << 22 : 0) | (n << 5) | d; /* FRECPE/FRSQRTE (vector) */
   case 17: return 0x2EA1F800u | (pick(2) << 30) | type | (n << 5) | d;                  /* FSQRT (vector): .2S/.4S/.2D (.1D: reserved) */
   case 15: return 0x4EA04400u | (pick(2) << 29) | ((28u + pick(4)) << 16) | (n << 5) | d; /* SSHL/USHL v.4s, counts from V28-V31 */
   case 10: return 0x1F000000u | type | (pick(2) << 21) | (m << 16) | (pick(2) << 15) | (cache_vreg() << 10) | (n << 5) | d; /* FMADD family */
@@ -614,6 +615,62 @@ static void run_case(uint32_t iteration) {
       };
       for (uint32_t k = 0; k < 10u; k++) code[i++] = fz[k];
       code[i] = 0xD53B442Bu; /* mrs x11, fpsr */
+      continue;
+    }
+    if (i + 12u < length && pick(48) == 0) { /* FRSQRTE/FRECPE of normal numbers (the estimate table), +-, every exponent */
+      const uint32_t hi1 = (pick(4) == 0 ? 1u << 15 : 0) | (0x80u + pick(0x7E80u)), hi2 = 0x80u + pick(0x7F00u);
+      const uint32_t est[12] = {
+          0x52800009u | (pick(0x10000u) << 5), 0x72A00009u | (hi1 << 5), /* w9, w10: normal bit patterns */
+          0x5280000Au | (pick(0x10000u) << 5), 0x72A0000Au | (hi2 << 5),
+          0x4E040D3Cu, 0x4E0C1D5Cu,                                      /* v28 = 4 x w9, then v28.s[1] = w10 */
+          0x6EA1DB9Du, 0x4EA1DB9Eu,                                      /* frsqrte v29.4s, frecpe v30.4s = v28 */
+          0x2EA1DB9Fu, 0x0EA1DB9Bu,                                      /* frsqrte v31.2s, frecpe v27.2s */
+          0x7EA1DB9Au, 0x5EA1DB99u,                                      /* frsqrte s26, frecpe s25 = s28 */
+      };
+      for (uint32_t k = 0; k < 12u; k++) code[i++] = est[k];
+      i--;
+      continue;
+    }
+    if (i + 11u < length && pick(48) == 0) { /* FABD with IXC (or IOC, UFC and IXC) recorded: |n - m|, NaN lanes too */
+      const bool nan = pick(2);
+      const uint32_t abd[11] = {
+          nan ? 0xD280032Bu : 0xD280020Bu, 0xD51B442Bu,                  /* FPSR = IOC | UFC | IXC, or IXC */
+          0x52800009u | (pick(0x10000u) << 5), 0x72A00009u | ((0x3000u + pick(0x2000u)) << 5), /* w9: about 1 */
+          0x4E040D3Cu,                                                   /* v28 = 4 x w9 */
+          0x5280002Au, nan ? 0x72BFF80Au : 0x72A7F00Au, 0x4E0C1D5Cu,    /* v28.s[1] = -quiet NaN, or 1 + 2^-23 */
+          0x4F03F61Du,                                                   /* fmov v29.4s, #1.0 */
+          0x6EBDD79Eu, 0x2EBCD7BFu,                                      /* fabd v30.4s = v28, v29; fabd v31.2s = v29, v28 */
+      };
+      for (uint32_t k = 0; k < 11u; k++) code[i++] = abd[k];
+      i--;
+      continue;
+    }
+    if (i + 15u < length && pick(48) == 0) { /* SQXTUN (QC), SHLL, (S|U)ADDW/SUBW on mixed lanes */
+      const uint32_t mix[15] = {
+          0xD51B443Fu,                                                       /* FPSR = 0 */
+          0x52800009u | (pick(0x10000u) << 5), 0x72A00009u | (pick(0x10000u) << 5), /* w9: any */
+          0x5280000Au | (pick(0x10000u) << 5), pick(2) ? 0x72A0000Au : 0x72A0000Au | (pick(0x10000u) << 5), /* w10: small or any */
+          0x4E040D3Cu, 0x4E0C1D5Cu,                                          /* v28 = 4 x w9, then v28.s[1] = w10 */
+          0x2E612B9Du, 0x6E612B9Du, 0x2E212B9Eu,                             /* sqxtun v29.4h, sqxtun2 v29.8h, sqxtun v30.8b */
+          0x2E613B9Fu, 0x6EA13B9Bu,                                          /* shll v31.4s, shll2 v27.2d */
+          0x2E7C13BAu, 0x4E3C33B9u,                                          /* uaddw v26.4s; ssubw v25.8h */
+          0xD53B442Bu,                                                       /* mrs x11, fpsr: QC */
+      };
+      for (uint32_t k = 0; k < 15u; k++) code[i++] = mix[k];
+      i--;
+      continue;
+    }
+    if (i + 10u < length && pick(48) == 0) { /* FRECPS/FRSQRTS (scalar) near 1 with IXC recorded, or inf * 0 */
+      const bool inf = pick(8) == 0;
+      const uint32_t step[10] = {
+          0xD280020Bu, 0xD51B442Bu,                                                     /* FPSR = IXC */
+          0x52800009u | (inf ? 0 : pick(0x10000u) << 5), 0x72A00009u | ((inf ? 0x7F80u : 0x3F00u + pick(0x200u)) << 5),
+          0x5280000Au | (pick(0x10000u) << 5), 0x72A0000Au | ((inf ? 0 : 0x3F00u + pick(0x200u)) << 5),
+          0x1E270130u, 0x1E270151u,                                                     /* s16 = w9, s17 = w10 */
+          0x5E31FE12u, 0x5EB1FE13u,                                                     /* frecps s18, frsqrts s19 = s16, s17 */
+      };
+      for (uint32_t k = 0; k < 10u; k++) code[i++] = step[k];
+      i--;
       continue;
     }
     if (i + 6u < length && pick(48) == 0) { /* FMAXNM(P) of quiet NaNs and numbers: the numbers (wasm's max: NaN) */
