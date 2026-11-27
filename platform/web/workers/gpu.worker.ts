@@ -88,6 +88,8 @@ const OPTIONAL_FEATURES: readonly GPUFeatureName[] = [
 /* Compute warp shuffles and votes need subgroups exactly a warp wide. */
 /** Records consumed between publishing the read position to the producer. */
 const READ_PUBLISH_RECORDS = 32;
+/* A record whose execution (not counting waits for pipelines built ahead) takes this long is logged. */
+const SLOW_RECORD_MS = 250;
 const WARP_LANES = 32;
 
 type WaitAsync = (a: Int32Array, i: number, v: number) => { async: boolean; value: Promise<string> | string };
@@ -422,7 +424,9 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
       if (type !== REC_PAD) {
         const payload = new Uint8Array(buffer, at + 8, size - 8);
         if (recorder?.take(type, payload)) recorder = null;
+        let began = performance.now(), spent = 0;
         for (let wait = executor.execute(type, payload); wait; wait = executor.execute(type, payload)) {
+          spent += performance.now() - began;
           /* The draw's pipeline is being built (scanAhead). What came before
            * goes to the GPU, the producer gets its space - what it writes
            * meanwhile is scanned too, and builds alongside. */
@@ -431,12 +435,18 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
           Atomics.add(words, OFF_READ_SIGNAL / 4, 1);
           Atomics.notify(words, OFF_READ_SIGNAL / 4);
           unpublished = 0;
-          const began = performance.now();
+          const waited = performance.now();
           await wait;
           yielded = performance.now();
-          executor.noteAheadWait(yielded - began);
+          executor.noteAheadWait(yielded - waited);
           write = Number(Atomics.load(wide, OFF_WRITE / 8));
           executor.scanAhead(buffer, ringBase, capacity, read, write);
+          began = performance.now();
+        }
+        spent += performance.now() - began;
+        if (spent >= SLOW_RECORD_MS) {
+          log("warn", `[gpu] a ${size}-byte record of type ${type} took the GPU worker ${spent.toFixed(0)} ms ` +
+            `(${executor.builtThisFrame()})`);
         }
       }
       read += size;
@@ -449,7 +459,10 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
         unpublished = 0;
       }
     }
+    const flushBegan = performance.now();
     executor.flush();
+    const flushed = performance.now() - flushBegan;
+    if (flushed >= SLOW_RECORD_MS) log("warn", `[gpu] a flush took the GPU worker ${flushed.toFixed(0)} ms`);
     if (Number(Atomics.load(wide, OFF_WRITE / 8)) === write) {
       await waitForChange(words, OFF_WRITE_SIGNAL / 4, seen);
       yielded = performance.now();

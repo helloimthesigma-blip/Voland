@@ -2565,6 +2565,12 @@ export class GpuExecutor {
    * up (its fences wait): said in the log with what was new in it - a
    * shader the driver takes seconds to compile shows here, not in this
    * thread (TOTK at Lookout Landing stalled ~10 s now and then). */
+  /** What this frame has built so far, for the GPU worker's slow-record log. */
+  builtThisFrame(): string {
+    return `${this.newPipelines} pipelines, ${this.newModules} shader modules (largest ${this.largestNewModule} characters) ` +
+      `so far in present ${this.stats.presents + 1}`;
+  }
+
   private watchQueue(): void {
     const present = this.stats.presents, pipelines = this.newPipelines, modules = this.newModules;
     const largest = this.largestNewModule, submitted = performance.now();
