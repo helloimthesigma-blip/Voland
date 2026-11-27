@@ -11,6 +11,7 @@
 #include "gpu/block_linear.h"
 #include "gpu/framebuffer.h"
 #include "hle/kernel/handle_table.h"
+#include "hle/kernel/svc_thread.h"
 #include "hwopus_vectors.h"
 #include "ipc_fixtures.h"
 
@@ -1084,6 +1085,18 @@ static void test_sdk_startup_services(void) {
     /* fatal:u stops the process as crashed. */
     const uint32_t fatal_result = 0x1234u;
     (void)call(service("fatal:u"), 1, &fatal_result, sizeof(fatal_result), NULL);
+    CHECK(g_emu.scheduler.process_crashed);
+    g_emu.scheduler.process_crashed = false;
+    /* svcBreak: a notification-only break (bit 31 - SSBU announces each
+     * module it loads) answers success and is no crash; a plain one is. */
+    CPU_Register_File *regs = g_emu.cpu_backend->get_register_file(g_emu.cpu_state);
+    regs->x[0] = HLE_BREAK_NOTIFICATION_ONLY | 3u;
+    regs->x[1] = 0;
+    regs->x[2] = 0;
+    hle_on_svc(g_emu.cpu_state, 0x26, &g_emu.hle);
+    CHECK(regs->x[0] == HLE_RESULT_SUCCESS && !g_emu.scheduler.process_crashed);
+    regs->x[0] = 0;
+    hle_on_svc(g_emu.cpu_state, 0x26, &g_emu.hle);
     CHECK(g_emu.scheduler.process_crashed);
     g_emu.scheduler.process_crashed = false;
   }
