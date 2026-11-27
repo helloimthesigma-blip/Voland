@@ -4,7 +4,7 @@ A Nintendo Switch emulator that runs in your browser. A C11 core compiled to
 WebAssembly, its own ARM64 → WebAssembly JIT, and a WebGPU renderer. Nothing
 to install, no keys, and most games need no firmware.
 
-> **Status:** Phase 4 (First Boot). All nine games we test play at full or near-full speed during actual play on an M4 Mac mini: Hollow Knight, Silksong, Celeste and Nine Sols, plus Mario Odyssey, Mario Kart 8 Deluxe, Smash Bros. Ultimate, Animal Crossing and Tears of the Kingdom. Recent work fixed Mario Kart's rare mid-race freeze (in the browser build, memory reads could catch another core's half-finished write), and turned the GPU shaders of branching game code into plain if/loop code, which cuts first-visit shader waits by about a quarter and lets them use mipmaps - Mario Odyssey's longest pause is now about four frames in every kingdom. Still open: Tears of the Kingdom's low frame rate, and short pauses the first time a scene's shaders are seen. The full task list is in [DESIGN.md §25](docs/DESIGN.md#25-development-phases), per-game details in [NEW_GAMES.md](docs/NEW_GAMES.md).
+> **Status:** Phase 4 (First Boot). All nine games we test play at full or near-full speed during actual play on an M4 Mac mini: Hollow Knight, Silksong, Celeste and Nine Sols, plus Mario Odyssey, Mario Kart 8 Deluxe, Smash Bros. Ultimate, Animal Crossing and Tears of the Kingdom. Recent work: long sessions in every game ran without an error or a slowdown (20 minutes each; for Mario Kart all eight cups, for Smash Bros. twelve fights with all 71 base fighters unlocked by an edited save), and edited saves took Tears of the Kingdom to Kakariko, Hateno and Gerudo Town; effect shaders on Apple GPUs now get up to 27 values per vertex instead of 14. Still open: Tears of the Kingdom runs at full game speed but about 14 fps, and a scene pauses the first time its shaders are seen. The full task list is in [DESIGN.md §25](docs/DESIGN.md#25-development-phases), per-game details in [NEW_GAMES.md](docs/NEW_GAMES.md).
 
 ### Where each game stands
 
@@ -17,14 +17,14 @@ cap is 60 unless noted.
 | Game | Where it was measured | Speed | fps | Known problems |
 |---|---|---|---|---|
 | Hollow Knight | Greenpath, City of Tears | 100% | 49-57 | none known |
-| Hollow Knight: Silksong | Bellhart, Bonetown | 100% | 57-58 | none known |
+| Hollow Knight: Silksong | Bellhart, Bonetown | 100% | 53-60 | none known |
 | Celeste | Chapter 3 (Celestial Resort) | 100% | 60 | none known |
 | Nine Sols | the first cave | 100% | 45 | |
 | Super Mario Odyssey | ten kingdoms, walking (Cap, Cascade, Sand, Wooded, Lake, Seaside, Snow, Luncheon, Bowser's, Moon) and New Donk City | 100% | 47-60 by kingdom (longest pause about 65 ms) | a kingdom's first seconds stutter while its shaders compile; the camera tutorial needs the right stick pushed up |
-| Mario Kart 8 Deluxe (32-bit) | Grand Prix races, all four races of a cup | 98-100% | 45-58 in races | the first visit to a course pauses while its shaders are built (about 15-20 s before the first race) |
-| Super Smash Bros. Ultimate | Battlefield fights | 94-100% | 32-59 (depends on the fight) | none known |
+| Mario Kart 8 Deluxe (32-bit) | Grand Prix races, all eight cups | 100% | 51-61 in races | the first visit to a course pauses while its shaders are built (about 15-20 s before the first race) |
+| Super Smash Bros. Ultimate | fights on 12 stages, all 71 base fighters unlocked | 100% | 56-62 | none known |
 | Animal Crossing: New Horizons | arrival on the island | 100% | 29 (the game's cap is 30) | generating the island takes a few minutes |
-| Tears of the Kingdom | the cave beneath Hyrule Castle, Great Sky Island, Lookout Landing at night | 99-100% | 12-13 in the cave, 9-10 at Lookout Landing (the game's cap is 30) | none known besides the frame rate |
+| Tears of the Kingdom | Great Sky Island, Lookout Landing (also visited: Kakariko, Hateno, Gerudo Town) | 100% | 13-14 (the game's cap is 30) | a new area's first visit can pause for seconds while its shaders compile |
 
 On an M1 Mac, Silksong gameplay runs at about 33 fps.
 Only macOS has been tested. Phones: Chrome on Android (64-bit, with WebGPU) should run it - the page fits a phone and plays with a paired controller (there are no touch controls) - but it has only been checked in Chrome's phone emulation, and a phone must grant the fixed 5.25 GB of memory. iPhones and iPads cannot run it yet, in Safari or Chrome: every iOS browser, Chrome included, uses Safari's engine, which lacks the 64-bit WebAssembly memory Voland needs, and iOS allows a tab far less than 5.25 GB. The numbers come from `platform/web/tools/perf.mjs`,
