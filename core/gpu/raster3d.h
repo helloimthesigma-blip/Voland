@@ -45,6 +45,7 @@ struct Gpu_Stream;
  * decoding a program in about one draw in five. */
 #define RASTER_PROGRAMS 1024u
 #define RASTER_PROGRAM_INDEX 8192u /* program_find's buckets: slot + 1 by address; 0 empty; may be stale */
+#define RASTER_PROGRAM_INDEX_WAYS 4u /* buckets an address may use: its own and the next three */
 /* Cached texture descriptors. GPU mode keeps only the GPU copy of an
  * uploaded texture, so this count - not the pool - bounds the working
  * set: MK8DX's races sample well over 256 a frame (at 256 every texture

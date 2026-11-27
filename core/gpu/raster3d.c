@@ -996,23 +996,57 @@ static bool program_matches(const Raster3d_Program *p, uint64_t address, bool co
   return p->valid && p->program.address == address && (!compute || p->program.header.stage == SM_STAGE_COMPUTE);
 }
 
+/* An address has RASTER_PROGRAM_INDEX_WAYS buckets, its own and the next
+ * ones: programs on one bucket all stay indexed (with one way, two of
+ * them evicted each other and every other lookup scanned all the slots -
+ * Tears of the Kingdom: ~350 scans a second). */
+static uint16_t *program_bucket_for(Raster3d *r, uint64_t address, bool compute, uint32_t way) {
+  return &r->program_index[(program_bucket(address, compute) + way) & (RASTER_PROGRAM_INDEX - 1u)];
+}
+
 /* The cached program at `address` (compute: a compute one), or NULL. The
  * index answers nearly every lookup; slots are 100 KB apart, so a scan
  * touches a cache line per slot. */
+static void program_index_set(Raster3d *r, uint64_t address, bool compute, uint32_t slot_plus_one);
 static Raster3d_Program *program_find(Raster3d *r, uint64_t address, bool compute) {
-  uint16_t *bucket = &r->program_index[program_bucket(address, compute)];
-  if (*bucket && program_matches(&r->programs[*bucket - 1u], address, compute)) return &r->programs[*bucket - 1u];
+  for (uint32_t way = 0; way < RASTER_PROGRAM_INDEX_WAYS; way++) {
+    const uint16_t bucket = *program_bucket_for(r, address, compute, way);
+    if (bucket && program_matches(&r->programs[bucket - 1u], address, compute)) return &r->programs[bucket - 1u];
+  }
   for (uint32_t i = 0; i < RASTER_PROGRAMS; i++) {
     if (program_matches(&r->programs[i], address, compute)) {
-      *bucket = (uint16_t)(i + 1u);
+      program_index_set(r, address, compute, i + 1u);
       return &r->programs[i];
     }
   }
   return NULL;
 }
 
+/* Whether bucket `b` is one of the buckets of the program it names (a
+ * slot reused since names a program that hashes elsewhere: stale). */
+static bool program_bucket_live(const Raster3d *r, const uint16_t *b) {
+  const Raster3d_Program *p = &r->programs[*b - 1u];
+  if (!p->valid) return false;
+  const uint32_t own = program_bucket(p->program.address, p->program.header.stage == SM_STAGE_COMPUTE);
+  const uint32_t at = (uint32_t)(b - r->program_index);
+  return ((at - own) & (RASTER_PROGRAM_INDEX - 1u)) < RASTER_PROGRAM_INDEX_WAYS;
+}
+
+/* Into a free way (empty, already this slot, or stale), else the first. */
+static void program_index_set(Raster3d *r, uint64_t address, bool compute, uint32_t slot_plus_one) {
+  uint16_t *target = program_bucket_for(r, address, compute, 0);
+  for (uint32_t way = 0; way < RASTER_PROGRAM_INDEX_WAYS; way++) {
+    uint16_t *b = program_bucket_for(r, address, compute, way);
+    if (!*b || *b == slot_plus_one || !program_bucket_live(r, b)) {
+      target = b;
+      break;
+    }
+  }
+  *target = (uint16_t)slot_plus_one;
+}
+
 static void program_index_note(Raster3d *r, const Raster3d_Program *slot, bool compute) {
-  r->program_index[program_bucket(slot->program.address, compute)] = (uint16_t)(slot - r->programs + 1);
+  program_index_set(r, slot->program.address, compute, (uint32_t)(slot - r->programs + 1));
 }
 
 static uint64_t bytes_content_hash(const uint8_t *p, uint64_t n);
