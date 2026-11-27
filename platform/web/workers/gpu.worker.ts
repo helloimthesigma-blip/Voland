@@ -90,6 +90,35 @@ const OPTIONAL_FEATURES: readonly GPUFeatureName[] = [
 const READ_PUBLISH_RECORDS = 32;
 /* A record whose execution (not counting waits for pipelines built ahead) takes this long is logged. */
 const SLOW_RECORD_MS = 250;
+/* A guest frame the GPU worker spends this long on is logged with where the time went. */
+const SLOW_FRAME_MS = 1000;
+
+/** Where the GPU worker's time went between two presents (the slow-frame log). */
+class FrameTimes {
+  private began = performance.now();
+  execute = 0;
+  scan = 0;
+  flush = 0;
+  ahead = 0;
+  idle = 0;
+  yielded = 0;
+  records = 0;
+
+  /** The breakdown of the frame just presented if it was slow, then a fresh count. */
+  presented(): string | null {
+    const now = performance.now(), total = now - this.began;
+    const known = this.execute + this.scan + this.flush + this.ahead + this.idle + this.yielded;
+    const report = total < SLOW_FRAME_MS ? null :
+      `[gpu] the GPU worker spent ${total.toFixed(0)} ms on one frame: ${this.records} records executing ` +
+      `${this.execute.toFixed(0)} ms, scanning ahead ${this.scan.toFixed(0)}, flushing ${this.flush.toFixed(0)}, ` +
+      `waiting for pipelines ${this.ahead.toFixed(0)}, for records ${this.idle.toFixed(0)}, ` +
+      `yielding ${this.yielded.toFixed(0)}, elsewhere ${(total - known).toFixed(0)}`;
+    this.began = now;
+    this.execute = this.scan = this.flush = this.ahead = this.idle = this.yielded = 0;
+    this.records = 0;
+    return report;
+  }
+}
 const WARP_LANES = 32;
 
 type WaitAsync = (a: Int32Array, i: number, v: number) => { async: boolean; value: Promise<string> | string };
@@ -398,12 +427,15 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
   const frames = new FramePacer(renderer, framePace);
   pacer = frames;
   if (framePace) log("info", "frame pacing on: frames shown on an even cadence");
+  const times = new FrameTimes();
   const executor = new GpuExecutor(renderer.device, {
     presentTarget: (width, height) => frames.target(width, height),
     presented: (width, height) => {
       if (++presented === 1) log("info", `first WebGPU frame presented: ${width}x${height}`);
       webgpuPresents++;
       frames.presented();
+      const slow = times.presented();
+      if (slow) log("warn", slow);
     },
     log,
   });
@@ -416,7 +448,11 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
     let write = Number(Atomics.load(wide, OFF_WRITE / 8));
     let read = Number(Atomics.load(wide, OFF_READ / 8));
     let unpublished = 0;
-    if (lookAhead) executor.scanAhead(buffer, ringBase, capacity, read, write);
+    if (lookAhead) {
+      const scanBegan = performance.now();
+      executor.scanAhead(buffer, ringBase, capacity, read, write);
+      times.scan += performance.now() - scanBegan;
+    }
     while (read < write) {
       const at = ringBase + (read % capacity);
       const type = ring.getUint32(at, true);
@@ -430,7 +466,9 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
           /* The draw's pipeline is being built (scanAhead). What came before
            * goes to the GPU, the producer gets its space - what it writes
            * meanwhile is scanned too, and builds alongside. */
+          const flushBegan = performance.now();
           executor.flush();
+          times.flush += performance.now() - flushBegan;
           Atomics.store(wide, OFF_READ / 8, BigInt(read));
           Atomics.add(words, OFF_READ_SIGNAL / 4, 1);
           Atomics.notify(words, OFF_READ_SIGNAL / 4);
@@ -439,11 +477,15 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
           await wait;
           yielded = performance.now();
           executor.noteAheadWait(yielded - waited);
+          times.ahead += yielded - waited;
           write = Number(Atomics.load(wide, OFF_WRITE / 8));
           executor.scanAhead(buffer, ringBase, capacity, read, write);
           began = performance.now();
+          times.scan += began - yielded;
         }
         spent += performance.now() - began;
+        times.execute += spent;
+        times.records++;
         if (spent >= SLOW_RECORD_MS) {
           log("warn", `[gpu] a ${size}-byte record of type ${type} took the GPU worker ${spent.toFixed(0)} ms ` +
             `(${executor.builtThisFrame()})`);
@@ -462,15 +504,20 @@ async function consumeStream(renderer: Renderer, memory: WebAssembly.Memory, hea
     const flushBegan = performance.now();
     executor.flush();
     const flushed = performance.now() - flushBegan;
+    times.flush += flushed;
     if (flushed >= SLOW_RECORD_MS) log("warn", `[gpu] a flush took the GPU worker ${flushed.toFixed(0)} ms`);
     if (Number(Atomics.load(wide, OFF_WRITE / 8)) === write) {
+      const idleBegan = performance.now();
       await waitForChange(words, OFF_WRITE_SIGNAL / 4, seen);
       yielded = performance.now();
+      times.idle += yielded - idleBegan;
     } else if (performance.now() - yielded > STREAM_BUSY_YIELD_MS) {
       /* An unpaced guest keeps the ring full and this loop never waits;
        * let queued messages (debug-dump-targets) run now and then. */
+      const yieldBegan = performance.now();
       await new Promise((resolve) => setTimeout(resolve, 0));
       yielded = performance.now();
+      times.yielded += yielded - yieldBegan;
     }
   }
 }
