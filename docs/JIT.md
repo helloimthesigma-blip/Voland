@@ -568,6 +568,10 @@ the workers that run guest code (2026-11-10, M4 mini, browser):
 |---|---|---|---|---|
 | Hollow Knight, Crossroads fight | 27% | 44% | 20% | 9% |
 | Nine Sols, first cave | 13-24% | 48-58% | ~20% | ~8% |
+| Tears of the Kingdom, Lookout Landing (2026-11-27), each of 3 guest cores | 15-16% | 51-54% | 23-24% | ~8% |
+
+(The GPU thread, C code, in the same TOTK trace: 59% useful, 12%
+delivery.)
 
 Instruction delivery - i-cache, iTLB, fetch - is the bottleneck, not
 memory or execution: compiled regions are ~10-20 KB of machine code each
