@@ -1091,7 +1091,10 @@ shows it next to the backend name.
   scalar form keeping the upper lanes, a dropped abs in either FABD arm,
   a signed narrow for SQXTUN, a wrong SHLL shift, a widened n for
   UADDW, and FRSQRTS unhalved, the two constants swapped or n*m added
-  were each caught; the random streams caught none of them.
+  were each caught; the random streams caught none of them. Lookout
+  Landing, four alternating pairs against 0.6.4: direct SIMD&FP calls
+  ~5.4 M -> ~3.7 M per 20 s measure, but 13.78 -> 13.68 fps (no change:
+  the helper is no longer where TOTK's time goes).
 
 ## What a region costs on V8
 
