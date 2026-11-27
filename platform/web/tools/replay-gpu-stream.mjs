@@ -140,6 +140,8 @@ const result = await page.evaluate(async ({ every, at, dumpTargets }) => {
     requiredLimits: { // as gpu.worker.ts
       maxColorAttachmentBytesPerSample: a.limits.maxColorAttachmentBytesPerSample,
       maxTextureDimension2D: a.limits.maxTextureDimension2D,
+      maxStorageBufferBindingSize: a.limits.maxStorageBufferBindingSize, /* a grown vertex pool (TOTK: 384 MiB) */
+      maxBufferSize: a.limits.maxBufferSize,
     },
   });
   if (globalThis.NO_SHADOW_COMPARE) { /* experiment: every depth compare passes */
