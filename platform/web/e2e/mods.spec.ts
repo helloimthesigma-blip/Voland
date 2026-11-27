@@ -70,11 +70,16 @@ test("a zip installs as a mod that can be disabled, reordered and deleted", asyn
   await rows.nth(1).getByTitle("Higher priority").click();
   await expect(rows.nth(0)).toContainText("Hard Mode");
   await rows.nth(0).locator('input[type="checkbox"]').uncheck();
-  /* The flag is written to OPFS asynchronously; wait for it before reloading. */
+  /* The flag is written to OPFS asynchronously; wait for it before reloading.
+   * A read that races the write fails (NotReadableError): not there yet. */
   await expect.poll(() => page.evaluate(async (title) => {
-    const root = await navigator.storage.getDirectory();
-    const dir = await (await root.getDirectoryHandle("mods")).getDirectoryHandle(title);
-    return (await (await dir.getFileHandle(".voland-mods.json")).getFile()).text();
+    try {
+      const root = await navigator.storage.getDirectory();
+      const dir = await (await root.getDirectoryHandle("mods")).getDirectoryHandle(title);
+      return await (await (await dir.getFileHandle(".voland-mods.json")).getFile()).text();
+    } catch {
+      return "";
+    }
   }, TITLE)).toContain('"disabled":["Hard Mode"]');
   await page.reload();
   await openTab(page, "mods");
