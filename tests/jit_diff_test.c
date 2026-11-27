@@ -565,10 +565,12 @@ static void run_case(uint32_t iteration) {
   const uint32_t length = 1u + pick(STREAM_MAX);
   /* A virtual call at the region's entry: ldr x8, [x29]; ldr x8, [x8, #8];
    * blr x8, x29 an object whose vtable slot (below) holds a small callee,
-   * a large one or garbage; later runs may have x29 changed. */
-  const bool vcall = length > 4u && pick(4) == 0;
+   * a large one or garbage; later runs may have x29 changed. Half of them
+   * come after a branch to the next instruction: in a block of their own. */
+  const bool vcall = length > 5u && pick(4) == 0, vcall_later = pick(2);
   for (uint32_t i = 0; i < length; i++) {
     if (vcall && i == 0) {
+      if (vcall_later) code[i++] = 0x14000001u; /* b +1 */
       code[i++] = 0xF94003A8u; /* ldr x8, [x29] */
       code[i++] = 0xF9400508u; /* ldr x8, [x8, #8] */
       code[i] = 0xD63F0100u;   /* blr x8 */

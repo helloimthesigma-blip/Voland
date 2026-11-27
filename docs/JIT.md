@@ -547,8 +547,13 @@ guard with its return site. Region entries fell 7% (320.6 M to 298.4 M
 on that thread; indirect exits 120.7 M to 110.0 M), but four alternating
 browser pairs at Lookout Landing gave 13.73 against 13.63 fps (two of
 four). A prediction also makes a region's bytes depend on the compiling
-core's registers, so cores stop sharing one compiled module. Reverted;
-jit_diff_test keeps the virtual-call sequence.
+core's registers, so cores stop sharing one compiled module. Seeding
+every block, not just the entry, with the registers no block writes (a
+virtual call in a loop over one object: `ldr x8, [x20]; ldr x8, [x8,
+#0x110]; blr x8` calling `mov w0, #4; ret` getters, ~2 M times each over
+80k slices of its boot) cut entries only 8% in all. Reverted;
+jit_diff_test keeps the virtual-call sequences (in the entry block and
+in a later one).
 
 **Where the time goes: the front end.** Hollow Knight's and Nine Sols'
 main threads are each about one host core and run 3.9-4.8 ns per guest
