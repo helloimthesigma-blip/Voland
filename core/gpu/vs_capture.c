@@ -36,7 +36,7 @@ void vs_capture_write(const Sm_Program *program, const Sm_Env *env, const Sm_Thr
   const Out o_value = {emit, user};
   const Out *o = &o_value;
   static Wgsl_Program_Desc desc;
-  wgsl_default_desc(program, &desc);
+  wgsl_default_desc(program, &desc, WGSL_BASE_VARYINGS);
   const char *skip = NULL;
   if (desc.texture_count) skip = "samples textures";
   static Wgsl_Globals globals;

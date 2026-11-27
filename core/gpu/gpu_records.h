@@ -131,6 +131,10 @@ enum {
 /* Storage buffer bindings and buffers of GPU_LARGE_BUFFER_BYTES: a vertex
  * pool that thrashes may grow to that size (raster3d.c vpool_frame). */
 #define GPU_DEVICE_LARGE_BUFFERS 16u
+/* 28 inter-stage vectors and vertex attributes: draws pass up to
+ * WGSL_MAX_VARYINGS varyings (else WGSL_BASE_VARYINGS). */
+#define GPU_DEVICE_WIDE_VARYINGS 32u
+#define GPU_WIDE_VARYINGS_LIMIT 28u
 #define GPU_LARGE_BUFFER_BYTES (384u << 20)
 
 #define GPU_USAGE_SAMPLED 1u

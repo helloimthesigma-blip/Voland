@@ -21,8 +21,10 @@ import {
   DEVICE_SUBGROUPS,
   DEVICE_FLOAT32_FILTERABLE,
   DEVICE_LARGE_BUFFERS,
+  DEVICE_WIDE_VARYINGS,
   GPU_STREAM_MAGIC,
   LARGE_BUFFER_BYTES,
+  WIDE_VARYINGS_LIMIT,
   OFF_CAPACITY,
   OFF_MAGIC,
   OFF_READ,
@@ -645,6 +647,10 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
      * scene's meshes do not fit it (DEVICE_LARGE_BUFFERS). */
     maxStorageBufferBindingSize: adapter.limits.maxStorageBufferBindingSize,
     maxBufferSize: adapter.limits.maxBufferSize,
+    /* Above the default 16, draws pass more varyings (DEVICE_WIDE_VARYINGS):
+     * Tears of the Kingdom's smoke reads more than 14 vectors. */
+    maxInterStageShaderVariables: adapter.limits.maxInterStageShaderVariables,
+    maxVertexAttributes: adapter.limits.maxVertexAttributes,
   };
   const device = await adapter.requestDevice({ requiredFeatures, requiredLimits });
   /* One report per burst: an exhausted device fails every allocation. */
@@ -694,7 +700,9 @@ async function init(canvas: OffscreenCanvas, memory: WebAssembly.Memory, layout:
       (warpSubgroups && device.features.has("subgroups" as GPUFeatureName) ? DEVICE_SUBGROUPS : 0) |
       (device.features.has("float32-filterable") ? DEVICE_FLOAT32_FILTERABLE : 0) |
       (device.limits.maxStorageBufferBindingSize >= LARGE_BUFFER_BYTES && device.limits.maxBufferSize >= LARGE_BUFFER_BYTES
-        ? DEVICE_LARGE_BUFFERS : 0),
+        ? DEVICE_LARGE_BUFFERS : 0) |
+      (device.limits.maxInterStageShaderVariables >= WIDE_VARYINGS_LIMIT &&
+        device.limits.maxVertexAttributes >= WIDE_VARYINGS_LIMIT ? DEVICE_WIDE_VARYINGS : 0),
   };
   self.postMessage(ready);
 

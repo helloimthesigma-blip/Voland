@@ -234,9 +234,9 @@ static bool g_mip_vector;
 static Wgsl_Program_Desc g_desc_from;
 static void check_desc_from(const Wgsl_Program_Desc *desc) {
   Wgsl_Desc_Defaults defaults;
-  wgsl_desc_defaults(&g_prog, &defaults);
+  wgsl_desc_defaults(&g_prog, &defaults, WGSL_BASE_VARYINGS);
   memset(&g_desc_from, 0x5a, sizeof(g_desc_from));
-  wgsl_default_desc_from(&g_prog, &defaults, &g_desc_from);
+  wgsl_default_desc_from(&g_prog, &defaults, &g_desc_from, WGSL_BASE_VARYINGS);
   CHECK(memcmp(&g_desc_from.texture_count, &desc->texture_count, sizeof(defaults.tail)) == 0);
   for (uint32_t k = 0; k < g_prog.texture_pc_count && k < SM_MAX_TEXTURE_PCS; k++)
     CHECK(g_desc_from.binding_of[g_prog.texture_pcs[k]] == desc->binding_of[g_prog.texture_pcs[k]]);
@@ -246,7 +246,7 @@ static void check_desc_from(const Wgsl_Program_Desc *desc) {
 static void finish(const Builder *b, const char *name, bool float_compare) {
   sm_program_decode(b->bytes, SM_SPH_BYTES + 8u * b->words, 0, &g_prog);
   Wgsl_Program_Desc desc;
-  wgsl_default_desc(&g_prog, &desc);
+  wgsl_default_desc(&g_prog, &desc, WGSL_BASE_VARYINGS);
   check_desc_from(&desc);
   desc.target_int_mask = 1u; /* raw register bits out (rgba32uint) */
   desc.hw_sample_mask = g_hw_sample_mask;
@@ -832,14 +832,14 @@ static void structural(void) {
   emit(&b, EXIT());
   sm_program_decode(b.bytes, SM_SPH_BYTES + 8u * b.words, 0, &g_prog);
   Wgsl_Program_Desc desc;
-  wgsl_default_desc(&g_prog, &desc);
+  wgsl_default_desc(&g_prog, &desc, WGSL_BASE_VARYINGS);
   CHECK(desc.stage == SM_STAGE_VERTEX);
   desc.stage = SM_STAGE_PIXEL; /* a vertex program translated as pixel: refused */
   Wgsl_Result r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   CHECK(!r.ok && strstr(r.reason, "pixel") != NULL);
   /* As a vertex program it translates: a `vs` entry, attribute arrays, the
    * viewport epilogue, and no fragment stage or quad helpers. */
-  wgsl_default_desc(&g_prog, &desc);
+  wgsl_default_desc(&g_prog, &desc, WGSL_BASE_VARYINGS);
   r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   CHECK(r.ok && strstr(g_text, "@vertex fn vs(vin: VIn) -> VOut") && strstr(g_text, "var aout: array<u32, 256>"));
   CHECK(strstr(g_text, "@fragment") == NULL && strstr(g_text, "dpdxFine") == NULL && strstr(g_text, "discard") == NULL);
@@ -853,7 +853,7 @@ static void structural(void) {
   emit(&b, op_top(0xf0c8) | GUARD | rd(0)); /* S2R R0, SR_LANEID */
   emit(&b, EXIT());
   sm_program_decode(b.bytes, SM_SPH_BYTES + 8u * b.words, 0, &g_prog);
-  wgsl_default_desc(&g_prog, &desc);
+  wgsl_default_desc(&g_prog, &desc, WGSL_BASE_VARYINGS);
   r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   CHECK(r.ok && strstr(g_text, "let ql = 0u;") != NULL && strstr(g_text, "r0 = ql;") != NULL);
   /* A pixel program writing depth with no depth target bound: the depth
@@ -865,7 +865,7 @@ static void structural(void) {
   emit(&b, EXIT());
   sm_program_decode(b.bytes, SM_SPH_BYTES + 8u * b.words, 0, &g_prog);
   CHECK(g_prog.header.omap_depth);
-  wgsl_default_desc(&g_prog, &desc);
+  wgsl_default_desc(&g_prog, &desc, WGSL_BASE_VARYINGS);
   const uint64_t with_depth = wgsl_desc_hash(&desc, &g_prog);
   r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   CHECK(r.ok && strstr(g_text, "@builtin(frag_depth)") != NULL && strstr(g_text, "fo.depth") != NULL);
@@ -880,7 +880,7 @@ static void structural(void) {
   for (uint32_t i = 0; i < WGSL_MAX_TEXTURES + 4u; i++) emit(&b, TEXS(0, 2, 4, 5, 1, 4, i));
   emit(&b, EXIT());
   sm_program_decode(b.bytes, SM_SPH_BYTES + 8u * b.words, 0, &g_prog);
-  wgsl_default_desc(&g_prog, &desc);
+  wgsl_default_desc(&g_prog, &desc, WGSL_BASE_VARYINGS);
   CHECK(g_prog.texture_pc_count == WGSL_MAX_TEXTURES + 4u && desc.texture_count == WGSL_MAX_TEXTURES);
   CHECK(desc.binding_of[g_prog.texture_pcs[WGSL_MAX_TEXTURES]] == WGSL_NO_BINDING);
   check_desc_from(&desc);
@@ -889,7 +889,7 @@ static void structural(void) {
   emit(&b, ALD(0, 0x80, 1));
   emit(&b, EXIT());
   sm_program_decode(b.bytes, SM_SPH_BYTES + 8u * b.words, 0, &g_prog);
-  wgsl_default_desc(&g_prog, &desc);
+  wgsl_default_desc(&g_prog, &desc, WGSL_BASE_VARYINGS);
   r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   CHECK(!r.ok && strstr(r.reason, "ALD") != NULL && g_text[0] == '\0');
   /* A buffer too small fails cleanly. */
@@ -897,7 +897,7 @@ static void structural(void) {
   emit(&b, MOV32I(0, 1));
   emit(&b, EXIT());
   sm_program_decode(b.bytes, SM_SPH_BYTES + 8u * b.words, 0, &g_prog);
-  wgsl_default_desc(&g_prog, &desc);
+  wgsl_default_desc(&g_prog, &desc, WGSL_BASE_VARYINGS);
   static char small[6000];
   r = wgsl_translate(&g_prog, &desc, small, sizeof(small));
   CHECK(!r.ok && small[0] == '\0');
@@ -906,6 +906,24 @@ static void structural(void) {
   /* The default descriptor: flat vectors 0 and 1, one target. */
   CHECK(desc.varying_count == 2 && desc.flat_mask == 3u && desc.varying_location[0] == 0 &&
         desc.varying_location[1] == 1 && desc.varying_location[2] == 0xff && desc.target_count == 1);
+  {
+    /* A pixel program reading more generic vectors than WGSL_BASE_VARYINGS:
+     * the rest get no location (read 0) unless the device is wide. */
+    enum { READ_VECTORS = 20 };
+    Builder wide;
+    begin(&wide);
+    memset(wide.bytes + 0x18, 0x55, READ_VECTORS); /* vectors 0-19: constant x4 */
+    emit(&wide, EXIT());
+    static Sm_Program prog;
+    sm_program_decode(wide.bytes, SM_SPH_BYTES + 8u * wide.words, 0, &prog);
+    Wgsl_Program_Desc d;
+    wgsl_default_desc(&prog, &d, WGSL_BASE_VARYINGS);
+    CHECK(d.varying_count == WGSL_BASE_VARYINGS && d.varying_location[WGSL_BASE_VARYINGS] == 0xff);
+    wgsl_default_desc(&prog, &d, WGSL_MAX_VARYINGS);
+    CHECK(d.varying_count == READ_VECTORS && d.varying_location[READ_VECTORS - 1] == READ_VECTORS - 1);
+    CHECK(wgsl_translate(&prog, &d, g_text, sizeof(g_text)).ok);
+    CHECK(strstr(g_text, "@location(20) @interpolate(flat) v19: vec4<u32>") != NULL);
+  }
   /* The cache key follows the descriptor. */
   const uint64_t h = wgsl_desc_hash(&desc, &g_prog);
   CHECK(h == wgsl_desc_hash(&desc, &g_prog));
@@ -937,7 +955,7 @@ static void lod_selection(void) {
   emit(&b, TEXS(10, 12, 4, 5, 3, 4, 0));          /* 2D LL: the level in the second operand pair */
   emit(&b, EXIT());
   sm_program_decode(b.bytes, SM_SPH_BYTES + 8u * b.words, 0, &g_prog);
-  wgsl_default_desc(&g_prog, &desc);
+  wgsl_default_desc(&g_prog, &desc, WGSL_BASE_VARYINGS);
   Wgsl_Result r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   CHECK(r.ok);
   CHECK(strstr(g_text, "fn t0_lod(") != NULL);
@@ -949,7 +967,7 @@ static void lod_selection(void) {
   emit(&b, TEXS(0, 2, 4, 5, 1, 4, 0) & ~(0xfull << 16)); /* @P0 */
   emit(&b, EXIT());
   sm_program_decode(b.bytes, SM_SPH_BYTES + 8u * b.words, 0, &g_prog);
-  wgsl_default_desc(&g_prog, &desc);
+  wgsl_default_desc(&g_prog, &desc, WGSL_BASE_VARYINGS);
   r = wgsl_translate(&g_prog, &desc, g_text, sizeof(g_text));
   CHECK(r.ok);
   CHECK(strstr(g_text, "t0_lod(tc") == NULL && strstr(g_text, "vec2<i32>(0), 0.0); ") != NULL);

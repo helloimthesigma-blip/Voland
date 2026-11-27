@@ -28,6 +28,10 @@ export const DEVICE_FLOAT32_FILTERABLE = 8;
  * LARGE_BUFFER_BYTES (a thrashing vertex pool may grow to that size). */
 export const DEVICE_LARGE_BUFFERS = 16;
 export const LARGE_BUFFER_BYTES = 384 * 1024 * 1024;
+/* gpu_records.h GPU_DEVICE_WIDE_VARYINGS: WIDE_VARYINGS_LIMIT inter-stage vectors
+ * and vertex attributes, so draws pass up to 27 varyings instead of 14. */
+export const DEVICE_WIDE_VARYINGS = 32;
+export const WIDE_VARYINGS_LIMIT = 28;
 
 export const REC_PAD = 0;
 export const REC_TEXTURE_CREATE = 1;

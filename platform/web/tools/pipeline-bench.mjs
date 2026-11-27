@@ -95,6 +95,8 @@ async function benchInPage({ last, skip, only, replace, salt, parallel }) {
     requiredLimits: {
       maxColorAttachmentBytesPerSample: adapter.limits.maxColorAttachmentBytesPerSample,
       maxTextureDimension2D: adapter.limits.maxTextureDimension2D,
+      maxInterStageShaderVariables: adapter.limits.maxInterStageShaderVariables, /* pipelines with up to 27 varyings */
+      maxVertexAttributes: adapter.limits.maxVertexAttributes,
     },
   });
   const describe = (spec, module, vsModule) => {

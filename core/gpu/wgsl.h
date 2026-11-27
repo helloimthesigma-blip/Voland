@@ -131,7 +131,13 @@
 #define WGSL_CS_MAX_INVOCATIONS 256u   /* WebGPU's default maxComputeInvocationsPerWorkgroup */
 #define WGSL_CS_MAX_SHARED_BYTES 16384u /* its default maxComputeWorkgroupStorageSize */
 #define WGSL_VERTEX_ID_LOCATION 0u /* vertex input: vec4<u32>(vertex id, instance id, 0, 0) */
-#define WGSL_MAX_VARYINGS 14u /* + 1/w, within WebGPU's 16 inter-stage vectors */
+/* Varyings: WGSL_BASE_VARYINGS + 1/w fit WebGPU's default 16 inter-stage
+ * vectors; a GPU_DEVICE_WIDE_VARYINGS device (28 inter-stage vectors and
+ * vertex attributes, as Apple GPUs offer) takes WGSL_MAX_VARYINGS. A pixel
+ * program reading more generic vectors reads 0 from the rest (Tears of the
+ * Kingdom's campfire smoke, 15 and more, was black at 14). */
+#define WGSL_BASE_VARYINGS 14u
+#define WGSL_MAX_VARYINGS 27u
 #define WGSL_DRAW_LOWER_LEFT 1u /* position y counts from the bottom */
 
 /* Texture parameter words. */
@@ -193,7 +199,7 @@ typedef struct Wgsl_Program_Desc {
    * inputs: varying_count and flat_mask are the pixel program's, and
    * output_word[l][c] is the attribute word (SM_ATTRIBUTE_WORDS index)
    * feeding location l component c (0xffff: 0), divided by w where
-   * perspective_mask bit l * 4 + c is set (as to_screen does). Generic
+   * perspective[l] bit c is set (as to_screen does). Generic
    * input vector v arrives at vertex input input_location[v] (0xff: not
    * supplied; reads 0); input 0 is the vertex and instance id. */
   uint8_t stage;
@@ -204,7 +210,7 @@ typedef struct Wgsl_Program_Desc {
   uint8_t input_location[SM_ATTR_GENERIC_COUNT];
   uint32_t input_count;
   uint16_t output_word[WGSL_MAX_VARYINGS][4];
-  uint64_t perspective_mask;
+  uint8_t perspective[WGSL_MAX_VARYINGS];
   /* Compute programs: the block (workgroup) size, the block's shared
    * memory, and how many global-memory windows are bound. */
   uint16_t block[3];
@@ -276,8 +282,10 @@ Wgsl_Result wgsl_translate(const Sm_Program *program, const Wgsl_Program_Desc *d
  * of a draw's): every generic input vector the SPH reads gets the next
  * location (flat when all its used components are constant-interpolated),
  * each texture instruction its own float binding while they last, and one
- * float target per render target the output map writes. */
-void wgsl_default_desc(const Sm_Program *program, Wgsl_Program_Desc *desc);
+ * float target per render target the output map writes. At most
+ * max_varyings vectors get a location (WGSL_BASE_VARYINGS or, on a wide
+ * device, WGSL_MAX_VARYINGS). */
+void wgsl_default_desc(const Sm_Program *program, Wgsl_Program_Desc *desc, uint32_t max_varyings);
 /* wgsl_default_desc's fields after binding_of, worked out once per
  * program: per-draw setup (two descriptors a draw, ~3000 draws a frame in
  * Super Mario Odyssey's New Donk City) copies them instead, and
@@ -285,8 +293,9 @@ void wgsl_default_desc(const Sm_Program *program, Wgsl_Program_Desc *desc);
 typedef struct Wgsl_Desc_Defaults {
   uint8_t tail[sizeof(Wgsl_Program_Desc) - offsetof(Wgsl_Program_Desc, texture_count)];
 } Wgsl_Desc_Defaults;
-void wgsl_desc_defaults(const Sm_Program *program, Wgsl_Desc_Defaults *defaults);
-void wgsl_default_desc_from(const Sm_Program *program, const Wgsl_Desc_Defaults *defaults, Wgsl_Program_Desc *desc);
+void wgsl_desc_defaults(const Sm_Program *program, Wgsl_Desc_Defaults *defaults, uint32_t max_varyings);
+void wgsl_default_desc_from(const Sm_Program *program, const Wgsl_Desc_Defaults *defaults, Wgsl_Program_Desc *desc,
+                            uint32_t max_varyings);
 /* desc->binding_of over `program`'s words (all a translation or hash of it
  * reads) to WGSL_NO_BINDING: the whole 4 KB array, cleared several times
  * per draw, was ~240 MB of memset per frame in Tears of the Kingdom. With

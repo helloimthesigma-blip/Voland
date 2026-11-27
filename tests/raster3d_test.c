@@ -972,7 +972,7 @@ static void test_depth_output(Raster3d *r) {
   sm_program_decode(g_gpu + (PROGRAM_REGION - GPU_BASE) + PS_DEPTH_OUT_OFFSET, bytes, PROGRAM_REGION + PS_DEPTH_OUT_OFFSET,
                     &prog);
   Wgsl_Program_Desc desc;
-  wgsl_default_desc(&prog, &desc);
+  wgsl_default_desc(&prog, &desc, WGSL_BASE_VARYINGS);
   static char text[1 << 18];
   const Wgsl_Result res = wgsl_translate(&prog, &desc, text, sizeof(text));
   CHECK(res.ok && strstr(text, "fo.depth = F(r1)") != NULL, "WGSL depth output from R1 (%s)", res.ok ? "translated" : res.reason);

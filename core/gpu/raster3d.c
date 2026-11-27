@@ -3726,6 +3726,7 @@ void raster3d_set_gpu_compression(Raster3d *r, uint32_t mask) {
              (mask & GPU_COMPRESSION_ASTC) ? "ASTC" : compression ? "" : "none");
     if (mask & GPU_DEVICE_SUBGROUPS) log_info("[gpu] 32-lane subgroups: compute shuffles and votes run on the GPU");
     if (mask & GPU_DEVICE_FLOAT32_FILTERABLE) log_info("[gpu] 32-bit float textures filter in the sampler");
+    if (mask & GPU_DEVICE_WIDE_VARYINGS) log_info("[gpu] up to %u varyings a draw", WGSL_MAX_VARYINGS);
   }
   r->gpu_compression = mask;
 }
@@ -5142,15 +5143,21 @@ static uint32_t cbuf_words_read(const Sm_Program *program, const Sm_Env *env, ui
  * the whole program, too slow to repeat per draw. */
 _Static_assert(RASTER_PROGRAM_GLOBALS == WGSL_MAX_GLOBALS, "the program cache holds every global buffer");
 
+_Static_assert(WGSL_MAX_VARYINGS + 1u <= GPU_WIDE_VARYINGS_LIMIT, "the varyings and 1/w fit a wide device");
+/* How many varyings the device's pipelines may pass (GPU_DEVICE_WIDE_VARYINGS). */
+static uint32_t gpu_max_varyings(const Raster3d *r) {
+  return (r->gpu_compression & GPU_DEVICE_WIDE_VARYINGS) ? WGSL_MAX_VARYINGS : WGSL_BASE_VARYINGS;
+}
+
 /* wgsl_default_desc of a graphics program (ctx->vs / ctx->ps, from
  * program_get), from the defaults its cache entry keeps. */
-static void program_desc(const Sm_Program *program, Wgsl_Program_Desc *desc) {
+static void program_desc(const Raster3d *r, const Sm_Program *program, Wgsl_Program_Desc *desc) {
   Raster3d_Program *p = (Raster3d_Program *)((uint8_t *)(uintptr_t)program - offsetof(Raster3d_Program, program));
   if (!p->desc_ready) {
-    wgsl_desc_defaults(program, &p->desc_defaults);
+    wgsl_desc_defaults(program, &p->desc_defaults, gpu_max_varyings(r));
     p->desc_ready = true;
   }
-  wgsl_default_desc_from(program, &p->desc_defaults, desc);
+  wgsl_default_desc_from(program, &p->desc_defaults, desc, gpu_max_varyings(r));
 }
 
 static const Raster3d_Program *program_globals(const Sm_Program *program) {
@@ -5444,7 +5451,7 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
     return;
   }
   Wgsl_Program_Desc *d = &g->vs_desc;
-  program_desc(ctx->vs, d);
+  program_desc(ctx->r, ctx->vs, d);
   /* Texture bindings come with the pixel program's (gpu_prepare_textures). */
   wgsl_clear_bindings(d, ctx->vs);
   d->texture_count = 0;
@@ -5452,7 +5459,7 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
   d->planar_mask = 0;
   d->varying_count = g->locations;
   d->flat_mask = g->flat_mask;
-  d->perspective_mask = 0;
+  memset(d->perspective, 0, sizeof(d->perspective));
   memset(d->output_word, 0xff, sizeof(d->output_word));
   for (uint32_t l = 0; l < g->locations; l++) {
     for (uint32_t c = 0; c < 4u; c++) {
@@ -5460,7 +5467,7 @@ static void gpu_choose_vertex_stage(Draw_Context *ctx, Raster_State *rs, uint32_
       const uint8_t i = g->varying_index[word];
       if (i == 0xffu) continue;
       d->output_word[l][c] = (uint16_t)(SM_ATTR_GENERIC / 4u + word);
-      if (rs->varyings.interp[i] == SM_INTERP_PERSPECTIVE) d->perspective_mask |= 1ull << (l * 4u + c);
+      if (rs->varyings.interp[i] == SM_INTERP_PERSPECTIVE) d->perspective[l] |= (uint8_t)(1u << c);
     }
   }
   g->input_count = d->input_count;
@@ -5529,7 +5536,7 @@ static bool gpu_draw_begin(Draw_Context *ctx, Raster_State *rs, uint32_t topolog
   /* Varying locations: each generic vector the pixel program reads. */
   memset(g->varying_index, 0xff, sizeof(g->varying_index));
   for (uint32_t i = 0; i < rs->varyings.count; i++) g->varying_index[rs->varyings.word[i]] = (uint8_t)i;
-  program_desc(ctx->ps, &g->desc);
+  program_desc(r, ctx->ps, &g->desc);
   for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++) {
     const uint8_t loc = g->desc.varying_location[v];
     if (loc != 0xffu && loc < WGSL_MAX_VARYINGS) g->location_vector[loc] = (uint8_t)v;
@@ -7427,7 +7434,7 @@ static bool compute_on_gpu(Raster3d *r, const Sm_Program *program, const Compute
     }
   }
   static Wgsl_Program_Desc desc;
-  wgsl_default_desc(program, &desc);
+  wgsl_default_desc(program, &desc, WGSL_BASE_VARYINGS); /* compute: no varyings */
   desc.stage = SM_STAGE_COMPUTE;
   for (uint32_t i = 0; i < 3u; i++) desc.block[i] = (uint16_t)launch->block[i];
   desc.shared_bytes = launch->shared_bytes;

@@ -408,7 +408,7 @@ static void dump_wgsl(void *user, const Sm_Program *program) {
   if (program->header.stage != SM_STAGE_PIXEL && program->header.stage != SM_STAGE_VERTEX) return;
   static Wgsl_Program_Desc desc;
   static char text[WGSL_DUMP_BYTES];
-  wgsl_default_desc(program, &desc);
+  wgsl_default_desc(program, &desc, WGSL_BASE_VARYINGS);
   const Wgsl_Result r = wgsl_translate(program, &desc, text, sizeof(text));
   char path[1024];
   snprintf(path, sizeof(path), "%s/%llx-%08x.%s", (const char *)user, (unsigned long long)program->address,

@@ -326,7 +326,7 @@ static bool g_subgroups; /* the next vector's desc.subgroups (32-lane WebGPU sub
 static void finish(const char *name, const uint32_t block[3], const uint32_t grid[3], uint32_t shared_bytes,
                    uint32_t ulps) {
   Wgsl_Program_Desc desc;
-  wgsl_default_desc(&g_prog, &desc);
+  wgsl_default_desc(&g_prog, &desc, WGSL_BASE_VARYINGS);
   desc.stage = SM_STAGE_COMPUTE;
   desc.subgroups = g_subgroups;
   for (uint32_t i = 0; i < 3u; i++) desc.block[i] = (uint16_t)block[i];
@@ -543,7 +543,7 @@ static void vector_subgroup(void) {
   g_subgroups = false;
   /* Without subgroups, or behind a conditional branch, it stays untranslated. */
   Wgsl_Program_Desc desc;
-  wgsl_default_desc(&g_prog, &desc);
+  wgsl_default_desc(&g_prog, &desc, WGSL_BASE_VARYINGS);
   desc.stage = SM_STAGE_COMPUTE;
   desc.block[0] = 64;
   desc.block[1] = desc.block[2] = 1;
@@ -562,7 +562,7 @@ static void structural(void) {
   const uint64_t code[] = {S2R(0, SR_TID_X), EXIT()};
   build(code, 2);
   Wgsl_Program_Desc desc;
-  wgsl_default_desc(&g_prog, &desc);
+  wgsl_default_desc(&g_prog, &desc, WGSL_BASE_VARYINGS);
   desc.stage = SM_STAGE_COMPUTE;
   desc.block[0] = 512;
   desc.block[1] = desc.block[2] = 1;
@@ -577,7 +577,7 @@ static void structural(void) {
    * derivatives in compute); TMML stays on the CPU. */
   const uint64_t tex[] = {(0xd800ull << 48) | GUARD | (1ull << 53) | (4ull << 50), EXIT()};
   build(tex, 2);
-  wgsl_default_desc(&g_prog, &desc);
+  wgsl_default_desc(&g_prog, &desc, WGSL_BASE_VARYINGS);
   desc.stage = SM_STAGE_COMPUTE;
   desc.block[0] = 32;
   desc.block[1] = desc.block[2] = 1;

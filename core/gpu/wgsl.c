@@ -3393,7 +3393,7 @@ static void emit_vertex_epilogue(Out *o, const Wgsl_Program_Desc *d) {
     char comp[4][48];
     for (uint32_t c = 0; c < 4u; c++) {
       const uint16_t word = d->output_word[l][c];
-      const bool persp = (d->perspective_mask >> (l * 4u + c)) & 1u;
+      const bool persp = (d->perspective[l] >> c) & 1u;
       if (word >= SM_ATTRIBUTE_WORDS) snprintf(comp[c], sizeof(comp[c]), flat ? "0u" : "0.0");
       else if (flat) snprintf(comp[c], sizeof(comp[c]), "aout[%uu]", word);
       else snprintf(comp[c], sizeof(comp[c]), persp ? "F(aout[%uu]) * iw" : "F(aout[%uu])", word);
@@ -3826,13 +3826,14 @@ void wgsl_clear_bindings(Wgsl_Program_Desc *desc, const Sm_Program *program) {
   memset(desc->binding_of, WGSL_NO_BINDING, program->word_count < SM_MAX_WORDS ? program->word_count : SM_MAX_WORDS);
 }
 
-void wgsl_default_desc(const Sm_Program *program, Wgsl_Program_Desc *desc) {
+void wgsl_default_desc(const Sm_Program *program, Wgsl_Program_Desc *desc, uint32_t max_varyings) {
+  if (max_varyings > WGSL_MAX_VARYINGS) max_varyings = WGSL_MAX_VARYINGS;
   /* Every field after binding_of (the first) zeroed; binding_of only as far as the program reaches. */
   memset(&desc->texture_count, 0, sizeof(*desc) - offsetof(Wgsl_Program_Desc, texture_count));
   wgsl_clear_bindings(desc, program);
   memset(desc->varying_location, 0xff, sizeof(desc->varying_location));
   const Sm_Header *h = &program->header;
-  for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT && desc->varying_count < WGSL_MAX_VARYINGS; v++) {
+  for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT && desc->varying_count < max_varyings; v++) {
     bool used = false, flat = true;
     for (uint32_t c = 0; c < 4u; c++) {
       const uint8_t mode = h->input_interp[v * 4u + c];
@@ -3870,24 +3871,25 @@ void wgsl_default_desc(const Sm_Program *program, Wgsl_Program_Desc *desc) {
   desc->flat_mask = 0;
   for (uint32_t v = 0; v < SM_ATTR_GENERIC_COUNT; v++) {
     if ((h->input_generic[v / 8u] >> ((v % 8u) * 4u)) & 0xfu) desc->input_location[v] = (uint8_t)desc->input_count++;
-    if (!((h->output_generic[v / 8u] >> ((v % 8u) * 4u)) & 0xfu) || desc->varying_count >= WGSL_MAX_VARYINGS) continue;
+    if (!((h->output_generic[v / 8u] >> ((v % 8u) * 4u)) & 0xfu) || desc->varying_count >= max_varyings) continue;
     const uint32_t l = desc->varying_count++;
     for (uint32_t c = 0; c < 4u; c++) {
       desc->output_word[l][c] = (uint16_t)(SM_ATTR_GENERIC / 4u + 4u * v + c);
-      desc->perspective_mask |= 1ull << (l * 4u + c);
+      desc->perspective[l] |= (uint8_t)(1u << c);
     }
   }
 }
 
-void wgsl_desc_defaults(const Sm_Program *program, Wgsl_Desc_Defaults *defaults) {
+void wgsl_desc_defaults(const Sm_Program *program, Wgsl_Desc_Defaults *defaults, uint32_t max_varyings) {
   Wgsl_Program_Desc desc;
-  wgsl_default_desc(program, &desc);
+  wgsl_default_desc(program, &desc, max_varyings);
   memcpy(defaults->tail, &desc.texture_count, sizeof(defaults->tail));
 }
 
-void wgsl_default_desc_from(const Sm_Program *program, const Wgsl_Desc_Defaults *defaults, Wgsl_Program_Desc *desc) {
+void wgsl_default_desc_from(const Sm_Program *program, const Wgsl_Desc_Defaults *defaults, Wgsl_Program_Desc *desc,
+                            uint32_t max_varyings) {
   if (!sm_texture_pcs_complete(program)) {
-    wgsl_default_desc(program, desc);
+    wgsl_default_desc(program, desc, max_varyings);
     return;
   }
   memcpy(&desc->texture_count, defaults->tail, sizeof(defaults->tail));
@@ -3943,7 +3945,7 @@ uint64_t wgsl_desc_hash(const Wgsl_Program_Desc *desc, const Sm_Program *program
     MIX(desc->input_location, sizeof(desc->input_location));
     MIX(&desc->input_count, sizeof(desc->input_count));
     MIX(desc->output_word, sizeof(desc->output_word));
-    MIX(&desc->perspective_mask, sizeof(desc->perspective_mask));
+    MIX(desc->perspective, sizeof(desc->perspective));
   }
   if (desc->stage == SM_STAGE_COMPUTE) { /* the bindings and workgroup the translation declares */
     MIX(&desc->window_count, sizeof(desc->window_count));
