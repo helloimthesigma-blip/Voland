@@ -219,6 +219,10 @@ export type MainToGPUMessage =
       /* Diagnostics (?trivialshaders=1): every pixel shader replaced by
        * one that writes nothing - is a title limited by GPU shading? */
       readonly trivialShaders: boolean;
+      /* Diagnostics (?patchshader=JSON {contains, find, replace}): text
+       * substitutions ("|||"-separated pairs) in the shaders whose WGSL
+       * contains `contains` - ids differ run to run, the text does not. */
+      readonly patchShader: { readonly contains: string; readonly find: string; readonly replace: string } | null;
       /* Diagnostics (?writestaging=0): buffer writes under pending commands
        * submit the batch first instead of copying in command order. */
       readonly noWriteStaging: boolean;

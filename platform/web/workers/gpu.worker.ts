@@ -769,6 +769,7 @@ self.addEventListener("message", (event: MessageEvent<MainToGPUMessage>) => {
   }
   if (event.data.type === "init") {
     if (event.data.trivialShaders) (globalThis as { TRIVIAL_SHADERS?: boolean }).TRIVIAL_SHADERS = true;
+    if (event.data.patchShader) (globalThis as { PATCH_SHADER?: unknown }).PATCH_SHADER = event.data.patchShader;
     if (event.data.noWriteStaging) (globalThis as { NO_WRITE_STAGING?: boolean }).NO_WRITE_STAGING = true;
     lookAhead = !event.data.noLookAhead;
     framePace = event.data.framePace;

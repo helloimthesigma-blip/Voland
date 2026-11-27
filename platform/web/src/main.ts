@@ -94,6 +94,21 @@ interface Memory64Descriptor {
   readonly address: "i64";
 }
 
+/** ?patchshader=JSON ({contains, find, replace}, all strings) for the GPU worker; null when absent or malformed. */
+function parsePatchShader(param: string | null): { contains: string; find: string; replace: string } | null {
+  if (!param) return null;
+  try {
+    const p: unknown = JSON.parse(param);
+    if (typeof p !== "object" || p === null) return null;
+    const { contains, find, replace } = p as Record<string, unknown>;
+    if (typeof contains !== "string" || typeof find !== "string" || typeof replace !== "string") return null;
+    return { contains, find, replace };
+  } catch {
+    appendLogLine("warn", "?patchshader is not JSON {contains, find, replace}");
+    return null;
+  }
+}
+
 function allocateSharedMemory(): WebAssembly.Memory | null {
   // Verified directly against this environment's V8 and against
   // Emscripten's own -m64 (wasm64) glue output: both use `address: "i64"`
@@ -271,6 +286,7 @@ async function boot(): Promise<BootResult | null> {
         gpuWorker.postMessage(
           { type: "init", canvas: offscreen, memory, layout,
             trivialShaders: new URLSearchParams(location.search).get("trivialshaders") === "1",
+            patchShader: parsePatchShader(new URLSearchParams(location.search).get("patchshader")),
             noWriteStaging: new URLSearchParams(location.search).get("writestaging") === "0",
             noLookAhead: new URLSearchParams(location.search).get("lookahead") === "0",
             skipBuilding: Number(new URLSearchParams(location.search).get("skipbuilding") ?? DEFAULT_SKIP_BUILDING) || 0,

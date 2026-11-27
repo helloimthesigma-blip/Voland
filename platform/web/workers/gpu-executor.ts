@@ -1317,12 +1317,17 @@ export class GpuExecutor {
 
   private shader(v: DataView, payload: Uint8Array): void {
     const id = v.getUint32(0, true);
-    /* Debugging (replay-gpu-stream.mjs PATCH_SHADER): text substitutions ("|||"-separated pairs) in one
-     * program, e.g. to output intermediate registers. */
-    const patch = (globalThis as { PATCH_SHADER?: { id: number; find: string; replace: string } }).PATCH_SHADER;
-    const finds = patch?.id === id ? patch.find.split("|||") : [];
+    /* Debugging (replay-gpu-stream.mjs PATCH_SHADER, ?patchshader=): text substitutions ("|||"-separated
+     * pairs) in one program - by id, or each whose text contains `contains` - e.g. to output intermediate
+     * registers. */
+    const patch = (globalThis as { PATCH_SHADER?: { id?: number; contains?: string; find: string; replace: string } })
+      .PATCH_SHADER;
+    const text = this.shaderCode(v, payload);
+    const patched = patch !== undefined && (patch.id === id || (!!patch.contains && text.includes(patch.contains)));
+    const finds = patched ? patch.find.split("|||") : [];
     const replaces = patch?.replace.split("|||") ?? [];
-    const code = finds.reduce((c, f, k) => c.replace(f, replaces[k] ?? ""), this.shaderCode(v, payload));
+    const code = finds.reduce((c, f, k) => c.replace(f, replaces[k] ?? ""), text);
+    if (patched && patch.contains) this.host.log("warn", `[gpu] shader ${id} patched (?patchshader)`);
     if ((globalThis as { PRINT_SHADER?: number }).PRINT_SHADER === id) console.log(`shader ${id}:\n${code}`);
     const hash = wgslHash(code);
     this.noteCode(hash, code);
