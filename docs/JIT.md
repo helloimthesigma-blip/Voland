@@ -537,6 +537,19 @@ again on top of register residency (0.5.6, which makes the caller's
 reload at most 8 registers): still 6-7% slower (fight 48.9-49.7 vs
 51.0-55.0 fps, three runs each).
 
+**Tried: predicted A64 virtual calls** (2026-11-27). Tears of the
+Kingdom's busiest thread leaves its regions mostly by returns (47%) and
+indirect branches (38%; Hollow Knight's: 15%), C++ virtual calls among
+them. As the A32 front end does for BLX, the entry block's registers at
+compile time, carried through `LDR Xt, [Xn, #imm]` and `MOV`, predicted
+a BLR's target, and a small predicted callee joined the region behind a
+guard with its return site. Region entries fell 7% (320.6 M to 298.4 M
+on that thread; indirect exits 120.7 M to 110.0 M), but four alternating
+browser pairs at Lookout Landing gave 13.73 against 13.63 fps (two of
+four). A prediction also makes a region's bytes depend on the compiling
+core's registers, so cores stop sharing one compiled module. Reverted;
+jit_diff_test keeps the virtual-call sequence.
+
 **Where the time goes: the front end.** Hollow Knight's and Nine Sols'
 main threads are each about one host core and run 3.9-4.8 ns per guest
 instruction, against 0.7-0.9 for their loop-heavy audio and render

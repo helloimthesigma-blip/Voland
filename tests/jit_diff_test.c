@@ -37,6 +37,8 @@
 #define BIG_ELSEWHERE 112u
 #define CODE2_PA 0x1000ull
 #define DATA_GVA 0x200000ull
+#define VCALL_OBJECT 0x10u /* data offsets: the virtual call's object and its vtable */
+#define VCALL_VTABLE 0x20u
 #define CODE_PA 0x0ull
 #define DATA_PA 0x10000ull
 #define DATA_BYTES 0x4000u          /* 4 pages: accesses that cross pages */
@@ -549,12 +551,29 @@ static Snapshot snapshot(const CPU_Backend *cpu, CPU_State *s, CPU_ExitReason ex
   return snap;
 }
 
+/* The data pages are mapped in reverse (main below): the offset in
+ * g_data_init of the byte at DATA_GVA + `offset`. */
+static uint32_t data_init_offset(uint32_t offset) {
+  const uint32_t page = offset / VMM_PAGE_SIZE;
+  return (DATA_BYTES / VMM_PAGE_SIZE - 1u - page) * VMM_PAGE_SIZE + offset % VMM_PAGE_SIZE;
+}
+
 static void run_case(uint32_t iteration) {
   /* Code: the stream, then SVCs to the end of the page (R-X: cacheable). */
   static uint32_t code[VMM_PAGE_SIZE / 4];
   for (uint32_t i = 0; i < VMM_PAGE_SIZE / 4; i++) code[i] = SVC_ZERO;
   const uint32_t length = 1u + pick(STREAM_MAX);
+  /* A virtual call at the region's entry: ldr x8, [x29]; ldr x8, [x8, #8];
+   * blr x8, x29 an object whose vtable slot (below) holds a small callee,
+   * a large one or garbage; later runs may have x29 changed. */
+  const bool vcall = length > 4u && pick(4) == 0;
   for (uint32_t i = 0; i < length; i++) {
+    if (vcall && i == 0) {
+      code[i++] = 0xF94003A8u; /* ldr x8, [x29] */
+      code[i++] = 0xF9400508u; /* ldr x8, [x8, #8] */
+      code[i] = 0xD63F0100u;   /* blr x8 */
+      continue;
+    }
     if (i + 2u < length && pick(24) == 0) { /* overwrite the GOT slot, then call the stub: a stale prediction */
       const uint64_t delta = ((DATA_GVA >> 12) - ((CODE_GVA + 4u * i) >> 12)) & 0x1FFFFFu;
       code[i] = 0x90000010u | (uint32_t)((delta & 3u) << 29) | (uint32_t)((delta >> 2) << 5); /* adrp x16, DATA */
@@ -774,6 +793,7 @@ static void run_case(uint32_t iteration) {
   for (int i = 24; i < 28; i++) x[i] = pick(64) - 16u;                                 /* indexes */
   x[28] = CODE_GVA + 4u * pick(length + 1u);                                         /* BR target */
   if (pick(2)) x[1] = CODE2_GVA + (pick(2) ? 16u : 0u); /* a function the GOT may be pointed at */
+  if (vcall) x[29] = DATA_GVA + VCALL_OBJECT;
   const uint64_t sp = (DATA_GVA + 0x1000u + pick(0x1000u)) & ~(uint64_t)15;
   const uint32_t nzcv = (uint32_t)pick(16) << 28;
   /* FP environment: mostly the default, sometimes FZ/DN/rounding modes; FPSR flags clear or sticky-set. */
@@ -785,7 +805,13 @@ static void run_case(uint32_t iteration) {
   { /* the stub's GOT slot: mostly a real function */
     const uint32_t choice = pick(4);
     const uint64_t got = choice == 0 ? CODE2_GVA : choice == 1 ? CODE2_GVA + 16u : choice == 2 ? CODE_GVA : rnd();
-    memcpy(g_data_init + 8, &got, sizeof(got));
+    memcpy(g_data_init + data_init_offset(8u), &got, sizeof(got));
+  }
+  { /* the object (x29) points at its vtable; slot 1 is the virtual function */
+    const uint64_t vtable = DATA_GVA + VCALL_VTABLE, choice = pick(4);
+    const uint64_t method = choice == 0 ? CODE2_GVA : choice == 1 ? CODE2_GVA + 16u : choice == 2 ? CODE2_GVA + 4u * BIG_LEAF : rnd();
+    memcpy(g_data_init + data_init_offset(VCALL_OBJECT), &vtable, sizeof(vtable));
+    memcpy(g_data_init + data_init_offset(VCALL_VTABLE + 8u), &method, sizeof(method));
   }
 
   /* The same budgets for both: random sizes up to the limit. */
