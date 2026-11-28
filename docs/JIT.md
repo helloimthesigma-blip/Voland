@@ -669,6 +669,15 @@ ran 48.7/48.1 fps at 8192 and 44.3/43.7 at 2048 (2026-11-24, mini),
 though core 0 still spends ~9% in the interpreter there.
 `VOLAND_JIT_THRESHOLD=N` overrides it (in the browser through
 `?env=VOLAND_JIT_THRESHOLD=N`), for A/B runs without a rebuild.
+`VOLAND_JIT_SIZES=N` adds up the wasm bytes the final pass emits for each
+guest instruction, by class, and every N regions logs a table against the
+modules' whole size. Tears of the Kingdom's boot (Node, 6000 regions,
+2026-11-27): 17.3 KB a module for 128 guest instructions; loads and stores
+46% of the bytes at ~200 B each (the one-entry translation cache's check
+and refill, and the inlined walk behind it), branches and exits 27% at
+~180 B, data processing 23-29 B, the rest (prologue, block heads, shared
+code) 15%. Memory accesses are where code size goes.
+
 `VOLAND_JIT_FALLBACKS=N` is the browser's `--jit-fallbacks`: every N
 interpreted block starts it logs the most interpreted block PCs and
 instruction encodings, then resets them. `VOLAND_JIT_ENTRIES=1` counts,
