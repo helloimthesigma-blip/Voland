@@ -493,7 +493,13 @@ so this shapes the design in two ways:
    of regions never grow the host stack. Only a miss returns to the C
    loop. The probe is unrolled over the four ways in every region;
    `JIT_SHARED_PROBE=1` makes it a module function each exit calls
-   (smaller regions for one more call; A/B runs).
+   (smaller regions for one more call; A/B runs). On the code-size-bound
+   workloads (2026-11-28, browser, three alternating pairs each) both
+   smaller-code switches lost: `JIT_SHARED_PROBE=1` Super Mario Odyssey
+   running through Tostarena 49.4 -> 48.0 fps (3 of 3), Tears of the
+   Kingdom at Lookout Landing 13.5 -> 13.3; `JIT_SHARED_WALK=1` 50.1 ->
+   48.3 and 14.1 -> 13.7 (6 of 6). The extra call costs more than the
+   smaller code saves there too.
 
 Compiled code reads the cache's address from `Jit_State.thread_cache`
 and the code generation from the shared `g_vmm_generation`. It never

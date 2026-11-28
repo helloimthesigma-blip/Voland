@@ -401,6 +401,21 @@ run in 4: main spins in NVN's sync wait (sdk+0x429220) on a semaphore one
 short of its target (`[x26]` 0x46e, waiting for 0x46f) while every other
 thread waits.
 
+## Open: a rare stall in the wasm parallel test (2026-11-27)
+
+`parallel_test.js` under Node (Emscripten pthreads, lockstep slices) stops
+making progress in about 2% of runs (4 of 200), at different places: just
+after a program's `ExitProcess`, or as a program starts on 2-3 cores
+(once right after the backend switch to the A32 JIT). Inspector stacks of
+a stuck run: the driver keeps running slices (`emulator_run_slice`,
+`update_devices`, the slice wait), every core thread waits on `core_cv`
+in `core_main`, the pixel workers on their own condition variable; a
+32-thread pthread pool changes nothing, and native builds have not shown
+it. The driver's slice wait now logs, after 5 s, each core's state
+(`parallel_log_cores`, as the free-running park wait does), so a stall
+in the browser says where the cores are. With extra logging the stall
+stopped reproducing (300 runs); not found yet.
+
 ## Free placement (opt-in)
 
 `emulator_set_free_placement` (web `?placement=free`, CLI

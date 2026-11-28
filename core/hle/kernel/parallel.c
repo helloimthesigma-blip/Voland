@@ -656,6 +656,10 @@ static void report(Parallel *p) {
 
 void parallel_set_report_hook(Parallel *p, void (*hook)(void)) { p->report_hook = hook; }
 
+/* A driver wait this long (a slice, or cores parking) is logged, again
+ * every as long, with each core's state (parallel_log_cores). */
+#define PARALLEL_STALL_REPORT_NS 5000000000ull
+
 Scheduler_Status parallel_tick(Parallel *p, uint64_t budget) {
   Scheduler *sched = p->sched;
   pthread_mutex_lock(&p->kernel);
@@ -689,8 +693,11 @@ Scheduler_Status parallel_tick(Parallel *p, uint64_t budget) {
   pthread_cond_broadcast(&p->core_cv);
   pthread_mutex_unlock(&p->kernel);
 
-  /* Wait for the slice, serving host calls meanwhile. */
+  /* Wait for the slice, serving host calls meanwhile (a wait this long
+   * is logged with each core's state, as drive_until does). */
   const uint64_t wait_start = now_ns();
+  uint64_t stall_at = wait_start + PARALLEL_STALL_REPORT_NS;
+  uint32_t stalls = 0;
   pthread_mutex_lock(&p->channel);
   while (!p->slice_done) {
     if (p->call) {
@@ -701,7 +708,14 @@ Scheduler_Status parallel_tick(Parallel *p, uint64_t budget) {
       pthread_cond_broadcast(&p->channel_cv);
       continue;
     }
-    wait_on_channel(p);
+    if (now_ns() >= stall_at) {
+      log_warn("[parallel] the driver has waited %llu s for slice %llu: %u core(s) not done, %u under budget",
+               (unsigned long long)(++stalls * PARALLEL_STALL_REPORT_NS / 1000000000ull), (unsigned long long)p->slice,
+               __atomic_load_n(&p->working, __ATOMIC_RELAXED), __atomic_load_n(&p->under_budget, __ATOMIC_RELAXED));
+      parallel_log_cores(p);
+      stall_at += PARALLEL_STALL_REPORT_NS;
+    }
+    wait_on_channel_until(p, stall_at);
   }
   pthread_mutex_unlock(&p->channel);
   p->driver_wait_ns += now_ns() - wait_start;
@@ -724,12 +738,9 @@ void parallel_set_device_hook(Parallel *p, void (*devices)(void *ctx), void *ctx
 }
 
 /* Serves host calls on the channel until done() (under `channel`) or the
- * deadline (0 = none). */
-/* A wait with no deadline (cores parking) that lasts this long is logged,
- * again every as long, with each core's state (parallel_log_cores): the
- * rare Mario Kart 8 Deluxe hang stopped the driver here, time with it. */
-#define PARALLEL_STALL_REPORT_NS 5000000000ull
-
+ * deadline (0 = none). A wait with no deadline (cores parking) is logged
+ * every PARALLEL_STALL_REPORT_NS: the rare Mario Kart 8 Deluxe hang
+ * stopped the driver here, time with it. */
 static void drive_until(Parallel *p, bool (*done)(const Parallel *p), uint64_t deadline) {
   uint64_t stall_at = deadline ? 0 : now_ns() + PARALLEL_STALL_REPORT_NS;
   uint32_t stalls = 0;
