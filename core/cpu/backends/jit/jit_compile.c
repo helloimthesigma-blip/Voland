@@ -36,6 +36,7 @@
 #include <stdio.h>
 
 #include "common/assert.h"
+#include "common/log.h"
 #include "cpu/backends/interpreter/softfloat.h"
 #include "cpu/backends/jit/jit_wasm.h"
 
@@ -6845,6 +6846,57 @@ static Outcome compile_instruction(Ctx *c, uint32_t insn) {
   }
 }
 
+/* VOLAND_JIT_SIZES=N (diagnostics): the wasm bytes the final pass emits
+ * per guest instruction, by class (a helper instruction's call counted as
+ * its own class), and every N regions a table against the modules' whole
+ * size. Compiles are serialized, so plain counters do. */
+enum {
+  SIZE_LOAD_STORE, SIZE_LOAD_STORE_FP, SIZE_DP_IMMEDIATE, SIZE_DP_REGISTER, SIZE_BRANCH, SIZE_SIMD_FP, SIZE_HELPER,
+  SIZE_A32, SIZE_CLASSES
+};
+static const char *const k_size_names[SIZE_CLASSES] = {"load/store", "FP load/store", "dp imm", "dp reg", "branch/exit",
+                                                       "SIMD&FP", "helper", "A32"};
+static uint64_t g_size_every, g_size_regions, g_size_module_bytes, g_size_bytes[SIZE_CLASSES], g_size_insns[SIZE_CLASSES];
+static uint32_t size_class(const Ctx *c, uint32_t insn, Outcome outcome) {
+  if (outcome == OUTCOME_HELPER || outcome == OUTCOME_END_HELPER) return SIZE_HELPER;
+  if (c->a32) return SIZE_A32;
+  switch (bits(insn, 28, 25)) {
+  case 0x8: case 0x9: return SIZE_DP_IMMEDIATE;
+  case 0xA: case 0xB: return SIZE_BRANCH;
+  case 0x4: case 0x6: case 0xC: case 0xE: return bit(insn, 26) ? SIZE_LOAD_STORE_FP : SIZE_LOAD_STORE;
+  case 0x5: case 0xD: return SIZE_DP_REGISTER;
+  default: return SIZE_SIMD_FP;
+  }
+}
+static void size_note(const Ctx *c, uint32_t mark, Outcome outcome) {
+  if (!g_size_every || c->discover) return;
+  const uint32_t k = size_class(c, c->insn, outcome);
+  g_size_bytes[k] += c->b->length - mark;
+  g_size_insns[k]++;
+}
+#define SIZE_REPORT_BYTES 1024u
+static void size_region_done(uint32_t module_bytes) {
+  if (!g_size_every) return;
+  g_size_module_bytes += module_bytes;
+  if (++g_size_regions % g_size_every) return;
+  char line[SIZE_REPORT_BYTES];
+  size_t at = 0;
+  uint64_t insn_bytes = 0, insns = 0;
+  for (uint32_t k = 0; k < SIZE_CLASSES; k++) {
+    insn_bytes += g_size_bytes[k];
+    insns += g_size_insns[k];
+    if (!g_size_insns[k] || at >= sizeof(line)) continue;
+    at += (size_t)snprintf(line + at, sizeof(line) - at, " %s %.1f B x %llu (%.0f%%);", k_size_names[k],
+                           (double)g_size_bytes[k] / (double)g_size_insns[k], (unsigned long long)g_size_insns[k],
+                           100.0 * (double)g_size_bytes[k] / (double)g_size_module_bytes);
+  }
+  log_info("[jit] sizes: %llu regions, %.0f B a module, %.1f guest instructions and %.1f B of them a region;%s "
+           "rest (prologue, block heads, shared code) %.0f%%",
+           (unsigned long long)g_size_regions, (double)g_size_module_bytes / (double)g_size_regions,
+           (double)insns / (double)g_size_regions, (double)insn_bytes / (double)g_size_regions, line,
+           100.0 - 100.0 * (double)insn_bytes / (double)g_size_module_bytes);
+}
+
 /* Region block `b`'s instructions; returns how many. */
 static uint32_t compile_block_code(Ctx *c, uint32_t b) {
   const uint64_t start = c->blocks[b].pc;
@@ -6884,10 +6936,10 @@ static uint32_t compile_block_code(Ctx *c, uint32_t b) {
       c->fp = fp;
     }
     switch (outcome) {
-    case OUTCOME_NEXT: break;
-    case OUTCOME_HELPER: helper_and_continue(c); return i + 1u;
-    case OUTCOME_END: return i + 1u;
-    case OUTCOME_END_HELPER: leave_via_interpreter(c); return i + 1u;
+    case OUTCOME_NEXT: size_note(c, mark, outcome); break;
+    case OUTCOME_HELPER: helper_and_continue(c); size_note(c, mark, outcome); return i + 1u;
+    case OUTCOME_END: size_note(c, mark, outcome); return i + 1u;
+    case OUTCOME_END_HELPER: leave_via_interpreter(c); size_note(c, mark, outcome); return i + 1u;
     }
   }
   /* Ran off the end (block limit or page end): on to the next pc. */
@@ -7492,6 +7544,12 @@ static uint8_t g_analysis[JIT_ANALYSIS_BYTES];
 bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memory_pages, const Jit_Link *link,
                        uint8_t *out, uint32_t capacity, Jit_Compiled *result) {
   static Ctx analysis, c;
+  static bool size_env_read;
+  if (!size_env_read) {
+    const char *every = getenv("VOLAND_JIT_SIZES");
+    g_size_every = every ? strtoull(every, NULL, 0) : 0;
+    size_env_read = true;
+  }
   uint32_t max_blocks = region_blocks_max(), max_block_insns = JIT_MAX_BLOCK_INSNS;
   for (;;) {
     /* Pass 1: the region's blocks and pages, and which registers they touch. */
@@ -7574,6 +7632,7 @@ bool jit_compile_block(uint64_t pc, const Jit_Code_Source *source, uint64_t memo
       result->blocks = c.block_count;
       for (uint32_t k = 0; k < c.block_count && k < JIT_REGION_BLOCK_PCS; k++) result->block_pc[k] = c.blocks[k].pc;
       result->module_bytes = b.length;
+      size_region_done(b.length);
       return true;
     }
     /* Too big: a smaller region, then shorter blocks. */
