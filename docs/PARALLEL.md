@@ -414,7 +414,7 @@ in `core_main`, the pixel workers on their own condition variable; a
 it. The driver's slice wait now logs, after 5 s, each core's state
 (`parallel_log_cores`, as the free-running park wait does), so a stall
 in the browser says where the cores are. With extra logging the stall
-stopped reproducing (300 runs); not found yet.
+did not reproduce in ~1.7 hours of back-to-back runs; not found yet.
 
 ## Free placement (opt-in)
 
